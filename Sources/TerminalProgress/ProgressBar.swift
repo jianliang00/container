@@ -22,19 +22,27 @@ public final class ProgressBar: Sendable {
     let config: ProgressConfig
     @SendableProperty
     var state: State
-    static let term: FileHandle? = getTerminal()
-    static let termQueue = DispatchQueue(label: "com.apple.container.ProgressBar")
+    @SendableProperty
+    var printedWidth = 0
+    let term: FileHandle?
+    let termQueue = DispatchQueue(label: "com.apple.container.ProgressBar")
     private let standardError = StandardError()
+
+    /// Returns `true` if the progress bar has finished.
+    public var isFinished: Bool {
+        state.finished
+    }
 
     /// Creates a new progress bar.
     /// - Parameter config: The configuration for the progress bar.
     public init(config: ProgressConfig) {
         self.config = config
+        term = isatty(config.terminal.fileDescriptor) == 1 ? config.terminal : nil
         state = State(
             description: config.initialDescription, itemsName: config.initialItemsName, totalTasks: config.initialTotalTasks,
             totalItems: config.initialTotalItems,
             totalSize: config.initialTotalSize)
-        ProgressBar.display(EscapeSequence.hideCursor)
+        display(EscapeSequence.hideCursor)
     }
 
     deinit {
@@ -48,13 +56,7 @@ public final class ProgressBar: Sendable {
 
     /// Allows resetting the progress state of the current task.
     public func resetCurrentTask() {
-        clear()
         state = State(description: state.description, itemsName: state.itemsName, tasks: state.tasks, totalTasks: state.totalTasks, startTime: state.startTime)
-    }
-
-    /// Returns `true` if the progress bar has finished.
-    public func isFinished() -> Bool {
-        state.finished
     }
 
     private func printFullDescription() {
@@ -95,7 +97,7 @@ public final class ProgressBar: Sendable {
             printFullDescription()
         }
 
-        while !self.isFinished() {
+        while !isFinished {
             let intervalNanoseconds = UInt64(intervalSeconds * 1_000_000_000)
             render()
             state.iteration += 1
@@ -115,7 +117,7 @@ public final class ProgressBar: Sendable {
 
     /// Finishes the progress bar.
     public func finish() {
-        guard !self.isFinished() else {
+        guard !isFinished else {
             return
         }
 
@@ -127,8 +129,10 @@ public final class ProgressBar: Sendable {
         if config.clearOnFinish {
             clearAndResetCursor()
         } else {
-            ProgressBar.resetCursor()
+            resetCursor()
         }
+        // Allow printed output to flush.
+        usleep(100_000)
     }
 }
 
@@ -140,7 +144,7 @@ extension ProgressBar {
     }
 
     func render() {
-        guard ProgressBar.term != nil && !config.disableProgressUpdates else {
+        guard term != nil && !config.disableProgressUpdates && !isFinished else {
             return
         }
         let output = draw()

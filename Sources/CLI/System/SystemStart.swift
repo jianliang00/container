@@ -34,8 +34,10 @@ extension Application {
         @Flag(name: .long, help: "Enable debug logging for the runtime daemon.")
         var debug = false
 
-        @Flag(name: .long, help: "Do not prompt for confirmation before installing runtime dependencies")
-        var installDependencies: Bool = false
+        @Flag(
+            name: .long, inversion: .prefixedEnableDisable,
+            help: "Specify whether the default kernel should be installed or not. The default behavior is to prompt the user for a response.")
+        var kernelInstall: Bool?
 
         func run() async throws {
             // Without the true path to the binary in the plist, `container-apiserver` won't launch properly.
@@ -110,9 +112,10 @@ extension Application {
             let defaultKernelURL = kernelDependency.source
             let defaultKernelBinaryPath = ClientDefaults.get(key: .defaultKernelBinaryPath)
 
-            print("No default kernel configured.")
-            print("Install the recommended default kernel from [\(kernelDependency.source)]? [Y/n]: ", terminator: "")
-            if !installDependencies {
+            var shouldInstallKernel = false
+            if kernelInstall == nil {
+                print("No default kernel configured.")
+                print("Install the recommended default kernel from [\(kernelDependency.source)]? [Y/n]: ", terminator: "")
                 guard let read = readLine(strippingNewline: true) else {
                     throw ContainerizationError(.internalError, message: "Failed to read user input")
                 }
@@ -120,6 +123,12 @@ extension Application {
                     print("Please use the `container system kernel set --recommended` command to configure the default kernel")
                     return
                 }
+                shouldInstallKernel = true
+            } else {
+                shouldInstallKernel = kernelInstall ?? false
+            }
+            guard shouldInstallKernel else {
+                return
             }
             print("Installing kernel...")
             try await KernelSet.downloadAndInstallWithProgressBar(tarRemoteURL: defaultKernelURL, kernelFilePath: defaultKernelBinaryPath)

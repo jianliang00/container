@@ -11,7 +11,7 @@ on:
 jobs:
   buildAndTest:
     name: Build and test the project
-    timeout-minutes: 30
+    timeout-minutes: 60
     runs-on: [self-hosted, macos, sequoia, ARM64]
     permissions:
       contents: read
@@ -23,10 +23,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Update containerization
-        run: |
-          /usr/bin/swift package update containerization
 
       - name: Check formatting
         run: |
@@ -47,7 +43,9 @@ jobs:
             git diff --name-only -- .
             false
           fi
-  
+        env:
+          DEVELOPER_DIR: "/Applications/Xcode_26.b1.app/Contents/Developer"
+
       - name: Set build configuration
         run: |
           echo "BUILD_CONFIGURATION=debug" >> $GITHUB_ENV
@@ -60,7 +58,7 @@ jobs:
           make container dsym docs
           tar cfz _site.tgz _site
         env:
-          DEVELOPER_DIR: "/Applications/Xcode_16.3.app/Contents/Developer"
+          DEVELOPER_DIR: "/Applications/Xcode_26.b1.app/Contents/Developer"
 
       - name: Create package
         run: |
@@ -73,7 +71,7 @@ jobs:
           launchctl setenv HTTP_PROXY $HTTP_PROXY
           make test cleancontent install-kernel integration
         env:
-          DEVELOPER_DIR: "/Applications/Xcode_16.3.app/Contents/Developer"
+          DEVELOPER_DIR: "/Applications/Xcode_26.b1.app/Contents/Developer"
           CURRENT_SDK: y # explicitly repeated due to local env block
 
       - name: Save documentation artifact

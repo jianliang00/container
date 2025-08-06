@@ -117,6 +117,25 @@ actor ContainersService {
         }
     }
 
+    /// Execute an operation with the current container list while maintaining atomicity
+    /// This prevents race conditions where containers are created during the operation
+    public func withContainerList<T: Sendable>(_ operation: @Sendable @escaping ([ContainerSnapshot]) async throws -> T) async throws -> T {
+        try await lock.withLock { context in
+            var snapshots = [ContainerSnapshot]()
+
+            for (id, item) in await self.containers {
+                do {
+                    let result = try await item.asSnapshot()
+                    snapshots.append(result.0)
+                } catch {
+                    self.log.error("unable to load bundle for \(id) \(error)")
+                }
+            }
+
+            return try await operation(snapshots)
+        }
+    }
+
     /// Create a new container from the provided id and configuration.
     public func create(configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions) async throws {
         self.log.debug("\(#function)")
@@ -228,6 +247,7 @@ actor ContainersService {
     private func _cleanup(id: String, item: Item) throws {
         self.log.debug("\(#function)")
         let config = try item.bundle.configuration
+
         let label = Self.fullLaunchdServiceLabel(runtimeName: config.runtimeHandler, instanceId: id)
         try ServiceManager.deregister(fullServiceLabel: label)
         try item.bundle.delete()
@@ -240,7 +260,7 @@ actor ContainersService {
         try ServiceManager.kill(fullServiceLabel: label)
     }
 
-    private func cleanup(id: String, item: Item, context: AsyncLock.Context) async throws {
+    private func cleanup(id: String, item: Item, context: AsyncLock.Context) throws {
         try self._cleanup(id: id, item: item)
     }
 
@@ -257,7 +277,7 @@ actor ContainersService {
             }
             let options: ContainerCreateOptions = try item.bundle.load(filename: "options.json")
             if options.autoRemove {
-                try await self.cleanup(id: id, item: item, context: context)
+                try self.cleanup(id: id, item: item, context: context)
             }
         } catch {
             self.log.error(
@@ -334,6 +354,7 @@ extension ContainersService {
             )
         }
     }
+
 }
 
 extension ContainersService.Item {

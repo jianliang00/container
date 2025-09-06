@@ -17,6 +17,7 @@
 import ArgumentParser
 import ContainerClient
 import ContainerPlugin
+import Darwin
 
 struct DefaultCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -48,7 +49,17 @@ struct DefaultCommand: AsyncParsableCommand {
         guard let plugin = pluginLoader?.findPlugin(name: command), plugin.config.isCLI else {
             throw ValidationError("failed to find plugin named container-\(command)")
         }
+        // Before execing into the plugin, restore default SIGINT/SIGTERM so the plugin can manage signals.
+        Self.resetSignalsForPluginExec()
         // Exec performs execvp (with no fork).
         try plugin.exec(args: remaining)
+    }
+}
+
+extension DefaultCommand {
+    // Exposed for tests to verify signal reset semantics.
+    static func resetSignalsForPluginExec() {
+        signal(SIGINT, SIG_DFL)
+        signal(SIGTERM, SIG_DFL)
     }
 }

@@ -25,8 +25,9 @@ import Foundation
 import TerminalProgress
 
 extension Application {
-    struct KernelSet: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
+    public struct KernelSet: AsyncParsableCommand {
+        public init() {}
+        public static let configuration = CommandConfiguration(
             commandName: "set",
             abstract: "Set the default kernel"
         )
@@ -46,7 +47,7 @@ extension Application {
         @Flag(name: .long, help: "Force install of kernel. If a kernel exists with the same name, it will be overwritten.")
         var force: Bool = false
 
-        func run() async throws {
+        public func run() async throws {
             if recommended {
                 let url = DefaultsStore.get(key: .defaultKernelURL)
                 let path = DefaultsStore.get(key: .defaultKernelBinaryPath)
@@ -100,7 +101,7 @@ extension Application {
             }
         }
 
-        public static func downloadAndInstallWithProgressBar(tarRemoteURL: String, kernelFilePath: String, platform: SystemPlatform = .current, force: Bool) async throws {
+        static func downloadAndInstallWithProgressBar(tarRemoteURL: String, kernelFilePath: String, platform: SystemPlatform = .current, force: Bool) async throws {
             let progressConfig = try ProgressConfig(
                 showTasks: true,
                 totalTasks: 2

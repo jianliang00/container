@@ -22,8 +22,9 @@ import Foundation
 import TerminalProgress
 
 extension Application {
-    struct NetworkCreate: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
+    public struct NetworkCreate: AsyncParsableCommand {
+        public init() {}
+        public static let configuration = CommandConfiguration(
             commandName: "create",
             abstract: "Create a new network")
 
@@ -36,7 +37,7 @@ extension Application {
         @Argument(help: "Network name")
         var name: String
 
-        func run() async throws {
+        public func run() async throws {
             let parsedLabels = Utility.parseKeyValuePairs(labels)
             let config = try NetworkConfiguration(id: self.name, mode: .nat, labels: parsedLabels)
             let state = try await ClientNetwork.create(configuration: config)

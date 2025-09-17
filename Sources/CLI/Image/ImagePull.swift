@@ -22,8 +22,8 @@ import ContainerizationOCI
 import TerminalProgress
 
 extension Application {
-    struct ImagePull: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
+    public struct ImagePull: AsyncParsableCommand {
+        public static let configuration = CommandConfiguration(
             commandName: "pull",
             abstract: "Pull an image"
         )
@@ -55,9 +55,9 @@ extension Application {
 
         @Argument var reference: String
 
-        init() {}
+        public init() {}
 
-        init(platform: String? = nil, scheme: String = "auto", reference: String, disableProgress: Bool = false) {
+        public init(platform: String? = nil, scheme: String = "auto", reference: String, disableProgress: Bool = false) {
             self.global = Flags.Global()
             self.registry = Flags.Registry(scheme: scheme)
             self.progressFlags = Flags.Progress(disableProgressUpdates: disableProgress)
@@ -65,7 +65,7 @@ extension Application {
             self.reference = reference
         }
 
-        func run() async throws {
+        public func run() async throws {
             var p: Platform?
             if let platform {
                 p = try Platform(from: platform)

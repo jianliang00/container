@@ -23,7 +23,8 @@ import Foundation
 import SwiftProtobuf
 
 extension Application {
-    struct ListImageOptions: ParsableArguments {
+    public struct ListImageOptions: ParsableArguments {
+        public init() {}
         @Flag(name: .shortAndLong, help: "Only output the image name")
         var quiet = false
 
@@ -38,15 +39,15 @@ extension Application {
     }
 
     struct ListImageImplementation {
-        static private func createHeader() -> [[String]] {
+        static func createHeader() -> [[String]] {
             [["NAME", "TAG", "DIGEST"]]
         }
 
-        static private func createVerboseHeader() -> [[String]] {
+        static func createVerboseHeader() -> [[String]] {
             [["NAME", "TAG", "INDEX DIGEST", "OS", "ARCH", "VARIANT", "SIZE", "CREATED", "MANIFEST DIGEST"]]
         }
 
-        static private func printImagesVerbose(images: [ClientImage]) async throws {
+        static func printImagesVerbose(images: [ClientImage]) async throws {
 
             var rows = createVerboseHeader()
             for image in images {
@@ -102,7 +103,7 @@ extension Application {
             print(formatter.format())
         }
 
-        static private func printImages(images: [ClientImage], format: ListFormat, options: ListImageOptions) async throws {
+        static func printImages(images: [ClientImage], format: ListFormat, options: ListImageOptions) async throws {
             var images = images
             images.sort {
                 $0.reference < $1.reference
@@ -160,8 +161,9 @@ extension Application {
         }
     }
 
-    struct ImageList: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
+    public struct ImageList: AsyncParsableCommand {
+        public init() {}
+        public static let configuration = CommandConfiguration(
             commandName: "list",
             abstract: "List images",
             aliases: ["ls"])
@@ -169,7 +171,7 @@ extension Application {
         @OptionGroup
         var options: ListImageOptions
 
-        mutating func run() async throws {
+        public mutating func run() async throws {
             try ListImageImplementation.validate(options: options)
             try await ListImageImplementation.listImages(options: options)
         }

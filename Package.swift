@@ -33,6 +33,7 @@ let package = Package(
         .library(name: "ContainerSandboxService", targets: ["ContainerSandboxService"]),
         .library(name: "ContainerNetworkService", targets: ["ContainerNetworkService"]),
         .library(name: "ContainerImagesService", targets: ["ContainerImagesService", "ContainerImagesServiceClient"]),
+        .library(name: "ContainerCommands", targets: ["ContainerCommands"]),
         .library(name: "ContainerClient", targets: ["ContainerClient"]),
         .library(name: "ContainerBuild", targets: ["ContainerBuild"]),
         .library(name: "ContainerLog", targets: ["ContainerLog"]),
@@ -65,6 +66,15 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "container",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerClient",
+                "ContainerCommands",
+            ],
+            path: "Sources/ExecutableCLI"
+        ),
+        .target(
+            name: "ContainerCommands",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),

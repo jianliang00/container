@@ -22,14 +22,12 @@ import Foundation
 import SwiftProtobuf
 
 extension Application {
-    struct NetworkList: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
+    public struct NetworkList: AsyncParsableCommand {
+        public init() {}
+        public static let configuration = CommandConfiguration(
             commandName: "list",
             abstract: "List networks",
             aliases: ["ls"])
-
-        @OptionGroup
-        var global: Flags.Global
 
         @Flag(name: .shortAndLong, help: "Only output the network name")
         var quiet = false
@@ -37,7 +35,10 @@ extension Application {
         @Option(name: .long, help: "Format of the output")
         var format: ListFormat = .table
 
-        func run() async throws {
+        @OptionGroup
+        var global: Flags.Global
+
+        public func run() async throws {
             let networks = try await ClientNetwork.list()
             try printNetworks(networks: networks, format: format)
         }
@@ -46,7 +47,7 @@ extension Application {
             [["NETWORK", "STATE", "SUBNET"]]
         }
 
-        private func printNetworks(networks: [NetworkState], format: ListFormat) throws {
+        func printNetworks(networks: [NetworkState], format: ListFormat) throws {
             if format == .json {
                 let printables = networks.map {
                     PrintableNetwork($0)
@@ -86,13 +87,13 @@ extension NetworkState {
     }
 }
 
-struct PrintableNetwork: Codable {
+public struct PrintableNetwork: Codable {
     let id: String
     let state: String
     let config: NetworkConfiguration
     let status: NetworkStatus?
 
-    init(_ network: NetworkState) {
+    public init(_ network: NetworkState) {
         self.id = network.id
         self.state = network.state
         switch network {

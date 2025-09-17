@@ -23,8 +23,9 @@ import Foundation
 import TerminalProgress
 
 extension Application {
-    struct ImageSave: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
+    public struct ImageSave: AsyncParsableCommand {
+        public init() {}
+        public static let configuration = CommandConfiguration(
             commandName: "save",
             abstract: "Save an image as an OCI compatible tar archive"
         )
@@ -57,7 +58,7 @@ extension Application {
 
         @Argument var references: [String]
 
-        func run() async throws {
+        public func run() async throws {
             var p: Platform?
             if let platform {
                 p = try Platform(from: platform)

@@ -27,7 +27,8 @@ import NIO
 import TerminalProgress
 
 extension Application {
-    struct BuildCommand: AsyncParsableCommand {
+    public struct BuildCommand: AsyncParsableCommand {
+        public init() {}
         public static var configuration: CommandConfiguration {
             var config = CommandConfiguration()
             config.commandName = "build"
@@ -38,7 +39,7 @@ extension Application {
         }
 
         @Option(name: [.customLong("cpus"), .customShort("c")], help: "Number of CPUs to allocate to the container")
-        public var cpus: Int64 = 2
+        var cpus: Int64 = 2
 
         @Option(
             name: [.customLong("memory"), .customShort("m")],
@@ -117,7 +118,7 @@ extension Application {
         @Flag(name: .shortAndLong, help: "Suppress build output")
         var quiet: Bool = false
 
-        func run() async throws {
+        public func run() async throws {
             do {
                 let timeout: Duration = .seconds(300)
                 let progressConfig = try ProgressConfig(
@@ -132,16 +133,16 @@ extension Application {
 
                 progress.set(description: "Dialing builder")
 
-                let builder: Builder? = try await withThrowingTaskGroup(of: Builder.self) { group in
+                let builder: Builder? = try await withThrowingTaskGroup(of: Builder.self) { [vsockPort, cpus, memory] group in
                     defer {
                         group.cancelAll()
                     }
 
-                    group.addTask {
+                    group.addTask { [vsockPort, cpus, memory] in
                         while true {
                             do {
                                 let container = try await ClientContainer.get(id: "buildkit")
-                                let fh = try await container.dial(self.vsockPort)
+                                let fh = try await container.dial(vsockPort)
 
                                 let threadGroup: MultiThreadedEventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
                                 let b = try Builder(socket: fh, group: threadGroup)
@@ -156,8 +157,8 @@ extension Application {
                                 progress.set(totalTasks: 3)
 
                                 try await BuilderStart.start(
-                                    cpus: self.cpus,
-                                    memory: self.memory,
+                                    cpus: cpus,
+                                    memory: memory,
                                     progressUpdate: progress.handler
                                 )
 
@@ -255,7 +256,7 @@ extension Application {
                         }
                         return results
                     }()
-                    group.addTask { [terminal] in
+                    group.addTask { [terminal, buildArg, contextDir, label, noCache, target, quiet, cacheIn, cacheOut] in
                         let config = ContainerBuild.Builder.BuildConfig(
                             buildID: buildID,
                             contentStore: RemoteContentStoreClient(),
@@ -341,7 +342,7 @@ extension Application {
             }
         }
 
-        func validate() throws {
+        public func validate() throws {
             guard FileManager.default.fileExists(atPath: file) else {
                 throw ValidationError("Dockerfile does not exist at path: \(file)")
             }

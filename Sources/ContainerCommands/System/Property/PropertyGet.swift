@@ -21,10 +21,12 @@ import ContainerizationError
 import Foundation
 
 extension Application {
-    struct PropertyClear: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
-            commandName: "clear",
-            abstract: "Clear a property value"
+    public struct PropertyGet: AsyncParsableCommand {
+        public init() {}
+
+        public static let configuration = CommandConfiguration(
+            commandName: "get",
+            abstract: "Retrieve a property value"
         )
 
         @OptionGroup
@@ -33,12 +35,19 @@ extension Application {
         @Argument(help: "the property ID")
         var id: String
 
-        func run() async throws {
-            guard let key = DefaultsStore.Keys(rawValue: id) else {
-                throw ContainerizationError(.invalidArgument, message: "invalid property ID: \(id)")
+        public func run() async throws {
+            let value = DefaultsStore.allValues()
+                .filter { id == $0.id }
+                .first
+            guard let value else {
+                throw ContainerizationError(.invalidArgument, message: "property ID \(id) not found")
             }
 
-            DefaultsStore.unset(key: key)
+            guard let val = value.value?.description else {
+                return
+            }
+
+            print(val)
         }
     }
 }

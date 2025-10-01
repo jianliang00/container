@@ -16,7 +16,7 @@ None of this workflow would be practical without ensuring interoperability betwe
 
 ## How does `container` run my container?
 
-Many operating systems support containers, but the most commonly encountered containers are those that run on the Linux operating system. On macOS, the typical way to run Linux containers is to launch a Linux virtual machine (VM) that hosts all of your containers.
+Many operating systems support containers, but the most commonly encountered containers are those that run on the Linux operating system. With macOS, the typical way to run Linux containers is to launch a Linux virtual machine (VM) that hosts all of your containers.
 
 `container` runs containers differently. Using the open source [Containerization](https://github.com/apple/containerization) package, it runs a lightweight VM for each container that you create. This approach has the following properties:
 
@@ -67,7 +67,7 @@ Currently, memory pages freed to the Linux operating system by processes running
 
 ### macOS 15 limitations
 
-`container` relies on the new features and enhancements present in the macOS 26 beta. You can run `container` on macOS 15, but you will need to be aware of some user experience and functional limitations. There is no plan to address issues found with macOS 15 that cannot be reproduced in the macOS 26 beta.
+`container` relies on the new features and enhancements present in macOS 26. You can run `container` on macOS 15, but you will need to be aware of some user experience and functional limitations. There is no plan to address issues found with macOS 15 that cannot be reproduced on macOS 26.
 
 #### Network isolation
 

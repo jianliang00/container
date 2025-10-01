@@ -118,7 +118,7 @@ public struct Parser {
                 continue
             }
             if !line.hasPrefix("#") {
-                let keyVals = line.split(separator: "=")
+                let keyVals = line.split(separator: "=", maxSplits: 2)
                 if keyVals.count != 2 {
                     continue
                 }

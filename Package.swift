@@ -303,6 +303,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),
+                "CAuditToken",
             ]
         ),
         .target(
@@ -373,7 +374,15 @@ let package = Package(
                 .define("GIT_COMMIT", to: "\"\(gitCommit)\""),
                 .define("RELEASE_VERSION", to: "\"\(releaseVersion)\""),
                 .define("BUILDER_SHIM_VERSION", to: "\"\(builderShimVersion)\""),
+            ],
+            linkerSettings: [
+                .linkedLibrary("bsm")
             ]
+        ),
+        .target(
+            name: "CAuditToken",
+            dependencies: [],
+            publicHeadersPath: "include"
         ),
     ]
 )

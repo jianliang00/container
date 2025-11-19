@@ -198,7 +198,7 @@ public actor SandboxService {
                         ))
                 }
                 czConfig.hosts = Hosts(entries: hostsEntries)
-                czConfig.bootlog = bundle.bootlog
+                czConfig.bootLog = BootLog.file(path: bundle.bootlog, append: true)
             }
 
             await self.setContainer(

@@ -545,17 +545,17 @@ container image delete [--all] [--debug] [<images> ...]
 
 ### `container image prune`
 
-Removes unreferenced and dangling images to reclaim disk space. The command outputs the amount of space freed after deletion.
+Removes unused images to reclaim disk space. By default, only removes dangling images (images with no tags). Use `-a` to remove all images not referenced by any container.
 
 **Usage**
 
 ```bash
-container image prune [--debug]
+container image prune [--all] [--debug]
 ```
 
 **Options**
 
-No options.
+*   `-a, --all`: Remove all unused images, not just dangling ones
 
 ### `container image inspect`
 

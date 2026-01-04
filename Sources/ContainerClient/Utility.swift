@@ -1,5 +1,5 @@
 //===----------------------------------------------------------------------===//
-// Copyright © 2025 Apple Inc. and the container project authors.
+// Copyright © 2025-2026 Apple Inc. and the container project authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -73,14 +73,14 @@ public struct Utility {
     }
 
     public static func validPublishPorts(_ publishPorts: [PublishPort]) throws {
-        var hostPorts = Set<UInt16>()
+        var hostPorts = Set<String>()
         for publishPort in publishPorts {
-            for index in 0..<publishPort.count {
-                let hostPort = publishPort.hostPort + index
-                guard !hostPorts.contains(hostPort) else {
+            for index in publishPort.hostPort..<(publishPort.hostPort + publishPort.count) {
+                let hostPortKey = "\(index)/\(publishPort.proto.rawValue)"
+                guard !hostPorts.contains(hostPortKey) else {
                     throw ContainerizationError(.invalidArgument, message: "host ports for different publish port specs may not overlap")
                 }
-                hostPorts.insert(hostPort)
+                hostPorts.insert(hostPortKey)
             }
         }
     }

@@ -1,5 +1,5 @@
 //===----------------------------------------------------------------------===//
-// Copyright © 2025 Apple Inc. and the container project authors.
+// Copyright © 2025-2026 Apple Inc. and the container project authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -115,5 +115,19 @@ struct UtilityTests {
             return error.description.contains("port specs may not overlap")
         }
 
+    }
+
+    @Test
+    func testPublishPortsSamePortDifferentProtocols() throws {
+        let result = try Parser.publishPorts([
+            "8080:8080/tcp",
+            "8080:8080/udp",
+            "1024-2048:1024-2048/tcp",
+            "1024-2048:1024-2048/udp",
+            "8081:8081",
+            "8081:8081/udp",
+        ])
+        #expect(result.count == 6)
+        try Utility.validPublishPorts(result)
     }
 }

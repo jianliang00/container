@@ -57,6 +57,15 @@ build:
 	@$(SWIFT) --version
 	@$(SWIFT) build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION)
 
+.PHONY: cli
+cli:
+	@echo Building container CLI...
+	@$(SWIFT) --version
+	@$(SWIFT) build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --product container
+	@echo Installing container CLI to bin/...
+	@mkdir -p bin
+	@install "$(BUILD_BIN_DIR)/container" "bin/container"
+
 .PHONY: container
 # Install binaries under project directory
 container: build

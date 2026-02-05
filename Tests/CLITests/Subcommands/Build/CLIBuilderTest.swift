@@ -525,6 +525,232 @@ extension TestCLIBuildBase {
             #expect(try self.inspectImage(imageName) == imageName, "expected to have successfully built \(imageName)")
         }
 
+        @Test func testLowercaseDockerfile() throws {
+            // Test 1: COPY with uppercase
+            let tempDir1: URL = try createTempDir()
+            let dockerfile1 =
+                """
+                FROM ghcr.io/linuxcontainers/alpine:3.20
+                COPY . /app
+                RUN test -f /app/testfile.txt
+                """
+            let context1: [FileSystemEntry] = [
+                .file("testfile.txt", content: .data("test".data(using: .utf8)!))
+            ]
+            try createContext(tempDir: tempDir1, dockerfile: dockerfile1, context: context1)
+            let imageName1 = "registry.local/copy-uppercase:\(UUID().uuidString)"
+            try self.build(tag: imageName1, tempDir: tempDir1)
+            #expect(try self.inspectImage(imageName1) == imageName1, "expected COPY to work")
+
+            // Test 2: copy with lowercase
+            let tempDir2: URL = try createTempDir()
+            let dockerfile2 =
+                """
+                FROM ghcr.io/linuxcontainers/alpine:3.20
+                copy . /app
+                RUN test -f /app/testfile.txt
+                """
+            let context2: [FileSystemEntry] = [
+                .file("testfile.txt", content: .data("test".data(using: .utf8)!))
+            ]
+            try createContext(tempDir: tempDir2, dockerfile: dockerfile2, context: context2)
+            let imageName2 = "registry.local/copy-lowercase:\(UUID().uuidString)"
+            try self.build(tag: imageName2, tempDir: tempDir2)
+            #expect(try self.inspectImage(imageName2) == imageName2, "expected copy to work")
+
+            // Test 3: ADD with uppercase
+            let tempDir3: URL = try createTempDir()
+            let dockerfile3 =
+                """
+                FROM ghcr.io/linuxcontainers/alpine:3.20
+                ADD . /app
+                RUN test -f /app/testfile.txt
+                """
+            let context3: [FileSystemEntry] = [
+                .file("testfile.txt", content: .data("test".data(using: .utf8)!))
+            ]
+            try createContext(tempDir: tempDir3, dockerfile: dockerfile3, context: context3)
+            let imageName3 = "registry.local/add-uppercase:\(UUID().uuidString)"
+            try self.build(tag: imageName3, tempDir: tempDir3)
+            #expect(try self.inspectImage(imageName3) == imageName3, "expected ADD to work")
+
+            // Test 4: add with lowercase
+            let tempDir4: URL = try createTempDir()
+            let dockerfile4 =
+                """
+                FROM ghcr.io/linuxcontainers/alpine:3.20
+                add . /app
+                RUN test -f /app/testfile.txt
+                """
+            let context4: [FileSystemEntry] = [
+                .file("testfile.txt", content: .data("test".data(using: .utf8)!))
+            ]
+            try createContext(tempDir: tempDir4, dockerfile: dockerfile4, context: context4)
+            let imageName4 = "registry.local/add-lowercase:\(UUID().uuidString)"
+            try self.build(tag: imageName4, tempDir: tempDir4)
+            #expect(try self.inspectImage(imageName4) == imageName4, "expected add to work")
+        }
+
+        @Test func testRunWithBindMount() throws {
+            let tempDir: URL = try createTempDir()
+            let dockerfile =
+                """
+                FROM ghcr.io/linuxcontainers/alpine:3.20
+
+                # Use bind mount to access build context during RUN
+                RUN --mount=type=bind,source=.,target=/mnt/context \
+                    set -e; \
+                    echo "Checking files in bind mount..."; \
+                    ls -la /mnt/context/; \
+                    \
+                    echo "Verifying files are accessible in mount..."; \
+                    if [ ! -f /mnt/context/app.py ]; then \
+                        echo "ERROR: app.py should be in bind mount!"; \
+                        exit 1; \
+                    fi; \
+                    if [ ! -f /mnt/context/config.yaml ]; then \
+                        echo "ERROR: config.yaml should be in bind mount!"; \
+                        exit 1; \
+                    fi; \
+                    \
+                    echo "RUN --mount bind check passed!"; \
+                    cp /mnt/context/app.py /app.py
+
+                RUN cat /app.py
+                """
+
+            let context: [FileSystemEntry] = [
+                .file("app.py", content: .data("print('Hello from bind mount')".data(using: .utf8)!)),
+                .file("config.yaml", content: .data("key: value".data(using: .utf8)!)),
+            ]
+
+            try createContext(tempDir: tempDir, dockerfile: dockerfile, context: context)
+            let imageName = "registry.local/bind-mount-test:\(UUID().uuidString)"
+            try self.build(tag: imageName, tempDir: tempDir)
+            #expect(try self.inspectImage(imageName) == imageName, "expected to have successfully built \(imageName)")
+        }
+
+        @Test func testBuildDockerIgnore() throws {
+            let tempDir: URL = try createTempDir()
+            let dockerfile =
+                """
+                FROM ghcr.io/linuxcontainers/alpine:3.20
+
+                # Copy all files - should respect .dockerignore
+                COPY . /app
+
+                # Verify specific files are excluded
+                RUN set -e; \
+                    echo "Checking specific file exclusion..."; \
+                    if [ -f /app/secret.txt ]; then \
+                        echo "ERROR: secret.txt should be excluded!"; \
+                        exit 1; \
+                    fi
+
+                # Verify wildcard *.log files are excluded
+                RUN set -e; \
+                    echo "Checking *.log exclusion..."; \
+                    if [ -f /app/debug.log ]; then \
+                        echo "ERROR: debug.log should be excluded by *.log pattern!"; \
+                        exit 1; \
+                    fi; \
+                    if ls /app/logs/*.log 2>/dev/null; then \
+                        echo "ERROR: logs/*.log files should be excluded!"; \
+                        exit 1; \
+                    fi
+
+                # Verify exception pattern (!important.log) works
+                RUN set -e; \
+                    echo "Checking exception pattern..."; \
+                    if [ ! -f /app/important.log ]; then \
+                        echo "ERROR: important.log should be included (exception with !)"; \
+                        exit 1; \
+                    fi
+
+                # Verify *.tmp files are excluded
+                RUN set -e; \
+                    echo "Checking *.tmp exclusion..."; \
+                    if find /app -name "*.tmp" | grep .; then \
+                        echo "ERROR: .tmp files should be excluded!"; \
+                        exit 1; \
+                    fi
+
+                # Verify directories are excluded
+                RUN set -e; \
+                    echo "Checking directory exclusion..."; \
+                    if [ -d /app/temp ]; then \
+                        echo "ERROR: temp/ directory should be excluded!"; \
+                        exit 1; \
+                    fi; \
+                    if [ -d /app/node_modules ]; then \
+                        echo "ERROR: node_modules/ should be excluded!"; \
+                        exit 1; \
+                    fi
+
+                # Verify included files ARE present
+                RUN set -e; \
+                    echo "Checking included files..."; \
+                    if [ ! -f /app/main.go ]; then \
+                        echo "ERROR: main.go should be included!"; \
+                        exit 1; \
+                    fi; \
+                    if [ ! -f /app/README.md ]; then \
+                        echo "ERROR: README.md should be included!"; \
+                        exit 1; \
+                    fi; \
+                    if [ ! -f /app/src/app.go ]; then \
+                        echo "ERROR: src/app.go should be included!"; \
+                        exit 1; \
+                    fi; \
+                    echo "All .dockerignore checks passed!"
+                """
+
+            let dockerignore =
+                """
+                # Exclude specific files
+                secret.txt
+
+                # Exclude all log files
+                *.log
+                **/*.log
+
+                # But make an exception for important.log
+                !important.log
+
+                # Exclude all temporary files
+                *.tmp
+                **/*.tmp
+
+                # Exclude directories
+                temp/
+                node_modules/
+                """
+
+            let context: [FileSystemEntry] = [
+                .file(".dockerignore", content: .data(dockerignore.data(using: .utf8)!)),
+                .file("secret.txt", content: .data("secret content".data(using: .utf8)!)),
+                .file("debug.log", content: .data("debug log content".data(using: .utf8)!)),
+                .file("important.log", content: .data("important log content".data(using: .utf8)!)),
+                .file("cache.tmp", content: .data("cache".data(using: .utf8)!)),
+                .file("main.go", content: .data("package main".data(using: .utf8)!)),
+                .file("README.md", content: .data("# README".data(using: .utf8)!)),
+                .directory("temp"),
+                .file("temp/cache.tmp", content: .data("temp cache".data(using: .utf8)!)),
+                .directory("logs"),
+                .file("logs/app.log", content: .data("app log".data(using: .utf8)!)),
+                .directory("node_modules"),
+                .file("node_modules/package.json", content: .data("{}".data(using: .utf8)!)),
+                .directory("src"),
+                .file("src/app.go", content: .data("package src".data(using: .utf8)!)),
+                .file("src/test.tmp", content: .data("temp".data(using: .utf8)!)),
+            ]
+
+            try createContext(tempDir: tempDir, dockerfile: dockerfile, context: context)
+            let imageName = "registry.local/dockerignore-test:\(UUID().uuidString)"
+            try self.build(tag: imageName, tempDir: tempDir)
+            #expect(try self.inspectImage(imageName) == imageName, "expected to have successfully built \(imageName)")
+        }
+
         @Test func testBuildNoCachePullLatestImage() throws {
             let tempDir: URL = try createTempDir()
             let dockerfile =

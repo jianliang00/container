@@ -248,6 +248,10 @@ public struct Utility {
         config.ssh = management.ssh
         config.readOnly = management.readOnly
 
+        if let runtime = management.runtime {
+            config.runtimeHandler = runtime
+        }
+
         return (config, kernel)
     }
 

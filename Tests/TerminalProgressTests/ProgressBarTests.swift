@@ -19,6 +19,27 @@ import XCTest
 @testable import TerminalProgress
 
 final class ProgressBarTests: XCTestCase {
+    private func formattedSize(_ size: Int64) -> String {
+        size.formattedSize()
+    }
+
+    private func combinedFormattedSize(_ size: Int64, _ totalSize: Int64) -> String {
+        let formattedCurrentSize = formattedSize(size)
+        let formattedTotalSize = formattedSize(totalSize)
+
+        let sizeComponents = formattedCurrentSize.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        let totalSizeComponents = formattedTotalSize.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+
+        guard sizeComponents.count == 2, totalSizeComponents.count == 2 else {
+            return "\(formattedCurrentSize)/\(formattedTotalSize)"
+        }
+
+        guard sizeComponents[1] == totalSizeComponents[1] else {
+            return "\(formattedCurrentSize)/\(formattedTotalSize)"
+        }
+        return "\(sizeComponents[0])/\(totalSizeComponents[0]) \(totalSizeComponents[1])"
+    }
+
     func testSpinner() async throws {
         let config = try ProgressConfig(
             description: "Task"
@@ -470,7 +491,7 @@ final class ProgressBarTests: XCTestCase {
         let progress = ProgressBar(config: config)
         progress.add(size: 1)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task (1 byte) [0s]")
+        XCTAssertEqual(output, "⠋ Task (\(formattedSize(1))) [0s]")
     }
 
     func testSizeAddFinish() async throws {
@@ -495,7 +516,7 @@ final class ProgressBarTests: XCTestCase {
         let progress = ProgressBar(config: config)
         progress.set(size: 2)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task (2 bytes) [0s]")
+        XCTAssertEqual(output, "⠋ Task (\(formattedSize(2))) [0s]")
     }
 
     func testTotalSizeZeroSize() async throws {
@@ -519,7 +540,7 @@ final class ProgressBarTests: XCTestCase {
         let progress = ProgressBar(config: config)
         progress.set(size: 1)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task 50% (1 byte/2 bytes) [0s]")
+        XCTAssertEqual(output, "⠋ Task 50% (\(combinedFormattedSize(1, 2))) [0s]")
     }
 
     func testTotalSizeDifferentUnitsFinish() async throws {
@@ -533,7 +554,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(size: 1)
         progress.finish()
         let output = progress.draw()
-        XCTAssertEqual(output, "✔ Task 100% (2 bytes) [0s]")
+        XCTAssertEqual(output, "✔ Task 100% (\(formattedSize(2))) [0s]")
     }
 
     func testTotalSizeSameUnits() async throws {
@@ -546,7 +567,7 @@ final class ProgressBarTests: XCTestCase {
         let progress = ProgressBar(config: config)
         progress.set(size: 2)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task 50% (2/4 bytes) [0s]")
+        XCTAssertEqual(output, "⠋ Task 50% (\(combinedFormattedSize(2, 4))) [0s]")
     }
 
     func testTotalSizeSameUnitsFinish() async throws {
@@ -560,7 +581,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(size: 2)
         progress.finish()
         let output = progress.draw()
-        XCTAssertEqual(output, "✔ Task 100% (4 bytes) [0s]")
+        XCTAssertEqual(output, "✔ Task 100% (\(formattedSize(4))) [0s]")
     }
 
     func testTotalSizeAdd() async throws {
@@ -574,7 +595,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(size: 2)
         progress.add(totalSize: 1)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task 50% (2/4 bytes) [0s]")
+        XCTAssertEqual(output, "⠋ Task 50% (\(combinedFormattedSize(2, 4))) [0s]")
     }
 
     func testTotalSizeSet() async throws {
@@ -588,7 +609,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(size: 2)
         progress.set(totalSize: 4)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task 50% (2/4 bytes) [0s]")
+        XCTAssertEqual(output, "⠋ Task 50% (\(combinedFormattedSize(2, 4))) [0s]")
     }
 
     func testTotalSizeInvalid() throws {
@@ -613,7 +634,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(items: 1)
         progress.set(size: 2)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task 50% (1 of 2 it, 2/4 bytes) [0s]")
+        XCTAssertEqual(output, "⠋ Task 50% (1 of 2 it, \(combinedFormattedSize(2, 4))) [0s]")
     }
 
     func testItemsAndSizeFinish() async throws {
@@ -630,7 +651,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(size: 2)
         progress.finish()
         let output = progress.draw()
-        XCTAssertEqual(output, "✔ Task 100% (2 it, 4 bytes) [0s]")
+        XCTAssertEqual(output, "✔ Task 100% (2 it, \(formattedSize(4))) [0s]")
     }
 
     func testNoSpeed() async throws {
@@ -642,7 +663,7 @@ final class ProgressBarTests: XCTestCase {
         let progress = ProgressBar(config: config)
         progress.set(size: 2)
         let output = progress.draw()
-        XCTAssertEqual(output, "⠋ Task 50% (2/4 bytes) [0s]")
+        XCTAssertEqual(output, "⠋ Task 50% (\(combinedFormattedSize(2, 4))) [0s]")
     }
 
     func testSpeed() async throws {
@@ -683,7 +704,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(items: 1)
         progress.set(size: 2)
         let output = progress.draw()
-        XCTAssertTrue(output.contains("1 of 2 it, 2/4 bytes"))
+        XCTAssertTrue(output.contains("1 of 2 it, \(combinedFormattedSize(2, 4))"))
         XCTAssertTrue(output.contains("/s"))
     }
 
@@ -701,7 +722,7 @@ final class ProgressBarTests: XCTestCase {
         progress.set(size: 2)
         progress.finish()
         let output = progress.draw()
-        XCTAssertTrue(output.contains("2 it, 4 bytes"))
+        XCTAssertTrue(output.contains("2 it, \(formattedSize(4))"))
         XCTAssertFalse(output.contains("/s"))
     }
 

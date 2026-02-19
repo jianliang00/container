@@ -163,6 +163,11 @@ public struct Flags {
     }
 
     public struct Management: ParsableArguments {
+        public enum SnapshotMode: String, ExpressibleByArgument {
+            case on
+            case off
+        }
+
         public init() {}
 
         public init(
@@ -347,20 +352,14 @@ public struct Flags {
         @Option(name: [.customLong("volume"), .short], help: "Bind mount a volume into the container")
         public var volumes: [String] = []
 
-        public func validate() throws {
-            if dnsDisabled {
-                let hasDNSConfig =
-                    !dns.nameservers.isEmpty
-                    || dns.domain != nil
-                    || !dns.options.isEmpty
-                    || !dns.searchDomains.isEmpty
-                if hasDNSConfig {
-                    throw ValidationError(
-                        "`--no-dns` cannot be used with DNS configuration flags (`--dns`, `--dns-domain`, `--dns-option`, `--dns-search`)"
-                    )
-                }
-            }
-        }
+        @Option(name: .long, help: "Set the runtime handler for the container (default: inferred from --os)")
+        public var runtime: String?
+
+        @Option(name: .long, help: "Enable or disable VM snapshot save/restore (format: on|off)")
+        public var snapshot: SnapshotMode = .off
+
+        @Flag(name: .long, help: "Show the guest VM in a local GUI window (macOS guest runtime only)")
+        public var gui = false
     }
 
     public struct Progress: ParsableArguments {

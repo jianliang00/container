@@ -52,18 +52,8 @@ public struct ContainerConfiguration: Sendable, Codable {
     public var ssh: Bool = false
     /// Whether to mount the rootfs as read-only.
     public var readOnly: Bool = false
-    /// Whether to use a minimal init process inside the container.
-    public var useInit: Bool = false
-    /// Linux capabilities to add (normalized CAP_* strings, or "ALL").
-    public var capAdd: [String] = []
-    /// Linux capabilities to drop (normalized CAP_* strings, or "ALL").
-    public var capDrop: [String] = []
-    /// Size of /dev/shm in bytes. When nil, the default size is used.
-    public var shmSize: UInt64?
-    /// Signal to send to the container process on stop (from image config).
-    public var stopSignal: String?
-    /// The time at which the container was created.
-    public var creationDate: Date = Date()
+    /// macOS guest runtime options.
+    public var macosGuest: MacOSGuestOptions? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -83,12 +73,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case virtualization
         case ssh
         case readOnly
-        case useInit
-        case capAdd
-        case capDrop
-        case shmSize
-        case stopSignal
-        case creationDate
+        case macosGuest
     }
 
     /// Create a configuration from the supplied Decoder, initializing missing
@@ -119,12 +104,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         virtualization = try container.decodeIfPresent(Bool.self, forKey: .virtualization) ?? false
         ssh = try container.decodeIfPresent(Bool.self, forKey: .ssh) ?? false
         readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
-        useInit = try container.decodeIfPresent(Bool.self, forKey: .useInit) ?? false
-        capAdd = try container.decodeIfPresent([String].self, forKey: .capAdd) ?? []
-        capDrop = try container.decodeIfPresent([String].self, forKey: .capDrop) ?? []
-        shmSize = try container.decodeIfPresent(UInt64.self, forKey: .shmSize)
-        stopSignal = try container.decodeIfPresent(String.self, forKey: .stopSignal)
-        creationDate = try container.decodeIfPresent(Date.self, forKey: .creationDate) ?? Date(timeIntervalSince1970: 0)
+        macosGuest = try container.decodeIfPresent(MacOSGuestOptions.self, forKey: .macosGuest)
     }
 
     public struct DNSConfiguration: Sendable, Codable {
@@ -167,6 +147,18 @@ public struct ContainerConfiguration: Sendable, Codable {
             self.memoryInBytes = try c.decodeIfPresent(UInt64.self, forKey: .memoryInBytes) ?? 1024.mib()
             self.storage = try c.decodeIfPresent(UInt64.self, forKey: .storage)
             self.cpuOverhead = try c.decodeIfPresent(Int.self, forKey: .cpuOverhead) ?? 1
+        }
+    }
+
+    public struct MacOSGuestOptions: Sendable, Codable, Equatable {
+        public var snapshotEnabled: Bool
+        public var guiEnabled: Bool
+        public var agentPort: UInt32
+
+        public init(snapshotEnabled: Bool, guiEnabled: Bool, agentPort: UInt32) {
+            self.snapshotEnabled = snapshotEnabled
+            self.guiEnabled = guiEnabled
+            self.agentPort = agentPort
         }
     }
 

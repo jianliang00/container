@@ -49,8 +49,8 @@ let package = Package(
         .library(name: "ContainerOS", targets: ["ContainerOS"]),
         .library(name: "SocketForwarder", targets: ["SocketForwarder"]),
         .library(name: "TerminalProgress", targets: ["TerminalProgress"]),
-        .library(name: "MachineAPIClient", targets: ["MachineAPIClient"]),
-        .library(name: "MachineAPIService", targets: ["MachineAPIService"]),
+        .executable(name: "container-runtime-macos", targets: ["container-runtime-macos"]),
+        .executable(name: "container-macos-guest-agent", targets: ["container-macos-guest-agent"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
@@ -245,6 +245,7 @@ let package = Package(
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "SystemPackage", package: "swift-system"),
                 "ContainerAPIClient",
+                "ContainerResource",
                 "ContainerPersistence",
                 "ContainerTestSupport",
             ]
@@ -376,6 +377,29 @@ let package = Package(
             path: "Sources/Plugins/RuntimeLinux",
             exclude: ["config.toml"]
         ),
+        .executableTarget(
+            name: "container-runtime-macos",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                "ContainerImagesServiceClient",
+                "ContainerLog",
+                "ContainerResource",
+                "ContainerSandboxServiceClient",
+                "ContainerVersion",
+                "ContainerXPC",
+            ],
+            path: "Sources/Helpers/RuntimeMacOS"
+        ),
+        .executableTarget(
+            name: "container-macos-guest-agent",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "Sources/Helpers/MacOSGuestAgent"
+        ),
         .target(
             name: "ContainerRuntimeLinuxServer",
             dependencies: [
@@ -468,6 +492,15 @@ let package = Package(
             name: "ContainerPluginTests",
             dependencies: [
                 "ContainerPlugin"
+            ]
+        ),
+        .testTarget(
+            name: "ContainerSandboxServiceTests",
+            dependencies: [
+                .product(name: "Containerization", package: "containerization"),
+                "ContainerAPIService",
+                "ContainerResource",
+                "ContainerSandboxServiceClient",
             ]
         ),
         .target(

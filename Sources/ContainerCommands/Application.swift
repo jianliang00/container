@@ -71,6 +71,12 @@ public struct Application: AsyncLoggableCommand {
                 ]
             ),
             CommandGroup(
+                name: "MacOS",
+                subcommands: [
+                    MacOSCommand.self
+                ]
+            ),
+            CommandGroup(
                 name: "Image",
                 subcommands: [
                     BuildCommand.self,

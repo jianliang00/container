@@ -22,7 +22,7 @@ import ContainerizationOS
 import Foundation
 import Testing
 
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLINetwork: CLITest {
     private static let retries = 10
     private static let retryDelaySeconds = Int64(3)

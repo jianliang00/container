@@ -18,6 +18,8 @@ import ContainerizationOS
 import Foundation
 import Testing
 
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
+
 class TestCLIRunBase: CLITest {
     var terminal: Terminal!
     var containerName: String = UUID().uuidString

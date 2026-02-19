@@ -125,6 +125,11 @@ public struct Flags {
     }
 
     public struct Management: ParsableArguments {
+        public enum SnapshotMode: String, ExpressibleByArgument {
+            case on
+            case off
+        }
+
         public init() {}
 
         @Option(name: .shortAndLong, help: "Set arch if image can target multiple architectures")
@@ -228,8 +233,14 @@ public struct Flags {
         @Flag(name: .long, help: "Mount the container's root filesystem as read-only")
         public var readOnly = false
 
-        @Option(name: .long, help: "Set the runtime handler for the container (default: container-runtime-linux)")
+        @Option(name: .long, help: "Set the runtime handler for the container (default: inferred from --os)")
         public var runtime: String?
+
+        @Option(name: .long, help: "Enable or disable VM snapshot save/restore (format: on|off)")
+        public var snapshot: SnapshotMode = .off
+
+        @Flag(name: .long, help: "Show the guest VM in a local GUI window (macOS guest runtime only)")
+        public var gui = false
     }
 
     public struct Progress: ParsableArguments {

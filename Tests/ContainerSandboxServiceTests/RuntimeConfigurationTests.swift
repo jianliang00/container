@@ -82,10 +82,10 @@ struct RuntimeConfigurationTests {
             readRuntimeConfig.path == bundlePath,
             "Path should match")
         #expect(
-            readRuntimeConfig.kernel.path == kernel.path,
+            readRuntimeConfig.kernel?.path == kernel.path,
             "Kernel path should match")
         #expect(
-            readRuntimeConfig.initialFilesystem.source == initFs.source,
+            readRuntimeConfig.initialFilesystem?.source == initFs.source,
             "Initial filesystem source should match")
         #expect(
             readRuntimeConfig.containerConfiguration == nil,

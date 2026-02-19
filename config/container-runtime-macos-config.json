@@ -1,0 +1,15 @@
+{
+    "abstract" : "macOS guest container runtime plugin",
+    "version":  "0.1",
+    "author": "Apple",
+    "servicesConfig" : {
+        "loadAtBoot" : false,
+        "runAtLoad" : false,
+        "services" : [
+            {
+                "type" : "runtime"
+            }
+        ],
+        "defaultArguments": []
+    }
+}

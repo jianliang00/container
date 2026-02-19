@@ -69,7 +69,7 @@ extension Application {
             let id = Utility.createContainerID(name: self.managementFlags.name)
             try Utility.validEntityName(id)
 
-            let ck = try await Utility.containerConfigFromFlags(
+            let (configuration, kernel, initImage) = try await Utility.containerConfigFromFlags(
                 id: id,
                 image: image,
                 arguments: arguments,
@@ -84,7 +84,7 @@ extension Application {
 
             let options = ContainerCreateOptions(autoRemove: managementFlags.remove)
             let client = ContainerClient()
-            try await client.create(configuration: ck.0, options: options, kernel: ck.1, initImage: ck.2)
+            try await client.create(configuration: configuration, options: options, kernel: kernel, initImage: initImage)
 
             if !self.managementFlags.cidfile.isEmpty {
                 let path = self.managementFlags.cidfile

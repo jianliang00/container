@@ -17,6 +17,8 @@
 import ContainerizationError
 import Testing
 
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
+
 class TestCLIRunLifecycle: CLITest {
     private func getTestName() -> String {
         Test.current!.name.trimmingCharacters(in: ["(", ")"]).lowercased()

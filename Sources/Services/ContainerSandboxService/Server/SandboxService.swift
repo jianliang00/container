@@ -1319,10 +1319,22 @@ extension SandboxService {
     private func createBundle() throws {
         do {
             let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: self.root)
+            guard let initialFilesystem = runtimeConfig.initialFilesystem else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "runtime configuration missing initial filesystem"
+                )
+            }
+            guard let kernel = runtimeConfig.kernel else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "runtime configuration missing kernel"
+                )
+            }
             _ = try ContainerResource.Bundle.create(
                 path: runtimeConfig.path,
-                initialFilesystem: runtimeConfig.initialFilesystem,
-                kernel: runtimeConfig.kernel,
+                initialFilesystem: initialFilesystem,
+                kernel: kernel,
                 containerConfiguration: runtimeConfig.containerConfiguration,
                 containerRootFilesystem: runtimeConfig.containerRootFilesystem,
                 options: runtimeConfig.options

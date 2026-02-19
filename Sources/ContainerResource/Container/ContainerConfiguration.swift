@@ -51,6 +51,8 @@ public struct ContainerConfiguration: Sendable, Codable {
     public var ssh: Bool = false
     /// Whether to mount the rootfs as read-only.
     public var readOnly: Bool = false
+    /// macOS guest runtime options.
+    public var macosGuest: MacOSGuestOptions? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -70,6 +72,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case virtualization
         case ssh
         case readOnly
+        case macosGuest
     }
 
     /// Create a configuration from the supplied Decoder, initializing missing
@@ -100,6 +103,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         virtualization = try container.decodeIfPresent(Bool.self, forKey: .virtualization) ?? false
         ssh = try container.decodeIfPresent(Bool.self, forKey: .ssh) ?? false
         readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+        macosGuest = try container.decodeIfPresent(MacOSGuestOptions.self, forKey: .macosGuest)
     }
 
     public struct DNSConfiguration: Sendable, Codable {
@@ -133,6 +137,18 @@ public struct ContainerConfiguration: Sendable, Codable {
         public var storage: UInt64?
 
         public init() {}
+    }
+
+    public struct MacOSGuestOptions: Sendable, Codable, Equatable {
+        public var snapshotEnabled: Bool
+        public var guiEnabled: Bool
+        public var agentPort: UInt32
+
+        public init(snapshotEnabled: Bool, guiEnabled: Bool, agentPort: UInt32) {
+            self.snapshotEnabled = snapshotEnabled
+            self.guiEnabled = guiEnabled
+            self.agentPort = agentPort
+        }
     }
 
     public init(

@@ -18,7 +18,7 @@ import ContainerResource
 import Foundation
 import Testing
 
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLIAnonymousVolumes: CLITest {
 
     override init() throws {

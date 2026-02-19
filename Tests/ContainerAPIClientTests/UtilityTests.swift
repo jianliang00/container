@@ -108,4 +108,26 @@ struct UtilityTests {
         #expect(ports[1].proto == .udp)
         #expect(ports[1].count == 100)
     }
+
+    @Test("Infer runtime from linux platform")
+    func testInferRuntimeLinux() throws {
+        let platform = Parser.platform(os: "linux", arch: "arm64")
+        let runtime = try Utility.resolveRuntimeHandler(platform: platform, explicitRuntime: nil)
+        #expect(runtime == "container-runtime-linux")
+    }
+
+    @Test("Infer runtime from darwin platform")
+    func testInferRuntimeDarwin() throws {
+        let platform = Parser.platform(os: "darwin", arch: "arm64")
+        let runtime = try Utility.resolveRuntimeHandler(platform: platform, explicitRuntime: nil)
+        #expect(runtime == "container-runtime-macos")
+    }
+
+    @Test("Runtime conflict between --os and --runtime")
+    func testRuntimeConflict() throws {
+        let platform = Parser.platform(os: "darwin", arch: "arm64")
+        #expect(throws: ContainerizationError.self) {
+            _ = try Utility.resolveRuntimeHandler(platform: platform, explicitRuntime: "container-runtime-linux")
+        }
+    }
 }

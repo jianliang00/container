@@ -177,19 +177,13 @@ public struct ContainersHarness: Sendable {
             )
         }
         let kdata = message.dataNoCopy(key: .kernel)
-        guard let kdata else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "kernel cannot be empty"
-            )
-        }
         let odata = message.dataNoCopy(key: .containerOptions)
         var options: ContainerCreateOptions = .default
         if let odata {
             options = try JSONDecoder().decode(ContainerCreateOptions.self, from: odata)
         }
         let config = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
-        let kernel = try JSONDecoder().decode(Kernel.self, from: kdata)
+        let kernel = try kdata.map { try JSONDecoder().decode(Kernel.self, from: $0) }
 
         let initImage = message.string(key: .initImage)
 

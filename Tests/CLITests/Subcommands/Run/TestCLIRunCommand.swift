@@ -28,6 +28,7 @@ import Testing
 // When https://github.com/swiftlang/swift-testing/pull/1390 lands
 // and is available on the CI runners, we can try setting the
 // environment variable to limit concurrency and rejoin these suites.
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLIRunCommand1: CLITest {
     func getTestName() -> String {
         Test.current!.name.trimmingCharacters(in: ["(", ")"]).lowercased()
@@ -289,6 +290,8 @@ class TestCLIRunCommand1: CLITest {
     }
 }
 
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
+
 class TestCLIRunCommand2: CLITest {
     func getTestName() -> String {
         Test.current!.name.trimmingCharacters(in: ["(", ")"]).lowercased()
@@ -488,6 +491,8 @@ class TestCLIRunCommand2: CLITest {
         }
     }
 }
+
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 
 class TestCLIRunCommand3: CLITest {
     func getTestName() -> String {

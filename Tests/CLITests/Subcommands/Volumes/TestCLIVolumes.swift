@@ -18,7 +18,7 @@ import ContainerAPIClient
 import Foundation
 import Testing
 
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLIVolumes: CLITest {
 
     func doVolumeCreate(name: String) throws {

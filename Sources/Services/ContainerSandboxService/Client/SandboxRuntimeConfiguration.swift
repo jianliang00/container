@@ -23,16 +23,16 @@ public struct RuntimeConfiguration: Codable, Sendable {
     static let runtimeConfigurationFilename = "runtime-configuration.json"
 
     public let path: URL
-    public let initialFilesystem: Filesystem
-    public let kernel: Kernel
+    public let initialFilesystem: Filesystem?
+    public let kernel: Kernel?
     public let containerConfiguration: ContainerConfiguration?
     public let containerRootFilesystem: Filesystem?
     public let options: ContainerCreateOptions?
 
     public init(
         path: URL,
-        initialFilesystem: Filesystem,
-        kernel: Kernel,
+        initialFilesystem: Filesystem? = nil,
+        kernel: Kernel? = nil,
         containerConfiguration: ContainerConfiguration? = nil,
         containerRootFilesystem: Filesystem? = nil,
         options: ContainerCreateOptions? = nil

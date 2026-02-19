@@ -23,7 +23,7 @@ import Testing
 // for these tests are nested in extensions of CLIBuildBase so that we can set
 // the serialized parallelization attribute across all builder tests.
 */
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLIBuildBase: CLITest {
     override init() throws {
         try super.init()

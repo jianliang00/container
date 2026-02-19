@@ -17,6 +17,8 @@
 import Foundation
 import Testing
 
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
+
 class TestCLIRmRaceCondition: CLITest {
 
     /// Helper method to check if a container exists

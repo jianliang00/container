@@ -29,6 +29,8 @@ import Foundation
 import Logging
 
 public actor ContainersService {
+    private static let macOSRuntimeName = "container-runtime-macos"
+
     struct ContainerState {
         var snapshot: ContainerSnapshot
         var client: SandboxClient?
@@ -215,7 +217,7 @@ public actor ContainersService {
     }
 
     /// Create a new container from the provided id and configuration.
-    public func create(configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil) async throws {
+    public func create(configuration: ContainerConfiguration, kernel: Kernel?, options: ContainerCreateOptions, initImage: String? = nil) async throws {
         self.log.debug("\(#function)")
 
         try await self.lock.withLock { context in
@@ -253,15 +255,29 @@ public actor ContainersService {
                     message: "unable to locate runtime plugin \(configuration.runtimeHandler)"
                 )
             }
+            try Self.validateCreateInput(configuration: configuration, kernel: kernel)
 
             let path = self.containerRoot.appendingPathComponent(configuration.id)
-            let systemPlatform = kernel.platform
+            if configuration.runtimeHandler == Self.macOSRuntimeName {
+                let runtimeConfig = RuntimeConfiguration(
+                    path: path,
+                    containerConfiguration: configuration,
+                    options: options
+                )
+                try runtimeConfig.writeRuntimeConfiguration()
+            } else {
+                guard let kernel else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "kernel cannot be empty for runtime \(configuration.runtimeHandler)"
+                    )
+                }
 
-            // Fetch init image (custom or default)
-            self.log.info("Using init image: \(initImage ?? ClientImage.initImageRef)")
-            let initFilesystem = try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
+                let systemPlatform = kernel.platform
+                // Fetch init image (custom or default)
+                self.log.info("Using init image: \(initImage ?? ClientImage.initImageRef)")
+                let initFilesystem = try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
 
-            do {
                 let containerImage = ClientImage(description: configuration.image)
                 let imageFs = try await containerImage.getCreateSnapshot(platform: configuration.platform)
 
@@ -275,17 +291,34 @@ public actor ContainersService {
                 )
 
                 try runtimeConfig.writeRuntimeConfiguration()
-
-                let snapshot = ContainerSnapshot(
-                    configuration: configuration,
-                    status: .stopped,
-                    networks: [],
-                    startedDate: nil
-                )
-                await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
-            } catch {
-                throw error
             }
+
+            let snapshot = ContainerSnapshot(
+                configuration: configuration,
+                status: .stopped,
+                networks: [],
+                startedDate: nil
+            )
+            await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
+        }
+    }
+
+    nonisolated static func validateCreateInput(configuration: ContainerConfiguration, kernel: Kernel?) throws {
+        if configuration.runtimeHandler == Self.macOSRuntimeName {
+            guard configuration.platform.os == "darwin", configuration.platform.architecture == "arm64" else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "macOS runtime requires darwin/arm64 image platform, got \(configuration.platform)"
+                )
+            }
+            return
+        }
+
+        guard kernel != nil else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "kernel cannot be empty for runtime \(configuration.runtimeHandler)"
+            )
         }
     }
 

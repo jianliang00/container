@@ -18,10 +18,25 @@ import AsyncHTTPClient
 import ContainerResource
 import Containerization
 import ContainerizationOS
+import Darwin
 import Foundation
+import Synchronization
 import Testing
 
 class CLITest {
+    private struct SystemRecoveryState {
+        var attempted = false
+        var ready = false
+    }
+
+    private struct ServiceAvailabilityState {
+        var checked = false
+        var available = false
+    }
+
+    private static let systemRecoveryState = Mutex(SystemRecoveryState())
+    private static let serviceAvailabilityState = Mutex(ServiceAvailabilityState())
+
     struct Image: Codable {
         let reference: String
     }
@@ -109,7 +124,46 @@ class CLITest {
         }
     }
 
+    static func isCLIServiceAvailable() -> Bool {
+        if ProcessInfo.processInfo.environment["CONTAINER_FORCE_DISABLE_CLI_TESTS"] == "1" {
+            return false
+        }
+        if ProcessInfo.processInfo.environment["CONTAINER_FORCE_ENABLE_CLI_TESTS"] == "1" {
+            return true
+        }
+
+        let needsProbe = serviceAvailabilityState.withLock { state in
+            guard !state.checked else {
+                return false
+            }
+            state.checked = true
+            return true
+        }
+        if needsProbe {
+            let available = probeCLIServiceAvailability()
+            serviceAvailabilityState.withLock { state in
+                state.available = available
+            }
+        }
+        return serviceAvailabilityState.withLock { $0.available }
+    }
+
     func run(arguments: [String], stdin: Data? = nil, currentDirectory: URL? = nil) throws -> (outputData: Data, output: String, error: String, status: Int32) {
+        let result = try runRaw(arguments: arguments, stdin: stdin, currentDirectory: currentDirectory)
+        guard shouldAttemptXPCRecovery(for: arguments, status: result.status, error: result.error) else {
+            return result
+        }
+
+        try attemptSystemServiceRecovery()
+        return try runRaw(arguments: arguments, stdin: stdin, currentDirectory: currentDirectory)
+    }
+
+    private func runRaw(arguments: [String], stdin: Data? = nil, currentDirectory: URL? = nil) throws -> (
+        outputData: Data,
+        output: String,
+        error: String,
+        status: Int32
+    ) {
         let process = Process()
         process.executableURL = try executablePath
         process.arguments = arguments
@@ -126,23 +180,172 @@ class CLITest {
 
         let outputData: Data
         let errorData: Data
+        var timedOut = false
         do {
             try process.run()
             if let data = stdin {
                 inputPipe.fileHandleForWriting.write(data)
             }
             inputPipe.fileHandleForWriting.closeFile()
+
+            let timeout = commandTimeout(for: arguments)
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning, Date() < deadline {
+                usleep(100_000)
+            }
+
+            if process.isRunning {
+                timedOut = true
+                process.terminate()
+                let killDeadline = Date().addingTimeInterval(2)
+                while process.isRunning, Date() < killDeadline {
+                    usleep(100_000)
+                }
+                if process.isRunning {
+                    Darwin.kill(process.processIdentifier, SIGKILL)
+                }
+            }
+
+            process.waitUntilExit()
             outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
             errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
         } catch {
             throw CLIError.executionFailed("Failed to run CLI: \(error)")
         }
 
         let output = String(data: outputData, encoding: .utf8) ?? ""
-        let error = String(data: errorData, encoding: .utf8) ?? ""
+        var error = String(data: errorData, encoding: .utf8) ?? ""
+        var status = process.terminationStatus
+        if timedOut {
+            let command = arguments.joined(separator: " ")
+            let timeoutMessage = "command timed out for test: container \(command)"
+            error = error.isEmpty ? timeoutMessage : "\(error)\n\(timeoutMessage)"
+            status = 124
+        }
 
-        return (outputData: outputData, output: output, error: error, status: process.terminationStatus)
+        return (outputData: outputData, output: output, error: error, status: status)
+    }
+
+    private func shouldAttemptXPCRecovery(for arguments: [String], status: Int32, error: String) -> Bool {
+        guard status != 0 else {
+            return false
+        }
+        if arguments.starts(with: ["system", "start"]) || arguments.starts(with: ["system", "stop"]) {
+            return false
+        }
+        return error.contains("XPC connection error") || error.contains("Connection invalid")
+    }
+
+    private func attemptSystemServiceRecovery() throws {
+        let shouldAttempt = CLITest.systemRecoveryState.withLock { state in
+            guard !state.ready, !state.attempted else {
+                return false
+            }
+            state.attempted = true
+            return true
+        }
+        guard shouldAttempt else {
+            return
+        }
+
+        let startResult = try runRaw(arguments: ["system", "start", "--disable-kernel-install", "--timeout", "3"])
+        if startResult.status == 0 {
+            CLITest.systemRecoveryState.withLock { $0.ready = true }
+            return
+        }
+
+        // If the service was already up, start can fail; probe the API call directly.
+        let probeResult = try runRaw(arguments: ["system", "version", "--format", "json"])
+        if probeResult.status == 0 {
+            CLITest.systemRecoveryState.withLock { $0.ready = true }
+        }
+    }
+
+    private func commandTimeout(for arguments: [String]) -> TimeInterval {
+        if arguments.starts(with: ["system", "version"]) {
+            return 10
+        }
+        if arguments.starts(with: ["system", "start"]) {
+            return 20
+        }
+        if arguments.contains("build") {
+            return 300
+        }
+        return 120
+    }
+
+    private static func probeCLIServiceAvailability() -> Bool {
+        guard let executableURL = resolveExecutablePathForProbe() else {
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = ["system", "version", "--format", "json"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        process.standardInput = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning, Date() < deadline {
+            usleep(100_000)
+        }
+
+        if process.isRunning {
+            process.terminate()
+            let killDeadline = Date().addingTimeInterval(1)
+            while process.isRunning, Date() < killDeadline {
+                usleep(100_000)
+            }
+            if process.isRunning {
+                Darwin.kill(process.processIdentifier, SIGKILL)
+            }
+        }
+
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    private static func resolveExecutablePathForProbe() -> URL? {
+        if let containerPath = ProcessInfo.processInfo.environment["CONTAINER_CLI_PATH"] {
+            return URL(filePath: containerPath)
+        }
+
+        let fileManager = FileManager.default
+        let currentDir = fileManager.currentDirectoryPath
+
+        let releaseURL = URL(fileURLWithPath: currentDir)
+            .appendingPathComponent(".build")
+            .appendingPathComponent("release")
+            .appendingPathComponent("container")
+        let debugURL = URL(fileURLWithPath: currentDir)
+            .appendingPathComponent(".build")
+            .appendingPathComponent("debug")
+            .appendingPathComponent("container")
+
+        let releaseExists = fileManager.fileExists(atPath: releaseURL.path)
+        let debugExists = fileManager.fileExists(atPath: debugURL.path)
+        if releaseExists && debugExists {
+            let releaseDate = try? fileManager.attributesOfItem(atPath: releaseURL.path)[.modificationDate] as? Date
+            let debugDate = try? fileManager.attributesOfItem(atPath: debugURL.path)[.modificationDate] as? Date
+            if let releaseDate, let debugDate {
+                return (releaseDate > debugDate) ? releaseURL : debugURL
+            }
+            return debugURL
+        }
+        if releaseExists {
+            return releaseURL
+        }
+        if debugExists {
+            return debugURL
+        }
+        return nil
     }
 
     func runInteractive(arguments: [String], currentDirectory: URL? = nil) throws -> Terminal {

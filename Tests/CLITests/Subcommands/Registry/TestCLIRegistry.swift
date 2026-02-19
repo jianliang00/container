@@ -17,6 +17,8 @@
 import Foundation
 import Testing
 
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
+
 class TestCLIRegistry: CLITest {
     @Test func testListDefaultFormat() throws {
         let (_, output, error, status) = try run(arguments: ["registry", "list"])

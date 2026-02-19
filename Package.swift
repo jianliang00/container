@@ -44,6 +44,8 @@ let package = Package(
         .library(name: "ContainerXPC", targets: ["ContainerXPC"]),
         .library(name: "SocketForwarder", targets: ["SocketForwarder"]),
         .library(name: "TerminalProgress", targets: ["TerminalProgress"]),
+        .executable(name: "container-runtime-macos", targets: ["container-runtime-macos"]),
+        .executable(name: "container-macos-guest-agent", targets: ["container-macos-guest-agent"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
@@ -189,6 +191,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
                 "ContainerAPIClient",
+                "ContainerResource",
                 "ContainerPersistence",
             ]
         ),
@@ -301,6 +304,29 @@ let package = Package(
             ],
             path: "Sources/Helpers/RuntimeLinux"
         ),
+        .executableTarget(
+            name: "container-runtime-macos",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                "ContainerImagesServiceClient",
+                "ContainerLog",
+                "ContainerResource",
+                "ContainerSandboxServiceClient",
+                "ContainerVersion",
+                "ContainerXPC",
+            ],
+            path: "Sources/Helpers/RuntimeMacOS"
+        ),
+        .executableTarget(
+            name: "container-macos-guest-agent",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "Sources/Helpers/MacOSGuestAgent"
+        ),
         .target(
             name: "ContainerSandboxService",
             dependencies: [
@@ -375,6 +401,7 @@ let package = Package(
             name: "ContainerSandboxServiceTests",
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
+                "ContainerAPIService",
                 "ContainerResource",
                 "ContainerSandboxServiceClient",
             ]

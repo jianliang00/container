@@ -33,25 +33,36 @@ public struct ServiceManager {
         return launchctl.terminationStatus
     }
 
+    private static func runLaunchctlCommandChecked(args: [String]) throws {
+        let status = try runLaunchctlCommand(args: args)
+        guard status == 0 else {
+            let command = (["launchctl"] + args).joined(separator: " ")
+            throw ContainerizationError(
+                .internalError,
+                message: "command `\(command)` failed with status \(status)"
+            )
+        }
+    }
+
     /// Register a service by providing the path to a plist.
     public static func register(plistPath: String) throws {
         let domain = try Self.getDomainString()
-        _ = try runLaunchctlCommand(args: ["bootstrap", domain, plistPath])
+        try runLaunchctlCommandChecked(args: ["bootstrap", domain, plistPath])
     }
 
     /// Deregister a service by a launchd label.
     public static func deregister(fullServiceLabel label: String) throws {
-        _ = try runLaunchctlCommand(args: ["bootout", label])
+        try runLaunchctlCommandChecked(args: ["bootout", label])
     }
 
     /// Restart a service by a launchd label.
     public static func kickstart(fullServiceLabel label: String) throws {
-        _ = try runLaunchctlCommand(args: ["kickstart", "-k", label])
+        try runLaunchctlCommandChecked(args: ["kickstart", "-k", label])
     }
 
     /// Send a signal to a service by a launchd label.
     public static func kill(fullServiceLabel label: String, signal: Int32 = 15) throws {
-        _ = try runLaunchctlCommand(args: ["kill", "\(signal)", label])
+        try runLaunchctlCommandChecked(args: ["kill", "\(signal)", label])
     }
 
     /// Retrieve labels for all loaded launch units.

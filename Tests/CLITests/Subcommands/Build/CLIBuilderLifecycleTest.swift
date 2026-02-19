@@ -18,6 +18,7 @@ import Foundation
 import Testing
 
 extension TestCLIBuildBase {
+    @Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
     class CLIBuilderLifecycleTest: TestCLIBuildBase {
         override init() throws {}
         @Test func testBuilderStartStopCommand() throws {

@@ -20,6 +20,8 @@ import ContainerizationOCI
 import Foundation
 import Testing
 
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
+
 class TestCLIImagesCommand: CLITest {
     @Test func testPull() throws {
         do {

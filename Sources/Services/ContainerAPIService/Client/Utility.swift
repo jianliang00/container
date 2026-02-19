@@ -26,6 +26,9 @@ import TerminalProgress
 
 public struct Utility {
     static let publishedPortCountLimit = 64
+    static let runtimeLinux = "container-runtime-linux"
+    static let runtimeMacOS = "container-runtime-macos"
+    static let defaultMacOSGuestAgentPort: UInt32 = 27000
 
     private static let infraImages = [
         DefaultsStore.get(key: .defaultBuilderImage),
@@ -84,12 +87,44 @@ public struct Utility {
         imageFetch: Flags.ImageFetch,
         progressUpdate: @escaping ProgressUpdateHandler,
         log: Logger
-    ) async throws -> (ContainerConfiguration, Kernel, String?) {
+    ) async throws -> (ContainerConfiguration, Kernel?, String?) {
         var requestedPlatform = Parser.platform(os: management.os, arch: management.arch)
         // Prefer --platform
         if let platform = management.platform {
             requestedPlatform = try Parser.platform(from: platform)
         }
+        let runtimeHandler = try resolveRuntimeHandler(platform: requestedPlatform, explicitRuntime: management.runtime)
+        let isMacOSRuntime = runtimeHandler == runtimeMacOS
+
+        if isMacOSRuntime {
+            guard Platform.current.architecture == "arm64" else {
+                throw ContainerizationError(.unsupported, message: "macOS guest runtime requires an arm64 host")
+            }
+            guard requestedPlatform.os == "darwin", requestedPlatform.architecture == "arm64" else {
+                throw ContainerizationError(.invalidArgument, message: "macOS guest images must target darwin/arm64, got \(requestedPlatform)")
+            }
+            if management.kernel != nil {
+                throw ContainerizationError(.unsupported, message: "--kernel is not supported for --os darwin")
+            }
+            if management.initImage != nil {
+                throw ContainerizationError(.unsupported, message: "--init-image is not supported for --os darwin")
+            }
+            if !management.networks.isEmpty {
+                throw ContainerizationError(.unsupported, message: "--network is not supported for --os darwin; guest networking uses Virtualization NAT")
+            }
+            if !management.publishPorts.isEmpty {
+                throw ContainerizationError(.unsupported, message: "--publish is not supported for --os darwin")
+            }
+            if !management.publishSockets.isEmpty {
+                throw ContainerizationError(.unsupported, message: "--publish-socket is not supported for --os darwin")
+            }
+            if management.rosetta {
+                throw ContainerizationError(.unsupported, message: "--rosetta is not supported for --os darwin")
+            }
+        } else if management.snapshot == .on || management.gui {
+            throw ContainerizationError(.unsupported, message: "--snapshot and --gui require --os darwin")
+        }
+
         let scheme = try RequestScheme(registry.scheme)
 
         await progressUpdate([
@@ -106,43 +141,50 @@ public struct Utility {
             maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
         )
 
-        // Unpack a fetched image before use
-        await progressUpdate([
-            .setDescription("Unpacking image"),
-            .setItemsName("entries"),
-        ])
-        let unpackTask = await taskManager.startTask()
-        try await img.getCreateSnapshot(
-            platform: requestedPlatform,
-            progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: progressUpdate))
+        if !isMacOSRuntime {
+            // Unpack a fetched image before use for Linux runtime.
+            await progressUpdate([
+                .setDescription("Unpacking image"),
+                .setItemsName("entries"),
+            ])
+            let unpackTask = await taskManager.startTask()
+            try await img.getCreateSnapshot(
+                platform: requestedPlatform,
+                progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: progressUpdate))
+        }
 
-        await progressUpdate([
-            .setDescription("Fetching kernel"),
-            .setItemsName("binary"),
-        ])
+        let kernel: Kernel?
+        if isMacOSRuntime {
+            kernel = nil
+        } else {
+            await progressUpdate([
+                .setDescription("Fetching kernel"),
+                .setItemsName("binary"),
+            ])
 
-        let kernel = try await self.getKernel(management: management)
+            kernel = try await self.getKernel(management: management)
 
-        // Pull and unpack the initial filesystem
-        await progressUpdate([
-            .setDescription("Fetching init image"),
-            .setItemsName("blobs"),
-        ])
-        let fetchInitTask = await taskManager.startTask()
-        let initImageRef = management.initImage ?? ClientImage.initImageRef
-        let initImage = try await ClientImage.fetch(
-            reference: initImageRef, platform: .current, scheme: scheme,
-            progressUpdate: ProgressTaskCoordinator.handler(for: fetchInitTask, from: progressUpdate),
-            maxConcurrentDownloads: imageFetch.maxConcurrentDownloads)
+            // Pull and unpack the initial filesystem for Linux runtime.
+            await progressUpdate([
+                .setDescription("Fetching init image"),
+                .setItemsName("blobs"),
+            ])
+            let fetchInitTask = await taskManager.startTask()
+            let initImageRef = management.initImage ?? ClientImage.initImageRef
+            let initImage = try await ClientImage.fetch(
+                reference: initImageRef, platform: .current, scheme: scheme,
+                progressUpdate: ProgressTaskCoordinator.handler(for: fetchInitTask, from: progressUpdate),
+                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads)
 
-        await progressUpdate([
-            .setDescription("Unpacking init image"),
-            .setItemsName("entries"),
-        ])
-        let unpackInitTask = await taskManager.startTask()
-        _ = try await initImage.getCreateSnapshot(
-            platform: .current,
-            progressUpdate: ProgressTaskCoordinator.handler(for: unpackInitTask, from: progressUpdate))
+            await progressUpdate([
+                .setDescription("Unpacking init image"),
+                .setItemsName("entries"),
+            ])
+            let unpackInitTask = await taskManager.startTask()
+            _ = try await initImage.getCreateSnapshot(
+                platform: .current,
+                progressUpdate: ProgressTaskCoordinator.handler(for: unpackInitTask, from: progressUpdate))
+        }
 
         await taskManager.finish()
 
@@ -157,6 +199,7 @@ public struct Utility {
 
         var config = ContainerConfiguration(id: id, image: description, process: pc)
         config.platform = requestedPlatform
+        config.runtimeHandler = runtimeHandler
 
         config.resources = try Parser.resources(
             cpus: resource.cpus,
@@ -192,29 +235,33 @@ public struct Utility {
 
         config.virtualization = management.virtualization
 
-        // Parse network specifications with properties
-        let parsedNetworks = try management.networks.map { try Parser.network($0) }
-        if management.networks.contains(ClientNetwork.noNetworkName) {
-            guard management.networks.count == 1 else {
-                throw ContainerizationError(.unsupported, message: "no other networks may be created along with network \(ClientNetwork.noNetworkName)")
-            }
+        if isMacOSRuntime {
             config.networks = []
         } else {
-            let builtinNetworkId = try await ClientNetwork.builtin?.id
-            config.networks = try getAttachmentConfigurations(
-                containerId: config.id,
-                builtinNetworkId: builtinNetworkId,
-                networks: parsedNetworks
-            )
-            for attachmentConfiguration in config.networks {
-                let network: NetworkState = try await ClientNetwork.get(id: attachmentConfiguration.network)
-                guard case .running(_, _) = network else {
-                    throw ContainerizationError(.invalidState, message: "network \(attachmentConfiguration.network) is not running")
+            // Parse network specifications with properties
+            let parsedNetworks = try management.networks.map { try Parser.network($0) }
+            if management.networks.contains(ClientNetwork.noNetworkName) {
+                guard management.networks.count == 1 else {
+                    throw ContainerizationError(.unsupported, message: "no other networks may be created along with network \(ClientNetwork.noNetworkName)")
+                }
+                config.networks = []
+            } else {
+                let builtinNetworkId = try await ClientNetwork.builtin?.id
+                config.networks = try getAttachmentConfigurations(
+                    containerId: config.id,
+                    builtinNetworkId: builtinNetworkId,
+                    networks: parsedNetworks
+                )
+                for attachmentConfiguration in config.networks {
+                    let network: NetworkState = try await ClientNetwork.get(id: attachmentConfiguration.network)
+                    guard case .running(_, _) = network else {
+                        throw ContainerizationError(.invalidState, message: "network \(attachmentConfiguration.network) is not running")
+                    }
                 }
             }
         }
 
-        if management.dnsDisabled {
+        if isMacOSRuntime || management.dnsDisabled {
             config.dns = nil
         } else {
             let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
@@ -226,7 +273,11 @@ public struct Utility {
             )
         }
 
-        config.rosetta = management.rosetta || (Platform.current.architecture == "arm64" && requestedPlatform.architecture == "amd64")
+        if isMacOSRuntime {
+            config.rosetta = false
+        } else {
+            config.rosetta = management.rosetta || (Platform.current.architecture == "arm64" && requestedPlatform.architecture == "amd64")
+        }
 
         if management.rosetta && Platform.current.architecture != "arm64" {
             throw ContainerizationError(.unsupported, message: "--rosetta flag requires an arm64 host")
@@ -234,26 +285,66 @@ public struct Utility {
 
         config.labels = try Parser.labels(management.labels)
 
-        config.publishedPorts = try Parser.publishPorts(management.publishPorts)
-        guard config.publishedPorts.count <= publishedPortCountLimit else {
-            throw ContainerizationError(.invalidArgument, message: "cannot exceed more than \(publishedPortCountLimit) port publish descriptors")
-        }
-        guard !config.publishedPorts.hasOverlaps() else {
-            throw ContainerizationError(.invalidArgument, message: "host ports for different publish port specs may not overlap")
-        }
+        if isMacOSRuntime {
+            config.publishedPorts = []
+            config.publishedSockets = []
+        } else {
+            config.publishedPorts = try Parser.publishPorts(management.publishPorts)
+            guard config.publishedPorts.count <= publishedPortCountLimit else {
+                throw ContainerizationError(.invalidArgument, message: "cannot exceed more than \(publishedPortCountLimit) port publish descriptors")
+            }
+            guard !config.publishedPorts.hasOverlaps() else {
+                throw ContainerizationError(.invalidArgument, message: "host ports for different publish port specs may not overlap")
+            }
 
-        // Parse --publish-socket arguments and add to container configuration
-        // to enable socket forwarding from container to host.
-        config.publishedSockets = try Parser.publishSockets(management.publishSockets)
+            // Parse --publish-socket arguments and add to container configuration
+            // to enable socket forwarding from container to host.
+            config.publishedSockets = try Parser.publishSockets(management.publishSockets)
+        }
 
         config.ssh = management.ssh
         config.readOnly = management.readOnly
 
-        if let runtime = management.runtime {
-            config.runtimeHandler = runtime
+        if isMacOSRuntime {
+            config.macosGuest = .init(
+                snapshotEnabled: management.snapshot == .on,
+                guiEnabled: management.gui,
+                agentPort: defaultMacOSGuestAgentPort
+            )
         }
 
         return (config, kernel, management.initImage)
+    }
+
+    static func resolveRuntimeHandler(
+        platform: ContainerizationOCI.Platform,
+        explicitRuntime: String?
+    ) throws -> String {
+        let inferred = try inferRuntimeHandler(for: platform)
+        guard let explicitRuntime else {
+            return inferred
+        }
+        guard explicitRuntime == inferred else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "--runtime \(explicitRuntime) conflicts with platform \(platform); expected \(inferred)"
+            )
+        }
+        return explicitRuntime
+    }
+
+    static func inferRuntimeHandler(for platform: ContainerizationOCI.Platform) throws -> String {
+        switch platform.os {
+        case "linux":
+            return runtimeLinux
+        case "darwin":
+            return runtimeMacOS
+        default:
+            throw ContainerizationError(
+                .unsupported,
+                message: "unsupported platform OS \(platform.os); expected linux or darwin"
+            )
+        }
     }
 
     static func getAttachmentConfigurations(

@@ -16,6 +16,7 @@
 
 import Testing
 
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 struct TestCLIPluginErrors {
     @Test
     func testHelpfulMessageWhenPluginsUnavailable() throws {

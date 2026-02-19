@@ -19,6 +19,7 @@ import Foundation
 import Testing
 
 extension TestCLIRunBase {
+    @Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
     class TestCLITermIO: TestCLIRunBase {
         override var containerImage: String {
             "ghcr.io/linuxcontainers/alpine:3.20"

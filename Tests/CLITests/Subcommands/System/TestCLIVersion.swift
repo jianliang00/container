@@ -18,6 +18,7 @@ import Foundation
 import Testing
 
 /// Tests for `container system version` output formats and build type detection.
+@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 final class TestCLIVersion: CLITest {
     struct VersionInfo: Codable {
         let version: String

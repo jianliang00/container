@@ -96,17 +96,22 @@ $(STAGING_DIR):
 	@rm -rf "$(STAGING_DIR)"
 	@mkdir -p "$(join $(STAGING_DIR), bin)"
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin)"
+	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin)"
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin)"
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin)"
+	@mkdir -p "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin)"
 
 	@install "$(BUILD_BIN_DIR)/container" "$(join $(STAGING_DIR), bin/container)"
 	@install "$(BUILD_BIN_DIR)/container-apiserver" "$(join $(STAGING_DIR), bin/container-apiserver)"
 	@install "$(BUILD_BIN_DIR)/container-runtime-linux" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
 	@install config/container-runtime-linux-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/config.json)"
+	@install "$(BUILD_BIN_DIR)/container-runtime-macos" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
+	@install config/container-runtime-macos-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/config.json)"
 	@install "$(BUILD_BIN_DIR)/container-network-vmnet" "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet)"
 	@install config/container-network-vmnet-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/config.json)"
 	@install "$(BUILD_BIN_DIR)/container-core-images" "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin/container-core-images)"
 	@install config/container-core-images-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/config.json)"
+	@install "$(BUILD_BIN_DIR)/container-macos-guest-agent" "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
 
 	@echo Install uninstaller script
 	@install scripts/uninstall-container.sh "$(join $(STAGING_DIR), bin/uninstall-container.sh)"
@@ -118,7 +123,9 @@ installer-pkg: $(STAGING_DIR)
 	@codesign $(CODESIGN_OPTS) --identifier com.apple.container.apiserver "$(join $(STAGING_DIR), bin/container-apiserver)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin/container-core-images)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-linux.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
+	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-network-vmnet.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet)"
+	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
 
 	@echo Creating application installer
 	@pkgbuild --root "$(STAGING_DIR)" --identifier com.apple.container-installer --install-location /usr/local --version ${RELEASE_VERSION} $(PKG_PATH)
@@ -130,10 +137,12 @@ dsym:
 	@rm -rf "$(DSYM_DIR)"
 	@mkdir -p "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-runtime-linux.dSYM" "$(DSYM_DIR)"
+	@cp -a "$(BUILD_BIN_DIR)/container-runtime-macos.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-network-vmnet.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-core-images.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-apiserver.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container.dSYM" "$(DSYM_DIR)"
+	@cp -a "$(BUILD_BIN_DIR)/container-macos-guest-agent.dSYM" "$(DSYM_DIR)"
 
 	@echo Packaging the debug symbols...
 	@(cd "$(dir $(DSYM_DIR))" ; zip -r $(notdir $(DSYM_PATH)) $(notdir $(DSYM_DIR)))

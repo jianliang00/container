@@ -341,8 +341,8 @@ extension ProgressBar {
     }
 
     private func combineSize(size: String, totalSize: String) -> String {
-        let sizeComponents = size.split(separator: " ", maxSplits: 1)
-        let totalSizeComponents = totalSize.split(separator: " ", maxSplits: 1)
+        let sizeComponents = size.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        let totalSizeComponents = totalSize.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
         guard sizeComponents.count == 2, totalSizeComponents.count == 2 else {
             return "\(size)/\(totalSize)"
         }

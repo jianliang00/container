@@ -17,7 +17,7 @@
 import Foundation
 import Testing
 
-@Suite(.serialized)
+@Suite(.serialized, .enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLIPruneCommand: CLITest {
     private func getTestName() -> String {
         Test.current!.name.trimmingCharacters(in: ["(", ")"]).lowercased()

@@ -94,7 +94,7 @@ extension Application {
                 )
             }
 
-            let ck = try await Utility.containerConfigFromFlags(
+            let (configuration, kernel, initImage) = try await Utility.containerConfigFromFlags(
                 id: id,
                 image: image,
                 arguments: arguments,
@@ -111,10 +111,10 @@ extension Application {
 
             let options = ContainerCreateOptions(autoRemove: managementFlags.remove)
             try await client.create(
-                configuration: ck.0,
+                configuration: configuration,
                 options: options,
-                kernel: ck.1,
-                initImage: ck.2
+                kernel: kernel,
+                initImage: initImage
             )
 
             let detach = self.managementFlags.detach

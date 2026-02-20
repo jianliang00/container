@@ -32,6 +32,20 @@ test -x "$CONTAINER_BIN"
 test -x "$GUEST_AGENT_BIN"
 ```
 
+如果你使用的是本地 `swift build` 产物，建议在执行 `prepare-base` 前确认 `container` 具备 `com.apple.security.virtualization` entitlement：
+
+```bash
+codesign -d --entitlements :- "$CONTAINER_BIN" 2>&1 | grep com.apple.security.virtualization
+```
+
+若没有输出（或后续 `prepare-base` 报 `The restore image failed to load. Unable to connect to installation service.`），可为当前二进制补签：
+
+```bash
+codesign --force --sign - \
+  --entitlements signing/container-runtime-macos.entitlements \
+  "$CONTAINER_BIN"
+```
+
 ## 3. 生成模板目录（prepare-base）
 
 ```bash
@@ -67,6 +81,7 @@ mkdir -p "$SEED_DIR"
 install -m 0755 "$GUEST_AGENT_BIN" "$SEED_DIR/container-macos-guest-agent"
 install -m 0755 scripts/macos-guest-agent/install.sh "$SEED_DIR/install.sh"
 install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$SEED_DIR/container-macos-guest-agent.plist"
+install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$SEED_DIR/install-in-guest-from-seed.sh"
 ```
 
 ## 5. 手工启动模板 VM（GUI + virtiofs）
@@ -78,12 +93,22 @@ xcrun swiftc scripts/macos-guest-agent/manual-template-vm.swift \
   -framework AppKit \
   -framework Virtualization \
   -o /tmp/manual-template-vm
+
+# 关键：为手工 VM 工具补签 Virtualization entitlement
+codesign --force --sign - \
+  --entitlements signing/container-runtime-macos.entitlements \
+  /tmp/manual-template-vm
+
+# 可选校验：应能看到 com.apple.security.virtualization
+codesign -d --entitlements :- /tmp/manual-template-vm 2>&1 | grep com.apple.security.virtualization
 ```
 
 注意：
 
 - 不要直接用 `swift manual-template-vm.swift` 运行，已知可能触发 JIT/符号链接问题
 - 请在本地 Aqua 图形会话下运行（纯 SSH 无窗口环境会失败）
+- 若跳过补签，`5.2` 启动时可能报：`VZErrorDomain Code=2 "The process doesn’t have the com.apple.security.virtualization entitlement."`
+- 若第 6 步日志出现 `Error: ... Operation not supported by device`，通常是手工 VM 未启用 `VZVirtioSocketDeviceConfiguration()`；请更新到最新 `scripts/macos-guest-agent/manual-template-vm.swift` 后重新编译 `/tmp/manual-template-vm`
 
 ### 5.2 启动 VM
 
@@ -100,23 +125,28 @@ xcrun swiftc scripts/macos-guest-agent/manual-template-vm.swift \
 
 ## 6. 在 Guest 内安装 agent（人工注入）
 
-在 VM 内终端执行：
+首次进入该模板磁盘时，macOS 可能会进入 Setup Assistant 并要求创建本地用户名/密码。请先完成初始化并进入桌面，再执行下面的安装步骤。
+
+说明：
+
+- 这一步创建的账号主要用于模板制作阶段（执行 `sudo` 安装 agent）
+- 后续通过 `container run --os darwin` 启动时，`container` 依赖的是 system 域 `LaunchDaemon`（`com.apple.container.macos.guest-agent`），通常不需要手动图形登录输入密码
+
+在 VM 内终端执行（先挂载以访问脚本；脚本内部会检测已挂载并避免重复挂载）：
 
 ```bash
 sudo mkdir -p /Volumes/seed
 sudo mount -t virtiofs seed /Volumes/seed
-ls -l /Volumes/seed
+sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+```
 
-sudo install -d /usr/local/bin
-sudo install -m 0755 /Volumes/seed/container-macos-guest-agent /usr/local/bin/container-macos-guest-agent
+如需自定义端口/挂载参数，可在执行时传入环境变量（示例）：
 
-sudo mkdir -p /tmp/container-agent-install
-sudo cp /Volumes/seed/install.sh /tmp/container-agent-install/
-sudo cp /Volumes/seed/container-macos-guest-agent.plist /tmp/container-agent-install/
-sudo chmod +x /tmp/container-agent-install/install.sh
-
-cd /tmp/container-agent-install
-sudo CONTAINER_MACOS_AGENT_PORT=27000 ./install.sh /usr/local/bin/container-macos-guest-agent
+```bash
+sudo CONTAINER_MACOS_AGENT_PORT=27000 \
+  CONTAINER_SEED_TAG=seed \
+  CONTAINER_SEED_MOUNT=/Volumes/seed \
+  bash /Volumes/seed/install-in-guest-from-seed.sh
 ```
 
 验证 LaunchDaemon 状态：
@@ -133,6 +163,42 @@ sudo shutdown -h now
 ```
 
 等待 VM 完全停止并关闭窗口，再回到宿主继续打包。
+
+### 6.1 仅更新 guest agent（增量）
+
+当你只修改了 `container-macos-guest-agent`（或 `install.sh` / plist），不需要重跑 `prepare-base`。按下面步骤更新模板磁盘内的 agent：
+
+1. 在宿主重编译并刷新 seed 目录内容：
+
+```bash
+cd <repo-root>
+xcrun swift build -c release --product container-macos-guest-agent
+export GUEST_AGENT_BIN="$PWD/.build/release/container-macos-guest-agent"
+
+install -m 0755 "$GUEST_AGENT_BIN" "$SEED_DIR/container-macos-guest-agent"
+install -m 0755 scripts/macos-guest-agent/install.sh "$SEED_DIR/install.sh"
+install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$SEED_DIR/container-macos-guest-agent.plist"
+install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$SEED_DIR/install-in-guest-from-seed.sh"
+```
+
+2. 若你修改的是手工 VM 配置（例如新增 `VZVirtioSocketDeviceConfiguration()`），需要关闭当前手工 VM，并在宿主重新编译/重启 `/tmp/manual-template-vm`；这类改动不能在运行中的 VM 热生效。
+
+3. 在 guest 内重新执行安装（先挂载以访问脚本；脚本内部会检测已挂载并避免重复挂载）：
+
+```bash
+sudo mkdir -p /Volumes/seed
+sudo mount -t virtiofs seed /Volumes/seed
+sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+```
+
+4. 验证更新结果：
+
+```bash
+sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 40
+sudo tail -n 50 /var/log/container-macos-guest-agent.log
+```
+
+5. 验证通过后，按第 7、8 步重新 `package` / `push` 模板。
 
 ## 7. 打包模板（`container macos package`）
 
@@ -159,6 +225,31 @@ jq -r '.layers[].mediaType' "$TMP_LAYOUT/blobs/sha256/$MANIFEST_DIGEST"
 - `application/vnd.apple.container.macos.hardware-model`
 - `application/vnd.apple.container.macos.auxiliary-storage`
 - `application/vnd.apple.container.macos.disk-image`
+
+### 7.1 本地 `load + run/exec` 验证（不推远端）
+
+如果你想在执行第 8 步前，先在宿主做一次端到端验证，可先把第 7 步产物加载到本地镜像存储，然后直接 `run/exec`：
+
+```bash
+export LOCAL_REF="local/macos-template:base"
+
+# 1) load 到本地 image store
+"$CONTAINER_BIN" image load -i "$OCI_TAR"
+"$CONTAINER_BIN" image ls | grep "$LOCAL_REF"
+
+# 2) 冒烟验证：直接跑一条命令（成功返回即说明 guest-agent 基本可用）
+"$CONTAINER_BIN" run --os darwin --rm "$LOCAL_REF" /bin/ls /
+```
+
+如需额外验证 `container exec` 路径，可再做一次短时驻留容器：
+
+```bash
+"$CONTAINER_BIN" run --os darwin --name macos-agent-check --detach \
+  "$LOCAL_REF" /bin/sh -lc 'while true; do sleep 3600; done'
+
+"$CONTAINER_BIN" exec macos-agent-check /bin/ls /
+"$CONTAINER_BIN" delete --force macos-agent-check
+```
 
 ## 8. 推送模板（`container macos push`）
 
@@ -193,5 +284,26 @@ export REF="ghcr.io/<org>/<repo>:macos-template-v1"
 4. 后续 `container run --os darwin` 无法 `exec`  
    通常是模板中未成功安装或未启动 `container-macos-guest-agent`，回到第 6 步检查 `launchctl` 与日志。
 
-5. `prepare-base` 报 `Unknown option '--disk-size-gib'`（或 `--memory-mib`）  
+5. `prepare-base` 报 `The restore image failed to load. Unable to connect to installation service.`  
+   常见原因是 `container` 二进制缺少 `com.apple.security.virtualization` entitlement。按第 2 节补签后重试。
+
+6. `prepare-base` 报 `zsh: trace trap`，且目录里只有 `Disk.img` 和 `AuxiliaryStorage`，没有 `HardwareModel.bin`  
+   这是旧实现里 `VZMacOSInstaller` 非主线程初始化导致的崩溃。请更新到包含修复的新二进制（重新 `xcrun swift build -c release --product container`），并清理旧模板目录后重试。
+
+7. `prepare-base` 报 `Unknown option '--disk-size-gib'`（或 `--memory-mib`）  
    你当前二进制可能仍使用旧的自动命名参数：`--disk-size-gi-b`、`--memory-mi-b`。更新到包含参数别名修复的新构建，或临时改用旧参数名。
+
+8. `prepare-base` 报 `An error occurred during installation. Installation failed.`（常见伴随 `VZErrorDomain code 10007` / `MobileRestore code 4014`）  
+   常见原因是安装阶段访问 Apple restore 服务时被 VPN/TUN/代理或 TLS 拦截影响。建议临时关闭代理/VPN（尤其是 TUN 模式）、确保直连 Apple 服务后重试；必要时改用无代理网络（如手机热点）验证。
+
+9. `5.2` 启动手工 VM 报 `VZErrorDomain Code=2`：`The process doesn’t have the "com.apple.security.virtualization" entitlement.`  
+   这是 `/tmp/manual-template-vm` 未签 `com.apple.security.virtualization` entitlement。按第 `5.1` 节对该二进制执行 `codesign --entitlements signing/container-runtime-macos.entitlements` 后重试。
+
+10. 手工配置模板时提示创建用户名/密码，担心后续每次启动都要手动登录  
+   首次模板注入时完成 Setup Assistant 是正常现象。只要第 6 步把 `container-macos-guest-agent` 安装为 `system` 域 `LaunchDaemon`（`RunAtLoad` + `KeepAlive`），后续 `container run --os darwin` 一般不依赖图形登录。若运行时报 guest-agent 连接超时，再回到模板里检查 `launchctl print system/com.apple.container.macos.guest-agent` 和 `/var/log/container-macos-guest-agent.log`。
+
+11. 第 6 步 `launchctl print` 显示 `spawn scheduled`，日志报 `Error: The operation couldn't be completed. Operation not supported by device`  
+   这是 guest agent 在创建 `AF_VSOCK` 监听时失败，常见原因是手工模板 VM 没有配置 virtio socket 设备。请确认 `scripts/macos-guest-agent/manual-template-vm.swift` 包含 `vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]`，然后重新编译并启动手工 VM，再执行第 6 步安装与验证。
+
+12. 我只更新了 guest agent，是否必须重跑 `prepare-base`  
+   不需要。按第 `6.1` 节做增量更新即可；若模板 VM 配置本身有变更（如 socketDevices），需先重启手工 VM 后再重装 agent，最后重新 `package` / `push`。

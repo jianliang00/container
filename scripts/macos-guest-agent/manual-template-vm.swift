@@ -254,6 +254,7 @@ do {
     vmConfiguration.memorySize = clampedMemoryBytes(options.memoryMiB)
     vmConfiguration.storageDevices = [blockDevice]
     vmConfiguration.networkDevices = [networkDevice]
+    vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
     vmConfiguration.directorySharingDevices = [fileSystemDevice]
     vmConfiguration.graphicsDevices = [graphics]
     vmConfiguration.keyboards = [VZUSBKeyboardConfiguration()]

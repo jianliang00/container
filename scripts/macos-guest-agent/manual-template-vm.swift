@@ -22,7 +22,11 @@ struct Options {
     let shareTag: String
     let cpus: Int
     let memoryMiB: UInt64
+    let headless: Bool
+    let headlessDisplay: Bool
     let agentREPL: Bool
+    let agentProbe: Bool
+    let controlSocketPath: String?
     let agentPort: UInt32
     let agentConnectRetries: Int
 }
@@ -60,7 +64,11 @@ func printUsage() {
       --share-tag <name>    virtiofs tag visible in guest (default: seed)
       --cpus <n>            Requested vCPU count (default: 4)
       --memory-mib <n>      Requested memory in MiB (default: 8192)
+      --headless            Start without graphics/keyboard/pointer devices (closer to container runtime default)
+      --headless-display    Headless UI (no window) but keep a virtual display device attached
       --agent-repl          Enable interactive guest-agent debugger over vsock
+      --agent-probe         Non-interactive probe: auto connect to guest-agent, print result, then exit
+      --control-socket <p>  Start a Unix socket control server (commands: probe, quit, help)
       --agent-port <n>      Guest-agent vsock port (default: 27000)
       --agent-connect-retries <n>
                             Number of connect retries after VM start (default: 60)
@@ -91,7 +99,11 @@ func parseOptions() throws -> Options {
     var shareTag = "seed"
     var cpus = 4
     var memoryMiB: UInt64 = 8192
+    var headless = false
+    var headlessDisplay = false
     var agentREPL = false
+    var agentProbe = false
+    var controlSocketPath: String?
     var agentPort: UInt32 = 27000
     var agentConnectRetries = 60
 
@@ -130,8 +142,19 @@ func parseOptions() throws -> Options {
                 throw ArgumentError.invalidNumber(flag: flag, value: args[index])
             }
             memoryMiB = value
+        case "--headless":
+            headless = true
+        case "--headless-display":
+            headless = true
+            headlessDisplay = true
         case "--agent-repl":
             agentREPL = true
+        case "--agent-probe":
+            agentProbe = true
+        case "--control-socket":
+            index += 1
+            guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
+            controlSocketPath = args[index]
         case "--agent-port":
             index += 1
             guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
@@ -165,7 +188,11 @@ func parseOptions() throws -> Options {
         shareTag: shareTag,
         cpus: cpus,
         memoryMiB: memoryMiB,
+        headless: headless,
+        headlessDisplay: headlessDisplay,
         agentREPL: agentREPL,
+        agentProbe: agentProbe,
+        controlSocketPath: controlSocketPath,
         agentPort: agentPort,
         agentConnectRetries: agentConnectRetries
     )
@@ -298,20 +325,40 @@ private struct GuestAgentFrame: Codable {
 }
 
 final class AgentDebugger {
+    struct ControlExecResult {
+        let exitCode: Int32
+        let stdout: Data
+        let stderr: Data
+        let agentError: String?
+    }
+
+    private final class PendingControlExec {
+        let semaphore = DispatchSemaphore(value: 0)
+        var stdout = Data()
+        var stderr = Data()
+        var exitCode: Int32?
+        var agentError: String?
+        var streamError: String?
+        var completed = false
+    }
+
     private let virtualMachine: VZVirtualMachine
     private let port: UInt32
     private let connectRetries: Int
     private let retryDelayMicroseconds: useconds_t = 500_000
     private let readyTimeoutSeconds: TimeInterval = 5
     private let connectCallbackTimeoutSeconds: TimeInterval = 2
+    private let controlExecTimeoutSeconds: TimeInterval = 30
     private let writeLock = NSLock()
     private let connectionLock = NSLock()
+    private let controlExecLock = NSLock()
 
     private var connection: VZVirtioSocketConnection?
     private var socketHandle: FileHandle?
     private var readGeneration: UInt64 = 0
     private var activeProcessID: String?
     private var pendingReady: (generation: UInt64, semaphore: DispatchSemaphore)?
+    private var pendingControlExec: PendingControlExec?
 
     init(virtualMachine: VZVirtualMachine, port: UInt32, connectRetries: Int) {
         self.virtualMachine = virtualMachine
@@ -323,6 +370,73 @@ final class AgentDebugger {
         Thread.detachNewThread { [weak self] in
             self?.runREPLLoop()
         }
+    }
+
+    func launchProbeAndTerminateApp() {
+        Thread.detachNewThread { [weak self] in
+            self?.runProbeLoop()
+        }
+    }
+
+    func probeForControl(maxRetries: Int? = nil) throws -> String {
+        try connect(forceReconnect: true, maxRetries: maxRetries ?? connectRetries)
+        disconnect()
+        return "guest-agent ready on port \(port)"
+    }
+
+    func execForControl(executable: String, arguments: [String], maxRetries: Int? = nil) throws -> ControlExecResult {
+        try connect(forceReconnect: true, maxRetries: maxRetries ?? connectRetries)
+        defer { disconnect() }
+
+        let pending = PendingControlExec()
+        controlExecLock.lock()
+        if pendingControlExec != nil {
+            controlExecLock.unlock()
+            throw DebuggerError.connectFailed("another control exec is already in progress")
+        }
+        pendingControlExec = pending
+        controlExecLock.unlock()
+        defer {
+            controlExecLock.lock()
+            if pendingControlExec === pending {
+                pendingControlExec = nil
+            }
+            controlExecLock.unlock()
+        }
+
+        let processID = UUID().uuidString
+        activeProcessID = processID
+        let frame = GuestAgentFrame.exec(
+            id: processID,
+            executable: executable,
+            arguments: arguments,
+            environment: ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"],
+            workingDirectory: "/",
+            terminal: false
+        )
+        try sendFrame(frame)
+
+        let deadline = DispatchTime.now() + controlExecTimeoutSeconds
+        guard pending.semaphore.wait(timeout: deadline) == .success else {
+            throw DebuggerError.connectFailed("timeout waiting for exec result")
+        }
+
+        if let streamError = pending.streamError {
+            throw DebuggerError.connectFailed(streamError)
+        }
+        guard let exitCode = pending.exitCode else {
+            if let agentError = pending.agentError {
+                throw DebuggerError.connectFailed("guest-agent error: \(agentError)")
+            }
+            throw DebuggerError.connectFailed("missing exit frame for control exec")
+        }
+
+        return ControlExecResult(
+            exitCode: exitCode,
+            stdout: pending.stdout,
+            stderr: pending.stderr,
+            agentError: pending.agentError
+        )
     }
 
     private func runREPLLoop() {
@@ -404,6 +518,22 @@ final class AgentDebugger {
             } catch {
                 print("[agent-repl] \(error)")
             }
+        }
+    }
+
+    private func runProbeLoop() {
+        print("")
+        print("Agent probe started (vsock port \(port)).")
+        do {
+            print("[agent-probe] connecting with retries (\(connectRetries))...")
+            try connect(forceReconnect: true, maxRetries: connectRetries)
+            print("[agent-probe] success: guest-agent ready on port \(port)")
+        } catch {
+            print("[agent-probe] failed: \(error)")
+        }
+        disconnect()
+        DispatchQueue.main.async {
+            NSApplication.shared.terminate(nil)
         }
     }
 
@@ -547,6 +677,7 @@ final class AgentDebugger {
                 let chunk = try readChunk(fd: fd, into: &chunkBuffer)
                 guard let chunk, !chunk.isEmpty else {
                     if isCurrentReadGeneration(generation) {
+                        failPendingControlExecIfNeeded("connection closed by peer")
                         print("[agent-repl] connection closed by peer")
                     }
                     return
@@ -555,6 +686,7 @@ final class AgentDebugger {
                 try consumeFrames(buffer: &buffer, generation: generation)
             } catch {
                 if isCurrentReadGeneration(generation) {
+                    failPendingControlExecIfNeeded("read failed: \(describeError(error))")
                     print("[agent-repl] read failed: \(describeError(error))")
                 }
                 return
@@ -644,6 +776,9 @@ final class AgentDebugger {
     }
 
     private func render(frame: GuestAgentFrame, generation: UInt64) {
+        if consumeControlExecFrameIfNeeded(frame) {
+            return
+        }
         switch frame.type {
         case .stdout:
             if let data = frame.data {
@@ -672,6 +807,60 @@ final class AgentDebugger {
         case .exec, .stdin, .signal, .resize, .close:
             print("[frame] \(frame.type.rawValue)")
         }
+    }
+
+    private func consumeControlExecFrameIfNeeded(_ frame: GuestAgentFrame) -> Bool {
+        controlExecLock.lock()
+        guard let pending = pendingControlExec else {
+            controlExecLock.unlock()
+            return false
+        }
+
+        switch frame.type {
+        case .stdout:
+            if let data = frame.data {
+                pending.stdout.append(data)
+            }
+            controlExecLock.unlock()
+            return true
+        case .stderr:
+            if let data = frame.data {
+                pending.stderr.append(data)
+            }
+            controlExecLock.unlock()
+            return true
+        case .error:
+            pending.agentError = frame.message ?? "unknown guest-agent error"
+            controlExecLock.unlock()
+            return true
+        case .exit:
+            pending.exitCode = frame.exitCode ?? 1
+            if !pending.completed {
+                pending.completed = true
+                pending.semaphore.signal()
+            }
+            self.pendingControlExec = nil
+            controlExecLock.unlock()
+            return true
+        default:
+            controlExecLock.unlock()
+            return false
+        }
+    }
+
+    private func failPendingControlExecIfNeeded(_ message: String) {
+        controlExecLock.lock()
+        guard let pending = pendingControlExec else {
+            controlExecLock.unlock()
+            return
+        }
+        pending.streamError = message
+        if !pending.completed {
+            pending.completed = true
+            pending.semaphore.signal()
+        }
+        pendingControlExec = nil
+        controlExecLock.unlock()
     }
 
     private func startExec(executable: String, arguments: [String], terminal: Bool) throws {
@@ -775,6 +964,293 @@ final class AgentDebugger {
     }
 }
 
+final class ControlCommandServer {
+    private let socketPath: String
+    private let debugger: AgentDebugger?
+    private let lock = NSLock()
+
+    private var listenFD: Int32 = -1
+    private var isStopping = false
+    private var thread: Thread?
+
+    init(socketPath: String, debugger: AgentDebugger?) {
+        self.socketPath = socketPath
+        self.debugger = debugger
+    }
+
+    deinit {
+        stop()
+    }
+
+    func start() throws {
+        try stopAndCleanupStaleSocket()
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw makePOSIXError(errno)
+        }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+
+        let pathBytes = Array(socketPath.utf8)
+        let maxPathCount = MemoryLayout.size(ofValue: addr.sun_path)
+        guard pathBytes.count < maxPathCount else {
+            Darwin.close(fd)
+            throw DebuggerError.invalidCommand("control socket path too long: \(socketPath)")
+        }
+
+        withUnsafeMutableBytes(of: &addr.sun_path) { rawBuffer in
+            rawBuffer.initializeMemory(as: CChar.self, repeating: 0)
+            for (index, byte) in pathBytes.enumerated() {
+                rawBuffer[index] = byte
+            }
+        }
+
+        let addrLen = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count + 1)
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.bind(fd, sockaddrPtr, addrLen)
+            }
+        }
+        guard bindResult == 0 else {
+            let error = makePOSIXError(errno)
+            Darwin.close(fd)
+            throw error
+        }
+
+        guard listen(fd, 16) == 0 else {
+            let error = makePOSIXError(errno)
+            Darwin.close(fd)
+            throw error
+        }
+
+        _ = chmod(socketPath, mode_t(S_IRUSR | S_IWUSR))
+
+        lock.lock()
+        listenFD = fd
+        isStopping = false
+        lock.unlock()
+
+        let thread = Thread { [weak self] in
+            self?.acceptLoop()
+        }
+        thread.name = "manual-template-vm-control-socket"
+        self.thread = thread
+        thread.start()
+
+        print("control socket: \(socketPath)")
+        print("control commands: help | probe | exec <path> [args...] | sh <command> | quit")
+    }
+
+    func stop() {
+        lock.lock()
+        let fd = listenFD
+        if isStopping {
+            lock.unlock()
+            return
+        }
+        isStopping = true
+        listenFD = -1
+        lock.unlock()
+
+        if fd >= 0 {
+            shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+        unlink(socketPath)
+    }
+
+    private func stopAndCleanupStaleSocket() throws {
+        stop()
+        unlink(socketPath)
+        let parent = URL(fileURLWithPath: socketPath).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+    }
+
+    private func acceptLoop() {
+        while true {
+            lock.lock()
+            let fd = listenFD
+            let stopping = isStopping
+            lock.unlock()
+            if stopping || fd < 0 {
+                return
+            }
+
+            let clientFD = Darwin.accept(fd, nil, nil)
+            if clientFD >= 0 {
+                handleClient(clientFD)
+                continue
+            }
+
+            let code = errno
+            if code == EINTR {
+                continue
+            }
+
+            lock.lock()
+            let nowStopping = isStopping
+            lock.unlock()
+            if nowStopping {
+                return
+            }
+
+            print("[control] accept failed: \(String(cString: strerror(code))) (\(code))")
+            usleep(50_000)
+        }
+    }
+
+    private func handleClient(_ clientFD: Int32) {
+        defer {
+            Darwin.close(clientFD)
+        }
+
+        do {
+            guard let raw = try readLineFromClient(clientFD) else {
+                return
+            }
+            let command = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !command.isEmpty else {
+                try writeLineToClient(clientFD, "err empty command")
+                return
+            }
+
+            switch command {
+            case "help":
+                try writeLineToClient(clientFD, "ok commands: help, probe, exec <path> [args...], sh <command>, quit")
+            case "probe":
+                guard let debugger else {
+                    try writeLineToClient(clientFD, "err agent debugger unavailable")
+                    return
+                }
+                do {
+                    let message = try debugger.probeForControl()
+                    try writeLineToClient(clientFD, "ok \(message)")
+                } catch {
+                    try writeLineToClient(clientFD, "err \(describeError(error))")
+                }
+            case let command where command.hasPrefix("exec "):
+                guard let debugger else {
+                    try writeLineToClient(clientFD, "err agent debugger unavailable")
+                    return
+                }
+                let parts = splitWhitespace(String(command.dropFirst(5)))
+                guard let executable = parts.first else {
+                    try writeLineToClient(clientFD, "err usage: exec <path> [args...]")
+                    return
+                }
+                do {
+                    let result = try debugger.execForControl(executable: executable, arguments: Array(parts.dropFirst()))
+                    try writeExecResultToClient(clientFD, result: result)
+                } catch {
+                    try writeLineToClient(clientFD, "err \(describeError(error))")
+                }
+            case let command where command.hasPrefix("sh "):
+                guard let debugger else {
+                    try writeLineToClient(clientFD, "err agent debugger unavailable")
+                    return
+                }
+                let shellCommand = String(command.dropFirst(3))
+                guard !shellCommand.isEmpty else {
+                    try writeLineToClient(clientFD, "err usage: sh <command>")
+                    return
+                }
+                do {
+                    let result = try debugger.execForControl(executable: "/bin/sh", arguments: ["-lc", shellCommand])
+                    try writeExecResultToClient(clientFD, result: result)
+                } catch {
+                    try writeLineToClient(clientFD, "err \(describeError(error))")
+                }
+            case "quit":
+                try writeLineToClient(clientFD, "ok terminating")
+                stop()
+                DispatchQueue.main.async {
+                    NSApplication.shared.terminate(nil)
+                }
+            default:
+                try writeLineToClient(clientFD, "err unknown command: \(command)")
+            }
+        } catch {
+            print("[control] client error: \(describeError(error))")
+        }
+    }
+
+    private func readLineFromClient(_ fd: Int32) throws -> String? {
+        var bytes: [UInt8] = []
+        var ch: UInt8 = 0
+        while true {
+            let count = withUnsafeMutablePointer(to: &ch) { pointer in
+                Darwin.read(fd, pointer, 1)
+            }
+            if count > 0 {
+                if ch == 0x0A {  // \n
+                    break
+                }
+                bytes.append(ch)
+                continue
+            }
+            if count == 0 {
+                return bytes.isEmpty ? nil : String(decoding: bytes, as: UTF8.self)
+            }
+
+            let code = errno
+            if code == EINTR {
+                continue
+            }
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+            )
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private func writeLineToClient(_ fd: Int32, _ text: String) throws {
+        let data = Data((text + "\n").utf8)
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var totalWritten = 0
+            while totalWritten < rawBuffer.count {
+                let pointer = baseAddress.advanced(by: totalWritten)
+                let remaining = rawBuffer.count - totalWritten
+                let written = Darwin.write(fd, pointer, remaining)
+                if written > 0 {
+                    totalWritten += written
+                    continue
+                }
+                if written == 0 {
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain,
+                        code: Int(EPIPE),
+                        userInfo: [NSLocalizedDescriptionKey: "write returned 0 bytes"]
+                    )
+                }
+                let code = errno
+                if code == EINTR {
+                    continue
+                }
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(code),
+                    userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+                )
+            }
+        }
+    }
+
+    private func writeExecResultToClient(_ fd: Int32, result: AgentDebugger.ControlExecResult) throws {
+        let stdoutB64 = result.stdout.base64EncodedString()
+        let stderrB64 = result.stderr.base64EncodedString()
+        let agentErrorB64 = Data((result.agentError ?? "").utf8).base64EncodedString()
+        try writeLineToClient(
+            fd,
+            "ok exit=\(result.exitCode) stdout_b64=\(stdoutB64) stderr_b64=\(stderrB64) agent_error_b64=\(agentErrorB64)"
+        )
+    }
+}
+
 func splitWhitespace(_ value: String) -> [String] {
     value.split(whereSeparator: \.isWhitespace).map(String.init)
 }
@@ -785,6 +1261,25 @@ func describeError(_ error: Error) -> String {
     }
     let nsError = error as NSError
     return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
+}
+
+func makePOSIXError(_ code: Int32) -> NSError {
+    NSError(
+        domain: NSPOSIXErrorDomain,
+        code: Int(code),
+        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+    )
+}
+
+func currentSessionSummary() -> String {
+    guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
+        return "unavailable"
+    }
+    let onConsole = dict["kCGSessionOnConsoleKey"].map { "\($0)" } ?? "nil"
+    let loginDone = dict["kCGSessionLoginDoneKey"].map { "\($0)" } ?? "nil"
+    let userName = dict["kCGSessionUserNameKey"].map { "\($0)" } ?? "nil"
+    let userID = dict["kCGSessionUserIDKey"].map { "\($0)" } ?? "nil"
+    return "onConsole=\(onConsole) loginDone=\(loginDone) user=\(userName) uid=\(userID)"
 }
 
 do {
@@ -837,20 +1332,6 @@ do {
     let fileSystemDevice = VZVirtioFileSystemDeviceConfiguration(tag: options.shareTag)
     fileSystemDevice.share = singleDirectoryShare
 
-    let graphics = VZMacGraphicsDeviceConfiguration()
-    if let screen = NSScreen.main ?? NSScreen.screens.first {
-        graphics.displays = [
-            VZMacGraphicsDisplayConfiguration(
-                for: screen,
-                sizeInPoints: NSSize(width: 1440, height: 900)
-            )
-        ]
-    } else {
-        graphics.displays = [
-            VZMacGraphicsDisplayConfiguration(widthInPixels: 1440, heightInPixels: 900, pixelsPerInch: 80)
-        ]
-    }
-
     let vmConfiguration = VZVirtualMachineConfiguration()
     vmConfiguration.bootLoader = bootLoader
     vmConfiguration.platform = platform
@@ -860,48 +1341,89 @@ do {
     vmConfiguration.networkDevices = [networkDevice]
     vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
     vmConfiguration.directorySharingDevices = [fileSystemDevice]
-    vmConfiguration.graphicsDevices = [graphics]
-    vmConfiguration.keyboards = [VZUSBKeyboardConfiguration()]
-    vmConfiguration.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
+    if !options.headless || options.headlessDisplay {
+        let graphics = VZMacGraphicsDeviceConfiguration()
+        if let screen = NSScreen.main ?? NSScreen.screens.first {
+            graphics.displays = [
+                VZMacGraphicsDisplayConfiguration(
+                    for: screen,
+                    sizeInPoints: NSSize(width: 1440, height: 900)
+                )
+            ]
+        } else {
+            graphics.displays = [
+                VZMacGraphicsDisplayConfiguration(widthInPixels: 1440, heightInPixels: 900, pixelsPerInch: 80)
+            ]
+        }
+        vmConfiguration.graphicsDevices = [graphics]
+        if !options.headless {
+            vmConfiguration.keyboards = [VZUSBKeyboardConfiguration()]
+            vmConfiguration.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
+        }
+    }
 
     try vmConfiguration.validate()
 
     let virtualMachine = VZVirtualMachine(configuration: vmConfiguration)
     let delegate = VMDelegate()
     virtualMachine.delegate = delegate
-    let debugger = options.agentREPL ? AgentDebugger(
+    let debugger = (options.agentREPL || options.agentProbe || options.controlSocketPath != nil) ? AgentDebugger(
         virtualMachine: virtualMachine,
         port: options.agentPort,
         connectRetries: options.agentConnectRetries
     ) : nil
+    let controlServer = options.controlSocketPath.map { ControlCommandServer(socketPath: $0, debugger: debugger) }
 
     let app = NSApplication.shared
-    app.setActivationPolicy(.regular)
-
-    let frame = NSRect(x: 0, y: 0, width: 1440, height: 900)
-    let window = NSWindow(
-        contentRect: frame,
-        styleMask: [.titled, .closable, .miniaturizable, .resizable],
-        backing: .buffered,
-        defer: false
+    app.setActivationPolicy(options.headless ? .prohibited : .regular)
+    print(
+        "host context: pid=\(getpid()) uid=\(getuid()) stdinTTY=\(isatty(STDIN_FILENO) == 1) session={\(currentSessionSummary())} screens=\(NSScreen.screens.count) hasMainScreen=\(NSScreen.main != nil)"
     )
-    window.title = "Manual macOS Template VM"
 
-    let vmView = VZVirtualMachineView(frame: frame)
-    vmView.virtualMachine = virtualMachine
-    vmView.capturesSystemKeys = true
-    vmView.autoresizingMask = [.width, .height]
-    window.contentView = vmView
-    window.makeKeyAndOrderFront(nil)
+    var window: NSWindow?
+    var vmView: VZVirtualMachineView?
+    if !options.headless {
+        let frame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let uiWindow = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        uiWindow.title = "Manual macOS Template VM"
 
-    app.activate(ignoringOtherApps: true)
+        let uiVMView = VZVirtualMachineView(frame: frame)
+        uiVMView.virtualMachine = virtualMachine
+        uiVMView.capturesSystemKeys = true
+        uiVMView.autoresizingMask = [.width, .height]
+        uiWindow.contentView = uiVMView
+        uiWindow.makeKeyAndOrderFront(nil)
+        app.activate(ignoringOtherApps: true)
+        window = uiWindow
+        vmView = uiVMView
+    }
 
     print("Starting VM...")
     print("template: \(options.templateURL.path)")
     print("share: \(options.sharedDirectoryURL.path)")
     print("share tag: \(options.shareTag)")
+    let displayMode: String
+    if options.headlessDisplay {
+        displayMode = "headless-display"
+    } else if options.headless {
+        displayMode = "headless"
+    } else {
+        displayMode = "gui"
+    }
+    print("display mode: \(displayMode)")
     if options.agentREPL {
         print("agent repl: enabled (port \(options.agentPort))")
+    }
+    if options.agentProbe {
+        print("agent probe: enabled (port \(options.agentPort))")
+    }
+    if let controlSocketPath = options.controlSocketPath {
+        print("control socket: \(controlSocketPath)")
     }
     print("In guest:")
     print("  sudo mkdir -p /Volumes/\(options.shareTag)")
@@ -911,7 +1433,20 @@ do {
         switch result {
         case .success:
             print("VM started.")
-            debugger?.launchREPL()
+            if let controlServer {
+                do {
+                    try controlServer.start()
+                } catch {
+                    fputs("failed to start control socket server: \(error)\n", stderr)
+                    NSApplication.shared.terminate(nil)
+                    return
+                }
+            }
+            if options.agentProbe {
+                debugger?.launchProbeAndTerminateApp()
+            } else if options.agentREPL {
+                debugger?.launchREPL()
+            }
         case .failure(let error):
             fputs("failed to start VM: \(error)\n", stderr)
             NSApplication.shared.terminate(nil)
@@ -921,6 +1456,7 @@ do {
     // Keep references alive for the app lifetime.
     _ = delegate
     _ = debugger
+    _ = controlServer
     _ = window
     _ = vmView
 

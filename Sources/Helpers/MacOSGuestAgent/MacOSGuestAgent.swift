@@ -30,6 +30,7 @@ struct MacOSGuestAgent: ParsableCommand {
 
     mutating func run() throws {
         logAgentInfo("starting guest agent on vsock port \(port)")
+        logAgentStartupContext()
         let listener = try VsockListener(port: port)
         try listener.serveForever()
     }
@@ -65,10 +66,12 @@ private final class VsockListener {
         guard bindResult == 0 else {
             throw POSIXError.fromErrno()
         }
+        logAgentInfo("vsock listener bind succeeded on cid=\(VMADDR_CID_ANY) port=\(port)")
 
         guard listen(fd, 16) == 0 else {
             throw POSIXError.fromErrno()
         }
+        logAgentInfo("vsock listener listening on port \(port) backlog=16")
 
         self.listenFD = fd
     }
@@ -89,7 +92,9 @@ private final class VsockListener {
             guard clientFD >= 0 else {
                 throw POSIXError.fromErrno()
             }
-            logAgentInfo("accepted vsock client fd=\(clientFD)")
+            let peerPort = clientAddr.svm_port
+            let peerCID = clientAddr.svm_cid
+            logAgentInfo("accepted vsock client fd=\(clientFD) cid=\(peerCID) port=\(peerPort)")
 
             let connection = AgentConnection(fd: clientFD)
             Thread.detachNewThread {
@@ -527,6 +532,50 @@ private func environmentDictionary(from envList: [String]) -> [String: String] {
 private func describeError(_ error: Error) -> String {
     let nsError = error as NSError
     return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
+}
+
+private func logAgentStartupContext() {
+    let uid = getuid()
+    let euid = geteuid()
+    let gid = getgid()
+    let egid = getegid()
+    let pid = getpid()
+    let ppid = getppid()
+    let stdinTTY = isatty(STDIN_FILENO) == 1
+    let stdoutTTY = isatty(STDOUT_FILENO) == 1
+    let stderrTTY = isatty(STDERR_FILENO) == 1
+    let cwd = FileManager.default.currentDirectoryPath
+    let launchLabel = ProcessInfo.processInfo.environment["LAUNCH_JOB_LABEL"] ?? "<nil>"
+    let xpcService = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] ?? "<nil>"
+    let home = ProcessInfo.processInfo.environment["HOME"] ?? "<nil>"
+    let path = ProcessInfo.processInfo.environment["PATH"] ?? "<nil>"
+    let tmpdir = ProcessInfo.processInfo.environment["TMPDIR"] ?? "<nil>"
+    let consoleOwner = currentConsoleOwner()
+
+    logAgentInfo(
+        """
+        startup context pid=\(pid) ppid=\(ppid) uid=\(uid)/\(euid) gid=\(gid)/\(egid) \
+        tty(stdin/stdout/stderr)=\(stdinTTY)/\(stdoutTTY)/\(stderrTTY) cwd=\(cwd)
+        """
+    )
+    logAgentInfo("startup env LAUNCH_JOB_LABEL=\(launchLabel) XPC_SERVICE_NAME=\(xpcService) HOME=\(home) TMPDIR=\(tmpdir)")
+    logAgentInfo("startup env PATH=\(path)")
+    logAgentInfo("startup console owner=\(consoleOwner)")
+}
+
+private func currentConsoleOwner() -> String {
+    var st = stat()
+    if stat("/dev/console", &st) != 0 {
+        let code = errno
+        return "unavailable (\(code): \(String(cString: strerror(code))))"
+    }
+    let uid = st.st_uid
+    let gid = st.st_gid
+    if let pw = getpwuid(uid), let name = pw.pointee.pw_name {
+        let user = String(cString: name)
+        return "\(user) uid=\(uid) gid=\(gid)"
+    }
+    return "uid=\(uid) gid=\(gid)"
 }
 
 private func logAgentError(_ message: String) {

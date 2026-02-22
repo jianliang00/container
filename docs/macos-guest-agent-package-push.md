@@ -123,6 +123,41 @@ codesign -d --entitlements :- /tmp/manual-template-vm 2>&1 | grep com.apple.secu
 
 启动后会弹出 GUI 窗口。
 
+### 5.3 直接用 vsock 调试 guest-agent（不依赖 `container`）
+
+如果你要在手工 VM 场景下直接调试 guest-agent 协议，可在启动 VM 时增加 `--agent-repl`：
+
+```bash
+/tmp/manual-template-vm \
+  --template "$TEMPLATE_DIR" \
+  --share "$SEED_DIR" \
+  --share-tag seed \
+  --cpus 4 \
+  --memory-mib 8192 \
+  --agent-repl \
+  --agent-port 27000
+```
+
+VM 启动成功后，宿主终端会进入 `agent>` 交互模式，可直接发送 frame：
+
+```text
+connect
+sh /bin/ls /
+exec /usr/bin/id
+exec-tty /bin/sh
+stdin echo hello
+close
+signal 15
+resize 120 40
+quit
+```
+
+说明：
+
+- 该 REPL 与 VM 在同一进程内，使用 Virtualization.framework 的 `VZVirtioSocketDevice.connect(toPort:)` 直接连 guest-agent。
+- `quit` 只退出 REPL，不会关闭 VM 窗口；关闭 VM 请在 guest 内 `sudo shutdown -h now` 或直接关窗口。
+- 使用该模式前，仍需确保 guest 内 `com.apple.container.macos.guest-agent` 已安装并在 `system` 域运行。
+
 ## 6. 在 Guest 内安装 agent（人工注入）
 
 首次进入该模板磁盘时，macOS 可能会进入 Setup Assistant 并要求创建本地用户名/密码。请先完成初始化并进入桌面，再执行下面的安装步骤。

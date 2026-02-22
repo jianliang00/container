@@ -158,6 +158,9 @@ public struct ProcessIO: Sendable {
 
     public func handleProcess(process: ClientProcess, log: Logger) async throws -> Int32 {
         let signals = AsyncSignalHandler.create(notify: Self.signalSet)
+        try await process.start()
+        try closeAfterStart()
+
         return try await withThrowingTaskGroup(of: Int32?.self, returning: Int32.self) { group in
             try await process.start()
             try closeAfterStart()

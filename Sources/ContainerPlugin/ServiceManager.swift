@@ -18,28 +18,73 @@ import ContainerizationError
 import Foundation
 
 public struct ServiceManager {
-    private static func runLaunchctlCommand(args: [String]) throws -> Int32 {
+    private struct LaunchctlCommandResult {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+
+        var combinedOutput: String {
+            [stdout, stderr]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        }
+    }
+
+    private static func decodeOutput(data: Data) -> String {
+        String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private static func runLaunchctlCommand(args: [String], captureOutput: Bool) throws -> LaunchctlCommandResult {
         let launchctl = Foundation.Process()
         launchctl.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         launchctl.arguments = args
 
-        let null = FileHandle.nullDevice
-        launchctl.standardOutput = null
-        launchctl.standardError = null
+        if captureOutput {
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            launchctl.standardOutput = stdoutPipe
+            launchctl.standardError = stderrPipe
 
-        try launchctl.run()
-        launchctl.waitUntilExit()
+            try launchctl.run()
+            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            launchctl.waitUntilExit()
 
-        return launchctl.terminationStatus
+            return LaunchctlCommandResult(
+                status: launchctl.terminationStatus,
+                stdout: decodeOutput(data: stdoutData),
+                stderr: decodeOutput(data: stderrData)
+            )
+        } else {
+            let null = FileHandle.nullDevice
+            launchctl.standardOutput = null
+            launchctl.standardError = null
+
+            try launchctl.run()
+            launchctl.waitUntilExit()
+
+            return LaunchctlCommandResult(
+                status: launchctl.terminationStatus,
+                stdout: "",
+                stderr: ""
+            )
+        }
+    }
+
+    private static func runLaunchctlCommand(args: [String]) throws -> Int32 {
+        try runLaunchctlCommand(args: args, captureOutput: false).status
     }
 
     private static func runLaunchctlCommandChecked(args: [String]) throws {
-        let status = try runLaunchctlCommand(args: args)
-        guard status == 0 else {
+        let result = try runLaunchctlCommand(args: args, captureOutput: true)
+        guard result.status == 0 else {
             let command = (["launchctl"] + args).joined(separator: " ")
+            let output = result.combinedOutput
+            let details = output.isEmpty ? "" : ", output: \(output)"
             throw ContainerizationError(
                 .internalError,
-                message: "command `\(command)` failed with status \(status)"
+                message: "command `\(command)` failed with status \(result.status)\(details)"
             )
         }
     }

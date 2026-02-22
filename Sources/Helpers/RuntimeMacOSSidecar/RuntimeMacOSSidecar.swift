@@ -109,6 +109,60 @@ private final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     }
 }
 
+private struct SidecarGuestAgentFrame: Codable {
+    enum FrameType: String, Codable {
+        case exec
+        case stdin
+        case signal
+        case resize
+        case close
+        case stdout
+        case stderr
+        case exit
+        case error
+        case ready
+    }
+
+    let type: FrameType
+    let id: String?
+    let executable: String?
+    let arguments: [String]?
+    let environment: [String]?
+    let workingDirectory: String?
+    let terminal: Bool?
+    let signal: Int32?
+    let width: UInt16?
+    let height: UInt16?
+    let data: Data?
+    let exitCode: Int32?
+    let message: String?
+
+    static func exec(
+        id: String,
+        executable: String,
+        arguments: [String],
+        environment: [String]?,
+        workingDirectory: String?,
+        terminal: Bool
+    ) -> Self {
+        .init(
+            type: .exec,
+            id: id,
+            executable: executable,
+            arguments: arguments,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            terminal: terminal,
+            signal: nil,
+            width: nil,
+            height: nil,
+            data: nil,
+            exitCode: nil,
+            message: nil
+        )
+    }
+}
+
 actor MacOSSidecarService {
     private final class CreatedVM: @unchecked Sendable {
         let vm: VZVirtualMachine
@@ -195,6 +249,72 @@ actor MacOSSidecarService {
         }
         connection.close()
         return duplicated
+    }
+
+    func execProcessSync(port: UInt32, request: MacOSSidecarExecRequestPayload) async throws -> MacOSSidecarExecResultPayload {
+        guard let vm else {
+            throw ContainerizationError(.invalidState, message: "vm is not running")
+        }
+
+        log.info("sidecar process.execSync begin", metadata: [
+            "port": "\(port)",
+            "executable": "\(request.executable)",
+            "argc": "\(request.arguments.count)",
+        ])
+
+        let connection = try await connectSocketOnMain(vm, toPort: port)
+        let duplicated = dup(connection.fileDescriptor)
+        guard duplicated >= 0 else {
+            let error = makePOSIXError(errno)
+            connection.close()
+            throw error
+        }
+        connection.close()
+
+        defer { Darwin.close(duplicated) }
+
+        try waitForGuestAgentReady(fd: duplicated)
+
+        let processID = UUID().uuidString
+        let env = request.environment ?? ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"]
+        let cwd = request.workingDirectory ?? "/"
+        let execFrame = SidecarGuestAgentFrame.exec(
+            id: processID,
+            executable: request.executable,
+            arguments: request.arguments,
+            environment: env,
+            workingDirectory: cwd,
+            terminal: request.terminal
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(execFrame, fd: duplicated)
+
+        var stdout = Data()
+        var stderr = Data()
+        var agentError: String?
+
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: duplicated)
+            switch frame.type {
+            case .stdout:
+                if let data = frame.data { stdout.append(data) }
+            case .stderr:
+                if let data = frame.data { stderr.append(data) }
+            case .error:
+                agentError = frame.message ?? "unknown guest-agent error"
+            case .exit:
+                return MacOSSidecarExecResultPayload(
+                    exitCode: frame.exitCode ?? 1,
+                    stdout: stdout,
+                    stderr: stderr,
+                    agentError: agentError
+                )
+            case .ready:
+                // Ignore duplicate ready frames if any.
+                continue
+            case .exec, .stdin, .signal, .resize, .close:
+                continue
+            }
+        }
     }
 
     func prepareForQuit() async {
@@ -365,6 +485,28 @@ actor MacOSSidecarService {
                 } else {
                     continuation.resume(throwing: ContainerizationError(.invalidState, message: "vm socket device is unavailable"))
                 }
+            }
+        }
+    }
+
+    private func waitForGuestAgentReady(fd: Int32) throws {
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .ready:
+                return
+            case .error:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent error before ready: \(frame.message ?? "unknown error")"
+                )
+            case .exit:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
+                )
+            case .stdout, .stderr, .exec, .stdin, .signal, .resize, .close:
+                continue
             }
         }
     }
@@ -542,6 +684,15 @@ final class SidecarControlServer: @unchecked Sendable {
                 try MacOSSidecarSocketIO.sendNoFileDescriptorMarker(socketFD: clientFD)
                 let nsError = error as NSError
                 return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+            }
+        case .processExecSync:
+            guard let exec = request.exec else {
+                return .failure(requestID: requestID, code: "invalid_request", message: "missing exec payload")
+            }
+            let port = request.port ?? 27000
+            return try sync(requestID: requestID) {
+                let result = try await service.execProcessSync(port: port, request: exec)
+                return .success(requestID: requestID, execResult: result)
             }
         case .vmStop:
             return try sync(requestID: requestID) {

@@ -205,6 +205,11 @@ public struct Utility {
             cpus: resource.cpus,
             memory: resource.memory
         )
+        if isMacOSRuntime, resource.memory == nil {
+            // macOS guest templates commonly need substantially more memory than the global
+            // container default (1 GiB) to boot the guest-agent reliably.
+            config.resources.memoryInBytes = max(config.resources.memoryInBytes, 8192.mib())
+        }
 
         let tmpfs = try Parser.tmpfsMounts(management.tmpFs)
         let volumesOrFs = try Parser.volumes(management.volumes)

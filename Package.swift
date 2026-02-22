@@ -45,6 +45,7 @@ let package = Package(
         .library(name: "SocketForwarder", targets: ["SocketForwarder"]),
         .library(name: "TerminalProgress", targets: ["TerminalProgress"]),
         .executable(name: "container-runtime-macos", targets: ["container-runtime-macos"]),
+        .executable(name: "container-runtime-macos-sidecar", targets: ["container-runtime-macos-sidecar"]),
         .executable(name: "container-macos-guest-agent", targets: ["container-macos-guest-agent"]),
     ],
     dependencies: [
@@ -315,10 +316,24 @@ let package = Package(
                 "ContainerLog",
                 "ContainerResource",
                 "ContainerSandboxServiceClient",
+                "RuntimeMacOSSidecarShared",
                 "ContainerVersion",
                 "ContainerXPC",
             ],
             path: "Sources/Helpers/RuntimeMacOS"
+        ),
+        .executableTarget(
+            name: "container-runtime-macos-sidecar",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Containerization", package: "containerization"),
+                "ContainerLog",
+                "ContainerResource",
+                "RuntimeMacOSSidecarShared",
+                "ContainerVersion",
+            ],
+            path: "Sources/Helpers/RuntimeMacOSSidecar"
         ),
         .executableTarget(
             name: "container-macos-guest-agent",
@@ -326,6 +341,11 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/Helpers/MacOSGuestAgent"
+        ),
+        .target(
+            name: "RuntimeMacOSSidecarShared",
+            dependencies: [],
+            path: "Sources/Helpers/RuntimeMacOSSidecarShared"
         ),
         .target(
             name: "ContainerSandboxService",

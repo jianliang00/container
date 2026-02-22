@@ -24,18 +24,10 @@ import ContainerizationOCI
 import Darwin
 import Foundation
 import Logging
-
-#if arch(arm64)
-import AppKit
-import CoreGraphics
-@preconcurrency import Virtualization
-
-@MainActor
-private var macOSGuestWindows: [NSWindow] = []
-#endif
+import RuntimeMacOSSidecarShared
 
 public actor MacOSSandboxService {
-    private static let fallbackAgentPort: UInt32 = 27000
+    private static let defaultAgentPort: UInt32 = 27000
 
     private enum State: Equatable {
         case created
@@ -50,23 +42,14 @@ public actor MacOSSandboxService {
         let processID: String
         let config: ProcessConfiguration
         let stdio: [FileHandle?]
-        var vsockConnection: AnyObject?
-        var vsockHandle: FileHandle?
-        var inputBuffer: Data = .init()
+        var stdinClosed: Bool = false
         var started: Bool = false
-        var readyReceived: Bool = false
         var exitStatus: ExitStatus?
         var lastAgentError: String?
-        var streamError: String?
-        var readTask: Task<Void, Never>?
     }
 
     struct SidecarHandle {
         let launchLabel: String
-        let plistURL: URL
-        let socketURL: URL
-        let stdoutLogURL: URL
-        let stderrLogURL: URL
         let client: MacOSSidecarClient
     }
 
@@ -82,12 +65,6 @@ public actor MacOSSandboxService {
     var logHandle: FileHandle?
     private var bootLogHandle: FileHandle?
     var sidecarHandle: SidecarHandle?
-
-    #if arch(arm64)
-    private var vm: VZVirtualMachine?
-    private var vmConfiguration: VZVirtualMachineConfiguration?
-    private var socketDevice: VZVirtioSocketDevice?
-    #endif
 
     public init(root: URL, connection: xpc_connection_t, log: Logger) {
         self.root = root
@@ -165,14 +142,15 @@ extension MacOSSandboxService {
         }
 
         #if arch(arm64)
-        try await startSession(&session, containerConfig: configuration)
+        try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
+        writeContainerLog(Data(("startProcess using sidecar process stream path for \(processID)\n").utf8))
         #else
         throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
         #endif
 
-        // `startSession` can start the read loop and receive frames (including an immediate exit)
-        // before we return here for short-lived commands. Merge with the latest dictionary state
-        // instead of blindly overwriting it with the older local copy.
+        // Sidecar events can arrive (including an immediate exit for short-lived commands)
+        // before we return here. Merge with the latest dictionary state instead of blindly
+        // overwriting it with the older local copy.
         if var current = sessions[processID] {
             current.started = true
             sessions[processID] = current
@@ -203,7 +181,7 @@ extension MacOSSandboxService {
     public func kill(_ message: XPCMessage) async throws -> XPCMessage {
         let processID = try message.id()
         let signal = Int32(message.int64(key: SandboxKeys.signal.rawValue))
-        try await sendFrame(to: processID, frame: .signal(id: processID, signal: signal))
+        try sendSignalToProcess(processID: processID, signal: signal)
         return message.reply()
     }
 
@@ -212,7 +190,7 @@ extension MacOSSandboxService {
         let processID = try message.id()
         let width = UInt16(message.uint64(key: SandboxKeys.width.rawValue))
         let height = UInt16(message.uint64(key: SandboxKeys.height.rawValue))
-        try await sendFrame(to: processID, frame: .resize(id: processID, width: width, height: height))
+        try sendResizeToProcess(processID: processID, width: width, height: height)
         return message.reply()
     }
 
@@ -225,7 +203,7 @@ extension MacOSSandboxService {
         if let id = configuration?.id, let current = sessions[id], current.started {
             if current.exitStatus == nil {
                 writeContainerLog(Data(("stop: init process \(id) still running; sending signal \(stopOptions.signal)\n").utf8))
-                try? await sendFrame(to: id, frame: .signal(id: id, signal: Int32(stopOptions.signal)))
+                try? sendSignalToProcess(processID: id, signal: Int32(stopOptions.signal))
                 _ = try? await waitForProcess(id, timeout: stopOptions.timeoutInSeconds)
                 writeContainerLog(Data(("stop: wait for init process \(id) finished\n").utf8))
             } else {
@@ -234,16 +212,9 @@ extension MacOSSandboxService {
         }
 
         #if arch(arm64)
-        if isSidecarEnabled {
-            writeContainerLog(Data(("stop: sidecar shutdown start\n").utf8))
-            await stopAndQuitSidecarIfPresent()
-            writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
-        } else {
-            if let configuration {
-                try await saveSnapshotIfNeeded(configuration)
-            }
-            try await stopVirtualMachine()
-        }
+        writeContainerLog(Data(("stop: sidecar shutdown start\n").utf8))
+        await stopAndQuitSidecarIfPresent()
+        writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
         #endif
 
         closeAllSessions()
@@ -257,9 +228,7 @@ extension MacOSSandboxService {
         switch sandboxState {
         case .created, .stopping, .stopped(_):
             #if arch(arm64)
-            if isSidecarEnabled {
-                await stopAndQuitSidecarIfPresent()
-            }
+            await stopAndQuitSidecarIfPresent()
             #endif
             sandboxState = .shuttingDown
             return message.reply()
@@ -300,20 +269,7 @@ extension MacOSSandboxService {
     public func dial(_ message: XPCMessage) async throws -> XPCMessage {
         #if arch(arm64)
         let port = UInt32(message.uint64(key: SandboxKeys.port.rawValue))
-        let fh: FileHandle
-        if isSidecarEnabled {
-            fh = try sidecarDial(port: port)
-        } else {
-            guard let socketDevice else {
-                throw ContainerizationError(.invalidState, message: "vm socket device not available")
-            }
-            let connection = try await socketDevice.connect(toPort: port)
-            let duplicated = dup(connection.fileDescriptor)
-            guard duplicated >= 0 else {
-                throw POSIXError.fromErrno()
-            }
-            fh = FileHandle(fileDescriptor: duplicated, closeOnDealloc: true)
-        }
+        let fh = try sidecarDial(port: port)
         let reply = message.reply()
         reply.set(key: SandboxKeys.fd.rawValue, value: fh)
         return reply
@@ -367,14 +323,6 @@ extension MacOSSandboxService {
 
     private func hardwareModelPath() -> URL {
         root.appendingPathComponent("HardwareModel.bin")
-    }
-
-    private func machineIdentifierPath() -> URL {
-        root.appendingPathComponent("MachineIdentifier.bin")
-    }
-
-    private func snapshotPath() -> URL {
-        root.appendingPathComponent("MachineState.vzvmsave")
     }
 
     private func stdioLogPath() -> URL {
@@ -476,338 +424,7 @@ extension MacOSSandboxService {
 
     #if arch(arm64)
     private func startOrRestoreVirtualMachine(config: ContainerConfiguration) async throws {
-        if isSidecarEnabled {
-            try await startVirtualMachineViaSidecar(config: config)
-            return
-        }
-
-        await logHostDisplayContext(stage: "startOrRestoreVirtualMachine:entry")
-        await prepareDisplayRuntimeIfNeeded(config: config)
-
-        let vmConfiguration = try makeVirtualMachineConfiguration(containerConfig: config)
-        self.vmConfiguration = vmConfiguration
-        let vm = VZVirtualMachine(configuration: vmConfiguration)
-        self.vm = vm
-        self.socketDevice = vm.socketDevices.compactMap { $0 as? VZVirtioSocketDevice }.first
-        guard socketDevice != nil else {
-            throw ContainerizationError(.invalidState, message: "vm socket device is unavailable")
-        }
-
-        let snapshotEnabled = config.macosGuest?.snapshotEnabled ?? false
-        let snapshotURL = snapshotPath()
-        if snapshotEnabled, #available(macOS 14.0, *), FileManager.default.fileExists(atPath: snapshotURL.path) {
-            do {
-                try await restoreMachineState(vm, from: snapshotURL)
-                try await resumeVirtualMachine(vm)
-                await presentGUIIfNeeded(config: config, vm: vm)
-                try writeBootLog("restored vm state from snapshot")
-                return
-            } catch {
-                try writeBootLog("failed to restore snapshot, falling back to cold boot: \(error)")
-            }
-        }
-
-        do {
-            try await startVirtualMachine(vm)
-        } catch {
-            try writeBootLog("failed to start vm: \(error)")
-            throw ContainerizationError(.internalError, message: "failed to start macOS virtual machine", cause: error)
-        }
-        await presentGUIIfNeeded(config: config, vm: vm)
-    }
-
-    private func makeVirtualMachineConfiguration(containerConfig: ContainerConfiguration) throws -> VZVirtualMachineConfiguration {
-        let hardwareData = try Data(contentsOf: hardwareModelPath())
-        guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareData) else {
-            throw ContainerizationError(.invalidState, message: "invalid hardware model data")
-        }
-        let machineIdentifier: VZMacMachineIdentifier = try {
-            if FileManager.default.fileExists(atPath: machineIdentifierPath().path) {
-                let data = try Data(contentsOf: machineIdentifierPath())
-                if let value = VZMacMachineIdentifier(dataRepresentation: data) {
-                    return value
-                }
-            }
-            let value = VZMacMachineIdentifier()
-            try value.dataRepresentation.write(to: machineIdentifierPath())
-            return value
-        }()
-
-        let platform = VZMacPlatformConfiguration()
-        platform.hardwareModel = hardwareModel
-        platform.machineIdentifier = machineIdentifier
-        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: auxiliaryStoragePath())
-
-        let vmConfiguration = VZVirtualMachineConfiguration()
-        vmConfiguration.bootLoader = VZMacOSBootLoader()
-        vmConfiguration.platform = platform
-
-        vmConfiguration.cpuCount = max(
-            Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount),
-            min(Int(VZVirtualMachineConfiguration.maximumAllowedCPUCount), containerConfig.resources.cpus)
-        )
-        vmConfiguration.memorySize = max(
-            VZVirtualMachineConfiguration.minimumAllowedMemorySize,
-            min(VZVirtualMachineConfiguration.maximumAllowedMemorySize, containerConfig.resources.memoryInBytes)
-        )
-        vmConfiguration.storageDevices = [
-            VZVirtioBlockDeviceConfiguration(
-                attachment: try VZDiskImageStorageDeviceAttachment(url: diskImagePath(), readOnly: false)
-            )
-        ]
-        vmConfiguration.networkDevices = [createNATDevice()]
-        vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
-        // Keep a virtual display even for non-GUI macOS guests. On current templates,
-        // a pure headless (no graphics device) boot path can leave the guest-agent
-        // listener resetting vsock connections instead of accepting them.
-        vmConfiguration.graphicsDevices = [createGraphicsDevice()]
-
-        if containerConfig.macosGuest?.guiEnabled == true {
-            if !Self.isAquaSession() {
-                throw ContainerizationError(
-                    .unsupported,
-                    message: "--gui requires an Aqua login session. Run from a user login session instead of background launch contexts."
-                )
-            }
-            vmConfiguration.keyboards = [VZUSBKeyboardConfiguration()]
-            vmConfiguration.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
-        }
-
-        try vmConfiguration.validate()
-        return vmConfiguration
-    }
-
-    private static func isAquaSession() -> Bool {
-        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
-            return false
-        }
-        return (dict["kCGSessionOnConsoleKey"] as? Bool) == true
-    }
-
-    private func createNATDevice() -> VZVirtioNetworkDeviceConfiguration {
-        let device = VZVirtioNetworkDeviceConfiguration()
-        device.attachment = VZNATNetworkDeviceAttachment()
-        return device
-    }
-
-    private func prepareDisplayRuntimeIfNeeded(config: ContainerConfiguration) async {
-        guard config.macosGuest?.guiEnabled != true else {
-            return
-        }
-
-        await logHostDisplayContext(stage: "prepareDisplayRuntimeIfNeeded:before-mainactor")
-
-        // "Headless display" mode: keep a virtual display device attached for the guest,
-        // but do not create any local VM window.
-        let runtimeSummary = await MainActor.run { () -> String in
-            let hadNSApp = NSApp != nil
-            let app = NSApplication.shared
-            let beforePolicy = app.activationPolicy()
-            app.setActivationPolicy(.prohibited)
-            let afterPolicy = app.activationPolicy()
-            let screens = NSScreen.screens
-            let hasMainScreen = NSScreen.main != nil
-            return
-                "hadNSApp=\(hadNSApp) policyBefore=\(Self.describeActivationPolicy(beforePolicy)) policyAfter=\(Self.describeActivationPolicy(afterPolicy)) screens=\(screens.count) hasMainScreen=\(hasMainScreen)"
-        }
-
-        let line = "host display runtime prepared [mode=headless-display] \(runtimeSummary)\n"
-        writeContainerLog(Data(line.utf8))
-        log.info("host display runtime prepared", metadata: ["summary": "\(runtimeSummary)"])
-    }
-
-    private func presentGUIIfNeeded(config: ContainerConfiguration, vm: VZVirtualMachine) async {
-        guard config.macosGuest?.guiEnabled == true else {
-            return
-        }
-        // UI APIs are main-thread-only. We explicitly opt out of actor isolation for this
-        // immutable reference before hopping to MainActor to wire it into the window view.
-        nonisolated(unsafe) let uiVM = vm
-
-        await MainActor.run {
-            let app = NSApplication.shared
-            app.setActivationPolicy(.regular)
-
-            let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
-            let window = NSWindow(
-                contentRect: frame,
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = config.id
-
-            let vmView = VZVirtualMachineView(frame: frame)
-            vmView.virtualMachine = uiVM
-            vmView.capturesSystemKeys = true
-            vmView.autoresizingMask = [.width, .height]
-            window.contentView = vmView
-
-            window.makeKeyAndOrderFront(nil)
-            app.activate(ignoringOtherApps: true)
-            macOSGuestWindows.append(window)
-        }
-    }
-
-    private func createGraphicsDevice() -> VZMacGraphicsDeviceConfiguration {
-        let graphics = VZMacGraphicsDeviceConfiguration()
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        if let screen {
-            graphics.displays = [
-                VZMacGraphicsDisplayConfiguration(
-                    for: screen,
-                    sizeInPoints: NSSize(width: 1280, height: 800)
-                )
-            ]
-        } else {
-            graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1280, heightInPixels: 800, pixelsPerInch: 80)]
-        }
-        return graphics
-    }
-
-    private func logHostDisplayContext(stage: String) async {
-        let env = ProcessInfo.processInfo.environment
-        let launchLabel = env["LAUNCH_JOB_LABEL"] ?? "-"
-        let xpcServiceName = env["XPC_SERVICE_NAME"] ?? "-"
-        let xpcServiceBundleID = env["XPC_SERVICE_BUNDLE_IDENTIFIER"] ?? "-"
-        let aqua = Self.isAquaSession()
-        let sessionSummary: String = {
-            guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
-                return "unavailable"
-            }
-
-            let onConsole = dict["kCGSessionOnConsoleKey"].map { "\($0)" } ?? "nil"
-            let loginDone = dict["kCGSessionLoginDoneKey"].map { "\($0)" } ?? "nil"
-            let userName = dict["kCGSessionUserNameKey"].map { "\($0)" } ?? "nil"
-            let userID = dict["kCGSessionUserIDKey"].map { "\($0)" } ?? "nil"
-            return "onConsole=\(onConsole) loginDone=\(loginDone) user=\(userName) uid=\(userID)"
-        }()
-
-        let line =
-            "host display context [stage=\(stage)] pid=\(getpid()) ppid=\(getppid()) uid=\(getuid()) euid=\(geteuid()) stdinTTY=\(isatty(STDIN_FILENO) == 1) aqua=\(aqua) launchLabel=\(launchLabel) xpcService=\(xpcServiceName) xpcBundle=\(xpcServiceBundleID) session={\(sessionSummary)}\n"
-        writeContainerLog(Data(line.utf8))
-        log.info(
-            "host display context",
-            metadata: [
-                "stage": "\(stage)",
-                "aqua": "\(aqua)",
-                "launchLabel": "\(launchLabel)",
-                "xpcService": "\(xpcServiceName)",
-                "session": "\(sessionSummary)"
-            ]
-        )
-    }
-
-    private static func describeActivationPolicy(_ policy: NSApplication.ActivationPolicy) -> String {
-        switch policy {
-        case .regular:
-            return "regular"
-        case .accessory:
-            return "accessory"
-        case .prohibited:
-            return "prohibited"
-        @unknown default:
-            return "unknown(\(policy.rawValue))"
-        }
-    }
-
-    private func startVirtualMachine(_ vm: VZVirtualMachine) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.main.async {
-                vm.start(completionHandler: { result in
-                    continuation.resume(with: result)
-                })
-            }
-        }
-    }
-
-    private func resumeVirtualMachine(_ vm: VZVirtualMachine) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.main.async {
-                vm.resume(completionHandler: { result in
-                    continuation.resume(with: result)
-                })
-            }
-        }
-    }
-
-    @available(macOS 14.0, *)
-    private func restoreMachineState(_ vm: VZVirtualMachine, from url: URL) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.main.async {
-                vm.restoreMachineStateFrom(url: url) { error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                        return
-                    }
-                    continuation.resume(returning: ())
-                }
-            }
-        }
-    }
-
-    @available(macOS 14.0, *)
-    private func saveMachineState(_ vm: VZVirtualMachine, to url: URL) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.main.async {
-                vm.saveMachineStateTo(url: url) { error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                        return
-                    }
-                    continuation.resume(returning: ())
-                }
-            }
-        }
-    }
-
-    private func stopVirtualMachine() async throws {
-        guard let vm else { return }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.main.async {
-                vm.stop(completionHandler: { error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                        return
-                    }
-                    continuation.resume(returning: ())
-                })
-            }
-        }
-    }
-
-    private func pauseVirtualMachineIfSupported(_ vm: VZVirtualMachine) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.main.async {
-                guard vm.canPause else {
-                    continuation.resume(returning: ())
-                    return
-                }
-                vm.pause(completionHandler: { result in
-                    continuation.resume(with: result)
-                })
-            }
-        }
-    }
-
-    private func saveSnapshotIfNeeded(_ config: ContainerConfiguration) async throws {
-        guard config.macosGuest?.snapshotEnabled == true else {
-            return
-        }
-        guard #available(macOS 14.0, *) else {
-            return
-        }
-        guard let vm else {
-            return
-        }
-
-        guard let vmConfiguration else {
-            throw ContainerizationError(.invalidState, message: "vm configuration not initialized")
-        }
-        try vmConfiguration.validateSaveRestoreSupport()
-
-        try await pauseVirtualMachineIfSupported(vm)
-        try await saveMachineState(vm, to: snapshotPath())
+        try await startVirtualMachineViaSidecar(config: config)
     }
     #endif
 }
@@ -877,268 +494,127 @@ extension MacOSSandboxService {
 
     private func closeAllSessions() {
         for (_, session) in sessions {
-            session.readTask?.cancel()
             session.stdio[0]?.readabilityHandler = nil
-            try? session.vsockHandle?.close()
-            #if arch(arm64)
-            if let conn = session.vsockConnection as? VZVirtioSocketConnection {
-                conn.close()
-            }
-            #endif
+            try? session.stdio[1]?.close()
+            try? session.stdio[2]?.close()
         }
         sessions.removeAll()
     }
 
     #if arch(arm64)
-    private func startSession(_ session: inout Session, containerConfig: ContainerConfiguration) async throws {
-        let agentPort = containerConfig.macosGuest?.agentPort ?? Self.fallbackAgentPort
+    private func startSessionViaSidecarProcessStream(
+        _ session: inout Session,
+        containerConfig: ContainerConfiguration
+    ) async throws {
         let processID = session.processID
-        writeContainerLog(Data(("guest-agent connect begin for \(processID) on vsock port \(agentPort)\n").utf8))
-        let handle: FileHandle
-        if isSidecarEnabled {
-            do {
-                let fd = try await connectAgentFileDescriptorViaSidecar(port: agentPort, processID: processID)
-                handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-            } catch {
-                let detail = describeError(error)
-                writeContainerLog(Data(("guest-agent connect failed via sidecar on vsock port \(agentPort): \(detail)\n").utf8))
-                throw ContainerizationError(
-                    .internalError,
-                    message: """
-                    failed to connect to guest agent on vsock port \(agentPort) via sidecar: \(detail)
-                    check guest log: /var/log/container-macos-guest-agent.log
-                    """
-                )
-            }
-            writeContainerLog(Data(("guest-agent connect callback succeeded via sidecar for \(processID) on vsock port \(agentPort)\n").utf8))
-            session.vsockConnection = nil
-        } else {
-            let vsockConnection: VZVirtioSocketConnection
-            do {
-                vsockConnection = try await connectAgent(port: agentPort, processID: processID)
-            } catch {
-                let detail = describeError(error)
-                writeContainerLog(Data(("guest-agent connect failed on vsock port \(agentPort): \(detail)\n").utf8))
-                throw ContainerizationError(
-                    .internalError,
-                    message: """
-                    failed to connect to guest agent on vsock port \(agentPort): \(detail)
-                    check guest log: /var/log/container-macos-guest-agent.log
-                    """
-                )
-            }
-            writeContainerLog(Data(("guest-agent connect callback succeeded for \(processID) on vsock port \(agentPort)\n").utf8))
-            handle = FileHandle(fileDescriptor: vsockConnection.fileDescriptor, closeOnDealloc: false)
-            session.vsockConnection = vsockConnection
-        }
-        session.vsockHandle = handle
-
+        let agentPort = containerConfig.macosGuest?.agentPort ?? Self.defaultAgentPort
+        writeContainerLog(Data(("sidecar process.start begin for \(processID) on vsock port \(agentPort)\n").utf8))
         sessions[processID] = session
-        session.readTask = Task { [weak self] in
-            await self?.readFramesLoop(processID: processID)
-        }
-        sessions[processID] = session
-        writeContainerLog(Data(("guest-agent read loop started for \(processID)\n").utf8))
 
-        if let stdin = session.stdio[0] {
-            let service = self
-            stdin.readabilityHandler = { handle in
-                let data = handle.availableData
-                Task {
-                    await service.forwardHostStdin(processID: processID, data: data)
-                }
-            }
-        }
-
-        let payload = GuestAgentFrame.exec(
-            id: processID,
+        let request = MacOSSidecarExecRequestPayload(
             executable: session.config.executable,
             arguments: session.config.arguments,
             environment: session.config.environment,
             workingDirectory: session.config.workingDirectory,
-            terminal: session.config.terminal
+            terminal: session.config.terminal,
+            stdin: nil
         )
+
         do {
-            writeContainerLog(Data(("guest-agent sending exec frame for \(processID)\n").utf8))
-            try sendFrameNow(payload, session: session)
+            try await startProcessViaSidecarWithRetries(port: agentPort, processID: processID, request: request)
+            session.started = true
+            if let stdin = session.stdio[0] {
+                let service = self
+                stdin.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    Task {
+                        await service.forwardHostStdin(processID: processID, data: data)
+                    }
+                }
+            }
+            sessions[processID] = session
+            writeContainerLog(Data(("sidecar process.start sent for \(processID)\n").utf8))
         } catch {
             let detail = describeError(error)
-            writeContainerLog(Data(("guest-agent send error for \(processID): \(detail)\n").utf8))
+            writeContainerLog(Data(("sidecar process.start failed for \(processID): \(detail)\n").utf8))
             throw ContainerizationError(
                 .internalError,
                 message: """
-                failed to send exec request to guest agent: \(detail)
+                failed to start process via macOS sidecar guest agent on vsock port \(agentPort): \(detail)
                 check guest log: /var/log/container-macos-guest-agent.log
                 """
             )
         }
     }
-
-    private func connectAgent(port: UInt32, processID: String) async throws -> VZVirtioSocketConnection {
-        guard let socketDevice else {
-            throw ContainerizationError(.invalidState, message: "vm socket device not ready")
-        }
-
-        var lastError: Error?
-        let maxAttempts = 240
-        // macOS guest boot + launchd can take noticeably longer than VM start()
-        // completion, especially on first boot from a freshly packaged template.
-        for attempt in 1...maxAttempts {
-            do {
-                if shouldLogConnectAttempt(attempt, maxAttempts: maxAttempts) {
-                    writeContainerLog(Data(("guest-agent connect attempt \(attempt)/\(maxAttempts) for \(processID) on vsock port \(port)\n").utf8))
-                }
-                return try await connectSocketOnMain(socketDevice, toPort: port)
-            } catch {
-                lastError = error
-                if shouldLogConnectAttempt(attempt, maxAttempts: maxAttempts) {
-                    let detail = describeError(error)
-                    writeContainerLog(Data(("guest-agent connect attempt \(attempt)/\(maxAttempts) failed for \(processID): \(detail)\n").utf8))
-                }
-                try await Task.sleep(nanoseconds: 500_000_000)
-            }
-        }
-        throw lastError ?? ContainerizationError(.timeout, message: "timed out waiting for guest agent on vsock port \(port)")
-    }
-
-    private func connectSocketOnMain(_ socketDevice: VZVirtioSocketDevice, toPort port: UInt32) async throws -> VZVirtioSocketConnection {
-        let logger = self.log
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VZVirtioSocketConnection, Error>) in
-            DispatchQueue.main.async {
-                socketDevice.connect(toPort: port, completionHandler: { result in
-                    switch result {
-                    case .success(let connection):
-                        logger.info("guest-agent vsock connect callback succeeded", metadata: ["port": "\(port)"])
-                        nonisolated(unsafe) let unsafeConnection = connection
-                        continuation.resume(returning: unsafeConnection)
-                    case .failure(let error):
-                        logger.error("guest-agent vsock connect callback failed", metadata: ["port": "\(port)", "error": "\(error)"])
-                        continuation.resume(throwing: error)
-                    }
-                })
-            }
-        }
-    }
     #endif
 
     private func forwardHostStdin(processID: String, data: Data) async {
-        guard let session = sessions[processID], session.started else {
+        guard var session = sessions[processID], session.started else {
             return
         }
 
         do {
+            if session.stdinClosed {
+                return
+            }
+            guard let client = sidecarHandle?.client else {
+                throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+            }
             if data.isEmpty {
+                session.stdinClosed = true
+                sessions[processID] = session
                 session.stdio[0]?.readabilityHandler = nil
-                try sendFrameNow(.close(id: processID), session: session)
+                try client.processClose(processID: processID)
             } else {
-                try sendFrameNow(.stdin(id: processID, data: data), session: session)
+                try client.processStdin(processID: processID, data: data)
             }
         } catch {
             log.error("failed to forward stdin", metadata: ["process_id": "\(processID)", "error": "\(error)"])
         }
     }
 
-    private func sendFrame(to processID: String, frame: GuestAgentFrame) async throws {
+    private func sendSignalToProcess(processID: String, signal: Int32) throws {
         guard let session = sessions[processID] else {
             throw ContainerizationError(.notFound, message: "process \(processID) not found")
         }
-        try sendFrameNow(frame, session: session)
+        if session.exitStatus != nil {
+            return
+        }
+        guard let client = sidecarHandle?.client else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        try client.processSignal(processID: processID, signal: signal)
     }
 
-    private func sendFrameNow(_ frame: GuestAgentFrame, session: Session) throws {
-        guard let handle = session.vsockHandle else {
-            throw ContainerizationError(.invalidState, message: "agent session for process \(session.processID) is not started")
+    private func sendResizeToProcess(processID: String, width: UInt16, height: UInt16) throws {
+        guard let session = sessions[processID] else {
+            throw ContainerizationError(.notFound, message: "process \(processID) not found")
         }
-        let fd = handle.fileDescriptor
-
-        let payload = try JSONEncoder().encode(frame)
-        var length = UInt32(payload.count).bigEndian
-        let lengthData = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
-        try writeAllToSocket(fd: fd, data: lengthData)
-        try writeAllToSocket(fd: fd, data: payload)
+        if session.exitStatus != nil {
+            return
+        }
+        guard let client = sidecarHandle?.client else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        try client.processResize(processID: processID, width: width, height: height)
     }
 
-    private func readFramesLoop(processID: String) async {
-        var chunkBuffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            guard let fd = sessions[processID]?.vsockHandle?.fileDescriptor else {
-                break
-            }
-            do {
-                guard let chunk = try readSocketChunk(fd: fd, into: &chunkBuffer), !chunk.isEmpty else {
-                    if var session = sessions[processID], session.exitStatus == nil {
-                        let detail = "guest agent disconnected unexpectedly"
-                        if session.streamError == nil {
-                            session.streamError = detail
-                        }
-                        sessions[processID] = session
-                        writeContainerLog(Data(("guest-agent stream closed for \(processID): \(detail)\n").utf8))
-                    }
-                    break
-                }
-                try await processIncomingData(chunk, processID: processID)
-            } catch {
-                let detail = describeError(error)
-                log.error("failed to read guest agent stream", metadata: ["process_id": "\(processID)", "error": "\(detail)"])
-                if var session = sessions[processID], session.streamError == nil {
-                    session.streamError = detail
-                    sessions[processID] = session
-                }
-                writeContainerLog(Data(("guest-agent stream read failed for \(processID): \(detail)\n").utf8))
-                break
-            }
-        }
-
-        if
-            let session = sessions[processID],
-            session.exitStatus == nil,
-            let detail = session.lastAgentError ?? session.streamError
-        {
-            writeContainerLog(Data(("guest-agent failure for \(processID): \(detail)\n").utf8))
-        }
-
-        let status = sessions[processID]?.exitStatus ?? ExitStatus(exitCode: 1, exitedAt: Date())
-        completeProcess(id: processID, status: status)
-    }
-
-    private func processIncomingData(_ data: Data, processID: String) async throws {
+    func handleSidecarEvent(_ event: MacOSSidecarEvent) {
+        let processID = event.processID
         guard var session = sessions[processID] else {
             return
         }
-        session.inputBuffer.append(data)
 
-        while session.inputBuffer.count >= MemoryLayout<UInt32>.size {
-            let lengthBytes = session.inputBuffer.prefix(MemoryLayout<UInt32>.size)
-            let length = lengthBytes.withUnsafeBytes { raw in
-                raw.load(as: UInt32.self).bigEndian
-            }
-            let frameSize = Int(length)
-            let total = MemoryLayout<UInt32>.size + frameSize
-            guard session.inputBuffer.count >= total else {
-                break
-            }
-
-            let payload = session.inputBuffer.subdata(in: MemoryLayout<UInt32>.size..<total)
-            session.inputBuffer.removeSubrange(0..<total)
-
-            let frame = try JSONDecoder().decode(GuestAgentFrame.self, from: payload)
-            try handleFrame(frame, processID: processID, session: &session)
-        }
-
-        sessions[processID] = session
-    }
-
-    private func handleFrame(_ frame: GuestAgentFrame, processID: String, session: inout Session) throws {
-        switch frame.type {
-        case .stdout:
-            if let data = frame.data {
+        switch event.event {
+        case .processStdout:
+            if let data = event.data, !data.isEmpty {
                 if let stdout = session.stdio[1] {
                     try? stdout.write(contentsOf: data)
                 }
                 writeContainerLog(data)
             }
-        case .stderr:
-            if let data = frame.data {
+        case .processStderr:
+            if let data = event.data, !data.isEmpty {
                 if let stderr = session.stdio[2] {
                     try? stderr.write(contentsOf: data)
                 } else if let stdout = session.stdio[1] {
@@ -1146,248 +622,36 @@ extension MacOSSandboxService {
                 }
                 writeContainerLog(data)
             }
-        case .exit:
-            writeContainerLog(Data(("guest-agent exit frame for \(processID) code=\(frame.exitCode ?? 1)\n").utf8))
-            let status = ExitStatus(exitCode: frame.exitCode ?? 1, exitedAt: Date())
-            // `processIncomingData` writes the local session copy back after frame handling.
-            // Persist the exit status on the local copy first so we do not clobber the
-            // dictionary update performed by `completeProcess` when no waiter is attached yet.
-            session.exitStatus = status
-            // For short-lived commands, upper layers may be blocked waiting for stdio EOF rather
-            // than issuing an explicit wait request. Close the per-process streams as soon as the
-            // agent reports exit so the caller can finish promptly.
-            session.stdio[0]?.readabilityHandler = nil
-            try? session.vsockHandle?.close()
-            session.vsockHandle = nil
-            #if arch(arm64)
-            if let conn = session.vsockConnection as? VZVirtioSocketConnection {
-                conn.close()
+        case .processError:
+            let text = event.message ?? "unknown sidecar process error"
+            session.lastAgentError = text
+            writeContainerLog(Data(("sidecar process error for \(processID): \(text)\n").utf8))
+        case .processExit:
+            if session.exitStatus != nil {
+                return
             }
-            #endif
-            session.vsockConnection = nil
+            let code = event.exitCode ?? 1
+            writeContainerLog(Data(("sidecar process exit event for \(processID) code=\(code)\n").utf8))
+            let status = ExitStatus(exitCode: code, exitedAt: Date())
+            session.exitStatus = status
+            session.stdio[0]?.readabilityHandler = nil
             try? session.stdio[1]?.close()
             try? session.stdio[2]?.close()
+            sessions[processID] = session
             completeProcess(id: processID, status: status)
             if processID == configuration?.id {
                 sandboxState = .stopped(status.exitCode)
             }
-        case .error:
-            let text = frame.message ?? "unknown guest agent error"
-            session.lastAgentError = text
-            writeContainerLog(Data(("guest-agent error frame for \(processID): \(text)\n").utf8))
-        case .ready:
-            session.readyReceived = true
-            writeContainerLog(Data(("guest-agent ready frame received for \(processID)\n").utf8))
-            break
-        case .exec, .stdin, .signal, .resize, .close:
-            break
-        }
-    }
-}
-
-// MARK: - Protocol frame model
-
-private struct GuestAgentFrame: Codable {
-    enum FrameType: String, Codable {
-        case exec
-        case stdin
-        case signal
-        case resize
-        case close
-        case stdout
-        case stderr
-        case exit
-        case error
-        case ready
-    }
-
-    let type: FrameType
-    let id: String?
-    let executable: String?
-    let arguments: [String]?
-    let environment: [String]?
-    let workingDirectory: String?
-    let terminal: Bool?
-    let signal: Int32?
-    let width: UInt16?
-    let height: UInt16?
-    let data: Data?
-    let exitCode: Int32?
-    let message: String?
-
-    static func exec(id: String, executable: String, arguments: [String], environment: [String], workingDirectory: String, terminal: Bool) -> Self {
-        .init(
-            type: .exec,
-            id: id,
-            executable: executable,
-            arguments: arguments,
-            environment: environment,
-            workingDirectory: workingDirectory,
-            terminal: terminal,
-            signal: nil,
-            width: nil,
-            height: nil,
-            data: nil,
-            exitCode: nil,
-            message: nil
-        )
-    }
-
-    static func stdin(id: String, data: Data) -> Self {
-        .init(
-            type: .stdin,
-            id: id,
-            executable: nil,
-            arguments: nil,
-            environment: nil,
-            workingDirectory: nil,
-            terminal: nil,
-            signal: nil,
-            width: nil,
-            height: nil,
-            data: data,
-            exitCode: nil,
-            message: nil
-        )
-    }
-
-    static func signal(id: String, signal: Int32) -> Self {
-        .init(
-            type: .signal,
-            id: id,
-            executable: nil,
-            arguments: nil,
-            environment: nil,
-            workingDirectory: nil,
-            terminal: nil,
-            signal: signal,
-            width: nil,
-            height: nil,
-            data: nil,
-            exitCode: nil,
-            message: nil
-        )
-    }
-
-    static func resize(id: String, width: UInt16, height: UInt16) -> Self {
-        .init(
-            type: .resize,
-            id: id,
-            executable: nil,
-            arguments: nil,
-            environment: nil,
-            workingDirectory: nil,
-            terminal: nil,
-            signal: nil,
-            width: width,
-            height: height,
-            data: nil,
-            exitCode: nil,
-            message: nil
-        )
-    }
-
-    static func close(id: String) -> Self {
-        .init(
-            type: .close,
-            id: id,
-            executable: nil,
-            arguments: nil,
-            environment: nil,
-            workingDirectory: nil,
-            terminal: nil,
-            signal: nil,
-            width: nil,
-            height: nil,
-            data: nil,
-            exitCode: nil,
-            message: nil
-        )
-    }
-}
-
-private func readSocketChunk(fd: Int32, into storage: inout [UInt8]) throws -> Data? {
-    while true {
-        let bytesRead = storage.withUnsafeMutableBytes { rawBuffer -> Int in
-            guard let baseAddress = rawBuffer.baseAddress else { return 0 }
-            return Darwin.read(fd, baseAddress, rawBuffer.count)
+            return
         }
 
-        if bytesRead > 0 {
-            return Data(storage.prefix(bytesRead))
-        }
-        if bytesRead == 0 {
-            return nil
-        }
-
-        let code = errno
-        if code == EINTR {
-            continue
-        }
-        if code == EAGAIN || code == EWOULDBLOCK {
-            usleep(10_000)
-            continue
-        }
-
-        throw NSError(
-            domain: NSPOSIXErrorDomain,
-            code: Int(code),
-            userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
-        )
-    }
-}
-
-private func writeAllToSocket(fd: Int32, data: Data) throws {
-    try data.withUnsafeBytes { rawBuffer in
-        guard let baseAddress = rawBuffer.baseAddress else { return }
-        var totalWritten = 0
-        while totalWritten < rawBuffer.count {
-            let pointer = baseAddress.advanced(by: totalWritten)
-            let remaining = rawBuffer.count - totalWritten
-            let written = Darwin.write(fd, pointer, remaining)
-            if written > 0 {
-                totalWritten += written
-                continue
-            }
-            if written == 0 {
-                throw NSError(
-                    domain: NSPOSIXErrorDomain,
-                    code: Int(EPIPE),
-                    userInfo: [NSLocalizedDescriptionKey: "write returned 0 bytes"]
-                )
-            }
-
-            let code = errno
-            if code == EINTR {
-                continue
-            }
-            if code == EAGAIN || code == EWOULDBLOCK {
-                usleep(10_000)
-                continue
-            }
-
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(code),
-                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
-            )
-        }
+        sessions[processID] = session
     }
 }
 
 private func describeError(_ error: Error) -> String {
     let nsError = error as NSError
     return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
-}
-
-private func shouldLogConnectAttempt(_ attempt: Int, maxAttempts: Int) -> Bool {
-    if attempt <= 5 {
-        return true
-    }
-    if attempt == maxAttempts {
-        return true
-    }
-    return attempt % 20 == 0
 }
 
 // MARK: - XPC helpers

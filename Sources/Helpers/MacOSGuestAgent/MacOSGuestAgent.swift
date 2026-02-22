@@ -29,6 +29,7 @@ struct MacOSGuestAgent: ParsableCommand {
     var port: UInt32 = 27000
 
     mutating func run() throws {
+        logAgentInfo("starting guest agent on vsock port \(port)")
         let listener = try VsockListener(port: port)
         try listener.serveForever()
     }
@@ -88,12 +89,14 @@ private final class VsockListener {
             guard clientFD >= 0 else {
                 throw POSIXError.fromErrno()
             }
+            logAgentInfo("accepted vsock client fd=\(clientFD)")
 
             let connection = AgentConnection(fd: clientFD)
             Thread.detachNewThread {
                 do {
                     try connection.run()
                 } catch {
+                    logAgentError("connection loop failed: \(describeError(error))")
                     _ = Darwin.close(clientFD)
                 }
             }
@@ -115,13 +118,25 @@ private final class AgentConnection: @unchecked Sendable {
     }
 
     func run() throws {
+        logAgentInfo("connection fd=\(fd): sending ready frame")
         try send(frame: .ready)
+        logAgentInfo("connection fd=\(fd): ready frame sent")
+        var chunkBuffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
-            guard let chunk = try socketHandle.read(upToCount: 64 * 1024), !chunk.isEmpty else {
+            guard let chunk = try readSocketChunk(into: &chunkBuffer), !chunk.isEmpty else {
+                logAgentInfo("connection fd=\(fd): peer closed stream")
                 break
             }
             buffer.append(chunk)
-            try consumeFrames()
+            do {
+                try consumeFrames()
+            } catch {
+                let message = "failed to consume frame: \(describeError(error))"
+                logAgentError(message)
+                try? send(frame: .error(message))
+                try? send(frame: .exit(1))
+                break
+            }
         }
         session?.cleanup()
         try? socketHandle.close()
@@ -142,6 +157,7 @@ private final class AgentConnection: @unchecked Sendable {
             buffer.removeSubrange(0..<total)
 
             let frame = try JSONDecoder().decode(GuestAgentFrame.self, from: payload)
+            logAgentInfo("connection fd=\(fd): received frame \(frame.type.rawValue)")
             try handle(frame: frame)
         }
     }
@@ -149,18 +165,45 @@ private final class AgentConnection: @unchecked Sendable {
     private func handle(frame: GuestAgentFrame) throws {
         switch frame.type {
         case .exec:
-            try startProcess(frame: frame)
+            do {
+                try startProcess(frame: frame)
+            } catch {
+                session?.cleanup()
+                session = nil
+                let message = "failed to start process: \(describeError(error))"
+                logAgentError(message)
+                try? send(frame: .error(message))
+                try? send(frame: .exit(1))
+            }
         case .stdin:
             if let data = frame.data {
-                try session?.writeStdin(data)
+                do {
+                    try session?.writeStdin(data)
+                } catch {
+                    let message = "failed to write stdin: \(describeError(error))"
+                    logAgentError(message)
+                    try? send(frame: .error(message))
+                }
             }
         case .signal:
             if let signal = frame.signal {
-                try session?.sendSignal(signal)
+                do {
+                    try session?.sendSignal(signal)
+                } catch {
+                    let message = "failed to send signal \(signal): \(describeError(error))"
+                    logAgentError(message)
+                    try? send(frame: .error(message))
+                }
             }
         case .resize:
             if let width = frame.width, let height = frame.height {
-                try session?.resize(width: width, height: height)
+                do {
+                    try session?.resize(width: width, height: height)
+                } catch {
+                    let message = "failed to resize tty to \(width)x\(height): \(describeError(error))"
+                    logAgentError(message)
+                    try? send(frame: .error(message))
+                }
             }
         case .close:
             session?.closeStdin()
@@ -174,6 +217,7 @@ private final class AgentConnection: @unchecked Sendable {
 
         guard let executable = frame.executable else {
             try send(frame: .error("missing executable"))
+            try send(frame: .exit(1))
             return
         }
 
@@ -235,8 +279,75 @@ private final class AgentConnection: @unchecked Sendable {
 
         lock.lock()
         defer { lock.unlock() }
-        try socketHandle.write(contentsOf: header)
-        try socketHandle.write(contentsOf: payload)
+        try writeAllToSocket(header)
+        try writeAllToSocket(payload)
+    }
+
+    private func readSocketChunk(into storage: inout [UInt8]) throws -> Data? {
+        while true {
+            let bytesRead = storage.withUnsafeMutableBytes { rawBuffer -> Int in
+                guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+                return Darwin.read(fd, baseAddress, rawBuffer.count)
+            }
+
+            if bytesRead > 0 {
+                return Data(storage.prefix(bytesRead))
+            }
+            if bytesRead == 0 {
+                return nil
+            }
+
+            let code = errno
+            if code == EINTR {
+                continue
+            }
+            if code == EAGAIN || code == EWOULDBLOCK {
+                usleep(10_000)
+                continue
+            }
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+            )
+        }
+    }
+
+    private func writeAllToSocket(_ data: Data) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var totalWritten = 0
+            while totalWritten < rawBuffer.count {
+                let pointer = baseAddress.advanced(by: totalWritten)
+                let remaining = rawBuffer.count - totalWritten
+                let written = Darwin.write(fd, pointer, remaining)
+                if written > 0 {
+                    totalWritten += written
+                    continue
+                }
+                if written == 0 {
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain,
+                        code: Int(EPIPE),
+                        userInfo: [NSLocalizedDescriptionKey: "write returned 0 bytes"]
+                    )
+                }
+
+                let code = errno
+                if code == EINTR {
+                    continue
+                }
+                if code == EAGAIN || code == EWOULDBLOCK {
+                    usleep(10_000)
+                    continue
+                }
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(code),
+                    userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+                )
+            }
+        }
     }
 }
 
@@ -256,8 +367,6 @@ private final class ProcessSession: @unchecked Sendable {
     }
 
     func start(stdoutHandle: FileHandle? = nil, stderrHandle: FileHandle? = nil) throws {
-        try process.run()
-
         if let masterHandle {
             masterHandle.readabilityHandler = { [weak self] handle in
                 guard let self else { return }
@@ -293,6 +402,8 @@ private final class ProcessSession: @unchecked Sendable {
             guard let self else { return }
             try? self.connection.send(frame: .exit(process.terminationStatus))
         }
+
+        try process.run()
     }
 
     func writeStdin(_ data: Data) throws {
@@ -411,6 +522,21 @@ private func environmentDictionary(from envList: [String]) -> [String: String] {
         result[String(parts[0])] = String(parts[1])
     }
     return result
+}
+
+private func describeError(_ error: Error) -> String {
+    let nsError = error as NSError
+    return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
+}
+
+private func logAgentError(_ message: String) {
+    fputs("container-macos-guest-agent: \(message)\n", stderr)
+    fflush(stderr)
+}
+
+private func logAgentInfo(_ message: String) {
+    fputs("container-macos-guest-agent: \(message)\n", stderr)
+    fflush(stderr)
 }
 
 private extension POSIXError {

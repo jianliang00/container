@@ -24,6 +24,9 @@ import TerminalProgress
 
 extension Application {
     public struct SystemStart: AsyncLoggableCommand {
+        private static let apiServerServiceLabel = "com.apple.container.apiserver"
+        private static let launchctlPrintLineLimit = 30
+
         public static let configuration = CommandConfiguration(
             commandName: "start",
             abstract: "Start `container` services"
@@ -93,16 +96,31 @@ extension Application {
             try data.write(to: plistURL)
 
             print("Registering API server with launchd...")
-            try ServiceManager.register(plistPath: plistURL.path)
+            do {
+                try ServiceManager.register(plistPath: plistURL.path)
+            } catch {
+                let diagnostics = self.collectAPIServerDiagnostics()
+                throw ContainerizationError(
+                    .internalError,
+                    message: """
+                    failed to register apiserver with launchd: \(error)
+                    \(diagnostics)
+                    """
+                )
+            }
 
             // Now ping our friendly daemon. Fail if we don't get a response.
             do {
                 print("Verifying apiserver is running...")
                 _ = try await ClientHealthCheck.ping(timeout: .seconds(timeout))
             } catch {
+                let diagnostics = self.collectAPIServerDiagnostics()
                 throw ContainerizationError(
                     .internalError,
-                    message: "failed to get a response from apiserver: \(error)"
+                    message: """
+                    failed to get a response from apiserver: \(error)
+                    \(diagnostics)
+                    """
                 )
             }
 
@@ -172,6 +190,69 @@ extension Application {
             } catch {
                 return false
             }
+        }
+
+        private func collectAPIServerDiagnostics() -> String {
+            var lines = ["apiserver launchd diagnostics:"]
+            do {
+                let domain = try ServiceManager.getDomainString()
+                let fullLabel = "\(domain)/\(Self.apiServerServiceLabel)"
+                let isRegistered = try ServiceManager.isRegistered(fullServiceLabel: Self.apiServerServiceLabel)
+                lines.append("launchd domain: \(domain)")
+                lines.append("service label: \(fullLabel)")
+                lines.append("registered: \(isRegistered)")
+
+                let domainResult = try runLaunchctl(args: ["print", fullLabel])
+                let preferred: (status: Int32, output: String)
+                let dumpLabel: String
+                if domainResult.status == 0 {
+                    preferred = domainResult
+                    dumpLabel = fullLabel
+                } else {
+                    preferred = try runLaunchctl(args: ["print", Self.apiServerServiceLabel])
+                    dumpLabel = Self.apiServerServiceLabel
+                }
+
+                let launchctlDump = preferred.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if launchctlDump.isEmpty {
+                    lines.append("launchctl print output is empty (status \(preferred.status))")
+                } else {
+                    let preview = trimLaunchctlOutput(launchctlDump, maxLines: Self.launchctlPrintLineLimit)
+                    lines.append("launchctl print (\(dumpLabel), status \(preferred.status)):")
+                    lines.append(preview)
+                }
+            } catch {
+                lines.append("failed to query launchd state: \(error)")
+            }
+            lines.append("hint: run `container system logs --last 5m` for detailed service logs")
+            return lines.joined(separator: "\n")
+        }
+
+        private func runLaunchctl(args: [String]) throws -> (status: Int32, output: String) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = args
+
+            let outputPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = outputPipe
+
+            try process.run()
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+
+            let output = String(data: outputData, encoding: .utf8) ?? ""
+            return (status: process.terminationStatus, output: output)
+        }
+
+        private func trimLaunchctlOutput(_ output: String, maxLines: Int) -> String {
+            let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+            guard lines.count > maxLines else {
+                return output
+            }
+            let head = lines.prefix(maxLines).joined(separator: "\n")
+            let remaining = lines.count - maxLines
+            return "\(head)\n... (\(remaining) more lines)"
         }
     }
 

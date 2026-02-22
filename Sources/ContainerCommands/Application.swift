@@ -131,7 +131,20 @@ public struct Application: AsyncLoggableCommand {
             }
             let errorAsString: String = String(describing: error)
             if errorAsString.contains("XPC connection error") {
-                let modifiedError = ContainerizationError(.interrupted, message: "\(error)\nEnsure container system service has been started with `container system start`.")
+                let apiServerAlive = (try? await ClientHealthCheck.ping(timeout: .seconds(2))) != nil
+                let isConnectionInterrupted = errorAsString.contains("Connection interrupted")
+                var message = "\(error)"
+                if apiServerAlive {
+                    message += "\nAPI server is reachable; a helper plugin/service may have exited unexpectedly."
+                    if isConnectionInterrupted, Self.serviceHasRecentJetsam(label: "com.apple.container.container-core-images") {
+                        message += "\nDetected recent `container-core-images` exit reason `OS_REASON_JETSAM` (memory pressure)."
+                    }
+                    message += "\nTry the command again, or restart services with `container system stop` then `container system start`."
+                    message += "\nFor diagnostics, run `container system logs --last 5m`."
+                } else {
+                    message += "\nEnsure container system service has been started with `container system start`."
+                }
+                let modifiedError = ContainerizationError(.interrupted, message: message)
                 Application.exit(withError: modifiedError)
             } else {
                 Application.exit(withError: error)
@@ -199,6 +212,34 @@ public struct Application: AsyncLoggableCommand {
                 """
             )
         }
+    }
+
+    private static func serviceHasRecentJetsam(label: String) -> Bool {
+        do {
+            let domain = try ServiceManager.getDomainString()
+            guard let output = try runLaunchctl(args: ["print", "\(domain)/\(label)"]) else {
+                return false
+            }
+            return output.contains("OS_REASON_JETSAM")
+        } catch {
+            return false
+        }
+    }
+
+    private static func runLaunchctl(args: [String]) throws -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = args
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     private static func otherCommands() -> [any ParsableCommand.Type] {

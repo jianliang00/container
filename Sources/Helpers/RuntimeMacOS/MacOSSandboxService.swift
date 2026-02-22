@@ -54,6 +54,8 @@ public actor MacOSSandboxService {
         var inputBuffer: Data = .init()
         var started: Bool = false
         var exitStatus: ExitStatus?
+        var lastAgentError: String?
+        var streamError: String?
         var readTask: Task<Void, Never>?
     }
 
@@ -442,7 +444,7 @@ extension MacOSSandboxService {
         if snapshotEnabled, #available(macOS 14.0, *), FileManager.default.fileExists(atPath: snapshotURL.path) {
             do {
                 try await restoreMachineState(vm, from: snapshotURL)
-                try await vm.resume()
+                try await resumeVirtualMachine(vm)
                 await presentGUIIfNeeded(config: config, vm: vm)
                 try writeBootLog("restored vm state from snapshot")
                 return
@@ -451,7 +453,12 @@ extension MacOSSandboxService {
             }
         }
 
-        try await vm.start()
+        do {
+            try await startVirtualMachine(vm)
+        } catch {
+            try writeBootLog("failed to start vm: \(error)")
+            throw ContainerizationError(.internalError, message: "failed to start macOS virtual machine", cause: error)
+        }
         await presentGUIIfNeeded(config: config, vm: vm)
     }
 
@@ -575,15 +582,37 @@ extension MacOSSandboxService {
         return graphics
     }
 
+    private func startVirtualMachine(_ vm: VZVirtualMachine) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.main.async {
+                vm.start(completionHandler: { result in
+                    continuation.resume(with: result)
+                })
+            }
+        }
+    }
+
+    private func resumeVirtualMachine(_ vm: VZVirtualMachine) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.main.async {
+                vm.resume(completionHandler: { result in
+                    continuation.resume(with: result)
+                })
+            }
+        }
+    }
+
     @available(macOS 14.0, *)
     private func restoreMachineState(_ vm: VZVirtualMachine, from url: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.restoreMachineStateFrom(url: url) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
+            DispatchQueue.main.async {
+                vm.restoreMachineStateFrom(url: url) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    continuation.resume(returning: ())
                 }
-                continuation.resume(returning: ())
             }
         }
     }
@@ -591,12 +620,14 @@ extension MacOSSandboxService {
     @available(macOS 14.0, *)
     private func saveMachineState(_ vm: VZVirtualMachine, to url: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.saveMachineStateTo(url: url) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
+            DispatchQueue.main.async {
+                vm.saveMachineStateTo(url: url) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    continuation.resume(returning: ())
                 }
-                continuation.resume(returning: ())
             }
         }
     }
@@ -604,13 +635,29 @@ extension MacOSSandboxService {
     private func stopVirtualMachine() async throws {
         guard let vm else { return }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.stop(completionHandler: { error in
-                if let error {
-                    continuation.resume(throwing: error)
+            DispatchQueue.main.async {
+                vm.stop(completionHandler: { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    continuation.resume(returning: ())
+                })
+            }
+        }
+    }
+
+    private func pauseVirtualMachineIfSupported(_ vm: VZVirtualMachine) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.main.async {
+                guard vm.canPause else {
+                    continuation.resume(returning: ())
                     return
                 }
-                continuation.resume(returning: ())
-            })
+                vm.pause(completionHandler: { result in
+                    continuation.resume(with: result)
+                })
+            }
         }
     }
 
@@ -630,9 +677,7 @@ extension MacOSSandboxService {
         }
         try vmConfiguration.validateSaveRestoreSupport()
 
-        if vm.canPause {
-            try await vm.pause()
-        }
+        try await pauseVirtualMachineIfSupported(vm)
         try await saveMachineState(vm, to: snapshotPath())
     }
     #endif
@@ -714,7 +759,21 @@ extension MacOSSandboxService {
     #if arch(arm64)
     private func startSession(_ session: inout Session, containerConfig: ContainerConfiguration) async throws {
         let agentPort = containerConfig.macosGuest?.agentPort ?? Self.fallbackAgentPort
-        let vsockConnection = try await connectAgent(port: agentPort)
+        let vsockConnection: VZVirtioSocketConnection
+        do {
+            vsockConnection = try await connectAgent(port: agentPort)
+        } catch {
+            let detail = describeError(error)
+            writeContainerLog(Data(("guest-agent connect failed on vsock port \(agentPort): \(detail)\n").utf8))
+            throw ContainerizationError(
+                .internalError,
+                message: """
+                failed to connect to guest agent on vsock port \(agentPort): \(detail)
+                check guest log: /var/log/container-macos-guest-agent.log
+                """
+            )
+        }
+
         let handle = FileHandle(fileDescriptor: vsockConnection.fileDescriptor, closeOnDealloc: false)
         session.vsockConnection = vsockConnection
         session.vsockHandle = handle
@@ -743,7 +802,19 @@ extension MacOSSandboxService {
             workingDirectory: session.config.workingDirectory,
             terminal: session.config.terminal
         )
-        try sendFrameNow(payload, session: session)
+        do {
+            try sendFrameNow(payload, session: session)
+        } catch {
+            let detail = describeError(error)
+            writeContainerLog(Data(("guest-agent send error for \(processID): \(detail)\n").utf8))
+            throw ContainerizationError(
+                .internalError,
+                message: """
+                failed to send exec request to guest agent: \(detail)
+                check guest log: /var/log/container-macos-guest-agent.log
+                """
+            )
+        }
     }
 
     private func connectAgent(port: UInt32) async throws -> VZVirtioSocketConnection {
@@ -754,13 +825,29 @@ extension MacOSSandboxService {
         var lastError: Error?
         for _ in 0..<60 {
             do {
-                return try await socketDevice.connect(toPort: port)
+                return try await connectSocketOnMain(socketDevice, toPort: port)
             } catch {
                 lastError = error
                 try await Task.sleep(nanoseconds: 500_000_000)
             }
         }
         throw lastError ?? ContainerizationError(.timeout, message: "timed out waiting for guest agent on vsock port \(port)")
+    }
+
+    private func connectSocketOnMain(_ socketDevice: VZVirtioSocketDevice, toPort port: UInt32) async throws -> VZVirtioSocketConnection {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VZVirtioSocketConnection, Error>) in
+            DispatchQueue.main.async {
+                socketDevice.connect(toPort: port, completionHandler: { result in
+                    switch result {
+                    case .success(let connection):
+                        nonisolated(unsafe) let unsafeConnection = connection
+                        continuation.resume(returning: unsafeConnection)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                })
+            }
+        }
     }
     #endif
 
@@ -810,13 +897,35 @@ extension MacOSSandboxService {
             }
             do {
                 guard let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty else {
+                    if var session = sessions[processID], session.exitStatus == nil {
+                        let detail = "guest agent disconnected unexpectedly"
+                        if session.streamError == nil {
+                            session.streamError = detail
+                        }
+                        sessions[processID] = session
+                        writeContainerLog(Data(("guest-agent stream closed for \(processID): \(detail)\n").utf8))
+                    }
                     break
                 }
                 try await processIncomingData(chunk, processID: processID)
             } catch {
-                log.error("failed to read guest agent stream", metadata: ["process_id": "\(processID)", "error": "\(error)"])
+                let detail = describeError(error)
+                log.error("failed to read guest agent stream", metadata: ["process_id": "\(processID)", "error": "\(detail)"])
+                if var session = sessions[processID], session.streamError == nil {
+                    session.streamError = detail
+                    sessions[processID] = session
+                }
+                writeContainerLog(Data(("guest-agent stream read failed for \(processID): \(detail)\n").utf8))
                 break
             }
+        }
+
+        if
+            let session = sessions[processID],
+            session.exitStatus == nil,
+            let detail = session.lastAgentError ?? session.streamError
+        {
+            writeContainerLog(Data(("guest-agent failure for \(processID): \(detail)\n").utf8))
         }
 
         let status = sessions[processID]?.exitStatus ?? ExitStatus(exitCode: 1, exitedAt: Date())
@@ -876,6 +985,7 @@ extension MacOSSandboxService {
             }
         case .error:
             let text = frame.message ?? "unknown guest agent error"
+            session.lastAgentError = text
             writeContainerLog(Data(("guest-agent error: \(text)\n").utf8))
         case .ready:
             break
@@ -1004,6 +1114,11 @@ private struct GuestAgentFrame: Codable {
             message: nil
         )
     }
+}
+
+private func describeError(_ error: Error) -> String {
+    let nsError = error as NSError
+    return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
 }
 
 // MARK: - XPC helpers

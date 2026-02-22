@@ -2,15 +2,9 @@ import ContainerizationError
 import ContainerResource
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 
 extension MacOSSandboxService {
-    static let disableSidecarEnv = "CONTAINER_RUNTIME_MACOS_DISABLE_SIDECAR"
-
-    var isSidecarEnabled: Bool {
-        let value = ProcessInfo.processInfo.environment[Self.disableSidecarEnv] ?? ""
-        return value != "1"
-    }
-
     func sidecarSocketPath(config: ContainerConfiguration) -> URL {
         URL(fileURLWithPath: "/tmp/ctrm-sidecar-\(config.id).sock")
     }
@@ -84,15 +78,17 @@ extension MacOSSandboxService {
         try bootstrapLaunchAgent(plistURL: plistURL)
 
         let client = MacOSSidecarClient(socketPath: socketURL.path, log: log)
+        client.setEventHandler { [weak self] event in
+            guard let self else { return }
+            Task {
+                await self.handleSidecarEvent(event)
+            }
+        }
         do {
             writeContainerLog(Data(("sidecar bootstrap start [label=\(launchLabel)] [socket=\(socketURL.path)]\n").utf8))
             try client.bootstrapStart(socketConnectRetries: 120)
             sidecarHandle = SidecarHandle(
                 launchLabel: launchLabel,
-                plistURL: plistURL,
-                socketURL: socketURL,
-                stdoutLogURL: stdoutURL,
-                stderrLogURL: stderrURL,
                 client: client
             )
             writeContainerLog(Data(("sidecar vm bootstrap succeeded [label=\(launchLabel)]\n").utf8))
@@ -123,10 +119,23 @@ extension MacOSSandboxService {
         } catch {
             writeContainerLog(Data(("sidecar bootout failed [label=\(handle.launchLabel)] error=\(String(describing: error))\n").utf8))
         }
+        handle.client.closeControlConnection()
         sidecarHandle = nil
     }
 
-    func connectAgentFileDescriptorViaSidecar(port: UInt32, processID: String) async throws -> Int32 {
+    func sidecarDial(port: UInt32) throws -> FileHandle {
+        guard let sidecarHandle else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        let fd = try sidecarHandle.client.connectVsock(port: port)
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+
+    func startProcessViaSidecarWithRetries(
+        port: UInt32,
+        processID: String,
+        request: MacOSSidecarExecRequestPayload
+    ) async throws {
         guard let sidecarHandle else {
             throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
         }
@@ -136,30 +145,36 @@ extension MacOSSandboxService {
         for attempt in 1...maxAttempts {
             do {
                 if shouldLogSidecarConnectAttempt(attempt, maxAttempts: maxAttempts) {
-                    writeContainerLog(Data(("sidecar vsock connect attempt \(attempt)/\(maxAttempts) for \(processID) on port \(port)\n").utf8))
+                    writeContainerLog(
+                        Data(
+                            ("sidecar process.start attempt \(attempt)/\(maxAttempts) for \(processID) on port \(port)\n").utf8
+                        )
+                    )
                 }
-                let fd = try sidecarHandle.client.connectVsock(port: port)
+                try sidecarHandle.client.processStart(port: port, processID: processID, request: request)
                 if shouldLogSidecarConnectAttempt(attempt, maxAttempts: maxAttempts) {
-                    writeContainerLog(Data(("sidecar vsock connect attempt \(attempt)/\(maxAttempts) succeeded for \(processID) on port \(port)\n").utf8))
+                    writeContainerLog(
+                        Data(
+                            ("sidecar process.start attempt \(attempt)/\(maxAttempts) succeeded for \(processID) on port \(port)\n").utf8
+                        )
+                    )
                 }
-                return fd
+                return
             } catch {
                 lastError = error
                 if shouldLogSidecarConnectAttempt(attempt, maxAttempts: maxAttempts) {
-                    writeContainerLog(Data(("sidecar vsock connect attempt \(attempt)/\(maxAttempts) failed for \(processID): \(String(describing: error))\n").utf8))
+                    writeContainerLog(
+                        Data(
+                            ("sidecar process.start attempt \(attempt)/\(maxAttempts) failed for \(processID): \(String(describing: error))\n").utf8
+                        )
+                    )
                 }
-                try? await Task.sleep(nanoseconds: 500_000_000)
+                if attempt < maxAttempts {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
             }
         }
-        throw lastError ?? ContainerizationError(.timeout, message: "timed out waiting for sidecar vsock connect on port \(port)")
-    }
-
-    func sidecarDial(port: UInt32) throws -> FileHandle {
-        guard let sidecarHandle else {
-            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
-        }
-        let fd = try sidecarHandle.client.connectVsock(port: port)
-        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        throw lastError ?? ContainerizationError(.timeout, message: "timed out waiting for sidecar process.start on port \(port)")
     }
 
     func writeSidecarLaunchAgentPlist(

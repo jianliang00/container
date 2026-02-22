@@ -4,9 +4,12 @@ import Foundation
 public enum MacOSSidecarMethod: String, Codable, Sendable {
     case vmBootstrapStart = "vm.bootstrapStart"
     case vmConnectVsock = "vm.connectVsock"
-    case processExecSync = "process.execSync"
+    case processStart = "process.start"
+    case processStdin = "process.stdin"
+    case processSignal = "process.signal"
+    case processResize = "process.resize"
+    case processClose = "process.close"
     case vmStop = "vm.stop"
-    case vmState = "vm.state"
     case sidecarQuit = "sidecar.quit"
 }
 
@@ -16,33 +19,22 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
     public let environment: [String]?
     public let workingDirectory: String?
     public let terminal: Bool
+    public let stdin: Data?
 
     public init(
         executable: String,
         arguments: [String] = [],
         environment: [String]? = nil,
         workingDirectory: String? = nil,
-        terminal: Bool = false
+        terminal: Bool = false,
+        stdin: Data? = nil
     ) {
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
         self.workingDirectory = workingDirectory
         self.terminal = terminal
-    }
-}
-
-public struct MacOSSidecarExecResultPayload: Codable, Sendable {
-    public let exitCode: Int32
-    public let stdout: Data
-    public let stderr: Data
-    public let agentError: String?
-
-    public init(exitCode: Int32, stdout: Data, stderr: Data, agentError: String? = nil) {
-        self.exitCode = exitCode
-        self.stdout = stdout
-        self.stderr = stderr
-        self.agentError = agentError
+        self.stdin = stdin
     }
 }
 
@@ -50,18 +42,33 @@ public struct MacOSSidecarRequest: Codable, Sendable {
     public let requestID: String
     public let method: MacOSSidecarMethod
     public let port: UInt32?
+    public let processID: String?
     public let exec: MacOSSidecarExecRequestPayload?
+    public let data: Data?
+    public let signal: Int32?
+    public let width: UInt16?
+    public let height: UInt16?
 
     public init(
         requestID: String = UUID().uuidString,
         method: MacOSSidecarMethod,
         port: UInt32? = nil,
-        exec: MacOSSidecarExecRequestPayload? = nil
+        processID: String? = nil,
+        exec: MacOSSidecarExecRequestPayload? = nil,
+        data: Data? = nil,
+        signal: Int32? = nil,
+        width: UInt16? = nil,
+        height: UInt16? = nil
     ) {
         self.requestID = requestID
         self.method = method
         self.port = port
+        self.processID = processID
         self.exec = exec
+        self.data = data
+        self.signal = signal
+        self.width = width
+        self.height = height
     }
 }
 
@@ -80,38 +87,91 @@ public struct MacOSSidecarErrorPayload: Codable, Sendable {
 public struct MacOSSidecarResponse: Codable, Sendable {
     public let requestID: String
     public let ok: Bool
-    public let state: String?
     public let fdAttached: Bool?
-    public let execResult: MacOSSidecarExecResultPayload?
     public let error: MacOSSidecarErrorPayload?
 
     public init(
         requestID: String,
         ok: Bool,
-        state: String? = nil,
         fdAttached: Bool? = nil,
-        execResult: MacOSSidecarExecResultPayload? = nil,
         error: MacOSSidecarErrorPayload? = nil
     ) {
         self.requestID = requestID
         self.ok = ok
-        self.state = state
         self.fdAttached = fdAttached
-        self.execResult = execResult
         self.error = error
     }
 
     public static func success(
         requestID: String,
-        state: String? = nil,
-        fdAttached: Bool? = nil,
-        execResult: MacOSSidecarExecResultPayload? = nil
+        fdAttached: Bool? = nil
     ) -> Self {
-        .init(requestID: requestID, ok: true, state: state, fdAttached: fdAttached, execResult: execResult, error: nil)
+        .init(requestID: requestID, ok: true, fdAttached: fdAttached, error: nil)
     }
 
     public static func failure(requestID: String, code: String, message: String, details: String? = nil) -> Self {
-        .init(requestID: requestID, ok: false, state: nil, fdAttached: nil, execResult: nil, error: .init(code: code, message: message, details: details))
+        .init(requestID: requestID, ok: false, fdAttached: nil, error: .init(code: code, message: message, details: details))
+    }
+}
+
+public enum MacOSSidecarEventType: String, Codable, Sendable {
+    case processStdout = "process.stdout"
+    case processStderr = "process.stderr"
+    case processExit = "process.exit"
+    case processError = "process.error"
+}
+
+public struct MacOSSidecarEvent: Codable, Sendable {
+    public let event: MacOSSidecarEventType
+    public let processID: String
+    public let data: Data?
+    public let exitCode: Int32?
+    public let message: String?
+
+    public init(
+        event: MacOSSidecarEventType,
+        processID: String,
+        data: Data? = nil,
+        exitCode: Int32? = nil,
+        message: String? = nil
+    ) {
+        self.event = event
+        self.processID = processID
+        self.data = data
+        self.exitCode = exitCode
+        self.message = message
+    }
+}
+
+public enum MacOSSidecarEnvelopeKind: String, Codable, Sendable {
+    case request
+    case response
+    case event
+}
+
+public struct MacOSSidecarEnvelope: Codable, Sendable {
+    public let kind: MacOSSidecarEnvelopeKind
+    public let request: MacOSSidecarRequest?
+    public let response: MacOSSidecarResponse?
+    public let event: MacOSSidecarEvent?
+
+    public init(kind: MacOSSidecarEnvelopeKind, request: MacOSSidecarRequest? = nil, response: MacOSSidecarResponse? = nil, event: MacOSSidecarEvent? = nil) {
+        self.kind = kind
+        self.request = request
+        self.response = response
+        self.event = event
+    }
+
+    public static func request(_ request: MacOSSidecarRequest) -> Self {
+        .init(kind: .request, request: request)
+    }
+
+    public static func response(_ response: MacOSSidecarResponse) -> Self {
+        .init(kind: .response, response: response)
+    }
+
+    public static func event(_ event: MacOSSidecarEvent) -> Self {
+        .init(kind: .event, event: event)
     }
 }
 

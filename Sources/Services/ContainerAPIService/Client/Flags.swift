@@ -125,15 +125,10 @@ public struct Flags {
     }
 
     public struct Management: ParsableArguments {
-        public enum SnapshotMode: String, ExpressibleByArgument {
-            case on
-            case off
-        }
-
         public init() {}
 
         @Option(name: .shortAndLong, help: "Set arch if image can target multiple architectures")
-        public var arch: String = Arch.hostArchitecture().rawValue
+        public var arch: String?
 
         @Option(name: .long, help: "Write the container ID to the path provided")
         public var cidfile = ""
@@ -185,7 +180,7 @@ public struct Flags {
         public var dnsDisabled = false
 
         @Option(name: .long, help: "Set OS if image can target multiple operating systems")
-        public var os = "linux"
+        public var os: String?
 
         @Option(
             name: [.customShort("p"), .customLong("publish")],
@@ -233,11 +228,8 @@ public struct Flags {
         @Flag(name: .long, help: "Mount the container's root filesystem as read-only")
         public var readOnly = false
 
-        @Option(name: .long, help: "Set the runtime handler for the container (default: inferred from --os)")
+        @Option(name: .long, help: "Set the runtime handler for the container (default: inferred from image platform)")
         public var runtime: String?
-
-        @Option(name: .long, help: "Enable or disable VM snapshot save/restore (format: on|off)")
-        public var snapshot: SnapshotMode = .off
 
         @Flag(name: .long, help: "Show the guest VM in a local GUI window (macOS guest runtime only)")
         public var gui = false

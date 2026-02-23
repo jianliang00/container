@@ -2,9 +2,9 @@
 
 本文档面向需要维护或扩展 macOS guest 功能的开发者，说明当前实现的架构、关键数据流、控制协议、并发模型与已知约束。
 
-本文档关注“技术方案细节”，不覆盖模板制作与日常排障操作步骤。操作流程请参考：
+本文档关注“技术方案细节”，不覆盖镜像制作与日常排障操作步骤。操作流程请参考：
 
-- `docs/macos-guest-agent-package-push.md`
+- `docs/macos-guest-image-prepare.md`
 - `docs/macos-guest-development-debugging.md`
 
 ## 1. 目标与背景
@@ -65,9 +65,9 @@
 
 实测表明：
 
-- 纯 `headless`（无显示设备）在某些模板上会导致 guest-agent vsock 连接异常（reset）
+- 纯 `headless`（无显示设备）在某些镜像上会导致 guest-agent vsock 连接异常（reset）
 - “无窗口但保留显示设备”显著改善稳定性
-- helper/XPC 上下文内直接承载 VM 即使保留显示设备，也可能与 `manual-template-vm` 表现不同
+- helper/XPC 上下文内直接承载 VM 即使保留显示设备，也可能与 `macos-vm-manager` 表现不同
 
 因此当前方案固定为：
 
@@ -78,8 +78,8 @@
 ### 3.2 运行模式对比
 
 - `container-runtime-macos-sidecar`：默认使用 headless-display（无窗口、有显示设备）
-- `manual-template-vm --headless-display`：用于复现实验和对照验证
-- `manual-template-vm --headless`：保留为问题复现工具，不作为推荐路径
+- `macos-vm-manager start --headless-display`：用于复现实验和对照验证
+- `macos-vm-manager start --headless`：保留为问题复现工具，不作为推荐路径
 
 ## 4. Build / Packaging 集成点
 
@@ -198,7 +198,7 @@ helper 会在容器 root 下生成 sidecar plist（示例字段）：
 
 `bootstrap` 路径（高层顺序）：
 
-1. helper 准备容器 bundle（模板文件 clone/copy + config）
+1. helper 准备容器 bundle（镜像文件 clone/copy + config）
 2. helper 打开容器 `stdio.log` / `vminitd.log`
 3. helper 生成 sidecar LaunchAgent plist
 4. helper `bootout` 旧 unit（best effort）并删除旧 socket
@@ -367,7 +367,7 @@ sidecar 会记录 host context 信息（screens、session、launch label 等）�
 
 ### 9.3 VM 配置（当前实现）
 
-sidecar 使用容器 root 中的模板文件：
+sidecar 使用容器 root 中的镜像文件：
 
 - `Disk.img`
 - `AuxiliaryStorage`
@@ -483,7 +483,7 @@ sidecar `process.start` 处理流程：
 ### 11.1 `container run --os darwin ...` 高层时序（简化）
 
 1. APIServer 调用 runtime helper `bootstrap`
-2. helper 准备容器 root 与模板文件
+2. helper 准备容器 root 与镜像文件
 3. helper 启动 sidecar LaunchAgent
 4. helper `vm.bootstrapStart`
 5. APIServer 调用 `createProcess`（init process）
@@ -659,7 +659,7 @@ helper 在 `startProcess` 场景会进一步包装错误消息，增加：
 再配合：
 
 - `docs/macos-guest-development-debugging.md`（排障方法）
-- `docs/macos-guest-agent-package-push.md`（模板制作/打包链路）
+- `docs/macos-guest-image-prepare.md`（镜像制作/打包链路）
 
 ## 18. 总结
 

@@ -23,36 +23,36 @@ struct MacOSOCIFormatTests {
     @Test
     func parseRequiredMacOSLayersFromManifest() throws {
         let manifestJSON = """
-        {
-          "schemaVersion": 2,
-          "mediaType": "application/vnd.oci.image.manifest.v1+json",
-          "config": {
-            "mediaType": "application/vnd.oci.image.config.v1+json",
-            "digest": "sha256:config",
-            "size": 1
-          },
-          "layers": [
             {
-              "mediaType": "\(MacOSTemplateOCIMediaTypes.hardwareModel)",
-              "digest": "sha256:hardware",
-              "size": 10
-            },
-            {
-              "mediaType": "\(MacOSTemplateOCIMediaTypes.auxiliaryStorage)",
-              "digest": "sha256:aux",
-              "size": 20
-            },
-            {
-              "mediaType": "\(MacOSTemplateOCIMediaTypes.diskImage)",
-              "digest": "sha256:disk",
-              "size": 30
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.oci.image.manifest.v1+json",
+              "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:config",
+                "size": 1
+              },
+              "layers": [
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.hardwareModel)",
+                  "digest": "sha256:hardware",
+                  "size": 10
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.auxiliaryStorage)",
+                  "digest": "sha256:aux",
+                  "size": 20
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.diskImage)",
+                  "digest": "sha256:disk",
+                  "size": 30
+                }
+              ]
             }
-          ]
-        }
-        """
+            """
 
         let manifest = try JSONDecoder().decode(Manifest.self, from: Data(manifestJSON.utf8))
-        let layers = try MacOSTemplateLayers(manifest: manifest)
+        let layers = try MacOSImageLayers(manifest: manifest)
 
         #expect(layers.hardwareModel.digest == "sha256:hardware")
         #expect(layers.auxiliaryStorage.digest == "sha256:aux")
@@ -62,26 +62,26 @@ struct MacOSOCIFormatTests {
     @Test
     func missingLayerFailsValidation() throws {
         let manifestJSON = """
-        {
-          "schemaVersion": 2,
-          "mediaType": "application/vnd.oci.image.manifest.v1+json",
-          "config": {
-            "mediaType": "application/vnd.oci.image.config.v1+json",
-            "digest": "sha256:config",
-            "size": 1
-          },
-          "layers": [
             {
-              "mediaType": "\(MacOSTemplateOCIMediaTypes.hardwareModel)",
-              "digest": "sha256:hardware",
-              "size": 10
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.oci.image.manifest.v1+json",
+              "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:config",
+                "size": 1
+              },
+              "layers": [
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.hardwareModel)",
+                  "digest": "sha256:hardware",
+                  "size": 10
+                }
+              ]
             }
-          ]
-        }
-        """
+            """
         let manifest = try JSONDecoder().decode(Manifest.self, from: Data(manifestJSON.utf8))
-        #expect(throws: MacOSTemplateFormatError.self) {
-            _ = try MacOSTemplateLayers(manifest: manifest)
+        #expect(throws: MacOSImageFormatError.self) {
+            _ = try MacOSImageLayers(manifest: manifest)
         }
     }
 }

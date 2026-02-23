@@ -16,8 +16,8 @@
 
 import ArgumentParser
 import ContainerAPIClient
-import ContainerizationError
 import ContainerVersion
+import ContainerizationError
 import Foundation
 
 extension Application {
@@ -26,7 +26,7 @@ extension Application {
 
         public static let configuration = CommandConfiguration(
             commandName: "prepare-base",
-            abstract: "Create a macOS guest template directory from an IPSW restore image"
+            abstract: "Create a macOS guest image directory from an IPSW restore image"
         )
 
         private static let helperBinaryName = "container-macos-image-prepare"
@@ -44,7 +44,7 @@ extension Application {
 
         @Option(
             name: .shortAndLong,
-            help: "Output template directory",
+            help: "Output image directory",
             completion: .directory,
             transform: { str in
                 URL(fileURLWithPath: str, relativeTo: .currentDirectory()).absoluteURL
@@ -151,7 +151,8 @@ extension Application {
             let candidatePaths = candidates.map { "  - \($0.path(percentEncoded: false))" }.joined(separator: "\n")
             throw ContainerizationError(
                 .notFound,
-                message: "\(Self.helperBinaryName) not found. Install it under the macos-image-prepare helper directory or set \(Self.helperBinaryEnvVar). Checked:\n\(candidatePaths)"
+                message:
+                    "\(Self.helperBinaryName) not found. Install it under the macos-image-prepare helper directory or set \(Self.helperBinaryEnvVar). Checked:\n\(candidatePaths)"
             )
         }
     }

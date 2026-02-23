@@ -1,5 +1,5 @@
-import ContainerizationError
 import ContainerResource
+import ContainerizationError
 import Darwin
 import Foundation
 import RuntimeMacOSSidecarShared

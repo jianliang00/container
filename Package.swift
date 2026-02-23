@@ -412,7 +412,7 @@ let package = Package(
         .executableTarget(
             name: "container-macos-guest-agent",
             dependencies: [
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
             ],
             path: "Sources/Helpers/MacOSGuestAgent"
         ),
@@ -433,7 +433,7 @@ let package = Package(
         .testTarget(
             name: "RuntimeMacOSSidecarSharedTests",
             dependencies: [
-                "RuntimeMacOSSidecarShared",
+                "RuntimeMacOSSidecarShared"
             ],
             path: "Tests/RuntimeMacOSSidecarSharedTests"
         ),

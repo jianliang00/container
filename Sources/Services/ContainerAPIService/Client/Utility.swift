@@ -99,10 +99,7 @@ public struct Utility {
             requestedPlatform = try Parser.platform(from: platform)
         }
         let canAutoDetectPlatformFromImage =
-            management.os == nil &&
-            management.arch == nil &&
-            management.platform == nil &&
-            management.runtime == nil
+            management.os == nil && management.arch == nil && management.platform == nil && management.runtime == nil
 
         var prefetchedImage: ClientImage?
         if canAutoDetectPlatformFromImage {
@@ -246,7 +243,7 @@ public struct Utility {
             defaultMemory: containerSystemConfig.container.memory
         )
         if isMacOSRuntime, resource.memory == nil {
-            // macOS guest templates commonly need substantially more memory than the global
+            // macOS guest images commonly need substantially more memory than the global
             // container default (1 GiB) to boot the guest-agent reliably.
             config.resources.memoryInBytes = max(config.resources.memoryInBytes, 8192.mib())
         }

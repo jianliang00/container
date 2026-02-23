@@ -18,19 +18,19 @@ import ContainerResource
 import CryptoKit
 import Foundation
 
-enum MacOSTemplatePackager {
+enum MacOSImagePackager {
     static let diskImageFilename = "Disk.img"
     static let auxiliaryStorageFilename = "AuxiliaryStorage"
     static let hardwareModelFilename = "HardwareModel.bin"
 
-    struct TemplatePaths {
+    struct ImagePaths {
         let root: URL
         let diskImage: URL
         let auxiliaryStorage: URL
         let hardwareModel: URL
     }
 
-    static func validateTemplateDirectory(_ path: URL) throws -> TemplatePaths {
+    static func validateImageDirectory(_ path: URL) throws -> ImagePaths {
         let root = path.standardizedFileURL
         let diskImage = root.appendingPathComponent(diskImageFilename)
         let auxiliaryStorage = root.appendingPathComponent(auxiliaryStorageFilename)
@@ -45,19 +45,19 @@ enum MacOSTemplatePackager {
     }
 
     static func package(
-        templateDirectory: URL,
+        imageDirectory: URL,
         outputTar: URL,
         reference: String?
     ) throws {
-        let template = try validateTemplateDirectory(templateDirectory)
-        let layoutDir = try createLayoutDirectory(from: template, reference: reference)
+        let image = try validateImageDirectory(imageDirectory)
+        let layoutDir = try createLayoutDirectory(from: image, reference: reference)
         defer {
             try? FileManager.default.removeItem(at: layoutDir)
         }
         try createTar(fromLayout: layoutDir, outputTar: outputTar)
     }
 
-    private static func createLayoutDirectory(from template: TemplatePaths, reference: String?) throws -> URL {
+    private static func createLayoutDirectory(from image: ImagePaths, reference: String?) throws -> URL {
         let fm = FileManager.default
         let layoutDir = fm.temporaryDirectory.appendingPathComponent("macos-oci-layout-\(UUID().uuidString)")
         let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
@@ -74,19 +74,19 @@ enum MacOSTemplatePackager {
         let config = try writeJSONBlob(configData, blobsDir: blobsDir, mediaType: "application/vnd.oci.image.config.v1+json")
 
         let hardware = try addFileBlob(
-            source: template.hardwareModel,
+            source: image.hardwareModel,
             blobsDir: blobsDir,
-            mediaType: MacOSTemplateOCIMediaTypes.hardwareModel
+            mediaType: MacOSImageOCIMediaTypes.hardwareModel
         )
         let auxiliary = try addFileBlob(
-            source: template.auxiliaryStorage,
+            source: image.auxiliaryStorage,
             blobsDir: blobsDir,
-            mediaType: MacOSTemplateOCIMediaTypes.auxiliaryStorage
+            mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage
         )
         let disk = try addFileBlob(
-            source: template.diskImage,
+            source: image.diskImage,
             blobsDir: blobsDir,
-            mediaType: MacOSTemplateOCIMediaTypes.diskImage
+            mediaType: MacOSImageOCIMediaTypes.diskImage
         )
 
         let manifestValue = OCIManifest(

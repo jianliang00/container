@@ -22,7 +22,7 @@ extension Application {
 
         public static let configuration = CommandConfiguration(
             commandName: "macos",
-            abstract: "Manage macOS guest templates",
+            abstract: "Manage macOS guest images",
             subcommands: [
                 MacOSPrepareBase.self,
                 MacOSPackage.self,

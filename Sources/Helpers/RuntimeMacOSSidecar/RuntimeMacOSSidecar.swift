@@ -200,6 +200,14 @@ private struct SidecarGuestAgentFrame: Codable {
 }
 
 actor MacOSSidecarService {
+    private final class UnsafeSendableBox<T>: @unchecked Sendable {
+        let value: T
+
+        init(_ value: T) {
+            self.value = value
+        }
+    }
+
     private final class BlockingResultBox<T>: @unchecked Sendable {
         var result: Result<T, Error>?
     }
@@ -241,6 +249,8 @@ actor MacOSSidecarService {
     private var vm: VZVirtualMachine?
     private var vmConfiguration: VZVirtualMachineConfiguration?
     private var vmDelegate: VMDelegate?
+    private var vmWindow: UnsafeSendableBox<NSWindow>?
+    private var vmWindowView: UnsafeSendableBox<VZVirtualMachineView>?
     private var state: State = .created
 
     init(rootURL: URL, log: Logging.Logger) {
@@ -256,9 +266,11 @@ actor MacOSSidecarService {
 
         log.info("bootstrapStart: loading container config")
         let config = try loadContainerConfiguration()
+        let guiEnabled = config.macosGuest?.guiEnabled ?? false
         log.info("bootstrapStart: building vm configuration", metadata: [
             "cpus": "\(config.resources.cpus)",
             "memory": "\(config.resources.memoryInBytes)",
+            "gui_enabled": "\(guiEnabled)",
         ])
         let vmConfiguration = try makeVirtualMachineConfiguration(containerConfig: config)
         self.vmConfiguration = vmConfiguration
@@ -268,8 +280,19 @@ actor MacOSSidecarService {
         let vm = created.vm
         self.vmDelegate = created.delegate
         self.vm = vm
-        log.info("bootstrapStart: starting vm")
-        try await startVirtualMachine(vm)
+        if guiEnabled {
+            try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
+        }
+        log.info("bootstrapStart: starting vm", metadata: ["gui_enabled": "\(guiEnabled)"])
+        do {
+            try await startVirtualMachine(vm)
+        } catch {
+            await closeGUIWindowOnMain()
+            self.vm = nil
+            self.vmConfiguration = nil
+            self.vmDelegate = nil
+            throw error
+        }
         try await validateSocketDeviceAvailable(on: vm)
         state = .running
         log.info("vm started", metadata: ["state": "\(state.rawValue)"])
@@ -281,6 +304,7 @@ actor MacOSSidecarService {
             return
         }
         try await stopVirtualMachine(vm)
+        await closeGUIWindowOnMain()
         self.vm = nil
         self.vmConfiguration = nil
         self.vmDelegate = nil
@@ -380,6 +404,10 @@ actor MacOSSidecarService {
         vmConfiguration.networkDevices = [createNATDevice()]
         vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         vmConfiguration.graphicsDevices = [createGraphicsDevice()]
+        if containerConfig.macosGuest?.guiEnabled == true {
+            vmConfiguration.keyboards = [VZUSBKeyboardConfiguration()]
+            vmConfiguration.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
+        }
         try vmConfiguration.validate()
         return vmConfiguration
     }
@@ -413,6 +441,63 @@ actor MacOSSidecarService {
         return graphics
     }
 
+    private func presentGUIWindowOnMain(vm: VZVirtualMachine, containerID: String) async throws {
+        let vmBox = UnsafeSendableBox(vm)
+        let title = "Container macOS Guest (\(String(containerID.prefix(12))))"
+        let created = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<(UnsafeSendableBox<NSWindow>, UnsafeSendableBox<VZVirtualMachineView>), Error>) in
+            DispatchQueue.main.async {
+                let app = NSApplication.shared
+                guard app.setActivationPolicy(.regular) else {
+                    continuation.resume(
+                        throwing: ContainerizationError(.internalError, message: "failed to enable GUI activation policy")
+                    )
+                    return
+                }
+
+                let frame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+                let window = NSWindow(
+                    contentRect: frame,
+                    styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                    backing: .buffered,
+                    defer: false
+                )
+                window.title = title
+                window.minSize = NSSize(width: 800, height: 500)
+                window.center()
+
+                let vmView = VZVirtualMachineView(frame: frame)
+                vmView.virtualMachine = vmBox.value
+                vmView.capturesSystemKeys = true
+                vmView.autoresizingMask = [.width, .height]
+
+                window.contentView = vmView
+                window.makeKeyAndOrderFront(nil)
+                app.activate(ignoringOtherApps: true)
+                continuation.resume(returning: (UnsafeSendableBox(window), UnsafeSendableBox(vmView)))
+            }
+        }
+        vmWindow = created.0
+        vmWindowView = created.1
+    }
+
+    private func closeGUIWindowOnMain() async {
+        let windowBox = vmWindow
+        vmWindow = nil
+        vmWindowView = nil
+        guard let windowBox else { return }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async {
+                windowBox.value.orderOut(nil)
+                windowBox.value.contentView = nil
+                windowBox.value.close()
+                _ = NSApplication.shared.setActivationPolicy(.prohibited)
+                continuation.resume()
+            }
+        }
+    }
+
     private func loadOrCreateMachineIdentifier(at path: URL) throws -> VZMacMachineIdentifier {
         if FileManager.default.fileExists(atPath: path.path) {
             let data = try Data(contentsOf: path)
@@ -426,10 +511,12 @@ actor MacOSSidecarService {
     }
 
     private func startVirtualMachine(_ vm: VZVirtualMachine) async throws {
-        nonisolated(unsafe) let unsafeVM = vm
+        // Virtualization callbacks must be invoked on the main queue. We wrap the VM reference
+        // so the compiler knows we are intentionally transferring it to that queue.
+        let vmBox = UnsafeSendableBox(vm)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.main.async {
-                unsafeVM.start { result in
+                vmBox.value.start { result in
                     continuation.resume(with: result)
                 }
             }
@@ -437,12 +524,12 @@ actor MacOSSidecarService {
     }
 
     private func createVirtualMachineOnMain(configuration: VZVirtualMachineConfiguration) async throws -> CreatedVM {
-        nonisolated(unsafe) let unsafeConfiguration = configuration
+        let configurationBox = UnsafeSendableBox(configuration)
         let log = self.log
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CreatedVM, Error>) in
             DispatchQueue.main.async {
                 log.info("creating vm on main thread")
-                let vm = VZVirtualMachine(configuration: unsafeConfiguration)
+                let vm = VZVirtualMachine(configuration: configurationBox.value)
                 let delegate = VMDelegate(log: log)
                 vm.delegate = delegate
                 continuation.resume(returning: CreatedVM(vm: vm, delegate: delegate))
@@ -451,10 +538,10 @@ actor MacOSSidecarService {
     }
 
     private func stopVirtualMachine(_ vm: VZVirtualMachine) async throws {
-        nonisolated(unsafe) let unsafeVM = vm
+        let vmBox = UnsafeSendableBox(vm)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.main.async {
-                unsafeVM.stop { error in
+                vmBox.value.stop { error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
@@ -470,7 +557,7 @@ actor MacOSSidecarService {
         toPort port: UInt32,
         timeoutSeconds: TimeInterval
     ) async throws -> VZVirtioSocketConnection {
-        nonisolated(unsafe) let unsafeVM = vm
+        let vmBox = UnsafeSendableBox(vm)
         let log = self.log
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VZVirtioSocketConnection, Error>) in
             let gate = CompletionGate()
@@ -488,7 +575,7 @@ actor MacOSSidecarService {
             }
             DispatchQueue.main.async {
                 log.info("sidecar issuing vsock connect on main queue", metadata: ["port": "\(port)"])
-                guard let socketDevice = unsafeVM.socketDevices.compactMap({ $0 as? VZVirtioSocketDevice }).first else {
+                guard let socketDevice = vmBox.value.socketDevices.compactMap({ $0 as? VZVirtioSocketDevice }).first else {
                     log.error("sidecar vsock connect missing socket device", metadata: ["port": "\(port)"])
                     guard gate.tryComplete() else { return }
                     continuation.resume(
@@ -517,10 +604,10 @@ actor MacOSSidecarService {
     }
 
     private func validateSocketDeviceAvailable(on vm: VZVirtualMachine) async throws {
-        nonisolated(unsafe) let unsafeVM = vm
+        let vmBox = UnsafeSendableBox(vm)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.main.async {
-                let hasSocketDevice = unsafeVM.socketDevices.contains { $0 is VZVirtioSocketDevice }
+                let hasSocketDevice = vmBox.value.socketDevices.contains { $0 is VZVirtioSocketDevice }
                 if hasSocketDevice {
                     continuation.resume(returning: ())
                 } else {

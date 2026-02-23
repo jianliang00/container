@@ -848,6 +848,19 @@ struct ParserTest {
     }
 
     @Test
+    func testManagementFlagsParseGUI() throws {
+        let managementFlags = try Flags.Management.parse(["--gui"])
+        #expect(managementFlags.gui)
+    }
+
+    @Test
+    func testManagementFlagsRejectRemovedSnapshotFlag() {
+        #expect(throws: Error.self) {
+            _ = try Flags.Management.parse(["--snapshot", "on"])
+        }
+    }
+
+    @Test
     func testUlimitParserSoftAndHard() throws {
         let result = try Parser.rlimits(["nofile=1024:2048"])
         #expect(result.count == 1)

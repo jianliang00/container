@@ -373,6 +373,9 @@ extension ClientImage {
 // MARK: Instance methods
 
 extension ClientImage {
+    private static let dockerReferenceTypeAnnotation = "vnd.docker.reference.type"
+    private static let attestationManifestReferenceType = "attestation-manifest"
+
     public func push(platform: Platform? = nil, scheme: RequestScheme, progressUpdate: ProgressUpdateHandler?) async throws {
         let client = Self.newXPCClient()
         let request = Self.newRequest(.imagePush)
@@ -458,6 +461,55 @@ extension ClientImage {
             try await self.unpack(platform: platform, progressUpdate: progressUpdate)
             return try await self.getSnapshot(platform: platform)
         }
+    }
+
+    /// Best-effort list of image platforms for runtime auto-detection.
+    /// Falls back to reading manifest config when the index descriptor omits `platform`.
+    func availablePlatformsForRuntimeAutoDetect() async throws -> [Platform] {
+        let index = try await self.index()
+        var seen = Set<Platform>()
+        var platforms: [Platform] = []
+
+        for descriptor in index.manifests {
+            if descriptor.annotations?[Self.dockerReferenceTypeAnnotation] == Self.attestationManifestReferenceType {
+                continue
+            }
+
+            if let platform = descriptor.platform {
+                if seen.insert(platform).inserted {
+                    platforms.append(platform)
+                }
+                continue
+            }
+
+            guard let platform = try await self.platformFromManifestDescriptor(descriptor) else {
+                continue
+            }
+            if seen.insert(platform).inserted {
+                platforms.append(platform)
+            }
+        }
+
+        return platforms
+    }
+
+    private func platformFromManifestDescriptor(_ descriptor: Descriptor) async throws -> Platform? {
+        guard let content: Content = try await contentStore.get(digest: descriptor.digest) else {
+            return nil
+        }
+        let manifest: Manifest = try content.decode()
+
+        guard let configContent: Content = try await contentStore.get(digest: manifest.config.digest) else {
+            return nil
+        }
+        let config: ContainerizationOCI.Image = try configContent.decode()
+        return .init(
+            arch: config.architecture,
+            os: config.os,
+            osVersion: config.osVersion,
+            osFeatures: config.osFeatures,
+            variant: config.variant
+        )
     }
 }
 

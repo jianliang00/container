@@ -106,6 +106,7 @@ $(STAGING_DIR):
 	@install "$(BUILD_BIN_DIR)/container-runtime-linux" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
 	@install config/container-runtime-linux-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/config.json)"
 	@install "$(BUILD_BIN_DIR)/container-runtime-macos" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
+	@install "$(BUILD_BIN_DIR)/container-runtime-macos-sidecar" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar)"
 	@install config/container-runtime-macos-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/config.json)"
 	@install "$(BUILD_BIN_DIR)/container-network-vmnet" "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet)"
 	@install config/container-network-vmnet-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/config.json)"
@@ -124,6 +125,7 @@ installer-pkg: $(STAGING_DIR)
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin/container-core-images)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-linux.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
+	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-network-vmnet.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
 
@@ -138,6 +140,7 @@ dsym:
 	@mkdir -p "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-runtime-linux.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-runtime-macos.dSYM" "$(DSYM_DIR)"
+	@cp -a "$(BUILD_BIN_DIR)/container-runtime-macos-sidecar.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-network-vmnet.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-core-images.dSYM" "$(DSYM_DIR)"
 	@cp -a "$(BUILD_BIN_DIR)/container-apiserver.dSYM" "$(DSYM_DIR)"

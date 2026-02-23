@@ -130,4 +130,42 @@ struct UtilityTests {
             _ = try Utility.resolveRuntimeHandler(platform: platform, explicitRuntime: "container-runtime-linux")
         }
     }
+
+    @Test("Management flags do not set os/arch when omitted")
+    func testManagementFlagsLeavePlatformUnsetByDefault() throws {
+        let flags = try Flags.Management.parse([])
+        #expect(flags.os == nil)
+        #expect(flags.arch == nil)
+    }
+
+    @Test("Auto-detect macOS guest platform from darwin-only image")
+    func testAutoDetectMacOSGuestPlatform() throws {
+        let override = try Utility.autoDetectedPlatformOverrideIfNeeded(
+            availablePlatforms: [Parser.platform(os: "darwin", arch: "arm64")]
+        )
+        #expect(override == Parser.platform(os: "darwin", arch: "arm64"))
+    }
+
+    @Test("Auto-detect does not override linux-only images")
+    func testAutoDetectDoesNotOverrideLinuxOnlyImage() throws {
+        let override = try Utility.autoDetectedPlatformOverrideIfNeeded(
+            availablePlatforms: [
+                Parser.platform(os: "linux", arch: "arm64"),
+                Parser.platform(os: "linux", arch: "amd64"),
+            ]
+        )
+        #expect(override == nil)
+    }
+
+    @Test("Auto-detect rejects mixed linux and darwin images")
+    func testAutoDetectRejectsMixedOSImage() throws {
+        #expect(throws: ContainerizationError.self) {
+            _ = try Utility.autoDetectedPlatformOverrideIfNeeded(
+                availablePlatforms: [
+                    Parser.platform(os: "linux", arch: "arm64"),
+                    Parser.platform(os: "darwin", arch: "arm64"),
+                ]
+            )
+        }
+    }
 }

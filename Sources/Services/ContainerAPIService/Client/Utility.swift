@@ -29,6 +29,7 @@ public struct Utility {
     static let runtimeLinux = "container-runtime-linux"
     static let runtimeMacOS = "container-runtime-macos"
     static let defaultMacOSGuestAgentPort: UInt32 = 27000
+    static let defaultContainerOS = "linux"
 
     private static let infraImages = [
         DefaultsStore.get(key: .defaultBuilderImage),
@@ -88,11 +89,36 @@ public struct Utility {
         progressUpdate: @escaping ProgressUpdateHandler,
         log: Logger
     ) async throws -> (ContainerConfiguration, Kernel?, String?) {
-        var requestedPlatform = Parser.platform(os: management.os, arch: management.arch)
+        let defaultRequestedPlatform = Parser.platform(
+            os: management.os ?? defaultContainerOS,
+            arch: management.arch ?? Platform.current.architecture
+        )
+        var requestedPlatform = defaultRequestedPlatform
         // Prefer --platform
         if let platform = management.platform {
             requestedPlatform = try Parser.platform(from: platform)
         }
+        let canAutoDetectPlatformFromImage =
+            management.os == nil &&
+            management.arch == nil &&
+            management.platform == nil &&
+            management.runtime == nil
+
+        var prefetchedImage: ClientImage?
+        if canAutoDetectPlatformFromImage {
+            let img = try await ClientImage.fetch(
+                reference: image,
+                platform: nil,
+                scheme: try RequestScheme(registry.scheme),
+                progressUpdate: progressUpdate,
+                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
+            )
+            if let autoDetectedPlatform = try await self.autoDetectPlatformOverride(for: img) {
+                requestedPlatform = autoDetectedPlatform
+            }
+            prefetchedImage = img
+        }
+
         let runtimeHandler = try resolveRuntimeHandler(platform: requestedPlatform, explicitRuntime: management.runtime)
         let isMacOSRuntime = runtimeHandler == runtimeMacOS
 
@@ -121,8 +147,8 @@ public struct Utility {
             if management.rosetta {
                 throw ContainerizationError(.unsupported, message: "--rosetta is not supported for --os darwin")
             }
-        } else if management.snapshot == .on || management.gui {
-            throw ContainerizationError(.unsupported, message: "--snapshot and --gui require --os darwin")
+        } else if management.gui {
+            throw ContainerizationError(.unsupported, message: "--gui requires --os darwin")
         }
 
         let scheme = try RequestScheme(registry.scheme)
@@ -133,13 +159,25 @@ public struct Utility {
         ])
         let taskManager = ProgressTaskCoordinator()
         let fetchTask = await taskManager.startTask()
-        let img = try await ClientImage.fetch(
-            reference: image,
-            platform: requestedPlatform,
-            scheme: scheme,
-            progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
-            maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
-        )
+        let img: ClientImage
+        if let prefetchedImage {
+            img = try await ensureImageHasPlatform(
+                prefetchedImage,
+                reference: image,
+                platform: requestedPlatform,
+                scheme: scheme,
+                progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
+                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
+            )
+        } else {
+            img = try await ClientImage.fetch(
+                reference: image,
+                platform: requestedPlatform,
+                scheme: scheme,
+                progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
+                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
+            )
+        }
 
         if !isMacOSRuntime {
             // Unpack a fetched image before use for Linux runtime.
@@ -312,7 +350,7 @@ public struct Utility {
 
         if isMacOSRuntime {
             config.macosGuest = .init(
-                snapshotEnabled: management.snapshot == .on,
+                snapshotEnabled: false,
                 guiEnabled: management.gui,
                 agentPort: defaultMacOSGuestAgentPort
             )
@@ -352,6 +390,57 @@ public struct Utility {
         }
     }
 
+    static func ensureImageHasPlatform(
+        _ image: ClientImage,
+        reference: String,
+        platform: ContainerizationOCI.Platform,
+        scheme: RequestScheme,
+        progressUpdate: ProgressUpdateHandler?,
+        maxConcurrentDownloads: Int
+    ) async throws -> ClientImage {
+        do {
+            _ = try await image.config(for: platform)
+            return image
+        } catch let error as ContainerizationError {
+            guard error.isCode(.notFound) || error.isCode(.unsupported) else {
+                throw error
+            }
+        }
+        return try await ClientImage.fetch(
+            reference: reference,
+            platform: platform,
+            scheme: scheme,
+            progressUpdate: progressUpdate,
+            maxConcurrentDownloads: maxConcurrentDownloads
+        )
+    }
+
+    static func autoDetectPlatformOverride(for image: ClientImage) async throws -> ContainerizationOCI.Platform? {
+        let platforms = try await image.availablePlatformsForRuntimeAutoDetect()
+        return try autoDetectedPlatformOverrideIfNeeded(availablePlatforms: platforms)
+    }
+
+    static func autoDetectedPlatformOverrideIfNeeded(
+        availablePlatforms: [ContainerizationOCI.Platform]
+    ) throws -> ContainerizationOCI.Platform? {
+        var seen = Set<ContainerizationOCI.Platform>()
+        let uniquePlatforms = availablePlatforms.filter { seen.insert($0).inserted }
+
+        guard let darwinArm64 = uniquePlatforms.first(where: { $0.os == "darwin" && $0.architecture == "arm64" }) else {
+            return nil
+        }
+
+        let availableOSes = Set(uniquePlatforms.map(\.os))
+        if availableOSes.count > 1 {
+            let values = availableOSes.sorted().joined(separator: ", ")
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "image contains multiple operating systems (\(values)); please specify --platform or --os"
+            )
+        }
+
+        return darwinArm64
+    }
     static func getAttachmentConfigurations(
         containerId: String,
         builtinNetworkId: String?,

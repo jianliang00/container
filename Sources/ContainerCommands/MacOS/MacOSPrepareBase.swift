@@ -17,11 +17,8 @@
 import ArgumentParser
 import ContainerAPIClient
 import ContainerizationError
+import ContainerVersion
 import Foundation
-
-#if arch(arm64)
-import Virtualization
-#endif
 
 extension Application {
     public struct MacOSPrepareBase: AsyncLoggableCommand {
@@ -31,6 +28,9 @@ extension Application {
             commandName: "prepare-base",
             abstract: "Create a macOS guest template directory from an IPSW restore image"
         )
+
+        private static let helperBinaryName = "container-macos-image-prepare"
+        private static let helperBinaryEnvVar = "CONTAINER_MACOS_IMAGE_PREPARE_BIN"
 
         @Option(
             name: .long,
@@ -68,166 +68,91 @@ extension Application {
         public var logOptions: Flags.Logging
 
         public func run() async throws {
-            #if arch(arm64)
-            guard FileManager.default.fileExists(atPath: ipsw.path) else {
-                throw ContainerizationError(.notFound, message: "IPSW file not found at \(ipsw.path)")
-            }
+            let helperURL = try helperBinaryURL()
+            let process = Process()
+            process.executableURL = helperURL
+            process.arguments = helperArguments()
+            process.environment = ProcessInfo.processInfo.environment
+            process.standardInput = FileHandle.standardInput
+            process.standardOutput = FileHandle.standardOutput
+            process.standardError = FileHandle.standardError
 
-            let output = output.standardizedFileURL
-            try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-
-            let auxiliaryURL = output.appendingPathComponent(MacOSTemplatePackager.auxiliaryStorageFilename)
-            let diskURL = output.appendingPathComponent(MacOSTemplatePackager.diskImageFilename)
-            let hardwareURL = output.appendingPathComponent(MacOSTemplatePackager.hardwareModelFilename)
-
-            try createDiskImage(path: diskURL, sizeBytes: diskSizeGiB * 1024 * 1024 * 1024, overwrite: overwrite)
-            let hardwareModelData = try await Self.installAndCaptureHardwareModelData(
-                ipsw: ipsw,
-                auxiliaryURL: auxiliaryURL,
-                diskURL: diskURL,
-                overwrite: overwrite,
-                requestedCPUs: cpus,
-                requestedMemoryMiB: memoryMiB
-            )
-
-            if FileManager.default.fileExists(atPath: hardwareURL.path) {
-                if overwrite {
-                    try FileManager.default.removeItem(at: hardwareURL)
-                } else {
-                    throw ContainerizationError(.exists, message: "\(hardwareURL.path) already exists")
-                }
-            }
-            try hardwareModelData.write(to: hardwareURL)
-
-            print(output.path)
-            print("Template prepared. Before packaging, boot once and pre-install container-macos-guest-agent in the guest image.")
-            #else
-            throw ContainerizationError(.unsupported, message: "macOS guest preparation requires an arm64 host")
-            #endif
-        }
-
-        #if arch(arm64)
-        private static func resolveCPUCount(requestedCPUs: Int?, minimum: Int) -> Int {
-            let minAllowed = Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount)
-            let maxAllowed = Int(VZVirtualMachineConfiguration.maximumAllowedCPUCount)
-            let requested = requestedCPUs ?? max(minimum, minAllowed)
-            return max(minAllowed, min(maxAllowed, max(requested, minimum)))
-        }
-
-        private static func resolveMemorySize(requestedMemoryMiB: UInt64, minimum: UInt64) -> UInt64 {
-            let requested = requestedMemoryMiB * 1024 * 1024
-            let minAllowed = VZVirtualMachineConfiguration.minimumAllowedMemorySize
-            let maxAllowed = VZVirtualMachineConfiguration.maximumAllowedMemorySize
-            let clamped = max(minAllowed, min(maxAllowed, requested))
-            return max(clamped, minimum)
-        }
-
-        @MainActor
-        private static func installAndCaptureHardwareModelData(
-            ipsw: URL,
-            auxiliaryURL: URL,
-            diskURL: URL,
-            overwrite: Bool,
-            requestedCPUs: Int?,
-            requestedMemoryMiB: UInt64
-        ) async throws -> Data {
-            let restoreImage = try await VZMacOSRestoreImage.image(from: ipsw)
-            guard let requirements = restoreImage.mostFeaturefulSupportedConfiguration else {
-                throw ContainerizationError(.unsupported, message: "the restore image is not supported on this host")
-            }
-
-            let hardwareModel = requirements.hardwareModel
-            let platform = VZMacPlatformConfiguration()
-            platform.hardwareModel = hardwareModel
-            platform.machineIdentifier = VZMacMachineIdentifier()
-            platform.auxiliaryStorage = try VZMacAuxiliaryStorage(
-                creatingStorageAt: auxiliaryURL,
-                hardwareModel: hardwareModel,
-                options: overwrite ? [.allowOverwrite] : []
-            )
-
-            let vmConfiguration = VZVirtualMachineConfiguration()
-            vmConfiguration.bootLoader = VZMacOSBootLoader()
-            vmConfiguration.platform = platform
-            vmConfiguration.cpuCount = resolveCPUCount(requestedCPUs: requestedCPUs, minimum: requirements.minimumSupportedCPUCount)
-            vmConfiguration.memorySize = resolveMemorySize(requestedMemoryMiB: requestedMemoryMiB, minimum: requirements.minimumSupportedMemorySize)
-            vmConfiguration.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: diskURL, readOnly: false))]
-            vmConfiguration.networkDevices = [createNATNetworkDevice()]
-            // Keep installer device config aligned with OpenBox's successful install path.
-            let graphics = VZMacGraphicsDeviceConfiguration()
-            graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 80)]
-            vmConfiguration.graphicsDevices = [graphics]
-            vmConfiguration.keyboards = [VZUSBKeyboardConfiguration()]
-            vmConfiguration.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
-            try validateVirtualMachineConfiguration(vmConfiguration)
-
-            let vm = VZVirtualMachine(configuration: vmConfiguration)
-            let installer = VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: ipsw)
             do {
-                try await installer.install()
+                try process.run()
             } catch {
-                throw formatInstallError(error)
+                throw ContainerizationError(
+                    .internalError,
+                    message: "failed to start \(Self.helperBinaryName) at \(helperURL.path): \(error.localizedDescription)",
+                    cause: error
+                )
             }
 
-            return hardwareModel.dataRepresentation
-        }
-
-        private static func createNATNetworkDevice() -> VZVirtioNetworkDeviceConfiguration {
-            let device = VZVirtioNetworkDeviceConfiguration()
-            device.attachment = VZNATNetworkDeviceAttachment()
-            return device
-        }
-
-        private static func validateVirtualMachineConfiguration(_ configuration: VZVirtualMachineConfiguration) throws {
-            try configuration.validate()
-        }
-
-        private static func formatInstallError(_ error: any Error) -> ContainerizationError {
-            let nsError = error as NSError
-            var details = ["\(nsError.domain) code \(nsError.code)"]
-
-            if let reason = nsError.localizedFailureReason, !reason.isEmpty {
-                details.append(reason)
-            }
-
-            var remediationHint = ""
-            if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
-                details.append("underlying: \(underlying.domain) code \(underlying.code) \(underlying.localizedDescription)")
-                if let reason = underlying.localizedFailureReason, !reason.isEmpty {
-                    details.append(reason)
+            process.waitUntilExit()
+            switch process.terminationReason {
+            case .exit:
+                if process.terminationStatus != 0 {
+                    throw ArgumentParser.ExitCode(process.terminationStatus)
                 }
-                if underlying.domain == "com.apple.MobileDevice.MobileRestore", underlying.code == 4014 {
-                    remediationHint = " This usually indicates a restore state mismatch (DFU vs RestoreOS). It can also be caused by VPN/proxy/TLS interception blocking Apple restore services."
-                }
+            case .uncaughtSignal:
+                throw ArgumentParser.ExitCode(process.terminationStatus + 128)
+            @unknown default:
+                throw ArgumentParser.ExitCode(1)
             }
-
-            let suffix = details.joined(separator: "; ")
-            return ContainerizationError(
-                .internalError,
-                message: "macOS guest installation failed (\(suffix)).\(remediationHint)",
-                cause: error
-            )
         }
-        #endif
 
-        private func createDiskImage(path: URL, sizeBytes: UInt64, overwrite: Bool) throws {
+        private func helperArguments() -> [String] {
+            var args: [String] = [
+                "--ipsw", ipsw.standardizedFileURL.path,
+                "--output", output.standardizedFileURL.path,
+                "--disk-size-gib", String(diskSizeGiB),
+                "--memory-mib", String(memoryMiB),
+            ]
+
+            if let cpus {
+                args += ["--cpus", String(cpus)]
+            }
+            if overwrite {
+                args.append("--overwrite")
+            }
+            return args
+        }
+
+        private func helperBinaryURL() throws -> URL {
             let fm = FileManager.default
-            if fm.fileExists(atPath: path.path) {
-                if overwrite {
-                    try fm.removeItem(at: path)
-                } else {
-                    throw ContainerizationError(.exists, message: "\(path.path) already exists")
+
+            if let override = ProcessInfo.processInfo.environment[Self.helperBinaryEnvVar], !override.isEmpty {
+                let url = URL(fileURLWithPath: override, relativeTo: .currentDirectory()).absoluteURL
+                if fm.isExecutableFile(atPath: url.path) {
+                    return url
                 }
+                throw ContainerizationError(
+                    .notFound,
+                    message: "\(Self.helperBinaryEnvVar) points to a non-executable file: \(override)"
+                )
             }
 
-            guard fm.createFile(atPath: path.path, contents: nil) else {
-                throw ContainerizationError(.internalError, message: "failed to create disk image at \(path.path)")
+            let executableURL = CommandLine.executablePathUrl.standardizedFileURL
+            let executableDir = executableURL.deletingLastPathComponent()
+            let installRoot = executableDir.appendingPathComponent("..").standardizedFileURL
+            let candidates = [
+                executableDir.appendingPathComponent(Self.helperBinaryName),
+                installRoot
+                    .appendingPathComponent("libexec")
+                    .appendingPathComponent("container")
+                    .appendingPathComponent("macos-image-prepare")
+                    .appendingPathComponent("bin")
+                    .appendingPathComponent(Self.helperBinaryName),
+            ]
+
+            for candidate in candidates where fm.isExecutableFile(atPath: candidate.path) {
+                return candidate
             }
-            let handle = try FileHandle(forWritingTo: path)
-            defer {
-                try? handle.close()
-            }
-            try handle.truncate(atOffset: sizeBytes)
+
+            let candidatePaths = candidates.map { "  - \($0.path(percentEncoded: false))" }.joined(separator: "\n")
+            throw ContainerizationError(
+                .notFound,
+                message: "\(Self.helperBinaryName) not found. Install it under the macos-image-prepare helper directory or set \(Self.helperBinaryEnvVar). Checked:\n\(candidatePaths)"
+            )
         }
     }
 }

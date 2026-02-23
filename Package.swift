@@ -420,6 +420,22 @@ let package = Package(
             dependencies: [],
             path: "Sources/Helpers/RuntimeMacOSSidecarShared"
         ),
+        .testTarget(
+            name: "RuntimeMacOSSidecarSharedTests",
+            dependencies: [
+                "RuntimeMacOSSidecarShared",
+            ],
+            path: "Tests/RuntimeMacOSSidecarSharedTests"
+        ),
+        .testTarget(
+            name: "RuntimeMacOSSidecarClientTests",
+            dependencies: [
+                "RuntimeMacOSSidecarShared",
+                .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.macOS])),
+                .target(name: "container-runtime-macos", condition: .when(platforms: [.macOS])),
+            ],
+            path: "Tests/RuntimeMacOSSidecarClientTests"
+        ),
         .target(
             name: "ContainerSandboxService",
             dependencies: [
@@ -445,6 +461,7 @@ let package = Package(
             dependencies: [
                 "ContainerAPIClient",
                 "ContainerResource",
+                "TerminalProgress",
                 "ContainerXPC",
             ],
             path: "Sources/Services/Runtime/RuntimeClient"

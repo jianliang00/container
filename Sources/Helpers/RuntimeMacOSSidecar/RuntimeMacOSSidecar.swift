@@ -267,11 +267,13 @@ actor MacOSSidecarService {
         log.info("bootstrapStart: loading container config")
         let config = try loadContainerConfiguration()
         let guiEnabled = config.macosGuest?.guiEnabled ?? false
-        log.info("bootstrapStart: building vm configuration", metadata: [
-            "cpus": "\(config.resources.cpus)",
-            "memory": "\(config.resources.memoryInBytes)",
-            "gui_enabled": "\(guiEnabled)",
-        ])
+        log.info(
+            "bootstrapStart: building vm configuration",
+            metadata: [
+                "cpus": "\(config.resources.cpus)",
+                "memory": "\(config.resources.memoryInBytes)",
+                "gui_enabled": "\(guiEnabled)",
+            ])
         let vmConfiguration = try makeVirtualMachineConfiguration(containerConfig: config)
         self.vmConfiguration = vmConfiguration
 
@@ -835,11 +837,13 @@ final class SidecarControlServer: @unchecked Sendable {
         do {
             try writeEnvelope(.event(event), to: clientFD)
         } catch {
-            log.error("failed to send sidecar event", metadata: [
-                "event": "\(event.event.rawValue)",
-                "process_id": "\(event.processID)",
-                "error": "\(error)",
-            ])
+            log.error(
+                "failed to send sidecar event",
+                metadata: [
+                    "event": "\(event.event.rawValue)",
+                    "process_id": "\(event.processID)",
+                    "error": "\(error)",
+                ])
         }
     }
 

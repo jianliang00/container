@@ -12,7 +12,7 @@
 - `1c1abaf` feat(macos): implement sidecar process.execSync
 - `53d4fdb` feat(macos): add runtime sidecar for guest VM control
 - `7808c7f` fix(macos): harden guest-agent runtime and diagnostics
-- `8c0d80f` fix(macos): improve template prep and guest-agent workflow
+- `8c0d80f` fix(macos): improve image prep and guest-agent workflow
 - `2aba56e` feat: add macOS guest runtime workflow and tests
 
 ## 结论摘要
@@ -239,7 +239,7 @@
 
 已覆盖（新增或增强）：
 
-- OCI 模板格式解析：`Tests/ContainerAPIClientTests/MacOSOCIFormatTests.swift`
+- OCI 镜像格式解析：`Tests/ContainerAPIClientTests/MacOSOCIFormatTests.swift`
 - `ContainerConfiguration` 的 macOS 字段兼容性：`Tests/ContainerResourceTests/ContainerConfigurationMacOSTests.swift`
 - `clonefile` fallback copy：`Tests/ContainerResourceTests/FilesystemCloneFallbackTests.swift`
 - `ContainersService.validateCreateInput`（macOS/Linux kernel 校验）：`Tests/ContainerSandboxServiceTests/MacOSCreateValidationTests.swift`
@@ -252,5 +252,5 @@
 
 ## 文档一致性评估
 
-- `docs/macos-guest-agent-package-push.md` 与 `docs/macos-guest-development-debugging.md` 基本与当前实现一致，可作为实操文档继续维护。
+- `docs/macos-guest-image-prepare.md` 与 `docs/macos-guest-development-debugging.md` 基本与当前实现一致，可作为实操文档继续维护。
 - `apple-container-macos-guest.md` 需要明确定位（RFC vs 现状），避免误导。

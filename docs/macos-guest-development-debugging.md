@@ -7,14 +7,14 @@
 - `container run --os darwin ...`
 - `container-runtime-macos` / `container-runtime-macos-sidecar`
 - `container-macos-guest-agent`
-- 模板 VM（`prepare-base` 生成的 `TEMPLATE_DIR`）
-- 手工调试工具：`scripts/macos-guest-agent/manual-template-vm.swift`
+- 镜像 VM（`prepare-base` 生成的 `IMAGE_DIR`）
+- 手工调试工具：`scripts/macos-guest-agent/macos-vm-manager.swift`
 
 配套文档：
 
-- 模板制作/打包/推送流程：`docs/macos-guest-agent-package-push.md`
+- 镜像制作/打包/推送流程：`docs/macos-guest-image-prepare.md`
 
-建议先复用 `docs/macos-guest-agent-package-push.md` 中的环境变量约定（如 `CONTAINER_BIN`、`TEMPLATE_DIR`、`SEED_DIR`、`OCI_TAR`、`LOCAL_REF`）。
+建议先复用 `docs/macos-guest-image-prepare.md` 中的环境变量约定（如 `CONTAINER_BIN`、`IMAGE_DIR`、`SEED_DIR`、`OCI_TAR`、`LOCAL_REF`）。
 
 ## 1. 当前架构（重构后）
 
@@ -22,7 +22,7 @@
 
 1. `container-runtime-macos`（helper）负责：
    - XPC `SandboxService` 路由
-   - 容器 root / 模板文件准备
+   - 容器 root / 镜像文件准备
    - 启动/管理 sidecar（LaunchAgent）
    - 转发 stdio、wait、signal、resize 等高层操作
 2. `container-runtime-macos-sidecar`（GUI 域 LaunchAgent）负责：
@@ -40,26 +40,26 @@
 
 实际验证结果：
 
-- `manual-template-vm --headless`：常见 `vsock Code=54 reset by peer`
-- `manual-template-vm --headless-display`：guest-agent 可正常连通
+- `macos-vm-manager start --headless`：常见 `vsock Code=54 reset by peer`
+- `macos-vm-manager start --headless-display`：guest-agent 可正常连通
 - `container-runtime-macos` 直接在 helper 内“无窗口+保留显示设备”仍可能失败（运行上下文差异）
 - 将 VM 承载迁移到 GUI 域 sidecar 后，稳定性显著提升
 
 结论：
 
-- “纯 headless”不是可靠启动模式（至少对当前模板/agent 组合不是）
+- “纯 headless”不是可靠启动模式（至少对当前镜像/agent 组合不是）
 - “无窗口 + 保留显示设备”是更稳定的默认模式
 
 ### 2.2 手工 VM 正常，不等于 `container run` 一定正常
 
 你可能遇到过：
 
-- `manual-template-vm` 里 agent 正常
+- `macos-vm-manager` 里 agent 正常
 - `container run` 仍报 `failed to connect to guest agent ... Code=54`
 
 常见原因并不矛盾，通常是以下之一：
 
-- 打包镜像时模板盘还没关机落盘（用的是旧模板内容）
+- 打包镜像时镜像盘还没关机落盘（用的是旧镜像内容）
 - 插件目录里仍是旧版 `container-runtime-macos` / `sidecar`（你只重编译了 `.build`）
 - `container system` 未重启，仍在运行旧插件进程
 - 某个旧容器/旧 sidecar 卡死，拖住 APIServer，导致后续 `containerCreate` XPC 超时
@@ -80,17 +80,17 @@
 
 ```bash
 export CONTAINER_BIN="$PWD/.build/release/container"
-export TEMPLATE_DIR="/tmp/macos-template-base"
+export IMAGE_DIR="/tmp/macos-image-base"
 export SEED_DIR="/tmp/macos-agent-seed"
-export OCI_TAR="/tmp/macos-template-base-oci.tar"
-export LOCAL_REF="local/macos-template:base"
+export OCI_TAR="/tmp/macos-image-base-oci.tar"
+export LOCAL_REF="local/macos-image:base"
 ```
 
 关键路径：
 
 - 插件 helper：`libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos`
 - 插件 sidecar：`libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar`
-- 手工调试 VM 工具（本地临时）：`/tmp/manual-template-vm`
+- 手工调试 VM 工具（本地临时）：`/tmp/macos-vm-manager`
 - guest-agent 日志（guest 内）：`/var/log/container-macos-guest-agent.log`
 - 容器 helper 日志（宿主容器 root）：`<container-root>/stdio.log`
 
@@ -154,7 +154,7 @@ codesign -d --entitlements :- \
 - 若不加，可能走到别的安装路径/旧插件
 - `system stop` 如果遇到旧容器卡死，日志里可能看到某个 runtime helper 的 `XPC timeout`，但通常后续 `bootout` 仍会强制卸载对应 launchd 单元
 
-## 5. 模板 VM 调试（不依赖 `container run`）
+## 5. 镜像 VM 调试（不依赖 `container run`）
 
 这是最有效的隔离调试手段，用来判断问题在：
 
@@ -163,17 +163,17 @@ codesign -d --entitlements :- \
 - host vsock 连接路径
 - runtime/helper 上下文差异
 
-### 5.1 编译并签名 `manual-template-vm`
+### 5.1 编译并签名 `macos-vm-manager`
 
 ```bash
-xcrun swiftc scripts/macos-guest-agent/manual-template-vm.swift \
+xcrun swiftc scripts/macos-guest-agent/macos-vm-manager.swift \
   -framework AppKit \
   -framework Virtualization \
-  -o /tmp/manual-template-vm
+  -o /tmp/macos-vm-manager
 
 codesign --force --sign - \
   --entitlements signing/container-runtime-macos.entitlements \
-  /tmp/manual-template-vm
+  /tmp/macos-vm-manager
 ```
 
 ### 5.2 三种启动模式（A/B 必备）
@@ -181,8 +181,8 @@ codesign --force --sign - \
 #### GUI（正常人工调试）
 
 ```bash
-/tmp/manual-template-vm \
-  --template "$TEMPLATE_DIR" \
+/tmp/macos-vm-manager start \
+  --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
   --share-tag seed \
   --cpus 4 \
@@ -192,8 +192,8 @@ codesign --force --sign - \
 #### 纯 headless（用于复现问题，不推荐作为默认）
 
 ```bash
-/tmp/manual-template-vm \
-  --template "$TEMPLATE_DIR" \
+/tmp/macos-vm-manager start \
+  --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
   --share-tag seed \
   --cpus 4 \
@@ -204,8 +204,8 @@ codesign --force --sign - \
 #### headless-display（无窗口，但保留显示设备；接近稳定路径）
 
 ```bash
-/tmp/manual-template-vm \
-  --template "$TEMPLATE_DIR" \
+/tmp/macos-vm-manager start \
+  --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
   --share-tag seed \
   --cpus 4 \
@@ -218,8 +218,8 @@ codesign --force --sign - \
 在手工 VM 启动时增加 `--agent-repl`：
 
 ```bash
-/tmp/manual-template-vm \
-  --template "$TEMPLATE_DIR" \
+/tmp/macos-vm-manager start \
+  --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
   --share-tag seed \
   --cpus 4 \
@@ -259,7 +259,7 @@ quit
 ### 5.4 非交互探针（适合脚本化）
 
 ```bash
-/tmp/manual-template-vm ... --agent-probe --agent-port 27000
+/tmp/macos-vm-manager start ... --agent-probe --agent-port 27000
 ```
 
 预期：
@@ -269,17 +269,17 @@ quit
 
 ### 5.5 Unix socket 控制口（sidecar 风格调试）
 
-`manual-template-vm` 支持用 `--control-socket` 启动一个控制服务器，便于脚本化验证：
+`macos-vm-manager start` 支持用 `--control-socket` 启动一个控制服务器，便于脚本化验证：
 
 ```bash
-/tmp/manual-template-vm \
-  --template "$TEMPLATE_DIR" \
+/tmp/macos-vm-manager start \
+  --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
   --share-tag seed \
   --cpus 4 \
   --memory-mib 8192 \
   --headless-display \
-  --control-socket /tmp/manual-template-vm.sock
+  --control-socket /tmp/macos-vm-manager.sock
 ```
 
 控制命令（通过 Unix socket 发送文本行）：
@@ -295,7 +295,7 @@ quit
 - GUI 域 sidecar 承载 VM 是可行的
 - 宿主通过控制面可以完成 `probe/exec`，不依赖 `container run`
 
-## 6. guest-agent 安装与验证（模板盘内）
+## 6. guest-agent 安装与验证（镜像盘内）
 
 ### 6.1 在 guest 内安装（通过 seed 目录）
 
@@ -343,7 +343,7 @@ exec /bin/echo hello
 1. 确认 `container system` 正常启动
 2. 手工 VM（GUI）验证 guest-agent / REPL
 3. 手工 VM 做 `headless` vs `headless-display` A/B
-4. 确认模板盘改动已关机落盘，再 `package + image load`
+4. 确认镜像盘改动已关机落盘，再 `package + image load`
 5. 确认插件目录已更新（不是 `.build` 里的新版本）
 6. 重启 `container system`
 7. 再跑 `container run`
@@ -388,7 +388,7 @@ Ensure container system service has been started with `container system start`.
 处理建议：
 
 - 先做镜像清理（`image prune` 或删除旧本地镜像/tag）
-- 删除不需要的 OCI tar（例如 `/tmp/macos-template-base-oci.tar`）
+- 删除不需要的 OCI tar（例如 `/tmp/macos-image-base-oci.tar`）
 - 再重新 `package` / `image load`
 
 ### 8.4 `container run` 报 `Code=54 Connection reset by peer`
@@ -407,14 +407,14 @@ Ensure container system service has been started with `container system start`.
 
 优先检查：
 
-1. 模板盘是否已关机并重新打包
+1. 镜像盘是否已关机并重新打包
 2. `container run` 用的镜像 tag/digest 是否真是最新
 3. 插件目录二进制是否已替换 + 重签
 4. `container system` 是否已重启
 
 此前真实踩坑就是：
 
-- 手工 VM 验证的是新模板盘
+- 手工 VM 验证的是新镜像盘
 - `container run` 实际跑的是旧打包镜像或旧插件
 
 ### 8.5 `containerCreate` XPC timeout（APIServer 超时）
@@ -495,9 +495,9 @@ sudo tail -n 200 /var/log/container-macos-guest-agent.log
 - 你之前遇到过 `Operation not supported by device` 是旧日志残留
 - 重启后没有新错误，则应以最新时间段日志为准
 
-## 10. 模板打包与镜像更新的关键注意事项
+## 10. 镜像打包与更新的关键注意事项
 
-### 10.1 模板盘改完一定先关机
+### 10.1 镜像盘改完一定先关机
 
 如果 VM 没关机就 `package`，非常容易把旧内容打包进去（尤其是 `Disk.img` / `AuxiliaryStorage` 还没落盘）。
 
@@ -512,8 +512,8 @@ sudo tail -n 200 /var/log/container-macos-guest-agent.log
 可以用这些信号交叉验证：
 
 - `OCI tar` 修改时间
-- `TEMPLATE_DIR/Disk.img` 修改时间
-- `TEMPLATE_DIR/AuxiliaryStorage` 修改时间
+- `IMAGE_DIR/Disk.img` 修改时间
+- `IMAGE_DIR/AuxiliaryStorage` 修改时间
 - 必要时比较 digest（排查“看起来重打包了，实际上还是旧内容”）
 
 ## 11. 磁盘空间清理（实战常用）
@@ -523,7 +523,7 @@ sudo tail -n 200 /var/log/container-macos-guest-agent.log
 常用清理项：
 
 - 删除旧本地镜像 tag
-- 删除旧 OCI tar（例如 `/tmp/macos-template-base-oci.tar`）
+- 删除旧 OCI tar（例如 `/tmp/macos-image-base-oci.tar`）
 - 删除 dangling 镜像（`image prune`）
 
 建议优先删：
@@ -537,11 +537,11 @@ sudo tail -n 200 /var/log/container-macos-guest-agent.log
 
 1. `container run` 报 guest-agent 连接失败（`Code=54`）
 2. 进入手工 VM 验证 guest 内 agent：发现前台 agent/日志正常
-3. 怀疑协议问题，新增 `manual-template-vm --agent-repl` 直接走 vsock
+3. 怀疑协议问题，新增 `macos-vm-manager start --agent-repl` 直接走 vsock
 4. 发现 REPL 重连竞态/读写实现问题，改为 `Darwin.read/write`
 5. 发现 guest-agent 对短命令（`ls`/`echo`）丢 `stdout/exit`，修复为先安装回调再 `process.run()`
 6. 发现纯 `headless` 启动路径不稳定（`Code=54`），`headless-display` 正常
-7. 在 `manual-template-vm` 做 GUI 域 sidecar 实验（`control-socket`），验证 `probe/exec` 成功
+7. 在 `macos-vm-manager` 做 GUI 域 sidecar 实验（`control-socket`），验证 `probe/exec` 成功
 8. 将 macOS VM 承载迁移到 `container-runtime-macos-sidecar`
 9. 逐步迁移到 sidecar 高层进程协议（`process.start/stdin/signal/resize/close + stdout/stderr/exit`）
 10. 清理 helper 旧实现（本地 VM / guest-agent 帧处理逻辑）
@@ -608,7 +608,7 @@ codesign --force --sign - \
 "$CONTAINER_BIN" system start --install-root "$PWD" --disable-kernel-install
 ```
 
-### 14.2 更新模板盘内 guest-agent（增量）
+### 14.2 更新镜像盘内 guest-agent（增量）
 
 ```bash
 xcrun swift build -c release --product container-macos-guest-agent
@@ -625,7 +625,7 @@ sudo shutdown -h now
 
 ```bash
 "$CONTAINER_BIN" macos package \
-  --input "$TEMPLATE_DIR" \
+  --input "$IMAGE_DIR" \
   --output "$OCI_TAR" \
   --reference "$LOCAL_REF"
 
@@ -642,4 +642,4 @@ sudo shutdown -h now
 
 ---
 
-如果你在后续迭代里再次看到 `Code=54` 或 `containerCreate` XPC timeout，优先回到本文档的第 4、7、8、9、13 节按顺序排查，通常能在几分钟内定位到“模板/插件/服务/guest-agent/运行上下文”中的具体层级。
+如果你在后续迭代里再次看到 `Code=54` 或 `containerCreate` XPC timeout，优先回到本文档的第 4、7、8、9、13 节按顺序排查，通常能在几分钟内定位到“镜像/插件/服务/guest-agent/运行上下文”中的具体层级。

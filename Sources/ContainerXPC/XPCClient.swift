@@ -113,10 +113,12 @@ extension XPCClient {
                 } catch {
                     return
                 }
-                finish(.failure(ContainerizationError(
-                    .internalError,
-                    message: "XPC timeout for request to \(self.service)/\(route)"
-                )))
+                finish(
+                    .failure(
+                        ContainerizationError(
+                            .internalError,
+                            message: "XPC timeout for request to \(self.service)/\(route)"
+                        )))
             }
         }
     }

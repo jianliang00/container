@@ -54,15 +54,15 @@ struct MacOSCreateValidationTests {
 
     private func baseConfiguration() throws -> ContainerConfiguration {
         let imageJSON = """
-        {
-          "reference": "example/test:latest",
-          "descriptor": {
-            "mediaType": "application/vnd.oci.image.index.v1+json",
-            "digest": "sha256:test",
-            "size": 1
-          }
-        }
-        """
+            {
+              "reference": "example/test:latest",
+              "descriptor": {
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "digest": "sha256:test",
+                "size": 1
+              }
+            }
+            """
         let image = try JSONDecoder().decode(ImageDescription.self, from: Data(imageJSON.utf8))
         let process = ProcessConfiguration(
             executable: "/bin/sh",

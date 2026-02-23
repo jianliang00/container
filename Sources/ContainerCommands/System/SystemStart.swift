@@ -103,9 +103,9 @@ extension Application {
                 throw ContainerizationError(
                     .internalError,
                     message: """
-                    failed to register apiserver with launchd: \(error)
-                    \(diagnostics)
-                    """
+                        failed to register apiserver with launchd: \(error)
+                        \(diagnostics)
+                        """
                 )
             }
 
@@ -118,9 +118,9 @@ extension Application {
                 throw ContainerizationError(
                     .internalError,
                     message: """
-                    failed to get a response from apiserver: \(error)
-                    \(diagnostics)
-                    """
+                        failed to get a response from apiserver: \(error)
+                        \(diagnostics)
+                        """
                 )
             }
 

@@ -16,7 +16,7 @@
 
 import ContainerizationOCI
 
-public enum MacOSTemplateOCIMediaTypes {
+public enum MacOSImageOCIMediaTypes {
     public static let hardwareModel = "application/vnd.apple.container.macos.hardware-model"
     public static let auxiliaryStorage = "application/vnd.apple.container.macos.auxiliary-storage"
     public static let diskImage = "application/vnd.apple.container.macos.disk-image"
@@ -28,12 +28,12 @@ public enum MacOSTemplateOCIMediaTypes {
     ]
 }
 
-public enum MacOSTemplateFormatError: Error, Equatable {
+public enum MacOSImageFormatError: Error, Equatable {
     case missingLayer(mediaType: String)
     case duplicateLayer(mediaType: String)
 }
 
-public struct MacOSTemplateLayers: Sendable {
+public struct MacOSImageLayers: Sendable {
     public let hardwareModel: Descriptor
     public let auxiliaryStorage: Descriptor
     public let diskImage: Descriptor
@@ -45,19 +45,19 @@ public struct MacOSTemplateLayers: Sendable {
 
         for layer in manifest.layers {
             switch layer.mediaType {
-            case MacOSTemplateOCIMediaTypes.hardwareModel:
+            case MacOSImageOCIMediaTypes.hardwareModel:
                 if hardwareModel != nil {
-                    throw MacOSTemplateFormatError.duplicateLayer(mediaType: layer.mediaType)
+                    throw MacOSImageFormatError.duplicateLayer(mediaType: layer.mediaType)
                 }
                 hardwareModel = layer
-            case MacOSTemplateOCIMediaTypes.auxiliaryStorage:
+            case MacOSImageOCIMediaTypes.auxiliaryStorage:
                 if auxiliaryStorage != nil {
-                    throw MacOSTemplateFormatError.duplicateLayer(mediaType: layer.mediaType)
+                    throw MacOSImageFormatError.duplicateLayer(mediaType: layer.mediaType)
                 }
                 auxiliaryStorage = layer
-            case MacOSTemplateOCIMediaTypes.diskImage:
+            case MacOSImageOCIMediaTypes.diskImage:
                 if diskImage != nil {
-                    throw MacOSTemplateFormatError.duplicateLayer(mediaType: layer.mediaType)
+                    throw MacOSImageFormatError.duplicateLayer(mediaType: layer.mediaType)
                 }
                 diskImage = layer
             default:
@@ -66,13 +66,13 @@ public struct MacOSTemplateLayers: Sendable {
         }
 
         guard let hardwareModel else {
-            throw MacOSTemplateFormatError.missingLayer(mediaType: MacOSTemplateOCIMediaTypes.hardwareModel)
+            throw MacOSImageFormatError.missingLayer(mediaType: MacOSImageOCIMediaTypes.hardwareModel)
         }
         guard let auxiliaryStorage else {
-            throw MacOSTemplateFormatError.missingLayer(mediaType: MacOSTemplateOCIMediaTypes.auxiliaryStorage)
+            throw MacOSImageFormatError.missingLayer(mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage)
         }
         guard let diskImage else {
-            throw MacOSTemplateFormatError.missingLayer(mediaType: MacOSTemplateOCIMediaTypes.diskImage)
+            throw MacOSImageFormatError.missingLayer(mediaType: MacOSImageOCIMediaTypes.diskImage)
         }
 
         self.hardwareModel = hardwareModel

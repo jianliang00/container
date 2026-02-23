@@ -27,11 +27,11 @@ import Virtualization
 struct MacOSImagePrepare: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "container-macos-image-prepare",
-        abstract: "Create a macOS guest template directory from an IPSW restore image",
+        abstract: "Create a macOS guest image directory from an IPSW restore image",
         version: ReleaseVersion.singleLine(appName: "container-macos-image-prepare")
     )
 
-    private enum TemplateFilenames {
+    private enum ImageFilenames {
         static let diskImage = "Disk.img"
         static let auxiliaryStorage = "AuxiliaryStorage"
         static let hardwareModel = "HardwareModel.bin"
@@ -49,7 +49,7 @@ struct MacOSImagePrepare: AsyncParsableCommand {
 
     @Option(
         name: .shortAndLong,
-        help: "Output template directory",
+        help: "Output image directory",
         completion: .directory,
         transform: { str in
             URL(fileURLWithPath: str, relativeTo: .currentDirectory()).absoluteURL
@@ -78,9 +78,9 @@ struct MacOSImagePrepare: AsyncParsableCommand {
         let output = output.standardizedFileURL
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
-        let auxiliaryURL = output.appendingPathComponent(TemplateFilenames.auxiliaryStorage)
-        let diskURL = output.appendingPathComponent(TemplateFilenames.diskImage)
-        let hardwareURL = output.appendingPathComponent(TemplateFilenames.hardwareModel)
+        let auxiliaryURL = output.appendingPathComponent(ImageFilenames.auxiliaryStorage)
+        let diskURL = output.appendingPathComponent(ImageFilenames.diskImage)
+        let hardwareURL = output.appendingPathComponent(ImageFilenames.hardwareModel)
 
         try createDiskImage(path: diskURL, sizeBytes: diskSizeGiB * 1024 * 1024 * 1024, overwrite: overwrite)
         let hardwareModelData = try await Self.installAndCaptureHardwareModelData(
@@ -93,16 +93,15 @@ struct MacOSImagePrepare: AsyncParsableCommand {
         )
 
         if FileManager.default.fileExists(atPath: hardwareURL.path) {
-            if overwrite {
-                try FileManager.default.removeItem(at: hardwareURL)
-            } else {
+            guard overwrite else {
                 throw ContainerizationError(.exists, message: "\(hardwareURL.path) already exists")
             }
+            try FileManager.default.removeItem(at: hardwareURL)
         }
         try hardwareModelData.write(to: hardwareURL)
 
         print(output.path)
-        print("Template prepared. Before packaging, boot once and pre-install container-macos-guest-agent in the guest image.")
+        print("Image prepared. Before packaging, boot once and pre-install container-macos-guest-agent in the guest image.")
         #else
         throw ContainerizationError(.unsupported, message: "macOS guest preparation requires an arm64 host")
         #endif
@@ -199,7 +198,8 @@ struct MacOSImagePrepare: AsyncParsableCommand {
                 details.append(reason)
             }
             if underlying.domain == "com.apple.MobileDevice.MobileRestore", underlying.code == 4014 {
-                remediationHint = " This usually indicates a restore state mismatch (DFU vs RestoreOS). It can also be caused by VPN/proxy/TLS interception blocking Apple restore services."
+                remediationHint =
+                    " This usually indicates a restore state mismatch (DFU vs RestoreOS). It can also be caused by VPN/proxy/TLS interception blocking Apple restore services."
             }
         }
 
@@ -215,11 +215,10 @@ struct MacOSImagePrepare: AsyncParsableCommand {
     private func createDiskImage(path: URL, sizeBytes: UInt64, overwrite: Bool) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: path.path) {
-            if overwrite {
-                try fm.removeItem(at: path)
-            } else {
+            guard overwrite else {
                 throw ContainerizationError(.exists, message: "\(path.path) already exists")
             }
+            try fm.removeItem(at: path)
         }
 
         guard fm.createFile(atPath: path.path, contents: nil) else {

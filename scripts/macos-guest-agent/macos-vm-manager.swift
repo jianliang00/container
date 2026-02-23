@@ -1,13 +1,13 @@
 #!/usr/bin/swift
 
-// Minimal manual launcher for a macOS template VM with GUI + virtiofs.
+// Minimal macOS VM manager for manual guest workflows (GUI + virtiofs).
 //
 // Build + run:
-//   xcrun swiftc scripts/macos-guest-agent/manual-template-vm.swift \
+//   xcrun swiftc scripts/macos-guest-agent/macos-vm-manager.swift \
 //     -framework AppKit -framework Virtualization \
-//     -o /tmp/manual-template-vm
-//   /tmp/manual-template-vm \
-//     --template /path/to/template-dir \
+//     -o /tmp/macos-vm-manager
+//   /tmp/macos-vm-manager start \
+//     --image /path/to/image-dir \
 //     --share /tmp/macos-agent-seed \
 //     --share-tag seed
 
@@ -17,7 +17,7 @@ import Foundation
 import Virtualization
 
 struct Options {
-    let templateURL: URL
+    let imageURL: URL
     let sharedDirectoryURL: URL
     let shareTag: String
     let cpus: Int
@@ -29,6 +29,10 @@ struct Options {
     let controlSocketPath: String?
     let agentPort: UInt32
     let agentConnectRetries: Int
+}
+
+enum CLICommand {
+    case start(Options)
 }
 
 enum ArgumentError: Error, CustomStringConvertible {
@@ -51,50 +55,84 @@ enum ArgumentError: Error, CustomStringConvertible {
     }
 }
 
-func printUsage() {
+enum CommandError: Error, CustomStringConvertible {
+    case missingSubcommand
+    case unknownSubcommand(String)
+
+    var description: String {
+        switch self {
+        case .missingSubcommand:
+            return "missing subcommand (supported: start)"
+        case .unknownSubcommand(let value):
+            return "unknown subcommand: \(value)"
+        }
+    }
+}
+
+func executableName() -> String {
+    URL(fileURLWithPath: CommandLine.arguments.first ?? "macos-vm-manager").lastPathComponent
+}
+
+func printRootUsage(programName: String = executableName()) {
     let usage = """
-    Usage:
-      manual-template-vm.swift --template <path> --share <path> [options]
+        Usage:
+          \(programName) <command> [options]
 
-    Required:
-      --template <path>     Template directory containing Disk.img/AuxiliaryStorage/HardwareModel.bin
-      --share <path>        Host directory to mount into guest using virtiofs
+        Commands:
+          start               Start a macOS guest VM from an image directory
 
-    Optional:
-      --share-tag <name>    virtiofs tag visible in guest (default: seed)
-      --cpus <n>            Requested vCPU count (default: 4)
-      --memory-mib <n>      Requested memory in MiB (default: 8192)
-      --headless            Start without graphics/keyboard/pointer devices (closer to container runtime default)
-      --headless-display    Headless UI (no window) but keep a virtual display device attached
-      --agent-repl          Enable interactive guest-agent debugger over vsock
-      --agent-probe         Non-interactive probe: auto connect to guest-agent, print result, then exit
-      --control-socket <p>  Start a Unix socket control server (commands: probe, quit, help)
-      --agent-port <n>      Guest-agent vsock port (default: 27000)
-      --agent-connect-retries <n>
-                            Number of connect retries after VM start (default: 60)
-      -h, --help            Show this help
-
-    In guest, mount the shared directory with:
-      sudo mkdir -p /Volumes/<tag>
-      sudo mount -t virtiofs <tag> /Volumes/<tag>
-
-    With --agent-repl enabled:
-      connect
-      connect-wait
-      sh /bin/ls /
-      exec /usr/bin/id
-      exec-tty /bin/sh
-      stdin echo hello
-      close
-      signal 15
-      resize 120 40
-      quit
-    """
+        Help:
+          \(programName) --help
+          \(programName) start --help
+        """
     print(usage)
 }
 
-func parseOptions() throws -> Options {
-    var templatePath: String?
+func printStartUsage(programName: String = executableName()) {
+    let usage = """
+        Usage:
+          \(programName) start --image <path> --share <path> [options]
+
+        Required:
+          --image <path>        Image directory containing Disk.img/AuxiliaryStorage/HardwareModel.bin
+          --share <path>        Host directory to mount into guest using virtiofs
+
+        Optional:
+          --template <path>     Alias for --image
+          --share-tag <name>    virtiofs tag visible in guest (default: seed)
+          --cpus <n>            Requested vCPU count (default: 4)
+          --memory-mib <n>      Requested memory in MiB (default: 8192)
+          --headless            Start without graphics/keyboard/pointer devices (closer to container runtime default)
+          --headless-display    Headless UI (no window) but keep a virtual display device attached
+          --agent-repl          Enable interactive guest-agent debugger over vsock
+          --agent-probe         Non-interactive probe: auto connect to guest-agent, print result, then exit
+          --control-socket <p>  Start a Unix socket control server (commands: probe, quit, help)
+          --agent-port <n>      Guest-agent vsock port (default: 27000)
+          --agent-connect-retries <n>
+                                Number of connect retries after VM start (default: 60)
+          -h, --help            Show this help
+
+        In guest, mount the shared directory with:
+          sudo mkdir -p /Volumes/<tag>
+          sudo mount -t virtiofs <tag> /Volumes/<tag>
+
+        With --agent-repl enabled:
+          connect
+          connect-wait
+          sh /bin/ls /
+          exec /usr/bin/id
+          exec-tty /bin/sh
+          stdin echo hello
+          close
+          signal 15
+          resize 120 40
+          quit
+        """
+    print(usage)
+}
+
+func parseStartOptions(_ args: [String], programName: String = executableName()) throws -> Options {
+    var imagePath: String?
     var sharePath: String?
     var shareTag = "seed"
     var cpus = 4
@@ -107,19 +145,18 @@ func parseOptions() throws -> Options {
     var agentPort: UInt32 = 27000
     var agentConnectRetries = 60
 
-    var index = 1
-    let args = CommandLine.arguments
+    var index = 0
 
     while index < args.count {
         let flag = args[index]
         switch flag {
         case "-h", "--help":
-            printUsage()
+            printStartUsage(programName: programName)
             exit(0)
-        case "--template":
+        case "--image", "--template":
             index += 1
             guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
-            templatePath = args[index]
+            imagePath = args[index]
         case "--share":
             index += 1
             guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
@@ -175,15 +212,15 @@ func parseOptions() throws -> Options {
         index += 1
     }
 
-    guard let templatePath else {
-        throw ArgumentError.required("missing required argument: --template")
+    guard let imagePath else {
+        throw ArgumentError.required("missing required argument: --image")
     }
     guard let sharePath else {
         throw ArgumentError.required("missing required argument: --share")
     }
 
     return Options(
-        templateURL: URL(fileURLWithPath: templatePath).standardizedFileURL,
+        imageURL: URL(fileURLWithPath: imagePath).standardizedFileURL,
         sharedDirectoryURL: URL(fileURLWithPath: sharePath).standardizedFileURL,
         shareTag: shareTag,
         cpus: cpus,
@@ -196,6 +233,26 @@ func parseOptions() throws -> Options {
         agentPort: agentPort,
         agentConnectRetries: agentConnectRetries
     )
+}
+
+func parseCommandLine() throws -> CLICommand {
+    let args = CommandLine.arguments
+    let programName = executableName()
+
+    guard args.count >= 2 else {
+        throw CommandError.missingSubcommand
+    }
+
+    let subcommand = args[1]
+    switch subcommand {
+    case "-h", "--help":
+        printRootUsage(programName: programName)
+        exit(0)
+    case "start":
+        return .start(try parseStartOptions(Array(args.dropFirst(2)), programName: programName))
+    default:
+        throw CommandError.unknownSubcommand(subcommand)
+    }
 }
 
 func ensureFileExists(_ path: URL, message: String) {
@@ -304,23 +361,33 @@ private struct GuestAgentFrame: Codable {
     let message: String?
 
     static func exec(id: String, executable: String, arguments: [String], environment: [String], workingDirectory: String, terminal: Bool) -> Self {
-        .init(type: .exec, id: id, executable: executable, arguments: arguments, environment: environment, workingDirectory: workingDirectory, terminal: terminal, signal: nil, width: nil, height: nil, data: nil, exitCode: nil, message: nil)
+        .init(
+            type: .exec, id: id, executable: executable, arguments: arguments, environment: environment, workingDirectory: workingDirectory, terminal: terminal, signal: nil,
+            width: nil, height: nil, data: nil, exitCode: nil, message: nil)
     }
 
     static func stdin(id: String, data: Data) -> Self {
-        .init(type: .stdin, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data, exitCode: nil, message: nil)
+        .init(
+            type: .stdin, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data,
+            exitCode: nil, message: nil)
     }
 
     static func signal(id: String, signal: Int32) -> Self {
-        .init(type: .signal, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: signal, width: nil, height: nil, data: nil, exitCode: nil, message: nil)
+        .init(
+            type: .signal, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: signal, width: nil, height: nil, data: nil,
+            exitCode: nil, message: nil)
     }
 
     static func resize(id: String, width: UInt16, height: UInt16) -> Self {
-        .init(type: .resize, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: width, height: height, data: nil, exitCode: nil, message: nil)
+        .init(
+            type: .resize, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: width, height: height, data: nil,
+            exitCode: nil, message: nil)
     }
 
     static func close(id: String) -> Self {
-        .init(type: .close, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil, exitCode: nil, message: nil)
+        .init(
+            type: .close, id: id, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil,
+            exitCode: nil, message: nil)
     }
 }
 
@@ -661,7 +728,7 @@ final class AgentDebugger {
         let thread = Thread { [weak self] in
             self?.readLoop(fd: fd, generation: generation)
         }
-        thread.name = "manual-template-vm-agent-read"
+        thread.name = "macos-vm-manager-agent-read"
         thread.start()
     }
 
@@ -1035,7 +1102,7 @@ final class ControlCommandServer {
         let thread = Thread { [weak self] in
             self?.acceptLoop()
         }
-        thread.name = "manual-template-vm-control-socket"
+        thread.name = "macos-vm-manager-control-socket"
         self.thread = thread
         thread.start()
 
@@ -1282,29 +1349,23 @@ func currentSessionSummary() -> String {
     return "onConsole=\(onConsole) loginDone=\(loginDone) user=\(userName) uid=\(userID)"
 }
 
-do {
-    guard #available(macOS 13.0, *) else {
-        fputs("error: this script requires macOS 13 or newer\n", stderr)
-        exit(1)
-    }
-
+func runStartCommand(options: Options) throws {
     #if !arch(arm64)
     fputs("error: macOS guest virtualization requires Apple Silicon (arm64)\n", stderr)
     exit(1)
     #else
-    let options = try parseOptions()
 
-    ensureDirectoryExists(options.templateURL, message: "template directory does not exist")
+    ensureDirectoryExists(options.imageURL, message: "image directory does not exist")
     ensureDirectoryExists(options.sharedDirectoryURL, message: "shared directory does not exist")
 
-    let hardwareModelURL = options.templateURL.appendingPathComponent("HardwareModel.bin")
-    let auxiliaryStorageURL = options.templateURL.appendingPathComponent("AuxiliaryStorage")
-    let diskImageURL = options.templateURL.appendingPathComponent("Disk.img")
-    let machineIdentifierURL = options.templateURL.appendingPathComponent("MachineIdentifier.bin")
+    let hardwareModelURL = options.imageURL.appendingPathComponent("HardwareModel.bin")
+    let auxiliaryStorageURL = options.imageURL.appendingPathComponent("AuxiliaryStorage")
+    let diskImageURL = options.imageURL.appendingPathComponent("Disk.img")
+    let machineIdentifierURL = options.imageURL.appendingPathComponent("MachineIdentifier.bin")
 
-    ensureFileExists(hardwareModelURL, message: "missing template file")
-    ensureFileExists(auxiliaryStorageURL, message: "missing template file")
-    ensureFileExists(diskImageURL, message: "missing template file")
+    ensureFileExists(hardwareModelURL, message: "missing image file")
+    ensureFileExists(auxiliaryStorageURL, message: "missing image file")
+    ensureFileExists(diskImageURL, message: "missing image file")
 
     let hardwareModelData = try Data(contentsOf: hardwareModelURL)
     guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareModelData) else {
@@ -1367,11 +1428,13 @@ do {
     let virtualMachine = VZVirtualMachine(configuration: vmConfiguration)
     let delegate = VMDelegate()
     virtualMachine.delegate = delegate
-    let debugger = (options.agentREPL || options.agentProbe || options.controlSocketPath != nil) ? AgentDebugger(
-        virtualMachine: virtualMachine,
-        port: options.agentPort,
-        connectRetries: options.agentConnectRetries
-    ) : nil
+    let debugger =
+        (options.agentREPL || options.agentProbe || options.controlSocketPath != nil)
+        ? AgentDebugger(
+            virtualMachine: virtualMachine,
+            port: options.agentPort,
+            connectRetries: options.agentConnectRetries
+        ) : nil
     let controlServer = options.controlSocketPath.map { ControlCommandServer(socketPath: $0, debugger: debugger) }
 
     let app = NSApplication.shared
@@ -1390,7 +1453,7 @@ do {
             backing: .buffered,
             defer: false
         )
-        uiWindow.title = "Manual macOS Template VM"
+        uiWindow.title = "macOS VM Manager"
 
         let uiVMView = VZVirtualMachineView(frame: frame)
         uiVMView.virtualMachine = virtualMachine
@@ -1404,7 +1467,7 @@ do {
     }
 
     print("Starting VM...")
-    print("template: \(options.templateURL.path)")
+    print("image (--image): \(options.imageURL.path)")
     print("share: \(options.sharedDirectoryURL.path)")
     print("share tag: \(options.shareTag)")
     let displayMode: String
@@ -1462,8 +1525,24 @@ do {
 
     app.run()
     #endif
+}
+
+do {
+    guard #available(macOS 13.0, *) else {
+        fputs("error: this script requires macOS 13 or newer\n", stderr)
+        exit(1)
+    }
+
+    switch try parseCommandLine() {
+    case .start(let options):
+        try runStartCommand(options: options)
+    }
 } catch {
     fputs("error: \(error)\n", stderr)
-    printUsage()
+    if error is CommandError {
+        printRootUsage()
+    } else if error is ArgumentError {
+        printStartUsage()
+    }
     exit(1)
 }

@@ -501,19 +501,27 @@ private struct GuestAgentFrame: Codable {
     )
 
     static func stdout(_ data: Data) -> Self {
-        .init(type: .stdout, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data, exitCode: nil, message: nil)
+        .init(
+            type: .stdout, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data,
+            exitCode: nil, message: nil)
     }
 
     static func stderr(_ data: Data) -> Self {
-        .init(type: .stderr, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data, exitCode: nil, message: nil)
+        .init(
+            type: .stderr, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data,
+            exitCode: nil, message: nil)
     }
 
     static func exit(_ code: Int32) -> Self {
-        .init(type: .exit, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil, exitCode: code, message: nil)
+        .init(
+            type: .exit, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil,
+            exitCode: code, message: nil)
     }
 
     static func error(_ message: String) -> Self {
-        .init(type: .error, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil, exitCode: nil, message: message)
+        .init(
+            type: .error, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil,
+            exitCode: nil, message: message)
     }
 }
 
@@ -588,8 +596,8 @@ private func logAgentInfo(_ message: String) {
     fflush(stderr)
 }
 
-private extension POSIXError {
-    static func fromErrno() -> POSIXError {
+extension POSIXError {
+    fileprivate static func fromErrno() -> POSIXError {
         POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 }

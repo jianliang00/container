@@ -25,15 +25,15 @@ struct ContainerConfigurationMacOSTests {
     @Test
     func encodeDecodeWithMacOSGuestOptions() throws {
         let imageJSON = """
-        {
-          "reference": "example/macos:latest",
-          "descriptor": {
-            "mediaType": "application/vnd.oci.image.index.v1+json",
-            "digest": "sha256:test",
-            "size": 1
-          }
-        }
-        """
+            {
+              "reference": "example/macos:latest",
+              "descriptor": {
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "digest": "sha256:test",
+                "size": 1
+              }
+            }
+            """
         let image = try JSONDecoder().decode(ImageDescription.self, from: Data(imageJSON.utf8))
         let process = ProcessConfiguration(
             executable: "/bin/echo",
@@ -63,15 +63,15 @@ struct ContainerConfigurationMacOSTests {
     @Test
     func decodeLegacyConfigurationWithoutMacOSGuestField() throws {
         let imageJSON = """
-        {
-          "reference": "example/legacy:latest",
-          "descriptor": {
-            "mediaType": "application/vnd.oci.image.index.v1+json",
-            "digest": "sha256:legacy",
-            "size": 1
-          }
-        }
-        """
+            {
+              "reference": "example/legacy:latest",
+              "descriptor": {
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "digest": "sha256:legacy",
+                "size": 1
+              }
+            }
+            """
         let image = try JSONDecoder().decode(ImageDescription.self, from: Data(imageJSON.utf8))
         let process = ProcessConfiguration(
             executable: "/bin/sh",

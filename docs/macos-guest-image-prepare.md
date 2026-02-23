@@ -1,11 +1,11 @@
-# macOS Guest 模板：从构建 Agent 到 `package/load/push` 全流程
+# macOS Guest 镜像：从构建 Agent 到 `package/load/push` 全流程
 
 本文档覆盖一条完整的最小闭环链路：
 
 1. 在宿主构建 `container-macos-guest-agent`
-2. 生成模板目录（`prepare-base`）
-3. 用手工 GUI VM 启动模板并通过 virtiofs 注入 agent
-4. 将模板打包为 OCI tar（`container macos package`）
+2. 生成镜像目录（`prepare-base`）
+3. 用手工 GUI VM 启动镜像并通过 virtiofs 注入 agent
+4. 将镜像打包为 OCI tar（`container macos package`）
 5. 加载并推送到远端镜像仓库（`container image load` + `container image push`）
 
 ## 1. 前置条件
@@ -49,23 +49,23 @@ codesign --force --sign - \
   "$MACOS_IMAGE_PREPARE_BIN"
 ```
 
-## 3. 生成模板目录（prepare-base）
+## 3. 生成镜像目录（prepare-base）
 
 ```bash
 export IPSW="/path/to/UniversalMac_xxx_Restore.ipsw"
-export TEMPLATE_DIR="/tmp/macos-template-base"
+export IMAGE_DIR="/tmp/macos-image-base"
 
 "$CONTAINER_BIN" macos prepare-base \
   --ipsw "$IPSW" \
-  --output "$TEMPLATE_DIR" \
+  --output "$IMAGE_DIR" \
   --disk-size-gib 64 \
   --memory-mib 8192 \
   --cpus 4
 
-ls -lh "$TEMPLATE_DIR"/Disk.img "$TEMPLATE_DIR"/AuxiliaryStorage "$TEMPLATE_DIR"/HardwareModel.bin
+ls -lh "$IMAGE_DIR"/Disk.img "$IMAGE_DIR"/AuxiliaryStorage "$IMAGE_DIR"/HardwareModel.bin
 ```
 
-成功后模板目录至少应包含：
+成功后镜像目录至少应包含：
 
 - `Disk.img`
 - `AuxiliaryStorage`
@@ -87,37 +87,37 @@ install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$SE
 install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$SEED_DIR/install-in-guest-from-seed.sh"
 ```
 
-## 5. 手工启动模板 VM（GUI + virtiofs）
+## 5. 手工启动镜像 VM（GUI + virtiofs）
 
 ### 5.1 编译手工 VM 工具
 
 ```bash
-xcrun swiftc scripts/macos-guest-agent/manual-template-vm.swift \
+xcrun swiftc scripts/macos-guest-agent/macos-vm-manager.swift \
   -framework AppKit \
   -framework Virtualization \
-  -o /tmp/manual-template-vm
+  -o /tmp/macos-vm-manager
 
 # 关键：为手工 VM 工具补签 Virtualization entitlement
 codesign --force --sign - \
   --entitlements signing/container-runtime-macos.entitlements \
-  /tmp/manual-template-vm
+  /tmp/macos-vm-manager
 
 # 可选校验：应能看到 com.apple.security.virtualization
-codesign -d --entitlements :- /tmp/manual-template-vm 2>&1 | grep com.apple.security.virtualization
+codesign -d --entitlements :- /tmp/macos-vm-manager 2>&1 | grep com.apple.security.virtualization
 ```
 
 注意：
 
-- 不要直接用 `swift manual-template-vm.swift` 运行，已知可能触发 JIT/符号链接问题
+- 不要直接用 `swift macos-vm-manager.swift` 运行，已知可能触发 JIT/符号链接问题
 - 请在本地 Aqua 图形会话下运行（纯 SSH 无窗口环境会失败）
 - 若跳过补签，`5.2` 启动时可能报：`VZErrorDomain Code=2 "The process doesn’t have the com.apple.security.virtualization entitlement."`
-- 若第 6 步日志出现 `Error: ... Operation not supported by device`，通常是手工 VM 未启用 `VZVirtioSocketDeviceConfiguration()`；请更新到最新 `scripts/macos-guest-agent/manual-template-vm.swift` 后重新编译 `/tmp/manual-template-vm`
+- 若第 6 步日志出现 `Error: ... Operation not supported by device`，通常是手工镜像 VM 未启用 `VZVirtioSocketDeviceConfiguration()`；请更新到最新 `scripts/macos-guest-agent/macos-vm-manager.swift` 后重新编译 `/tmp/macos-vm-manager`
 
 ### 5.2 启动 VM
 
 ```bash
-/tmp/manual-template-vm \
-  --template "$TEMPLATE_DIR" \
+/tmp/macos-vm-manager start \
+  --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
   --share-tag seed \
   --cpus 4 \
@@ -131,8 +131,8 @@ codesign -d --entitlements :- /tmp/manual-template-vm 2>&1 | grep com.apple.secu
 如果你要在手工 VM 场景下直接调试 guest-agent 协议，可在启动 VM 时增加 `--agent-repl`：
 
 ```bash
-/tmp/manual-template-vm \
-  --template "$TEMPLATE_DIR" \
+/tmp/macos-vm-manager start \
+  --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
   --share-tag seed \
   --cpus 4 \
@@ -163,11 +163,11 @@ quit
 
 ## 6. 在 Guest 内安装 agent（人工注入）
 
-首次进入该模板磁盘时，macOS 可能会进入 Setup Assistant 并要求创建本地用户名/密码。请先完成初始化并进入桌面，再执行下面的安装步骤。
+首次进入该镜像磁盘时，macOS 可能会进入 Setup Assistant 并要求创建本地用户名/密码。请先完成初始化并进入桌面，再执行下面的安装步骤。
 
 说明：
 
-- 这一步创建的账号主要用于模板制作阶段（执行 `sudo` 安装 agent）
+- 这一步创建的账号主要用于镜像制作阶段（执行 `sudo` 安装 agent）
 - 后续通过 `container run --os darwin` 启动时，`container` 依赖的是 system 域 `LaunchDaemon`（`com.apple.container.macos.guest-agent`），通常不需要手动图形登录输入密码
 
 在 VM 内终端执行（先挂载以访问脚本；脚本内部会检测已挂载并避免重复挂载）：
@@ -204,7 +204,7 @@ sudo shutdown -h now
 
 ### 6.1 仅更新 guest agent（增量）
 
-当你只修改了 `container-macos-guest-agent`（或 `install.sh` / plist），不需要重跑 `prepare-base`。按下面步骤更新模板磁盘内的 agent：
+当你只修改了 `container-macos-guest-agent`（或 `install.sh` / plist），不需要重跑 `prepare-base`。按下面步骤更新镜像磁盘内的 agent：
 
 1. 在宿主重编译并刷新 seed 目录内容：
 
@@ -219,7 +219,7 @@ install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$SE
 install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$SEED_DIR/install-in-guest-from-seed.sh"
 ```
 
-2. 若你修改的是手工 VM 配置（例如新增 `VZVirtioSocketDeviceConfiguration()`），需要关闭当前手工 VM，并在宿主重新编译/重启 `/tmp/manual-template-vm`；这类改动不能在运行中的 VM 热生效。
+2. 若你修改的是手工 VM 配置（例如新增 `VZVirtioSocketDeviceConfiguration()`），需要关闭当前手工 VM，并在宿主重新编译/重启 `/tmp/macos-vm-manager`；这类改动不能在运行中的 VM 热生效。
 
 3. 在 guest 内重新执行安装（先挂载以访问脚本；脚本内部会检测已挂载并避免重复挂载）：
 
@@ -236,17 +236,17 @@ sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 40
 sudo tail -n 50 /var/log/container-macos-guest-agent.log
 ```
 
-5. 验证通过后，按第 7、8 步重新 `package` / `load` / `push` 模板。
+5. 验证通过后，按第 7、8 步重新 `package` / `load` / `push` 镜像。
 
-## 7. 打包模板（`container macos package`）
+## 7. 打包镜像（`container macos package`）
 
 ```bash
-export OCI_TAR="/tmp/macos-template-base-oci.tar"
+export OCI_TAR="/tmp/macos-image-base-oci.tar"
 
 "$CONTAINER_BIN" macos package \
-  --input "$TEMPLATE_DIR" \
+  --input "$IMAGE_DIR" \
   --output "$OCI_TAR" \
-  --reference "local/macos-template:base"
+  --reference "local/macos-image:base"
 ```
 
 可选校验（需要 `jq`）：
@@ -269,7 +269,7 @@ jq -r '.layers[].mediaType' "$TMP_LAYOUT/blobs/sha256/$MANIFEST_DIGEST"
 如果你想在执行第 8 步前，先在宿主做一次端到端验证，可先把第 7 步产物加载到本地镜像存储，然后直接 `run/exec`：
 
 ```bash
-export LOCAL_REF="local/macos-template:base"
+export LOCAL_REF="local/macos-image:base"
 
 # 1) load 到本地 image store
 "$CONTAINER_BIN" image load -i "$OCI_TAR"
@@ -289,7 +289,7 @@ export LOCAL_REF="local/macos-template:base"
 "$CONTAINER_BIN" delete --force macos-agent-check
 ```
 
-## 8. 加载并推送模板（`container image load` + `container image push`）
+## 8. 加载并推送镜像（`container image load` + `container image push`）
 
 先登录 registry（示例以 `ghcr.io`）：
 
@@ -300,7 +300,7 @@ echo "$REGISTRY_TOKEN" | "$CONTAINER_BIN" registry login ghcr.io --username "$RE
 先将第 7 步生成的 OCI tar 加载到本地镜像存储，再通过通用 `image push` 推送：
 
 ```bash
-export REF="ghcr.io/<org>/<repo>:macos-template-v1"
+export REF="ghcr.io/<org>/<repo>:macos-image-v1"
 
 "$CONTAINER_BIN" image load --input "$OCI_TAR"
 "$CONTAINER_BIN" image push --platform darwin/arm64 --scheme https "$REF"
@@ -314,17 +314,17 @@ export REF="ghcr.io/<org>/<repo>:macos-template-v1"
 2. 手工 VM 无法弹窗  
    命令不在图形会话执行；请在本机登录会话中运行，不要仅通过无 GUI 的远程 shell。
 
-3. `package` 报缺少模板文件  
-   检查 `TEMPLATE_DIR` 是否同时包含 `Disk.img`、`AuxiliaryStorage`、`HardwareModel.bin`。
+3. `package` 报缺少镜像文件  
+   检查 `IMAGE_DIR` 是否同时包含 `Disk.img`、`AuxiliaryStorage`、`HardwareModel.bin`。
 
 4. 后续 `container run --os darwin` 无法 `exec`  
-   通常是模板中未成功安装或未启动 `container-macos-guest-agent`，回到第 6 步检查 `launchctl` 与日志。
+   通常是镜像中未成功安装或未启动 `container-macos-guest-agent`，回到第 6 步检查 `launchctl` 与日志。
 
 5. `prepare-base` 报 `The restore image failed to load. Unable to connect to installation service.`  
    常见原因是 `container-macos-image-prepare` helper 缺少 `com.apple.security.virtualization` entitlement（本地 `swift build` 场景）。按第 2 节补签后重试。
 
 6. `prepare-base` 报 `zsh: trace trap`，且目录里只有 `Disk.img` 和 `AuxiliaryStorage`，没有 `HardwareModel.bin`  
-   这是旧实现里 `VZMacOSInstaller` 非主线程初始化导致的崩溃。请更新到包含修复的新二进制（至少重新 `xcrun swift build -c release --product container-macos-image-prepare`），并清理旧模板目录后重试。
+   这是旧实现里 `VZMacOSInstaller` 非主线程初始化导致的崩溃。请更新到包含修复的新二进制（至少重新 `xcrun swift build -c release --product container-macos-image-prepare`），并清理旧镜像目录后重试。
 
 7. `prepare-base` 报 `Unknown option '--disk-size-gib'`（或 `--memory-mib`）  
    你当前二进制可能仍使用旧的自动命名参数：`--disk-size-gi-b`、`--memory-mi-b`。更新到包含参数别名修复的新构建，或临时改用旧参数名。
@@ -333,13 +333,13 @@ export REF="ghcr.io/<org>/<repo>:macos-template-v1"
    常见原因是安装阶段访问 Apple restore 服务时被 VPN/TUN/代理或 TLS 拦截影响。建议临时关闭代理/VPN（尤其是 TUN 模式）、确保直连 Apple 服务后重试；必要时改用无代理网络（如手机热点）验证。
 
 9. `5.2` 启动手工 VM 报 `VZErrorDomain Code=2`：`The process doesn’t have the "com.apple.security.virtualization" entitlement.`  
-   这是 `/tmp/manual-template-vm` 未签 `com.apple.security.virtualization` entitlement。按第 `5.1` 节对该二进制执行 `codesign --entitlements signing/container-runtime-macos.entitlements` 后重试。
+   这是 `/tmp/macos-vm-manager` 未签 `com.apple.security.virtualization` entitlement。按第 `5.1` 节对该二进制执行 `codesign --entitlements signing/container-runtime-macos.entitlements` 后重试。
 
-10. 手工配置模板时提示创建用户名/密码，担心后续每次启动都要手动登录  
-   首次模板注入时完成 Setup Assistant 是正常现象。只要第 6 步把 `container-macos-guest-agent` 安装为 `system` 域 `LaunchDaemon`（`RunAtLoad` + `KeepAlive`），后续 `container run --os darwin` 一般不依赖图形登录。若运行时报 guest-agent 连接超时，再回到模板里检查 `launchctl print system/com.apple.container.macos.guest-agent` 和 `/var/log/container-macos-guest-agent.log`。
+10. 手工配置镜像时提示创建用户名/密码，担心后续每次启动都要手动登录  
+   首次镜像注入时完成 Setup Assistant 是正常现象。只要第 6 步把 `container-macos-guest-agent` 安装为 `system` 域 `LaunchDaemon`（`RunAtLoad` + `KeepAlive`），后续 `container run --os darwin` 一般不依赖图形登录。若运行时报 guest-agent 连接超时，再回到镜像里检查 `launchctl print system/com.apple.container.macos.guest-agent` 和 `/var/log/container-macos-guest-agent.log`。
 
 11. 第 6 步 `launchctl print` 显示 `spawn scheduled`，日志报 `Error: The operation couldn't be completed. Operation not supported by device`  
-   这是 guest agent 在创建 `AF_VSOCK` 监听时失败，常见原因是手工模板 VM 没有配置 virtio socket 设备。请确认 `scripts/macos-guest-agent/manual-template-vm.swift` 包含 `vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]`，然后重新编译并启动手工 VM，再执行第 6 步安装与验证。
+   这是 guest agent 在创建 `AF_VSOCK` 监听时失败，常见原因是手工镜像 VM 没有配置 virtio socket 设备。请确认 `scripts/macos-guest-agent/macos-vm-manager.swift` 包含 `vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]`，然后重新编译并启动手工 VM，再执行第 6 步安装与验证。
 
 12. 我只更新了 guest agent，是否必须重跑 `prepare-base`  
-   不需要。按第 `6.1` 节做增量更新即可；若模板 VM 配置本身有变更（如 socketDevices），需先重启手工 VM 后再重装 agent，最后重新 `package` / `push`。
+   不需要。按第 `6.1` 节做增量更新即可；若镜像 VM 配置本身有变更（如 socketDevices），需先重启手工 VM 后再重装 agent，最后重新 `package` / `push`。

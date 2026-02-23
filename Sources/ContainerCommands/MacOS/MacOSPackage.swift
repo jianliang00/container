@@ -24,12 +24,12 @@ extension Application {
 
         public static let configuration = CommandConfiguration(
             commandName: "package",
-            abstract: "Package a macOS template directory as an OCI layout tar"
+            abstract: "Package a macOS image directory as an OCI layout tar"
         )
 
         @Option(
             name: .shortAndLong,
-            help: "Path to a template directory containing Disk.img/AuxiliaryStorage/HardwareModel.bin",
+            help: "Path to an image directory containing Disk.img/AuxiliaryStorage/HardwareModel.bin",
             completion: .directory,
             transform: { str in
                 URL(fileURLWithPath: str, relativeTo: .currentDirectory()).absoluteURL
@@ -54,8 +54,8 @@ extension Application {
         public var logOptions: Flags.Logging
 
         public func run() async throws {
-            try MacOSTemplatePackager.package(
-                templateDirectory: input,
+            try MacOSImagePackager.package(
+                imageDirectory: input,
                 outputTar: output,
                 reference: reference
             )

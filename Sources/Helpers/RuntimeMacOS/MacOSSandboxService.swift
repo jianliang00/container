@@ -242,11 +242,12 @@ extension MacOSSandboxService {
         guard let configuration else {
             throw ContainerizationError(.invalidState, message: "container not bootstrapped")
         }
-        let status: RuntimeStatus = switch sandboxState {
-        case .running: .running
-        case .stopping: .stopping
-        default: .stopped
-        }
+        let status: RuntimeStatus =
+            switch sandboxState {
+            case .running: .running
+            case .stopping: .stopping
+            default: .stopped
+            }
 
         let snapshot = SandboxSnapshot(
             status: status,
@@ -403,7 +404,7 @@ extension MacOSSandboxService {
             throw ContainerizationError(.notFound, message: "missing manifest blob \(manifestDescriptor.digest)")
         }
         let manifest: Manifest = try manifestContent.decode()
-        let layers = try MacOSTemplateLayers(manifest: manifest)
+        let layers = try MacOSImageLayers(manifest: manifest)
 
         guard let hardwareContent: Content = try await store.get(digest: layers.hardwareModel.digest) else {
             throw ContainerizationError(.notFound, message: "missing hardware model blob \(layers.hardwareModel.digest)")
@@ -540,9 +541,9 @@ extension MacOSSandboxService {
             throw ContainerizationError(
                 .internalError,
                 message: """
-                failed to start process via macOS sidecar guest agent on vsock port \(agentPort): \(detail)
-                check guest log: /var/log/container-macos-guest-agent.log
-                """
+                    failed to start process via macOS sidecar guest agent on vsock port \(agentPort): \(detail)
+                    check guest log: /var/log/container-macos-guest-agent.log
+                    """
             )
         }
     }

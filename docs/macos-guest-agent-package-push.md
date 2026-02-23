@@ -1,4 +1,4 @@
-# macOS Guest 模板：从构建 Agent 到 `package/push` 全流程
+# macOS Guest 模板：从构建 Agent 到 `package/load/push` 全流程
 
 本文档覆盖一条完整的最小闭环链路：
 
@@ -6,7 +6,7 @@
 2. 生成模板目录（`prepare-base`）
 3. 用手工 GUI VM 启动模板并通过 virtiofs 注入 agent
 4. 将模板打包为 OCI tar（`container macos package`）
-5. 推送到远端镜像仓库（`container macos push`）
+5. 加载并推送到远端镜像仓库（`container image load` + `container image push`）
 
 ## 1. 前置条件
 
@@ -17,25 +17,28 @@
 - 已准备可用 IPSW（示例：`UniversalMac_*.ipsw`）
 - 推送镜像时已具备目标 registry 账号凭据
 
-## 2. 构建 `container` 与 guest agent
+## 2. 构建 `container`、prepare helper 与 guest agent
 
 ```bash
 cd <repo-root>
 
 xcrun swift build -c release --product container
 xcrun swift build -c release --product container-macos-guest-agent
+xcrun swift build -c release --product container-macos-image-prepare
 
 export CONTAINER_BIN="$PWD/.build/release/container"
 export GUEST_AGENT_BIN="$PWD/.build/release/container-macos-guest-agent"
+export MACOS_IMAGE_PREPARE_BIN="$PWD/.build/release/container-macos-image-prepare"
 
 test -x "$CONTAINER_BIN"
 test -x "$GUEST_AGENT_BIN"
+test -x "$MACOS_IMAGE_PREPARE_BIN"
 ```
 
-如果你使用的是本地 `swift build` 产物，建议在执行 `prepare-base` 前确认 `container` 具备 `com.apple.security.virtualization` entitlement：
+说明：`container macos prepare-base` 会调用后端 helper `container-macos-image-prepare`。如果你使用的是本地 `swift build` 产物，建议在执行 `prepare-base` 前确认 helper 具备 `com.apple.security.virtualization` entitlement：
 
 ```bash
-codesign -d --entitlements :- "$CONTAINER_BIN" 2>&1 | grep com.apple.security.virtualization
+codesign -d --entitlements :- "$MACOS_IMAGE_PREPARE_BIN" 2>&1 | grep com.apple.security.virtualization
 ```
 
 若没有输出（或后续 `prepare-base` 报 `The restore image failed to load. Unable to connect to installation service.`），可为当前二进制补签：
@@ -43,7 +46,7 @@ codesign -d --entitlements :- "$CONTAINER_BIN" 2>&1 | grep com.apple.security.vi
 ```bash
 codesign --force --sign - \
   --entitlements signing/container-runtime-macos.entitlements \
-  "$CONTAINER_BIN"
+  "$MACOS_IMAGE_PREPARE_BIN"
 ```
 
 ## 3. 生成模板目录（prepare-base）
@@ -233,7 +236,7 @@ sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 40
 sudo tail -n 50 /var/log/container-macos-guest-agent.log
 ```
 
-5. 验证通过后，按第 7、8 步重新 `package` / `push` 模板。
+5. 验证通过后，按第 7、8 步重新 `package` / `load` / `push` 模板。
 
 ## 7. 打包模板（`container macos package`）
 
@@ -286,7 +289,7 @@ export LOCAL_REF="local/macos-template:base"
 "$CONTAINER_BIN" delete --force macos-agent-check
 ```
 
-## 8. 推送模板（`container macos push`）
+## 8. 加载并推送模板（`container image load` + `container image push`）
 
 先登录 registry（示例以 `ghcr.io`）：
 
@@ -294,15 +297,13 @@ export LOCAL_REF="local/macos-template:base"
 echo "$REGISTRY_TOKEN" | "$CONTAINER_BIN" registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
 ```
 
-执行推送（内部会自动 package -> load -> tag -> push）：
+先将第 7 步生成的 OCI tar 加载到本地镜像存储，再通过通用 `image push` 推送：
 
 ```bash
 export REF="ghcr.io/<org>/<repo>:macos-template-v1"
 
-"$CONTAINER_BIN" macos push \
-  --input "$TEMPLATE_DIR" \
-  --reference "$REF" \
-  --scheme https
+"$CONTAINER_BIN" image load --input "$OCI_TAR"
+"$CONTAINER_BIN" image push --platform darwin/arm64 --scheme https "$REF"
 ```
 
 ## 9. 常见问题
@@ -320,10 +321,10 @@ export REF="ghcr.io/<org>/<repo>:macos-template-v1"
    通常是模板中未成功安装或未启动 `container-macos-guest-agent`，回到第 6 步检查 `launchctl` 与日志。
 
 5. `prepare-base` 报 `The restore image failed to load. Unable to connect to installation service.`  
-   常见原因是 `container` 二进制缺少 `com.apple.security.virtualization` entitlement。按第 2 节补签后重试。
+   常见原因是 `container-macos-image-prepare` helper 缺少 `com.apple.security.virtualization` entitlement（本地 `swift build` 场景）。按第 2 节补签后重试。
 
 6. `prepare-base` 报 `zsh: trace trap`，且目录里只有 `Disk.img` 和 `AuxiliaryStorage`，没有 `HardwareModel.bin`  
-   这是旧实现里 `VZMacOSInstaller` 非主线程初始化导致的崩溃。请更新到包含修复的新二进制（重新 `xcrun swift build -c release --product container`），并清理旧模板目录后重试。
+   这是旧实现里 `VZMacOSInstaller` 非主线程初始化导致的崩溃。请更新到包含修复的新二进制（至少重新 `xcrun swift build -c release --product container-macos-image-prepare`），并清理旧模板目录后重试。
 
 7. `prepare-base` 报 `Unknown option '--disk-size-gib'`（或 `--memory-mib`）  
    你当前二进制可能仍使用旧的自动命名参数：`--disk-size-gi-b`、`--memory-mi-b`。更新到包含参数别名修复的新构建，或临时改用旧参数名。

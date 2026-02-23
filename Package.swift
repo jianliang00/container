@@ -52,6 +52,7 @@ let package = Package(
         .executable(name: "container-runtime-macos", targets: ["container-runtime-macos"]),
         .executable(name: "container-runtime-macos-sidecar", targets: ["container-runtime-macos-sidecar"]),
         .executable(name: "container-macos-guest-agent", targets: ["container-macos-guest-agent"]),
+        .executable(name: "container-macos-image-prepare", targets: ["container-macos-image-prepare"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
@@ -414,6 +415,15 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/Helpers/MacOSGuestAgent"
+        ),
+        .executableTarget(
+            name: "container-macos-image-prepare",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Containerization", package: "containerization"),
+                "ContainerVersion",
+            ],
+            path: "Sources/Helpers/MacOSImagePrepare"
         ),
         .target(
             name: "RuntimeMacOSSidecarShared",

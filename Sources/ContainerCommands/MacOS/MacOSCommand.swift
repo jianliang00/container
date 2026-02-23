@@ -26,7 +26,6 @@ extension Application {
             subcommands: [
                 MacOSPrepareBase.self,
                 MacOSPackage.self,
-                MacOSPush.self,
             ]
         )
     }

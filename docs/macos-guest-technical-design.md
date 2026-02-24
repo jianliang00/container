@@ -67,7 +67,7 @@
 
 - 纯 `headless`（无显示设备）在某些镜像上会导致 guest-agent vsock 连接异常（reset）
 - “无窗口但保留显示设备”显著改善稳定性
-- helper/XPC 上下文内直接承载 VM 即使保留显示设备，也可能与 `macos-vm-manager` 表现不同
+- helper/XPC 上下文内直接承载 VM 即使保留显示设备，也可能与 `container macos start-vm` 表现不同
 
 因此当前方案固定为：
 
@@ -78,8 +78,8 @@
 ### 3.2 运行模式对比
 
 - `container-runtime-macos-sidecar`：默认使用 headless-display（无窗口、有显示设备）
-- `macos-vm-manager start --headless-display`：用于复现实验和对照验证
-- `macos-vm-manager start --headless`：保留为问题复现工具，不作为推荐路径
+- `container macos start-vm --headless-display`：用于复现实验和对照验证
+- `container macos start-vm --headless`：保留为问题复现工具，不作为推荐路径
 
 ## 4. Build / Packaging 集成点
 

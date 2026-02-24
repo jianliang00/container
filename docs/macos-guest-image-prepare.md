@@ -75,66 +75,66 @@ ls -lh "$IMAGE_DIR"/Disk.img "$IMAGE_DIR"/AuxiliaryStorage "$IMAGE_DIR"/Hardware
 
 把 agent 二进制与安装脚本放进一个共享目录，供 VM 通过 virtiofs 挂载读取：
 
+### 4.1 方式 A（推荐）：用 CLI 生成注入目录
+
 ```bash
 export SEED_DIR="/tmp/macos-agent-seed"
 
 rm -rf "$SEED_DIR"
-mkdir -p "$SEED_DIR"
 
-install -m 0755 "$GUEST_AGENT_BIN" "$SEED_DIR/container-macos-guest-agent"
-install -m 0755 scripts/macos-guest-agent/install.sh "$SEED_DIR/install.sh"
-install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$SEED_DIR/container-macos-guest-agent.plist"
-install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$SEED_DIR/install-in-guest-from-seed.sh"
+container macos guest-agent prepare -o "$SEED_DIR" --overwrite
+```
+
+### 4.2 方式 B（源码开发/临时验证）：手工准备注入目录
+
+当你需要快速验证 `scripts/macos-guest-agent/*` 的改动（不经过 CLI 的查找逻辑）时，可直接使用 `install` 拷贝四个文件：
+
+```bash
+export SEED_DIR="/tmp/macos-agent-seed"
+
+scripts/macos-guest-agent/prepare-agent.sh \
+  --seed-dir "$SEED_DIR" \
+  --guest-agent-bin "$GUEST_AGENT_BIN" \
+  --overwrite
 ```
 
 ## 5. 手工启动镜像 VM（GUI + virtiofs）
 
-### 5.1 编译手工 VM 工具
+### 5.1 启动 VM
 
 ```bash
-xcrun swiftc scripts/macos-guest-agent/macos-vm-manager.swift \
-  -framework AppKit \
-  -framework Virtualization \
-  -o /tmp/macos-vm-manager
-
-# 关键：为手工 VM 工具补签 Virtualization entitlement
-codesign --force --sign - \
-  --entitlements signing/container-runtime-macos.entitlements \
-  /tmp/macos-vm-manager
-
-# 可选校验：应能看到 com.apple.security.virtualization
-codesign -d --entitlements :- /tmp/macos-vm-manager 2>&1 | grep com.apple.security.virtualization
-```
-
-注意：
-
-- 不要直接用 `swift macos-vm-manager.swift` 运行，已知可能触发 JIT/符号链接问题
-- 请在本地 Aqua 图形会话下运行（纯 SSH 无窗口环境会失败）
-- 若跳过补签，`5.2` 启动时可能报：`VZErrorDomain Code=2 "The process doesn’t have the com.apple.security.virtualization entitlement."`
-- 若第 6 步日志出现 `Error: ... Operation not supported by device`，通常是手工镜像 VM 未启用 `VZVirtioSocketDeviceConfiguration()`；请更新到最新 `scripts/macos-guest-agent/macos-vm-manager.swift` 后重新编译 `/tmp/macos-vm-manager`
-
-### 5.2 启动 VM
-
-```bash
-/tmp/macos-vm-manager start \
+"$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
-  --share-tag seed \
   --cpus 4 \
   --memory-mib 8192
 ```
 
+也可以省略手工准备 `$SEED_DIR`：让 `start-vm` 在启动 VM 前自动创建临时注入目录并挂载（`--auto-seed`）：
+
+```bash
+"$CONTAINER_BIN" macos start-vm \
+  --image "$IMAGE_DIR" \
+  --auto-seed \
+  --cpus 4 \
+  --memory-mib 8192
+```
+
+说明：
+
+- `--auto-seed` 负责“宿主侧共享目录内容”（自动生成一个临时目录并填充 agent + 脚本）
+- `--share-tag`（默认 `seed`）只影响 guest 内 `mount -t virtiofs <tag> ...` 的 tag 名称；一般不需要显式传参
+
 启动后会弹出 GUI 窗口。
 
-### 5.3 直接用 vsock 调试 guest-agent（不依赖 `container`）
+### 5.2 直接用 vsock 调试 guest-agent（不依赖 `container run`）
 
 如果你要在手工 VM 场景下直接调试 guest-agent 协议，可在启动 VM 时增加 `--agent-repl`：
 
 ```bash
-/tmp/macos-vm-manager start \
+"$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
-  --share-tag seed \
   --cpus 4 \
   --memory-mib 8192 \
   --agent-repl \
@@ -213,13 +213,19 @@ cd <repo-root>
 xcrun swift build -c release --product container-macos-guest-agent
 export GUEST_AGENT_BIN="$PWD/.build/release/container-macos-guest-agent"
 
-install -m 0755 "$GUEST_AGENT_BIN" "$SEED_DIR/container-macos-guest-agent"
-install -m 0755 scripts/macos-guest-agent/install.sh "$SEED_DIR/install.sh"
-install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$SEED_DIR/container-macos-guest-agent.plist"
-install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$SEED_DIR/install-in-guest-from-seed.sh"
+# 推荐：用 CLI 重新生成 seed 目录（包含脚本/模板，减少手工同步步骤）
+CONTAINER_MACOS_GUEST_AGENT_BIN="$GUEST_AGENT_BIN" \
+CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent" \
+"$CONTAINER_BIN" macos guest-agent prepare -o "$SEED_DIR" --overwrite
+
+# 或：仅更新 seed 目录里的 agent 二进制（脚本/模板未改动时可用）
+# install -m 0755 "$GUEST_AGENT_BIN" "$SEED_DIR/container-macos-guest-agent"
+#
+# 或：用脚本生成注入目录（源码开发/临时验证）
+# scripts/macos-guest-agent/prepare-agent.sh --seed-dir "$SEED_DIR" --guest-agent-bin "$GUEST_AGENT_BIN" --overwrite
 ```
 
-2. 若你修改的是手工 VM 配置（例如新增 `VZVirtioSocketDeviceConfiguration()`），需要关闭当前手工 VM，并在宿主重新编译/重启 `/tmp/macos-vm-manager`；这类改动不能在运行中的 VM 热生效。
+2. 若你修改的是 VM 启动配置（例如 CPU/内存/显示模式/是否启用 vsock），需要先关闭当前 VM，再重新执行 `start-vm`；这类改动不能在运行中的 VM 热生效。
 
 3. 在 guest 内重新执行安装（先挂载以访问脚本；脚本内部会检测已挂载并避免重复挂载）：
 
@@ -332,14 +338,14 @@ export REF="ghcr.io/<org>/<repo>:macos-image-v1"
 8. `prepare-base` 报 `An error occurred during installation. Installation failed.`（常见伴随 `VZErrorDomain code 10007` / `MobileRestore code 4014`）  
    常见原因是安装阶段访问 Apple restore 服务时被 VPN/TUN/代理或 TLS 拦截影响。建议临时关闭代理/VPN（尤其是 TUN 模式）、确保直连 Apple 服务后重试；必要时改用无代理网络（如手机热点）验证。
 
-9. `5.2` 启动手工 VM 报 `VZErrorDomain Code=2`：`The process doesn’t have the "com.apple.security.virtualization" entitlement.`  
-   这是 `/tmp/macos-vm-manager` 未签 `com.apple.security.virtualization` entitlement。按第 `5.1` 节对该二进制执行 `codesign --entitlements signing/container-runtime-macos.entitlements` 后重试。
+9. `start-vm` 启动 VM 报 `VZErrorDomain Code=2`：`The process doesn’t have the "com.apple.security.virtualization" entitlement.`  
+   这通常表示你正在运行未签名的本地构建二进制。请确保使用安装包提供的 `container`（其 helper 已带正确 entitlement），或对 `container-macos-vm-manager` helper 补签 `signing/container-runtime-macos.entitlements` 后重试。
 
 10. 手工配置镜像时提示创建用户名/密码，担心后续每次启动都要手动登录  
    首次镜像注入时完成 Setup Assistant 是正常现象。只要第 6 步把 `container-macos-guest-agent` 安装为 `system` 域 `LaunchDaemon`（`RunAtLoad` + `KeepAlive`），后续 `container run --os darwin` 一般不依赖图形登录。若运行时报 guest-agent 连接超时，再回到镜像里检查 `launchctl print system/com.apple.container.macos.guest-agent` 和 `/var/log/container-macos-guest-agent.log`。
 
 11. 第 6 步 `launchctl print` 显示 `spawn scheduled`，日志报 `Error: The operation couldn't be completed. Operation not supported by device`  
-   这是 guest agent 在创建 `AF_VSOCK` 监听时失败，常见原因是手工镜像 VM 没有配置 virtio socket 设备。请确认 `scripts/macos-guest-agent/macos-vm-manager.swift` 包含 `vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]`，然后重新编译并启动手工 VM，再执行第 6 步安装与验证。
+   这是 guest agent 在创建 `AF_VSOCK` 监听时失败，常见原因是 VM 未启用 virtio socket 设备。使用 `container macos start-vm` 启动的 VM 默认已启用；若你使用的是自定义/旧版 VM 启动工具，请升级后重试。
 
 12. 我只更新了 guest agent，是否必须重跑 `prepare-base`  
    不需要。按第 `6.1` 节做增量更新即可；若镜像 VM 配置本身有变更（如 socketDevices），需先重启手工 VM 后再重装 agent，最后重新 `package` / `push`。

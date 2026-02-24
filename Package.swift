@@ -48,6 +48,7 @@ let package = Package(
         .executable(name: "container-runtime-macos-sidecar", targets: ["container-runtime-macos-sidecar"]),
         .executable(name: "container-macos-guest-agent", targets: ["container-macos-guest-agent"]),
         .executable(name: "container-macos-image-prepare", targets: ["container-macos-image-prepare"]),
+        .executable(name: "container-macos-vm-manager", targets: ["container-macos-vm-manager"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
@@ -124,6 +125,12 @@ let package = Package(
                 "ContainerBuild"
             ]
         ),
+        .testTarget(
+            name: "ContainerCommandsTests",
+            dependencies: [
+                "ContainerCommands"
+            ]
+        ),
         .executableTarget(
             name: "container-apiserver",
             dependencies: [
@@ -146,6 +153,15 @@ let package = Package(
                 "DNSServer",
             ],
             path: "Sources/Helpers/APIServer"
+        ),
+        .executableTarget(
+            name: "container-macos-vm-manager",
+            dependencies: [],
+            path: "Sources/Helpers/MacOSVMManager",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("Virtualization"),
+            ]
         ),
         .target(
             name: "ContainerAPIService",

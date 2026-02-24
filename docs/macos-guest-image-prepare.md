@@ -25,20 +25,29 @@ cd <repo-root>
 xcrun swift build -c release --product container
 xcrun swift build -c release --product container-macos-guest-agent
 xcrun swift build -c release --product container-macos-image-prepare
+xcrun swift build -c release --product container-macos-vm-manager
 
 export CONTAINER_BIN="$PWD/.build/release/container"
 export GUEST_AGENT_BIN="$PWD/.build/release/container-macos-guest-agent"
 export MACOS_IMAGE_PREPARE_BIN="$PWD/.build/release/container-macos-image-prepare"
+export MACOS_VM_MANAGER_BIN="$PWD/.build/release/container-macos-vm-manager"
 
 test -x "$CONTAINER_BIN"
 test -x "$GUEST_AGENT_BIN"
 test -x "$MACOS_IMAGE_PREPARE_BIN"
+test -x "$MACOS_VM_MANAGER_BIN"
 ```
 
-说明：`container macos prepare-base` 会调用后端 helper `container-macos-image-prepare`。如果你使用的是本地 `swift build` 产物，建议在执行 `prepare-base` 前确认 helper 具备 `com.apple.security.virtualization` entitlement：
+说明：
+
+- `container macos prepare-base` 会调用后端 helper `container-macos-image-prepare`
+- `container macos start-vm` 会调用后端 helper `container-macos-vm-manager`
+
+如果你使用的是本地 `swift build` 产物，建议在执行 `prepare-base/start-vm` 前确认 helper 具备 `com.apple.security.virtualization` entitlement：
 
 ```bash
 codesign -d --entitlements :- "$MACOS_IMAGE_PREPARE_BIN" 2>&1 | grep com.apple.security.virtualization
+codesign -d --entitlements :- "$MACOS_VM_MANAGER_BIN" 2>&1 | grep com.apple.security.virtualization
 ```
 
 若没有输出（或后续 `prepare-base` 报 `The restore image failed to load. Unable to connect to installation service.`），可为当前二进制补签：
@@ -47,6 +56,15 @@ codesign -d --entitlements :- "$MACOS_IMAGE_PREPARE_BIN" 2>&1 | grep com.apple.s
 codesign --force --sign - \
   --entitlements signing/container-runtime-macos.entitlements \
   "$MACOS_IMAGE_PREPARE_BIN"
+codesign --force --sign - \
+  --entitlements signing/container-runtime-macos.entitlements \
+  "$MACOS_VM_MANAGER_BIN"
+```
+
+如需显式指定 `start-vm` 使用的 helper 路径，可设置：
+
+```bash
+export CONTAINER_MACOS_VM_MANAGER_BIN="$MACOS_VM_MANAGER_BIN"
 ```
 
 ## 3. 生成镜像目录（prepare-base）

@@ -26,6 +26,8 @@ extension Application {
             subcommands: [
                 MacOSPrepareBase.self,
                 MacOSPackage.self,
+                MacOSStartVM.self,
+                MacOSGuestAgentCommand.self,
             ]
         )
     }

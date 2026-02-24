@@ -53,6 +53,7 @@ let package = Package(
         .executable(name: "container-runtime-macos-sidecar", targets: ["container-runtime-macos-sidecar"]),
         .executable(name: "container-macos-guest-agent", targets: ["container-macos-guest-agent"]),
         .executable(name: "container-macos-image-prepare", targets: ["container-macos-image-prepare"]),
+        .executable(name: "container-macos-vm-manager", targets: ["container-macos-vm-manager"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
@@ -155,8 +156,7 @@ let package = Package(
         .testTarget(
             name: "ContainerCommandsTests",
             dependencies: [
-                "ContainerCommands",
-                "ContainerResource",
+                "ContainerCommands"
             ]
         ),
         .executableTarget(
@@ -186,6 +186,15 @@ let package = Package(
                 "DNSServer",
             ],
             path: "Sources/APIServer"
+        ),
+        .executableTarget(
+            name: "container-macos-vm-manager",
+            dependencies: [],
+            path: "Sources/Helpers/MacOSVMManager",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("Virtualization"),
+            ]
         ),
         .target(
             name: "ContainerAPIService",

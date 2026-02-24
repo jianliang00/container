@@ -8,7 +8,7 @@
 - `container-runtime-macos` / `container-runtime-macos-sidecar`
 - `container-macos-guest-agent`
 - 镜像 VM（`prepare-base` 生成的 `IMAGE_DIR`）
-- 手工调试工具：`scripts/macos-guest-agent/macos-vm-manager.swift`
+- 手工调试工具：`container macos start-vm`
 
 配套文档：
 
@@ -40,8 +40,8 @@
 
 实际验证结果：
 
-- `macos-vm-manager start --headless`：常见 `vsock Code=54 reset by peer`
-- `macos-vm-manager start --headless-display`：guest-agent 可正常连通
+- `container macos start-vm --headless`：常见 `vsock Code=54 reset by peer`
+- `container macos start-vm --headless-display`：guest-agent 可正常连通
 - `container-runtime-macos` 直接在 helper 内“无窗口+保留显示设备”仍可能失败（运行上下文差异）
 - 将 VM 承载迁移到 GUI 域 sidecar 后，稳定性显著提升
 
@@ -54,7 +54,7 @@
 
 你可能遇到过：
 
-- `macos-vm-manager` 里 agent 正常
+- `start-vm` 里 agent 正常
 - `container run` 仍报 `failed to connect to guest agent ... Code=54`
 
 常见原因并不矛盾，通常是以下之一：
@@ -90,7 +90,7 @@ export LOCAL_REF="local/macos-image:base"
 
 - 插件 helper：`libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos`
 - 插件 sidecar：`libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar`
-- 手工调试 VM 工具（本地临时）：`/tmp/macos-vm-manager`
+- 手工调试 VM helper（安装包路径）：`/usr/local/libexec/container/macos-vm-manager/bin/container-macos-vm-manager`
 - guest-agent 日志（guest 内）：`/var/log/container-macos-guest-agent.log`
 - 容器 helper 日志（宿主容器 root）：`<container-root>/stdio.log`
 
@@ -163,28 +163,26 @@ codesign -d --entitlements :- \
 - host vsock 连接路径
 - runtime/helper 上下文差异
 
-### 5.1 编译并签名 `macos-vm-manager`
-
-```bash
-xcrun swiftc scripts/macos-guest-agent/macos-vm-manager.swift \
-  -framework AppKit \
-  -framework Virtualization \
-  -o /tmp/macos-vm-manager
-
-codesign --force --sign - \
-  --entitlements signing/container-runtime-macos.entitlements \
-  /tmp/macos-vm-manager
-```
+### 5.1 启动手工 VM（`container macos start-vm`）
 
 ### 5.2 三种启动模式（A/B 必备）
+
+如需简化流程（不手工创建 `$SEED_DIR`），可在启动时使用 `--auto-seed` 让 `start-vm` 自动创建临时注入目录并挂载：
+
+```bash
+"$CONTAINER_BIN" macos start-vm \
+  --image "$IMAGE_DIR" \
+  --auto-seed \
+  --cpus 4 \
+  --memory-mib 8192
+```
 
 #### GUI（正常人工调试）
 
 ```bash
-/tmp/macos-vm-manager start \
+"$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
-  --share-tag seed \
   --cpus 4 \
   --memory-mib 8192
 ```
@@ -192,10 +190,9 @@ codesign --force --sign - \
 #### 纯 headless（用于复现问题，不推荐作为默认）
 
 ```bash
-/tmp/macos-vm-manager start \
+"$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
-  --share-tag seed \
   --cpus 4 \
   --memory-mib 8192 \
   --headless
@@ -204,10 +201,9 @@ codesign --force --sign - \
 #### headless-display（无窗口，但保留显示设备；接近稳定路径）
 
 ```bash
-/tmp/macos-vm-manager start \
+"$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
-  --share-tag seed \
   --cpus 4 \
   --memory-mib 8192 \
   --headless-display
@@ -218,10 +214,9 @@ codesign --force --sign - \
 在手工 VM 启动时增加 `--agent-repl`：
 
 ```bash
-/tmp/macos-vm-manager start \
+"$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
-  --share-tag seed \
   --cpus 4 \
   --memory-mib 8192 \
   --agent-repl \
@@ -259,7 +254,7 @@ quit
 ### 5.4 非交互探针（适合脚本化）
 
 ```bash
-/tmp/macos-vm-manager start ... --agent-probe --agent-port 27000
+"$CONTAINER_BIN" macos start-vm ... --agent-probe --agent-port 27000
 ```
 
 预期：
@@ -269,13 +264,12 @@ quit
 
 ### 5.5 Unix socket 控制口（sidecar 风格调试）
 
-`macos-vm-manager start` 支持用 `--control-socket` 启动一个控制服务器，便于脚本化验证：
+`start-vm` 支持用 `--control-socket` 启动一个控制服务器，便于脚本化验证：
 
 ```bash
-/tmp/macos-vm-manager start \
+"$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
-  --share-tag seed \
   --cpus 4 \
   --memory-mib 8192 \
   --headless-display \
@@ -537,7 +531,7 @@ sudo tail -n 200 /var/log/container-macos-guest-agent.log
 
 1. `container run` 报 guest-agent 连接失败（`Code=54`）
 2. 进入手工 VM 验证 guest 内 agent：发现前台 agent/日志正常
-3. 怀疑协议问题，新增 `macos-vm-manager start --agent-repl` 直接走 vsock
+3. 怀疑协议问题，新增 `container macos start-vm --agent-repl` 直接走 vsock
 4. 发现 REPL 重连竞态/读写实现问题，改为 `Darwin.read/write`
 5. 发现 guest-agent 对短命令（`ls`/`echo`）丢 `stdout/exit`，修复为先安装回调再 `process.run()`
 6. 发现纯 `headless` 启动路径不稳定（`Code=54`），`headless-display` 正常
@@ -612,7 +606,9 @@ codesign --force --sign - \
 
 ```bash
 xcrun swift build -c release --product container-macos-guest-agent
-install -m 0755 .build/release/container-macos-guest-agent "$SEED_DIR/container-macos-guest-agent"
+CONTAINER_MACOS_GUEST_AGENT_BIN="$PWD/.build/release/container-macos-guest-agent" \
+CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent" \
+"$CONTAINER_BIN" macos guest-agent prepare -o "$SEED_DIR" --overwrite
 
 # 启动手工 VM -> 在 guest 内执行
 sudo mkdir -p /Volumes/seed

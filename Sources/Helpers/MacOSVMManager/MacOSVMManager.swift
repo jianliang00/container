@@ -25,10 +25,12 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     #else
 
     if let tempShare = options.temporarySharedDirectoryURL {
-        defer {
+        print("auto seed: \(tempShare.path)")
+    }
+    defer {
+        if let tempShare = options.temporarySharedDirectoryURL {
             try? FileManager.default.removeItem(at: tempShare)
         }
-        print("auto seed: \(tempShare.path)")
     }
 
     try ensureDirectoryExists(options.imageURL, message: "image directory does not exist")

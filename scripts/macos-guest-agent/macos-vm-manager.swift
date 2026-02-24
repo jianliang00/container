@@ -29,6 +29,7 @@ struct Options {
     let controlSocketPath: String?
     let agentPort: UInt32
     let agentConnectRetries: Int
+    let temporarySharedDirectoryURL: URL?
 }
 
 enum CLICommand {
@@ -91,15 +92,20 @@ func printRootUsage(programName: String = executableName()) {
 func printStartUsage(programName: String = executableName()) {
     let usage = """
         Usage:
-          \(programName) start --image <path> --share <path> [options]
+          \(programName) start --image <path> (--share <path> | --auto-seed) [options]
 
         Required:
           --image <path>        Image directory containing Disk.img/AuxiliaryStorage/HardwareModel.bin
-          --share <path>        Host directory to mount into guest using virtiofs
+          (--share <path> | --auto-seed)
 
         Optional:
+          --share <path>        Host directory to mount into guest using virtiofs
           --template <path>     Alias for --image
           --share-tag <name>    virtiofs tag visible in guest (default: seed)
+          --auto-seed           Create a temporary seed directory and mount it as the virtiofs share
+          --guest-agent-bin <p> Guest agent binary used with --auto-seed (default: best-effort auto-detect)
+          --seed-scripts-dir <p>
+                               Directory containing install.sh, container-macos-guest-agent.plist, install-in-guest-from-seed.sh
           --cpus <n>            Requested vCPU count (default: 4)
           --memory-mib <n>      Requested memory in MiB (default: 8192)
           --headless            Start without graphics/keyboard/pointer devices (closer to container runtime default)
@@ -131,6 +137,122 @@ func printStartUsage(programName: String = executableName()) {
     print(usage)
 }
 
+func runProcess(executablePath: String, arguments: [String]) throws {
+    let process = Process()
+    if executablePath.contains("/") {
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+    } else {
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [executablePath] + arguments
+    }
+    process.environment = ProcessInfo.processInfo.environment
+    process.standardInput = FileHandle.standardInput
+    process.standardOutput = FileHandle.standardOutput
+    process.standardError = FileHandle.standardError
+    try process.run()
+    process.waitUntilExit()
+    if process.terminationReason != .exit || process.terminationStatus != 0 {
+        throw ArgumentError.required("process failed: \(executablePath) \(arguments.joined(separator: " "))")
+    }
+}
+
+func copyFileReplacing(from: URL, to: URL) throws {
+    let fm = FileManager.default
+    if fm.fileExists(atPath: to.path) {
+        try fm.removeItem(at: to)
+    }
+    try fm.copyItem(at: from, to: to)
+}
+
+func setPermissions(_ mode: Int, url: URL) throws {
+    try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+}
+
+func prepareSeedDirectory(
+    seedDir: URL,
+    guestAgentBinOverride: String?,
+    seedScriptsDirOverride: String?
+) throws {
+    let fm = FileManager.default
+
+    let cwd = URL(fileURLWithPath: fm.currentDirectoryPath).standardizedFileURL
+
+    let guestAgentCandidates: [URL] = {
+        var values: [URL] = []
+        if let guestAgentBinOverride, !guestAgentBinOverride.isEmpty {
+            values.append(URL(fileURLWithPath: guestAgentBinOverride, relativeTo: cwd).absoluteURL.standardizedFileURL)
+        }
+        if let v = ProcessInfo.processInfo.environment["CONTAINER_MACOS_GUEST_AGENT_BIN"], !v.isEmpty {
+            values.append(URL(fileURLWithPath: v, relativeTo: cwd).absoluteURL.standardizedFileURL)
+        }
+        if let v = ProcessInfo.processInfo.environment["GUEST_AGENT_BIN"], !v.isEmpty {
+            values.append(URL(fileURLWithPath: v, relativeTo: cwd).absoluteURL.standardizedFileURL)
+        }
+        values.append(URL(fileURLWithPath: "/usr/local/libexec/container/macos-guest-agent/bin/container-macos-guest-agent"))
+        values.append(cwd.appendingPathComponent(".build/release/container-macos-guest-agent"))
+        values.append(cwd.appendingPathComponent(".build/debug/container-macos-guest-agent"))
+        values.append(cwd.appendingPathComponent(".build/arm64-apple-macosx/release/container-macos-guest-agent"))
+        values.append(cwd.appendingPathComponent(".build/arm64-apple-macosx/debug/container-macos-guest-agent"))
+        return values
+    }()
+
+    let guestAgentURL = guestAgentCandidates.first(where: { fm.isExecutableFile(atPath: $0.path) })
+    guard let guestAgentURL else {
+        throw ArgumentError.required("guest agent binary not found; use --guest-agent-bin or set CONTAINER_MACOS_GUEST_AGENT_BIN")
+    }
+
+    let scriptsDirCandidates: [URL] = {
+        var values: [URL] = []
+        if let seedScriptsDirOverride, !seedScriptsDirOverride.isEmpty {
+            values.append(URL(fileURLWithPath: seedScriptsDirOverride, relativeTo: cwd).absoluteURL.standardizedFileURL)
+        }
+        if let v = ProcessInfo.processInfo.environment["CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR"], !v.isEmpty {
+            values.append(URL(fileURLWithPath: v, relativeTo: cwd).absoluteURL.standardizedFileURL)
+        }
+        values.append(URL(fileURLWithPath: "/usr/local/libexec/container/macos-guest-agent/share"))
+        values.append(cwd.appendingPathComponent("scripts/macos-guest-agent"))
+        return values
+    }()
+
+    let scriptsDirURL = scriptsDirCandidates.first(where: { path in
+        var isDirectory: ObjCBool = false
+        return fm.fileExists(atPath: path.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    })
+    guard let scriptsDirURL else {
+        throw ArgumentError.required("guest agent scripts directory not found; use --seed-scripts-dir or set CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR")
+    }
+
+    let installScript = scriptsDirURL.appendingPathComponent("install.sh")
+    let plistTemplate = scriptsDirURL.appendingPathComponent("container-macos-guest-agent.plist")
+    let installFromSeedScript = scriptsDirURL.appendingPathComponent("install-in-guest-from-seed.sh")
+    for required in [installScript, plistTemplate, installFromSeedScript] {
+        guard fm.fileExists(atPath: required.path) else {
+            throw ArgumentError.required("missing required seed file: \(required.path)")
+        }
+    }
+
+    if fm.fileExists(atPath: seedDir.path) {
+        try fm.removeItem(at: seedDir)
+    }
+    try fm.createDirectory(at: seedDir, withIntermediateDirectories: true)
+
+    let agentDest = seedDir.appendingPathComponent("container-macos-guest-agent")
+    let installDest = seedDir.appendingPathComponent("install.sh")
+    let plistDest = seedDir.appendingPathComponent("container-macos-guest-agent.plist")
+    let installFromSeedDest = seedDir.appendingPathComponent("install-in-guest-from-seed.sh")
+
+    try copyFileReplacing(from: guestAgentURL, to: agentDest)
+    try copyFileReplacing(from: installScript, to: installDest)
+    try copyFileReplacing(from: plistTemplate, to: plistDest)
+    try copyFileReplacing(from: installFromSeedScript, to: installFromSeedDest)
+
+    try setPermissions(0o755, url: agentDest)
+    try setPermissions(0o755, url: installDest)
+    try setPermissions(0o644, url: plistDest)
+    try setPermissions(0o755, url: installFromSeedDest)
+}
+
 func parseStartOptions(_ args: [String], programName: String = executableName()) throws -> Options {
     var imagePath: String?
     var sharePath: String?
@@ -144,6 +266,9 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
     var controlSocketPath: String?
     var agentPort: UInt32 = 27000
     var agentConnectRetries = 60
+    var autoSeed = false
+    var guestAgentBinPath: String?
+    var seedScriptsDirPath: String?
 
     var index = 0
 
@@ -165,6 +290,16 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
             index += 1
             guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
             shareTag = args[index]
+        case "--auto-seed":
+            autoSeed = true
+        case "--guest-agent-bin":
+            index += 1
+            guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
+            guestAgentBinPath = args[index]
+        case "--seed-scripts-dir":
+            index += 1
+            guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
+            seedScriptsDirPath = args[index]
         case "--cpus":
             index += 1
             guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
@@ -215,13 +350,31 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
     guard let imagePath else {
         throw ArgumentError.required("missing required argument: --image")
     }
-    guard let sharePath else {
-        throw ArgumentError.required("missing required argument: --share")
+    let temporaryShareURL: URL?
+    if autoSeed {
+        if sharePath != nil {
+            throw ArgumentError.required("use either --share or --auto-seed")
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("container-macos-seed-\(UUID().uuidString)")
+        try prepareSeedDirectory(
+            seedDir: tempDir,
+            guestAgentBinOverride: guestAgentBinPath,
+            seedScriptsDirOverride: seedScriptsDirPath
+        )
+
+        sharePath = tempDir.path
+        temporaryShareURL = tempDir
+    } else {
+        guard sharePath != nil else {
+            throw ArgumentError.required("missing required argument: --share")
+        }
+        temporaryShareURL = nil
     }
 
     return Options(
         imageURL: URL(fileURLWithPath: imagePath).standardizedFileURL,
-        sharedDirectoryURL: URL(fileURLWithPath: sharePath).standardizedFileURL,
+        sharedDirectoryURL: URL(fileURLWithPath: sharePath!).standardizedFileURL,
         shareTag: shareTag,
         cpus: cpus,
         memoryMiB: memoryMiB,
@@ -231,7 +384,8 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
         agentProbe: agentProbe,
         controlSocketPath: controlSocketPath,
         agentPort: agentPort,
-        agentConnectRetries: agentConnectRetries
+        agentConnectRetries: agentConnectRetries,
+        temporarySharedDirectoryURL: temporaryShareURL
     )
 }
 
@@ -255,19 +409,17 @@ func parseCommandLine() throws -> CLICommand {
     }
 }
 
-func ensureFileExists(_ path: URL, message: String) {
+func ensureFileExists(_ path: URL, message: String) throws {
     guard FileManager.default.fileExists(atPath: path.path) else {
-        fputs("error: \(message): \(path.path)\n", stderr)
-        exit(1)
+        throw ArgumentError.required("\(message): \(path.path)")
     }
 }
 
-func ensureDirectoryExists(_ path: URL, message: String) {
+func ensureDirectoryExists(_ path: URL, message: String) throws {
     var isDirectory: ObjCBool = false
     let exists = FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory)
     guard exists, isDirectory.boolValue else {
-        fputs("error: \(message): \(path.path)\n", stderr)
-        exit(1)
+        throw ArgumentError.required("\(message): \(path.path)")
     }
 }
 
@@ -1355,22 +1507,28 @@ func runStartCommand(options: Options) throws {
     exit(1)
     #else
 
-    ensureDirectoryExists(options.imageURL, message: "image directory does not exist")
-    ensureDirectoryExists(options.sharedDirectoryURL, message: "shared directory does not exist")
+    if let tempShare = options.temporarySharedDirectoryURL {
+        defer {
+            try? FileManager.default.removeItem(at: tempShare)
+        }
+        print("auto seed: \(tempShare.path)")
+    }
+
+    try ensureDirectoryExists(options.imageURL, message: "image directory does not exist")
+    try ensureDirectoryExists(options.sharedDirectoryURL, message: "shared directory does not exist")
 
     let hardwareModelURL = options.imageURL.appendingPathComponent("HardwareModel.bin")
     let auxiliaryStorageURL = options.imageURL.appendingPathComponent("AuxiliaryStorage")
     let diskImageURL = options.imageURL.appendingPathComponent("Disk.img")
     let machineIdentifierURL = options.imageURL.appendingPathComponent("MachineIdentifier.bin")
 
-    ensureFileExists(hardwareModelURL, message: "missing image file")
-    ensureFileExists(auxiliaryStorageURL, message: "missing image file")
-    ensureFileExists(diskImageURL, message: "missing image file")
+    try ensureFileExists(hardwareModelURL, message: "missing image file")
+    try ensureFileExists(auxiliaryStorageURL, message: "missing image file")
+    try ensureFileExists(diskImageURL, message: "missing image file")
 
     let hardwareModelData = try Data(contentsOf: hardwareModelURL)
     guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareModelData) else {
-        fputs("error: invalid HardwareModel.bin\n", stderr)
-        exit(1)
+        throw ArgumentError.required("invalid HardwareModel.bin")
     }
 
     let machineIdentifier = try loadOrCreateMachineIdentifier(at: machineIdentifierURL)

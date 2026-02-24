@@ -108,6 +108,42 @@ container run --network default,mac=02:42:ac:11:00:02 ubuntu:latest
 container run --init-image local/custom-init:latest ubuntu:latest
 ```
 
+## macOS Guest Commands
+
+### `container macos guest-agent prepare`
+
+Creates a directory that can be mounted into a macOS guest (via virtiofs) to install `container-macos-guest-agent`.
+
+**Usage**
+
+```bash
+container macos guest-agent prepare -o <output-dir> [--overwrite]
+```
+
+**Notes**
+
+*   The output directory includes:
+    *   `container-macos-guest-agent`
+    *   `install.sh`
+    *   `container-macos-guest-agent.plist`
+    *   `install-in-guest-from-seed.sh`
+*   After mounting the directory inside the guest, run:
+
+```bash
+sudo bash /Volumes/<tag>/install-in-guest-from-seed.sh
+```
+
+### `container macos start-vm`
+
+Starts a macOS guest VM from an image directory. This is intended for manual image/guest-agent workflows and debugging, independent of `container run --os darwin`.
+
+**Usage**
+
+```bash
+container macos start-vm --image <image-dir> --share <host-dir>
+container macos start-vm --image <image-dir> --auto-seed
+```
+
 ### `container build`
 
 Builds an OCI image from a local build context. It reads a Dockerfile (default `Dockerfile`) or Containerfile and produces an image tagged with `-t` option. The build runs in isolation using BuildKit, and resource limits may be set for the build process itself.

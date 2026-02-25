@@ -42,6 +42,7 @@ let package = Package(
         .library(name: "ContainerPlugin", targets: ["ContainerPlugin"]),
         .library(name: "ContainerVersion", targets: ["ContainerVersion"]),
         .library(name: "ContainerXPC", targets: ["ContainerXPC"]),
+        .library(name: "ContainerOS", targets: ["ContainerOS"]),
         .library(name: "SocketForwarder", targets: ["SocketForwarder"]),
         .library(name: "TerminalProgress", targets: ["TerminalProgress"]),
     ],
@@ -142,6 +143,7 @@ let package = Package(
                 "ContainerResource",
                 "ContainerVersion",
                 "ContainerXPC",
+                "ContainerOS",
                 "DNSServer",
             ],
             path: "Sources/Helpers/APIServer"
@@ -401,6 +403,14 @@ let package = Package(
             ]
         ),
         .target(
+            name: "ContainerOS",
+            dependencies: [
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationOS", package: "containerization"),
+            ],
+            path: "Sources/ContainerOS"
+        ),
+        .target(
             name: "TerminalProgress",
             dependencies: [
                 .product(name: "ContainerizationOS", package: "containerization")
@@ -418,6 +428,7 @@ let package = Package(
                 .product(name: "DNSClient", package: "DNSClient"),
                 .product(name: "DNS", package: "DNS"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "ContainerizationOS", package: "containerization"),
             ]
         ),
         .testTarget(
@@ -425,6 +436,12 @@ let package = Package(
             dependencies: [
                 .product(name: "DNS", package: "DNS"),
                 "DNSServer",
+            ]
+        ),
+        .testTarget(
+            name: "ContainerOSTests",
+            dependencies: [
+                "ContainerOS"
             ]
         ),
         .target(

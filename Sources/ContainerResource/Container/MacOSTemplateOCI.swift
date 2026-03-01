@@ -17,9 +17,14 @@
 import ContainerizationOCI
 
 public enum MacOSImageOCIMediaTypes {
+    // Existing v0 media types
     public static let hardwareModel = "application/vnd.apple.container.macos.hardware-model"
     public static let auxiliaryStorage = "application/vnd.apple.container.macos.auxiliary-storage"
     public static let diskImage = "application/vnd.apple.container.macos.disk-image"
+
+    // v1 chunked media types
+    public static let diskLayout = "application/vnd.apple.container.macos.disk-layout.v1+json"
+    public static let diskChunk = "application/vnd.apple.container.macos.disk-chunk.v1.tar+zstd"
 
     public static let required = [
         hardwareModel,
@@ -33,15 +38,33 @@ public enum MacOSImageFormatError: Error, Equatable {
     case duplicateLayer(mediaType: String)
 }
 
-public struct MacOSImageLayers: Sendable {
-    public let hardwareModel: Descriptor
-    public let auxiliaryStorage: Descriptor
-    public let diskImage: Descriptor
+/// Parsed macOS image layers, supporting both v0 (single disk image) and v1 (chunked disk) formats.
+public enum MacOSImageLayers: Sendable {
+    /// v0: single raw disk image blob.
+    case v0(hardwareModel: Descriptor, auxiliaryStorage: Descriptor, diskImage: Descriptor)
+    /// v1: disk layout JSON + N disk chunk blobs.
+    case v1(hardwareModel: Descriptor, auxiliaryStorage: Descriptor, diskLayout: Descriptor, diskChunks: [Descriptor])
+
+    public var hardwareModel: Descriptor {
+        switch self {
+        case .v0(let hw, _, _): return hw
+        case .v1(let hw, _, _, _): return hw
+        }
+    }
+
+    public var auxiliaryStorage: Descriptor {
+        switch self {
+        case .v0(_, let aux, _): return aux
+        case .v1(_, let aux, _, _): return aux
+        }
+    }
 
     public init(manifest: Manifest) throws {
         var hardwareModel: Descriptor?
         var auxiliaryStorage: Descriptor?
         var diskImage: Descriptor?
+        var diskLayout: Descriptor?
+        var diskChunks: [Descriptor] = []
 
         for layer in manifest.layers {
             switch layer.mediaType {
@@ -60,6 +83,13 @@ public struct MacOSImageLayers: Sendable {
                     throw MacOSImageFormatError.duplicateLayer(mediaType: layer.mediaType)
                 }
                 diskImage = layer
+            case MacOSImageOCIMediaTypes.diskLayout:
+                if diskLayout != nil {
+                    throw MacOSImageFormatError.duplicateLayer(mediaType: layer.mediaType)
+                }
+                diskLayout = layer
+            case MacOSImageOCIMediaTypes.diskChunk:
+                diskChunks.append(layer)
             default:
                 continue
             }
@@ -71,12 +101,26 @@ public struct MacOSImageLayers: Sendable {
         guard let auxiliaryStorage else {
             throw MacOSImageFormatError.missingLayer(mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage)
         }
+
+        // v1 format: diskLayout present
+        if let diskLayout {
+            guard !diskChunks.isEmpty else {
+                throw MacOSImageFormatError.missingLayer(mediaType: MacOSImageOCIMediaTypes.diskChunk)
+            }
+            // Sort chunks by index annotation to ensure consistent ordering
+            let sorted = diskChunks.sorted { a, b in
+                let ai = a.annotations?["org.apple.container.macos.chunk.index"].flatMap(Int.init) ?? 0
+                let bi = b.annotations?["org.apple.container.macos.chunk.index"].flatMap(Int.init) ?? 0
+                return ai < bi
+            }
+            self = .v1(hardwareModel: hardwareModel, auxiliaryStorage: auxiliaryStorage, diskLayout: diskLayout, diskChunks: sorted)
+            return
+        }
+
+        // v0 format: single disk image
         guard let diskImage else {
             throw MacOSImageFormatError.missingLayer(mediaType: MacOSImageOCIMediaTypes.diskImage)
         }
-
-        self.hardwareModel = hardwareModel
-        self.auxiliaryStorage = auxiliaryStorage
-        self.diskImage = diskImage
+        self = .v0(hardwareModel: hardwareModel, auxiliaryStorage: auxiliaryStorage, diskImage: diskImage)
     }
 }

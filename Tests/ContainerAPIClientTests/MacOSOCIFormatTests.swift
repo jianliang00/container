@@ -56,7 +56,12 @@ struct MacOSOCIFormatTests {
 
         #expect(layers.hardwareModel.digest == "sha256:hardware")
         #expect(layers.auxiliaryStorage.digest == "sha256:aux")
-        #expect(layers.diskImage.digest == "sha256:disk")
+
+        guard case .v0(_, _, let diskImage) = layers else {
+            Issue.record("expected v0 format")
+            return
+        }
+        #expect(diskImage.digest == "sha256:disk")
     }
 
     @Test
@@ -75,6 +80,106 @@ struct MacOSOCIFormatTests {
                   "mediaType": "\(MacOSImageOCIMediaTypes.hardwareModel)",
                   "digest": "sha256:hardware",
                   "size": 10
+                }
+              ]
+            }
+            """
+        let manifest = try JSONDecoder().decode(Manifest.self, from: Data(manifestJSON.utf8))
+        #expect(throws: MacOSImageFormatError.self) {
+            _ = try MacOSImageLayers(manifest: manifest)
+        }
+    }
+
+    @Test
+    func parseV1ChunkedFormatFromManifest() throws {
+        let manifestJSON = """
+            {
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.oci.image.manifest.v1+json",
+              "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:config",
+                "size": 1
+              },
+              "layers": [
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.hardwareModel)",
+                  "digest": "sha256:hardware",
+                  "size": 10
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.auxiliaryStorage)",
+                  "digest": "sha256:aux",
+                  "size": 20
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.diskLayout)",
+                  "digest": "sha256:layout",
+                  "size": 500
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.diskChunk)",
+                  "digest": "sha256:chunk1",
+                  "size": 100,
+                  "annotations": {
+                    "org.apple.container.macos.chunk.index": "1"
+                  }
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.diskChunk)",
+                  "digest": "sha256:chunk0",
+                  "size": 200,
+                  "annotations": {
+                    "org.apple.container.macos.chunk.index": "0"
+                  }
+                }
+              ]
+            }
+            """
+
+        let manifest = try JSONDecoder().decode(Manifest.self, from: Data(manifestJSON.utf8))
+        let layers = try MacOSImageLayers(manifest: manifest)
+
+        #expect(layers.hardwareModel.digest == "sha256:hardware")
+        #expect(layers.auxiliaryStorage.digest == "sha256:aux")
+
+        guard case .v1(_, _, let diskLayout, let diskChunks) = layers else {
+            Issue.record("expected v1 format")
+            return
+        }
+        #expect(diskLayout.digest == "sha256:layout")
+        #expect(diskChunks.count == 2)
+        // Chunks should be sorted by index annotation
+        #expect(diskChunks[0].digest == "sha256:chunk0")
+        #expect(diskChunks[1].digest == "sha256:chunk1")
+    }
+
+    @Test
+    func v1MissingChunksFailsValidation() throws {
+        let manifestJSON = """
+            {
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.oci.image.manifest.v1+json",
+              "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:config",
+                "size": 1
+              },
+              "layers": [
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.hardwareModel)",
+                  "digest": "sha256:hardware",
+                  "size": 10
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.auxiliaryStorage)",
+                  "digest": "sha256:aux",
+                  "size": 20
+                },
+                {
+                  "mediaType": "\(MacOSImageOCIMediaTypes.diskLayout)",
+                  "digest": "sha256:layout",
+                  "size": 500
                 }
               ]
             }

@@ -81,17 +81,21 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     vmConfiguration.directorySharingDevices = [fileSystemDevice]
     if !options.headless || options.headlessDisplay {
         let graphics = VZMacGraphicsDeviceConfiguration()
-        if let screen = NSScreen.main ?? NSScreen.screens.first {
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        let onConsole = isSessionOnConsole() ?? false
+        if onConsole, let screen {
             graphics.displays = [
                 VZMacGraphicsDisplayConfiguration(
                     for: screen,
                     sizeInPoints: NSSize(width: 1440, height: 900)
                 )
             ]
+            print("graphics source: host-screen")
         } else {
             graphics.displays = [
-                VZMacGraphicsDisplayConfiguration(widthInPixels: 1440, heightInPixels: 900, pixelsPerInch: 80)
+                VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 80)
             ]
+            print("graphics source: fixed-1920x1200 (fallback)")
         }
         vmConfiguration.graphicsDevices = [graphics]
         if !options.headless {
@@ -209,7 +213,7 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 
 @main
 struct MacOSVMManagerMain {
-    static func main() async {
+    @MainActor static func main() {
         guard #available(macOS 13.0, *) else {
             fputs("error: this tool requires macOS 13 or newer\n", stderr)
             exit(1)
@@ -218,9 +222,7 @@ struct MacOSVMManagerMain {
         do {
             switch try parseCommandLine() {
             case .start(let options):
-                try await MainActor.run {
-                    try runStartCommand(options: options)
-                }
+                try runStartCommand(options: options)
             }
         } catch {
             fputs("error: \(error)\n", stderr)

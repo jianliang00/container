@@ -412,15 +412,76 @@ extension MacOSSandboxService {
         guard let auxiliaryContent: Content = try await store.get(digest: layers.auxiliaryStorage.digest) else {
             throw ContainerizationError(.notFound, message: "missing auxiliary storage blob \(layers.auxiliaryStorage.digest)")
         }
-        guard let diskContent: Content = try await store.get(digest: layers.diskImage.digest) else {
-            throw ContainerizationError(.notFound, message: "missing disk image blob \(layers.diskImage.digest)")
+
+        let diskImagePath: URL
+        switch layers {
+        case .v0(_, _, let diskImage):
+            guard let diskContent: Content = try await store.get(digest: diskImage.digest) else {
+                throw ContainerizationError(.notFound, message: "missing disk image blob \(diskImage.digest)")
+            }
+            diskImagePath = diskContent.path
+
+        case .v1(_, _, let diskLayoutDesc, let diskChunks):
+            diskImagePath = try await resolveV1DiskImage(
+                store: store,
+                manifestDigest: manifestDescriptor.digest,
+                diskLayoutDescriptor: diskLayoutDesc,
+                diskChunks: diskChunks
+            )
         }
 
         return LayerPaths(
             hardwareModel: hardwareContent.path,
             auxiliaryStorage: auxiliaryContent.path,
-            diskImage: diskContent.path
+            diskImage: diskImagePath
         )
+    }
+
+    /// Resolve a v1 chunked disk image: check rebuild cache, rebuild if needed.
+    private func resolveV1DiskImage(
+        store: RemoteContentStoreClient,
+        manifestDigest: String,
+        diskLayoutDescriptor: Descriptor,
+        diskChunks: [Descriptor]
+    ) async throws -> URL {
+        // Load disk layout
+        guard let layoutContent: Content = try await store.get(digest: diskLayoutDescriptor.digest) else {
+            throw ContainerizationError(.notFound, message: "missing disk layout blob \(diskLayoutDescriptor.digest)")
+        }
+        let layoutData = try layoutContent.data()
+        let layout = try JSONDecoder().decode(DiskLayout.self, from: layoutData)
+
+        // Check rebuild cache
+        let cacheDir = rebuildCacheDirectory()
+        let cachedPath = MacOSDiskRebuilder.rebuildCachePath(cacheDir: cacheDir, manifestDigest: manifestDigest)
+
+        if MacOSDiskRebuilder.cacheExists(at: cachedPath) {
+            return cachedPath
+        }
+
+        // Rebuild: fetch all chunk blob paths
+        var chunkBlobPaths: [String: URL] = [:]
+        for chunk in diskChunks {
+            guard let content: Content = try await store.get(digest: chunk.digest) else {
+                throw ContainerizationError(.notFound, message: "missing disk chunk blob \(chunk.digest)")
+            }
+            chunkBlobPaths[chunk.digest] = content.path
+        }
+
+        // Perform rebuild
+        try MacOSDiskRebuilder.rebuild(
+            layout: layout,
+            chunkBlobPaths: chunkBlobPaths,
+            outputPath: cachedPath
+        )
+
+        return cachedPath
+    }
+
+    /// Get the rebuild cache directory path.
+    private func rebuildCacheDirectory() -> URL {
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        return cacheDir.appendingPathComponent("com.apple.container/rebuild-cache")
     }
 
     #if arch(arm64)

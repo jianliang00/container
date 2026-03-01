@@ -63,12 +63,13 @@ enum MacOSImagePackager {
         let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
         try fm.createDirectory(at: blobsDir, withIntermediateDirectories: true)
 
+        // Use fixed timestamp for deterministic config digest
         let configData = try JSONEncoder().encode(
             OCIConfig(
                 architecture: "arm64",
                 os: "darwin",
                 rootfs: .init(type: "layers", diffIDs: []),
-                created: ISO8601DateFormatter().string(from: Date())
+                created: "1970-01-01T00:00:00Z"
             )
         )
         let config = try writeJSONBlob(configData, blobsDir: blobsDir, mediaType: "application/vnd.oci.image.config.v1+json")
@@ -83,17 +84,65 @@ enum MacOSImagePackager {
             blobsDir: blobsDir,
             mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage
         )
-        let disk = try addFileBlob(
-            source: image.diskImage,
-            blobsDir: blobsDir,
-            mediaType: MacOSImageOCIMediaTypes.diskImage
+
+        // v1 chunked disk format
+        let logicalSize = try MacOSDiskChunker.logicalFileSize(image.diskImage)
+        let chunkResults = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: image.diskImage,
+            blobsDir: blobsDir
         )
+
+        // Build DiskLayout
+        let chunkInfos = chunkResults.map { result in
+            DiskLayout.ChunkInfo(
+                index: result.index,
+                offset: result.chunkOffset,
+                length: result.chunkLength,
+                layerDigest: result.blobDigest,
+                layerSize: result.blobSize,
+                rawDigest: result.rawDigest,
+                rawLength: result.rawLength
+            )
+        }
+        let diskLayout = DiskLayout(
+            logicalSize: logicalSize,
+            chunks: chunkInfos
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let diskLayoutData = try encoder.encode(diskLayout)
+        let diskLayoutDescriptor = try writeJSONBlob(
+            diskLayoutData,
+            blobsDir: blobsDir,
+            mediaType: MacOSImageOCIMediaTypes.diskLayout
+        )
+
+        // Build chunk layer descriptors with annotations
+        let chunkDescriptors: [OCIDescriptor] = chunkResults.map { result in
+            OCIDescriptor(
+                mediaType: MacOSImageOCIMediaTypes.diskChunk,
+                digest: result.blobDigest,
+                size: result.blobSize,
+                platform: nil,
+                annotations: [
+                    "org.apple.container.macos.chunk.index": "\(result.index)",
+                    "org.apple.container.macos.chunk.offset": "\(result.chunkOffset)",
+                    "org.apple.container.macos.chunk.length": "\(result.chunkLength)",
+                    "org.apple.container.macos.chunk.raw.digest": result.rawDigest,
+                    "org.apple.container.macos.chunk.raw.length": "\(result.rawLength)",
+                ]
+            )
+        }
+
+        // Layers order: hardwareModel, auxiliaryStorage, diskLayout, diskChunks[0..N-1]
+        var layers: [OCIDescriptor] = [hardware, auxiliary, diskLayoutDescriptor]
+        layers.append(contentsOf: chunkDescriptors)
 
         let manifestValue = OCIManifest(
             schemaVersion: 2,
             mediaType: "application/vnd.oci.image.manifest.v1+json",
             config: config,
-            layers: [hardware, auxiliary, disk]
+            layers: layers
         )
         let manifestData = try JSONEncoder().encode(manifestValue)
         let manifest = try writeJSONBlob(manifestData, blobsDir: blobsDir, mediaType: manifestValue.mediaType)
@@ -126,18 +175,42 @@ enum MacOSImagePackager {
             try fm.removeItem(at: outputTar)
         }
 
+        // Use tar with --remove-files equivalent: write each blob, then delete it
+        // to avoid keeping the full layout directory and tar simultaneously.
+        // BSD tar doesn't support --remove-files, so we enumerate files ourselves,
+        // add them one at a time using tar -rf (append), and delete after appending.
+
+        // First write the small metadata files (oci-layout, index.json)
+        let smallFiles = ["oci-layout", "index.json"]
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = ["-cf", outputTar.path, "-C", layoutDir.path, "."]
-
+        process.arguments = ["-cf", outputTar.path, "-C", layoutDir.path] + smallFiles
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
         try process.run()
         process.waitUntilExit()
-
         guard process.terminationStatus == 0 else {
             let err = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "unknown tar error"
             throw NSError(domain: "container.macos.package", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: err])
+        }
+
+        // Append blob files one by one, deleting each after appending to free space
+        let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
+        let blobFiles = try fm.contentsOfDirectory(atPath: blobsDir.path)
+        for blob in blobFiles {
+            let appendProcess = Process()
+            appendProcess.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            appendProcess.arguments = ["-rf", outputTar.path, "-C", layoutDir.path, "blobs/sha256/\(blob)"]
+            let appendStderr = Pipe()
+            appendProcess.standardError = appendStderr
+            try appendProcess.run()
+            appendProcess.waitUntilExit()
+            guard appendProcess.terminationStatus == 0 else {
+                let err = String(data: appendStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "unknown tar error"
+                throw NSError(domain: "container.macos.package", code: Int(appendProcess.terminationStatus), userInfo: [NSLocalizedDescriptionKey: err])
+            }
+            // Delete the blob to free disk space immediately
+            try? fm.removeItem(at: blobsDir.appendingPathComponent(blob))
         }
     }
 

@@ -74,3 +74,16 @@ func currentSessionSummary() -> String {
     let userID = dict["kCGSessionUserIDKey"].map { "\($0)" } ?? "nil"
     return "onConsole=\(onConsole) loginDone=\(loginDone) user=\(userName) uid=\(userID)"
 }
+
+func isSessionOnConsole() -> Bool? {
+    guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
+        return nil
+    }
+    if let value = dict["kCGSessionOnConsoleKey"] as? NSNumber {
+        return value.boolValue
+    }
+    if let value = dict["kCGSessionOnConsoleKey"] as? Bool {
+        return value
+    }
+    return nil
+}

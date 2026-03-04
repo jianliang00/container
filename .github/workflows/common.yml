@@ -89,6 +89,11 @@ jobs:
       - name: Archive test logs
         if: always()
         run: |
+          if [ -d "${APP_ROOT}/containers" ] && [ -n "${LOG_ROOT}" ]; then
+            rsync -a --include='*/' --include='*.log' --exclude='*' \
+              "${APP_ROOT}/containers/" \
+              "${LOG_ROOT}/containers/"
+          fi
           if [ -n "${LOG_ROOT}" ] && [ -d "${LOG_ROOT}" ] ; then
             echo "Collecting logs from ${LOG_ROOT}..."
             tar czf container-logs.tar.gz -C "$(dirname "${LOG_ROOT}")" "$(basename "${LOG_ROOT}")"

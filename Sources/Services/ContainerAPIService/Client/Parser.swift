@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerPersistence
 import ContainerResource
 import Containerization
 import ContainerizationError
@@ -44,7 +45,7 @@ public enum VolumeOrFilesystem {
 }
 
 public struct Parser {
-    public static func memoryString(_ memory: String) throws -> Int64 {
+    public static func memoryStringAsMiB(_ memory: String) throws -> Int64 {
         let ram = try Measurement.parse(parsing: memory)
         let mb = ram.converted(to: .mebibytes)
         return Int64(mb.value)
@@ -90,9 +91,15 @@ public struct Parser {
         var resource = ContainerConfiguration.Resources()
         if let cpus {
             resource.cpus = Int(cpus)
+        } else if let cpuStr = DefaultsStore.getOptional(key: .defaultContainerCPUs),
+            let cpuVal = Int(cpuStr), cpuVal > 0
+        {
+            resource.cpus = cpuVal
         }
         if let memory {
-            resource.memoryInBytes = try Parser.memoryString(memory).mib()
+            resource.memoryInBytes = try Parser.memoryStringAsMiB(memory).mib()
+        } else if let memStr = DefaultsStore.getOptional(key: .defaultContainerMemory) {
+            resource.memoryInBytes = try Parser.memoryStringAsMiB(memStr).mib()
         }
         return resource
     }
@@ -396,7 +403,7 @@ public struct Parser {
                     throw ContainerizationError(.invalidArgument, message: "unsupported option size for \(type) mount")
                 }
                 var overflow: Bool
-                var memory = try Parser.memoryString(val)
+                var memory = try Parser.memoryStringAsMiB(val)
                 (memory, overflow) = memory.multipliedReportingOverflow(by: 1024 * 1024)
                 if overflow {
                     throw ContainerizationError(.invalidArgument, message: "overflow encountered when parsing memory string: \(val)")

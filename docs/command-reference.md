@@ -593,7 +593,7 @@ No options.
 
 ### `container image delete (rm)`
 
-Deletes one or more images. If no images are provided, `--all` can be used to delete all images. Images currently referenced by running containers cannot be deleted without first removing those containers.
+Deletes one or more images. If no images are provided, `--all` can be used to delete all images. Images currently referenced by running containers cannot be deleted without first removing those containers. After deleting image references, the command also reclaims orphaned macOS guest rebuild-cache entries that are no longer referenced by any local image.
 
 **Usage**
 
@@ -612,7 +612,7 @@ container image delete [--all] [--force] [--debug] [<images> ...]
 
 ### `container image prune`
 
-Removes unused images to reclaim disk space. By default, only removes dangling images (images with no tags). Use `-a` to remove all images not referenced by any container.
+Removes unused images to reclaim disk space. By default, only removes dangling images (images with no tags). Use `-a` to remove all images not referenced by any container. The cleanup also removes orphaned macOS guest rebuild-cache entries that are no longer referenced by any remaining local image.
 
 **Usage**
 
@@ -1084,7 +1084,7 @@ container system logs [--follow] [--last <last>] [--debug]
 
 ### `container system df`
 
-Shows disk usage for images, containers, and volumes. Displays total count, active count, size, and reclaimable space for each resource type.
+Shows disk usage for images, macOS guest caches, containers, and volumes. Displays total count, active count, size, and reclaimable space for each resource type.
 
 **Usage**
 

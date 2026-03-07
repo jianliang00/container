@@ -60,35 +60,24 @@ extension Application {
             // Header row
             rows.append(["TYPE", "TOTAL", "ACTIVE", "SIZE", "RECLAIMABLE"])
 
-            // Images row
-            rows.append([
-                "Images",
-                "\(stats.images.total)",
-                "\(stats.images.active)",
-                formatSize(stats.images.sizeInBytes),
-                formatReclaimable(stats.images.reclaimable, total: stats.images.sizeInBytes),
-            ])
-
-            // Containers row
-            rows.append([
-                "Containers",
-                "\(stats.containers.total)",
-                "\(stats.containers.active)",
-                formatSize(stats.containers.sizeInBytes),
-                formatReclaimable(stats.containers.reclaimable, total: stats.containers.sizeInBytes),
-            ])
-
-            // Volumes row
-            rows.append([
-                "Local Volumes",
-                "\(stats.volumes.total)",
-                "\(stats.volumes.active)",
-                formatSize(stats.volumes.sizeInBytes),
-                formatReclaimable(stats.volumes.reclaimable, total: stats.volumes.sizeInBytes),
-            ])
+            appendRow(label: "Images", usage: stats.images, to: &rows)
+            appendRow(label: "macOS Rebuild Cache", usage: stats.rebuildCache, to: &rows)
+            appendRow(label: "macOS Guest Disk Cache", usage: stats.guestDiskCache, to: &rows)
+            appendRow(label: "Containers", usage: stats.containers, to: &rows)
+            appendRow(label: "Local Volumes", usage: stats.volumes, to: &rows)
 
             let tableFormatter = TableOutput(rows: rows)
             print(tableFormatter.format())
+        }
+
+        private func appendRow(label: String, usage: ResourceUsage, to rows: inout [[String]]) {
+            rows.append([
+                label,
+                "\(usage.total)",
+                "\(usage.active)",
+                formatSize(usage.sizeInBytes),
+                formatReclaimable(usage.reclaimable, total: usage.sizeInBytes),
+            ])
         }
 
         private func formatSize(_ bytes: UInt64) -> String {

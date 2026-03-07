@@ -130,9 +130,14 @@ public actor ImagesService {
 
     public func cleanUpOrphanedBlobs() async throws -> ([String], UInt64) {
         let images = try await self._list()
+        let liveDarwinManifestDigests = try await self.liveDarwinManifestDigests(for: images)
         let freedSnapshotBytes = try await self.snapshotStore.clean(keepingSnapshotsFor: images)
         let (deleted, freedContentBytes) = try await self.imageStore.cleanUpOrphanedBlobs()
-        return (deleted, freedContentBytes + freedSnapshotBytes)
+        let freedRebuildCacheBytes = try MacOSGuestCache.pruneOrphanedRebuildCache(
+            cacheDir: MacOSGuestCache.rebuildCacheDirectory(),
+            liveManifestDigests: liveDarwinManifestDigests
+        )
+        return (deleted, freedContentBytes + freedSnapshotBytes + freedRebuildCacheBytes)
     }
 
     /// Calculate disk usage for images
@@ -256,6 +261,30 @@ extension ImagesService {
             return nil
         }
         return BasicAuthentication(username: user, password: password)
+    }
+}
+
+extension ImagesService {
+    private func liveDarwinManifestDigests(for images: [Containerization.Image]) async throws -> Set<String> {
+        var digests = Set<String>()
+
+        for image in images {
+            let index = try await image.index()
+            for descriptor in index.manifests {
+                if let refType = descriptor.annotations?["vnd.docker.reference.type"],
+                    refType == "attestation-manifest"
+                {
+                    continue
+                }
+
+                guard descriptor.platform?.os == "darwin" else {
+                    continue
+                }
+                digests.insert(descriptor.digest)
+            }
+        }
+
+        return digests
     }
 }
 

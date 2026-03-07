@@ -320,6 +320,15 @@ struct MacOSBuildEngine {
                 }
             }
 
+            // Flush guest filesystem buffers before stopping the VM so recent
+            // COPY/ADD/WORKDIR changes are durably reflected in the packaged disk.
+            try await runtime.run(
+                command: .exec(["/bin/sync"]),
+                environment: [:],
+                workingDirectory: "/",
+                quiet: true,
+                log: input.log
+            )
             try await runtime.stop()
 
             let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)

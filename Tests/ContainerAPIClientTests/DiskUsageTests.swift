@@ -25,6 +25,8 @@ struct DiskUsageTests {
     func testJSONSerialization() throws {
         let stats = DiskUsageStats(
             images: ResourceUsage(total: 10, active: 5, sizeInBytes: 1024, reclaimable: 512),
+            rebuildCache: ResourceUsage(total: 2, active: 1, sizeInBytes: 8192, reclaimable: 4096),
+            guestDiskCache: ResourceUsage(total: 3, active: 0, sizeInBytes: 16384, reclaimable: 16384),
             containers: ResourceUsage(total: 3, active: 2, sizeInBytes: 2048, reclaimable: 1024),
             volumes: ResourceUsage(total: 7, active: 4, sizeInBytes: 4096, reclaimable: 2048)
         )
@@ -39,6 +41,16 @@ struct DiskUsageTests {
         #expect(decoded.images.active == stats.images.active)
         #expect(decoded.images.sizeInBytes == stats.images.sizeInBytes)
         #expect(decoded.images.reclaimable == stats.images.reclaimable)
+
+        #expect(decoded.rebuildCache.total == stats.rebuildCache.total)
+        #expect(decoded.rebuildCache.active == stats.rebuildCache.active)
+        #expect(decoded.rebuildCache.sizeInBytes == stats.rebuildCache.sizeInBytes)
+        #expect(decoded.rebuildCache.reclaimable == stats.rebuildCache.reclaimable)
+
+        #expect(decoded.guestDiskCache.total == stats.guestDiskCache.total)
+        #expect(decoded.guestDiskCache.active == stats.guestDiskCache.active)
+        #expect(decoded.guestDiskCache.sizeInBytes == stats.guestDiskCache.sizeInBytes)
+        #expect(decoded.guestDiskCache.reclaimable == stats.guestDiskCache.reclaimable)
 
         #expect(decoded.containers.total == stats.containers.total)
         #expect(decoded.containers.active == stats.containers.active)
@@ -65,6 +77,31 @@ struct DiskUsageTests {
         #expect(decoded.active == 0)
         #expect(decoded.sizeInBytes == 0)
         #expect(decoded.reclaimable == 0)
+    }
+
+    @Test("DiskUsageStats decodes legacy payloads without cache fields")
+    func testLegacyDiskUsageDecoding() throws {
+        let payload = """
+        {
+          "images": { "total": 1, "active": 1, "sizeInBytes": 1024, "reclaimable": 0 },
+          "containers": { "total": 2, "active": 1, "sizeInBytes": 2048, "reclaimable": 1024 },
+          "volumes": { "total": 3, "active": 1, "sizeInBytes": 4096, "reclaimable": 512 }
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(DiskUsageStats.self, from: payload)
+
+        #expect(decoded.images.total == 1)
+        #expect(decoded.rebuildCache.total == 0)
+        #expect(decoded.rebuildCache.active == 0)
+        #expect(decoded.rebuildCache.sizeInBytes == 0)
+        #expect(decoded.rebuildCache.reclaimable == 0)
+        #expect(decoded.guestDiskCache.total == 0)
+        #expect(decoded.guestDiskCache.active == 0)
+        #expect(decoded.guestDiskCache.sizeInBytes == 0)
+        #expect(decoded.guestDiskCache.reclaimable == 0)
+        #expect(decoded.containers.total == 2)
+        #expect(decoded.volumes.total == 3)
     }
 
     @Test("ResourceUsage with large values")

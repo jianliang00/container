@@ -82,6 +82,48 @@ struct SidecarControlProtocolTests {
     }
 
     @Test
+    func filesystemPayloadRoundTripPreservesStructuredFields() throws {
+        let beginPayload = MacOSSidecarFSBeginRequestPayload(
+            txID: "tx-1",
+            op: .writeFile,
+            path: "/tmp/file.txt",
+            mode: 0o644,
+            mtime: 1_730_000_000,
+            overwrite: false,
+            inlineData: Data("abc".utf8),
+            autoCommit: true
+        )
+        let request = MacOSSidecarRequest(
+            method: .fsBegin,
+            port: 27000,
+            fsBegin: beginPayload
+        )
+
+        let (reader, writer) = try socketPair()
+        defer {
+            closeIfValid(reader)
+            closeIfValid(writer)
+        }
+
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(request), fd: writer)
+        let decoded = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: reader)
+
+        #expect(decoded.kind == .request)
+        let decodedRequest = try #require(decoded.request)
+        let decodedPayload = try #require(decodedRequest.fsBegin)
+        #expect(decodedRequest.method == .fsBegin)
+        #expect(decodedRequest.port == 27000)
+        #expect(decodedPayload.txID == "tx-1")
+        #expect(decodedPayload.op == .writeFile)
+        #expect(decodedPayload.path == "/tmp/file.txt")
+        #expect(decodedPayload.mode == 0o644)
+        #expect(decodedPayload.mtime == 1_730_000_000)
+        #expect(decodedPayload.overwrite == false)
+        #expect(decodedPayload.inlineData == Data("abc".utf8))
+        #expect(decodedPayload.autoCommit == true)
+    }
+
+    @Test
     func fileDescriptorMarkerRoundTripTransfersWorkingFD() throws {
         let (transportReader, transportWriter) = try socketPair()
         defer {

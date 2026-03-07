@@ -514,16 +514,15 @@ sudo tail -n 200 /var/log/container-macos-guest-agent.log
 
 当 `image load` 或打包过程异常时，先确认磁盘空间足够。
 
-常用清理项：
+完整的一遍清理流程见：
 
-- 删除旧本地镜像 tag
-- 删除旧 OCI tar（例如 `/tmp/macos-image-base-oci.tar`）
-- 删除 dangling 镜像（`image prune`）
+- [`docs/macos-guest-space-cleanup.md`](docs/macos-guest-space-cleanup.md)
 
-建议优先删：
+最小建议仍然是：
 
-1. 旧 OCI tar（容易重新生成）
-2. 不再使用的本地镜像 tag
+1. 先删旧 OCI tar（容易重新生成）
+2. 再删 stopped 容器和不再使用的本地镜像
+3. 最后再动 `macos-guest-disk-cache`、`rebuild-cache` 和 `TMPDIR` 里的 `macos-oci-layout-*`
 
 ## 12. 典型排障时间线（本次实战提炼）
 

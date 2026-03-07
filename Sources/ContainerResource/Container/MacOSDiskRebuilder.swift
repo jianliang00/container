@@ -144,8 +144,8 @@ public enum MacOSDiskRebuilder {
     /// Decompress a zstd file using the zstd command.
     private static func decompressZstd(input: URL, output: URL, chunkIndex: Int) throws {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["zstd", "-d", "-f", "-o", output.path, input.path]
+        process.executableURL = try ZstdTool.executableURL()
+        process.arguments = ["-d", "-f", "-o", output.path, input.path]
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
         try process.run()

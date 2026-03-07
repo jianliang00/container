@@ -41,39 +41,74 @@ struct ChunkResult {
 enum MacOSDiskChunker {
     static let zstdLevel = 3
     static let tarEntryName = "disk.chunk"
+    private static let maximumAutomaticParallelChunks = 4
 
     /// Split a disk image into 1 GiB chunks, generating sparse tar+zstd blobs.
     /// Returns chunk results and writes blobs to blobsDir.
     static func chunkDiskImage(
         diskImage: URL,
         blobsDir: URL,
-        chunkSize: Int64 = DiskLayout.defaultChunkSize
+        chunkSize: Int64 = DiskLayout.defaultChunkSize,
+        maxConcurrentChunks: Int? = nil
     ) throws -> [ChunkResult] {
         let fileSize = try Self.logicalFileSize(diskImage)
         let chunkCount = Int((fileSize + chunkSize - 1) / chunkSize)
-
-        let fd = open(diskImage.path, O_RDONLY)
-        guard fd >= 0 else {
-            throw CocoaError(.fileReadNoPermission, userInfo: [NSFilePathErrorKey: diskImage.path])
+        guard chunkCount > 0 else {
+            return []
         }
-        defer { close(fd) }
 
-        var results: [ChunkResult] = []
-
-        for i in 0..<chunkCount {
-            let offset = Int64(i) * chunkSize
-            let length = min(chunkSize, fileSize - offset)
-            let result = try processChunk(
-                fd: fd,
-                index: i,
-                chunkOffset: offset,
-                chunkLength: length,
-                blobsDir: blobsDir
+        let parallelism = recommendedParallelism(totalChunks: chunkCount, requested: maxConcurrentChunks)
+        let state = LockedValue(
+            ChunkWorkState(
+                nextIndex: 0,
+                firstError: nil,
+                results: Array(repeating: nil, count: chunkCount)
             )
-            results.append(result)
+        )
+
+        DispatchQueue.concurrentPerform(iterations: parallelism) { _ in
+            while let chunkIndex = state.withLock({ state -> Int? in
+                guard state.firstError == nil, state.nextIndex < chunkCount else {
+                    return nil
+                }
+                defer { state.nextIndex += 1 }
+                return state.nextIndex
+            }) {
+                let offset = Int64(chunkIndex) * chunkSize
+                let length = min(chunkSize, fileSize - offset)
+
+                do {
+                    let result = try processChunk(
+                        diskImage: diskImage,
+                        index: chunkIndex,
+                        chunkOffset: offset,
+                        chunkLength: length,
+                        blobsDir: blobsDir
+                    )
+                    state.withLock { $0.results[chunkIndex] = result }
+                } catch {
+                    state.withLock { current in
+                        if current.firstError == nil {
+                            current.firstError = error
+                        }
+                    }
+                    return
+                }
+            }
         }
 
-        return results
+        let finalState = state.withLock { state in
+            (state.firstError, state.results)
+        }
+        if let error = finalState.0 {
+            throw error
+        }
+        return finalState.1.enumerated().map { index, result in
+            guard let result else {
+                preconditionFailure("missing chunk result at index \(index)")
+            }
+            return result
+        }
     }
 
     /// Get the logical file size (works for sparse files).
@@ -87,12 +122,18 @@ enum MacOSDiskChunker {
 
     /// Process a single chunk: detect sparse regions, create tar+zstd blob.
     private static func processChunk(
-        fd: Int32,
+        diskImage: URL,
         index: Int,
         chunkOffset: Int64,
         chunkLength: Int64,
         blobsDir: URL
     ) throws -> ChunkResult {
+        let fd = open(diskImage.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw CocoaError(.fileReadNoPermission, userInfo: [NSFilePathErrorKey: diskImage.path])
+        }
+        defer { close(fd) }
+
         // 1. Detect sparse extents within this chunk
         let extents = detectSparseExtents(fd: fd, regionOffset: chunkOffset, regionLength: chunkLength)
 
@@ -122,8 +163,12 @@ enum MacOSDiskChunker {
 
         // 6. Move blob to blobs directory
         let blobPath = blobsDir.appendingPathComponent(blobDigest)
-        if !FileManager.default.fileExists(atPath: blobPath.path) {
+        do {
             try FileManager.default.moveItem(at: tempZst, to: blobPath)
+        } catch let error as NSError {
+            guard error.code == NSFileWriteFileExistsError else {
+                throw error
+            }
         }
 
         return ChunkResult(
@@ -443,5 +488,32 @@ enum MacOSDiskChunker {
             let padding = [UInt8](repeating: 0, count: 512 - remainder)
             try writeAll(fd, data: padding)
         }
+    }
+
+    private static func recommendedParallelism(totalChunks: Int, requested: Int?) -> Int {
+        let automaticParallelism = min(ProcessInfo.processInfo.activeProcessorCount, maximumAutomaticParallelChunks)
+        let candidate = requested ?? automaticParallelism
+        return max(1, min(totalChunks, candidate))
+    }
+}
+
+private struct ChunkWorkState {
+    var nextIndex: Int
+    var firstError: (any Error)?
+    var results: [ChunkResult?]
+}
+
+private final class LockedValue<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+
+    init(_ value: T) {
+        self.value = value
+    }
+
+    func withLock<R>(_ body: (inout T) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
     }
 }

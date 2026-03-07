@@ -69,6 +69,8 @@ du -sh /private/tmp/macos-image-base 2>/dev/null
 "$SYSTEM_BIN" image delete --all --force
 ```
 
+`image delete` / `image prune` 现在会顺带清理“已经不再被任何本地 image 引用”的 `rebuild-cache` 条目，但仍被当前 image 引用的 cache 不会自动删除。
+
 如果你还要继续复用某个 base image，就不要做这一步，或者只删不用的 tag。
 
 ### 3.3 删除 `macos-oci-layout-*` 临时目录

@@ -21,16 +21,47 @@ public struct DiskUsageStats: Sendable, Codable {
     /// Disk usage for images
     public var images: ResourceUsage
 
+    /// Disk usage for the macOS guest rebuild cache
+    public var rebuildCache: ResourceUsage
+
+    /// Disk usage for the macOS guest disk cache
+    public var guestDiskCache: ResourceUsage
+
     /// Disk usage for containers
     public var containers: ResourceUsage
 
     /// Disk usage for volumes
     public var volumes: ResourceUsage
 
-    public init(images: ResourceUsage, containers: ResourceUsage, volumes: ResourceUsage) {
+    public init(
+        images: ResourceUsage,
+        rebuildCache: ResourceUsage,
+        guestDiskCache: ResourceUsage,
+        containers: ResourceUsage,
+        volumes: ResourceUsage
+    ) {
         self.images = images
+        self.rebuildCache = rebuildCache
+        self.guestDiskCache = guestDiskCache
         self.containers = containers
         self.volumes = volumes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case images
+        case rebuildCache
+        case guestDiskCache
+        case containers
+        case volumes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.images = try container.decode(ResourceUsage.self, forKey: .images)
+        self.rebuildCache = try container.decodeIfPresent(ResourceUsage.self, forKey: .rebuildCache) ?? .zero
+        self.guestDiskCache = try container.decodeIfPresent(ResourceUsage.self, forKey: .guestDiskCache) ?? .zero
+        self.containers = try container.decode(ResourceUsage.self, forKey: .containers)
+        self.volumes = try container.decode(ResourceUsage.self, forKey: .volumes)
     }
 }
 
@@ -54,4 +85,6 @@ public struct ResourceUsage: Sendable, Codable {
         self.sizeInBytes = sizeInBytes
         self.reclaimable = reclaimable
     }
+
+    public static let zero = ResourceUsage(total: 0, active: 0, sizeInBytes: 0, reclaimable: 0)
 }

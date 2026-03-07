@@ -49,7 +49,6 @@ enum MacOSDiskChunker {
         blobsDir: URL,
         chunkSize: Int64 = DiskLayout.defaultChunkSize
     ) throws -> [ChunkResult] {
-        let fm = FileManager.default
         let fileSize = try Self.logicalFileSize(diskImage)
         let chunkCount = Int((fileSize + chunkSize - 1) / chunkSize)
 
@@ -379,9 +378,8 @@ enum MacOSDiskChunker {
     /// Compress a file using zstd with deterministic parameters.
     static func compressWithZstd(input: URL, output: URL, level: Int) throws {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.executableURL = try ZstdTool.executableURL()
         process.arguments = [
-            "zstd",
             "-\(level)",
             "--single-thread",
             "--no-check",

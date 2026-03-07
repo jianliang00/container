@@ -17,6 +17,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 
 @main
 struct MacOSGuestAgent: ParsableCommand {
@@ -116,6 +117,7 @@ private final class AgentConnection: @unchecked Sendable {
 
     private var buffer = Data()
     private var session: ProcessSession?
+    private var fileTransactions: [String: GuestAgentFileTransferTransaction] = [:]
 
     init(fd: Int32) {
         self.fd = fd
@@ -144,6 +146,10 @@ private final class AgentConnection: @unchecked Sendable {
             }
         }
         session?.cleanup()
+        for transaction in fileTransactions.values {
+            transaction.abort()
+        }
+        fileTransactions.removeAll()
         try? socketHandle.close()
     }
 
@@ -212,7 +218,13 @@ private final class AgentConnection: @unchecked Sendable {
             }
         case .close:
             session?.closeStdin()
-        case .stdout, .stderr, .exit, .error, .ready:
+        case .fsBegin:
+            try beginFileTransaction(frame: frame)
+        case .fsChunk:
+            try appendFileTransaction(frame: frame)
+        case .fsEnd:
+            try finishFileTransaction(frame: frame)
+        case .stdout, .stderr, .exit, .error, .ready, .ack:
             break
         }
     }
@@ -274,6 +286,70 @@ private final class AgentConnection: @unchecked Sendable {
             )
             self.session = session
             try session.start(stdoutHandle: stdoutPipe.fileHandleForReading, stderrHandle: stderrPipe.fileHandleForReading)
+        }
+    }
+
+    private func beginFileTransaction(frame: GuestAgentFrame) throws {
+        guard let txID = frame.id, !txID.isEmpty else {
+            throw POSIXError(.EINVAL)
+        }
+        guard fileTransactions[txID] == nil else {
+            throw POSIXError(.EEXIST)
+        }
+        guard let op = frame.op, let path = frame.path else {
+            throw POSIXError(.EINVAL)
+        }
+
+        let request = MacOSSidecarFSBeginRequestPayload(
+            txID: txID,
+            op: op,
+            path: path,
+            mode: frame.mode,
+            uid: frame.uid,
+            gid: frame.gid,
+            mtime: frame.mtime,
+            linkTarget: frame.linkTarget,
+            overwrite: frame.overwrite ?? true,
+            inlineData: frame.data,
+            autoCommit: frame.autoCommit ?? false
+        )
+        let transaction = try GuestAgentFileTransferTransaction(request: request)
+
+        if request.autoCommit {
+            try transaction.complete(action: .commit, digest: nil)
+        } else {
+            fileTransactions[txID] = transaction
+        }
+
+        try send(frame: .ack(id: txID))
+    }
+
+    private func appendFileTransaction(frame: GuestAgentFrame) throws {
+        guard let txID = frame.id, let offset = frame.offset, let data = frame.data else {
+            throw POSIXError(.EINVAL)
+        }
+        guard let transaction = fileTransactions[txID] else {
+            throw POSIXError(.ENOENT)
+        }
+
+        try transaction.append(data: data, offset: offset)
+        try send(frame: .ack(id: txID))
+    }
+
+    private func finishFileTransaction(frame: GuestAgentFrame) throws {
+        guard let txID = frame.id else {
+            throw POSIXError(.EINVAL)
+        }
+        guard let transaction = fileTransactions.removeValue(forKey: txID) else {
+            throw POSIXError(.ENOENT)
+        }
+
+        do {
+            try transaction.complete(action: frame.action ?? .commit, digest: frame.digest)
+            try send(frame: .ack(id: txID))
+        } catch {
+            transaction.abort()
+            throw error
         }
     }
 
@@ -463,6 +539,10 @@ private struct GuestAgentFrame: Codable {
         case signal
         case resize
         case close
+        case fsBegin
+        case fsChunk
+        case fsEnd
+        case ack
         case stdout
         case stderr
         case exit
@@ -483,45 +563,95 @@ private struct GuestAgentFrame: Codable {
     let data: Data?
     let exitCode: Int32?
     let message: String?
+    let op: MacOSSidecarFSOperation?
+    let path: String?
+    let mode: UInt32?
+    let uid: UInt32?
+    let gid: UInt32?
+    let mtime: Int64?
+    let linkTarget: String?
+    let overwrite: Bool?
+    let autoCommit: Bool?
+    let offset: UInt64?
+    let action: MacOSSidecarFSEndAction?
+    let digest: String?
+
+    init(
+        type: FrameType,
+        id: String? = nil,
+        executable: String? = nil,
+        arguments: [String]? = nil,
+        environment: [String]? = nil,
+        workingDirectory: String? = nil,
+        terminal: Bool? = nil,
+        signal: Int32? = nil,
+        width: UInt16? = nil,
+        height: UInt16? = nil,
+        data: Data? = nil,
+        exitCode: Int32? = nil,
+        message: String? = nil,
+        op: MacOSSidecarFSOperation? = nil,
+        path: String? = nil,
+        mode: UInt32? = nil,
+        uid: UInt32? = nil,
+        gid: UInt32? = nil,
+        mtime: Int64? = nil,
+        linkTarget: String? = nil,
+        overwrite: Bool? = nil,
+        autoCommit: Bool? = nil,
+        offset: UInt64? = nil,
+        action: MacOSSidecarFSEndAction? = nil,
+        digest: String? = nil
+    ) {
+        self.type = type
+        self.id = id
+        self.executable = executable
+        self.arguments = arguments
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.terminal = terminal
+        self.signal = signal
+        self.width = width
+        self.height = height
+        self.data = data
+        self.exitCode = exitCode
+        self.message = message
+        self.op = op
+        self.path = path
+        self.mode = mode
+        self.uid = uid
+        self.gid = gid
+        self.mtime = mtime
+        self.linkTarget = linkTarget
+        self.overwrite = overwrite
+        self.autoCommit = autoCommit
+        self.offset = offset
+        self.action = action
+        self.digest = digest
+    }
 
     static let ready = GuestAgentFrame(
-        type: .ready,
-        id: nil,
-        executable: nil,
-        arguments: nil,
-        environment: nil,
-        workingDirectory: nil,
-        terminal: nil,
-        signal: nil,
-        width: nil,
-        height: nil,
-        data: nil,
-        exitCode: nil,
-        message: nil
+        type: .ready
     )
 
     static func stdout(_ data: Data) -> Self {
-        .init(
-            type: .stdout, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data,
-            exitCode: nil, message: nil)
+        .init(type: .stdout, data: data)
     }
 
     static func stderr(_ data: Data) -> Self {
-        .init(
-            type: .stderr, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: data,
-            exitCode: nil, message: nil)
+        .init(type: .stderr, data: data)
     }
 
     static func exit(_ code: Int32) -> Self {
-        .init(
-            type: .exit, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil,
-            exitCode: code, message: nil)
+        .init(type: .exit, exitCode: code)
     }
 
     static func error(_ message: String) -> Self {
-        .init(
-            type: .error, id: nil, executable: nil, arguments: nil, environment: nil, workingDirectory: nil, terminal: nil, signal: nil, width: nil, height: nil, data: nil,
-            exitCode: nil, message: message)
+        .init(type: .error, message: message)
+    }
+
+    static func ack(id: String) -> Self {
+        .init(type: .ack, id: id)
     }
 }
 
@@ -597,7 +727,7 @@ private func logAgentInfo(_ message: String) {
 }
 
 extension POSIXError {
-    fileprivate static func fromErrno() -> POSIXError {
+    static func fromErrno() -> POSIXError {
         POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 }

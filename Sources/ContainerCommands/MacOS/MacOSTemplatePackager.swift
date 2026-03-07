@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationOCI
 import CryptoKit
 import Foundation
 
@@ -47,31 +48,36 @@ enum MacOSImagePackager {
     static func package(
         imageDirectory: URL,
         outputTar: URL,
-        reference: String?
+        reference: String?,
+        imageConfig: ContainerizationOCI.Image? = nil
     ) throws {
         let image = try validateImageDirectory(imageDirectory)
-        let layoutDir = try createLayoutDirectory(from: image, reference: reference)
+        let layoutDir = try createLayoutDirectory(from: image, reference: reference, imageConfig: imageConfig)
         defer {
             try? FileManager.default.removeItem(at: layoutDir)
         }
         try createTar(fromLayout: layoutDir, outputTar: outputTar)
     }
 
-    private static func createLayoutDirectory(from image: ImagePaths, reference: String?) throws -> URL {
+    private static func createLayoutDirectory(
+        from image: ImagePaths,
+        reference: String?,
+        imageConfig: ContainerizationOCI.Image?
+    ) throws -> URL {
         let fm = FileManager.default
         let layoutDir = fm.temporaryDirectory.appendingPathComponent("macos-oci-layout-\(UUID().uuidString)")
         let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
         try fm.createDirectory(at: blobsDir, withIntermediateDirectories: true)
 
         // Use fixed timestamp for deterministic config digest
-        let configData = try JSONEncoder().encode(
-            OCIConfig(
-                architecture: "arm64",
-                os: "darwin",
-                rootfs: .init(type: "layers", diffIDs: []),
-                created: "1970-01-01T00:00:00Z"
-            )
+        let configValue = imageConfig ?? ContainerizationOCI.Image(
+            created: "1970-01-01T00:00:00Z",
+            architecture: "arm64",
+            os: "darwin",
+            config: nil,
+            rootfs: .init(type: "layers", diffIDs: [])
         )
+        let configData = try JSONEncoder().encode(configValue)
         let config = try writeJSONBlob(configData, blobsDir: blobsDir, mediaType: "application/vnd.oci.image.config.v1+json")
 
         let hardware = try addFileBlob(
@@ -276,21 +282,4 @@ private struct OCIIndex: Codable {
     let schemaVersion: Int
     let mediaType: String
     let manifests: [OCIDescriptor]
-}
-
-private struct OCIConfig: Codable {
-    let architecture: String
-    let os: String
-    let rootfs: RootFS
-    let created: String
-
-    struct RootFS: Codable {
-        let type: String
-        let diffIDs: [String]
-
-        enum CodingKeys: String, CodingKey {
-            case type
-            case diffIDs = "diff_ids"
-        }
-    }
 }

@@ -1,0 +1,1670 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2026 Apple Inc. and the container project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import ContainerAPIClient
+import ContainerBuild
+import ContainerResource
+import ContainerSandboxServiceClient
+import Containerization
+import ContainerizationError
+import ContainerizationOCI
+import CryptoKit
+import Foundation
+import Logging
+import RuntimeMacOSSidecarShared
+
+struct MacOSBuildEngine {
+    static let buildPlatform = Platform(arch: "arm64", os: "darwin")
+    static let runtimeName = "container-runtime-macos"
+    static let defaultAgentPort: UInt32 = 27000
+    static let inlineDataLimit = 256 * 1024
+    static let chunkSize = 256 * 1024
+    static let stageStopTimeoutSeconds: Int32 = 20
+
+    struct Input {
+        let appRoot: URL
+        let buildID: String
+        let contextDirectory: URL
+        let dockerfile: Data
+        let buildArgs: [String]
+        let labelArgs: [String]
+        let cpus: Int64
+        let memory: String
+        let noCache: Bool
+        let pull: Bool
+        let quiet: Bool
+        let target: String
+        let tags: [String]
+        let exports: [Builder.BuildExport]
+        let log: Logger
+    }
+
+    struct Output {
+        let archiveURL: URL
+    }
+
+    struct Plan {
+        let stages: [Stage]
+        let targetStage: Stage
+    }
+
+    struct Stage {
+        let index: Int
+        let name: String?
+        let baseImage: String
+        let instructions: [Instruction]
+    }
+
+    enum Instruction {
+        case arg(ArgumentInstruction)
+        case env([KeyValuePair])
+        case workdir(String)
+        case run(CommandForm)
+        case copy(FileTransferInstruction)
+        case add(FileTransferInstruction)
+        case label([KeyValuePair])
+        case cmd(CommandForm)
+        case entrypoint(CommandForm)
+    }
+
+    struct ArgumentInstruction {
+        let name: String
+        let defaultValue: String?
+    }
+
+    struct KeyValuePair {
+        let key: String
+        let value: String
+    }
+
+    struct FileTransferInstruction {
+        let sources: [String]
+        let destination: String
+    }
+
+    enum CommandForm {
+        case shell(String)
+        case exec([String])
+    }
+
+    enum EntryKind {
+        case file
+        case directory
+        case symlink
+    }
+
+    struct ContextEntry {
+        let url: URL
+        let relativePath: String
+        let kind: EntryKind
+    }
+
+    struct DockerIgnoreRule {
+        let include: Bool
+        let regex: NSRegularExpression
+    }
+
+    struct StageState {
+        let baseConfig: ContainerizationOCI.Image
+        var buildArguments: [String: String]
+        var environment: [String: String]
+        var labels: [String: String]
+        var workingDirectory: String
+        var cmd: [String]?
+        var entrypoint: [String]?
+
+        init(baseConfig: ContainerizationOCI.Image, initialBuildArguments: [String: String]) {
+            self.baseConfig = baseConfig
+            self.buildArguments = initialBuildArguments
+            self.environment = Self.environmentDictionary(from: baseConfig.config?.env ?? [])
+            self.labels = baseConfig.config?.labels ?? [:]
+            self.workingDirectory = baseConfig.config?.workingDir ?? "/"
+            self.cmd = baseConfig.config?.cmd
+            self.entrypoint = baseConfig.config?.entrypoint
+        }
+
+        var variables: [String: String] {
+            var merged = buildArguments
+            for (key, value) in environment {
+                merged[key] = value
+            }
+            return merged
+        }
+
+        func resolvedPath(for value: String, preserveTrailingSlash: Bool = false) -> String {
+            guard !value.hasPrefix("/") else {
+                return normalizeAbsolutePath(value, preserveTrailingSlash: preserveTrailingSlash)
+            }
+            return normalizeAbsolutePath(workingDirectory + "/" + value, preserveTrailingSlash: preserveTrailingSlash)
+        }
+
+        func finalImage(labelOverrides: [String: String]) -> ContainerizationOCI.Image {
+            var mergedLabels = labels
+            for (key, value) in labelOverrides {
+                mergedLabels[key] = value
+            }
+            let env = environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" }
+            let config = ImageConfig(
+                user: baseConfig.config?.user,
+                env: env.isEmpty ? nil : env,
+                entrypoint: entrypoint,
+                cmd: cmd,
+                workingDir: workingDirectory,
+                labels: mergedLabels.isEmpty ? nil : mergedLabels,
+                stopSignal: baseConfig.config?.stopSignal
+            )
+            return .init(
+                created: Self.createdTimestamp(),
+                author: baseConfig.author,
+                architecture: baseConfig.architecture,
+                os: baseConfig.os,
+                osVersion: baseConfig.osVersion,
+                osFeatures: baseConfig.osFeatures,
+                variant: baseConfig.variant,
+                config: config,
+                rootfs: .init(type: "layers", diffIDs: []),
+                history: baseConfig.history
+            )
+        }
+
+        private static func environmentDictionary(from env: [String]) -> [String: String] {
+            var result: [String: String] = [:]
+            for entry in env {
+                let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+                guard let key = parts.first, !key.isEmpty else {
+                    continue
+                }
+                result[key] = parts.count == 2 ? parts[1] : ""
+            }
+            return result
+        }
+
+        private static func createdTimestamp() -> String {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter.string(from: Date())
+        }
+    }
+
+    static func run(_ input: Input) async throws -> Output {
+        guard input.exports.count == 1, let export = input.exports.first else {
+            throw ContainerizationError(.unsupported, message: "darwin builds currently support a single --output entry")
+        }
+
+        switch export.type {
+        case "oci", "tar":
+            break
+        case "local":
+            throw ContainerizationError(.unsupported, message: "darwin builds do not support --output type=local in phase 1")
+        default:
+            throw ContainerizationError(.unsupported, message: "unsupported darwin build output type \(export.type)")
+        }
+
+        let cliBuildArgs = Utility.parseKeyValuePairs(input.buildArgs)
+        let cliLabels = Utility.parseKeyValuePairs(input.labelArgs)
+        let planner = Planner(
+            dockerfile: input.dockerfile,
+            buildArgs: cliBuildArgs,
+            target: input.target
+        )
+        let plan = try planner.makePlan()
+        let contextProvider = try BuildContextProvider(contextRoot: input.contextDirectory)
+        let targetStage = plan.targetStage
+
+        let baseImage = try await resolveBaseImage(reference: targetStage.baseImage, pull: input.pull)
+        let baseConfig = try await baseImage.config(for: buildPlatform)
+        let bundleURL = input.appRoot
+            .appendingPathComponent("containers")
+            .appendingPathComponent(stageContainerID(buildID: input.buildID, stageIndex: targetStage.index))
+
+        let runtime = try await StageRuntime.start(
+            appRoot: input.appRoot,
+            buildID: input.buildID,
+            baseImage: baseImage,
+            stageIndex: targetStage.index,
+            cpus: input.cpus,
+            memory: input.memory
+        )
+
+        do {
+            let transport = FileTransport(
+                sandboxClient: runtime.sandboxClient,
+                contextProvider: contextProvider
+            )
+            var state = StageState(baseConfig: baseConfig, initialBuildArguments: cliBuildArgs)
+
+            if !input.quiet {
+                writeStderrLine("Building macOS stage \(targetStage.name ?? "#\(targetStage.index)")")
+            }
+
+            for instruction in targetStage.instructions {
+                switch instruction {
+                case .arg(let argument):
+                    let value = cliBuildArgs[argument.name] ?? argument.defaultValue ?? ""
+                    state.buildArguments[argument.name] = value
+
+                case .env(let pairs):
+                    var variables = state.variables
+                    for pair in pairs {
+                        let expanded = try VariableExpander.expand(pair.value, variables: variables)
+                        state.environment[pair.key] = expanded
+                        variables[pair.key] = expanded
+                    }
+
+                case .label(let pairs):
+                    var variables = state.variables
+                    for pair in pairs {
+                        let expanded = try VariableExpander.expand(pair.value, variables: variables)
+                        state.labels[pair.key] = expanded
+                        variables[pair.key] = expanded
+                    }
+
+                case .workdir(let path):
+                    let expanded = try VariableExpander.expand(path, variables: state.variables)
+                    let resolved = state.resolvedPath(for: expanded)
+                    try await transport.createDirectory(at: resolved)
+                    state.workingDirectory = resolved
+
+                case .copy(let fileInstruction):
+                    let expandedSources = try fileInstruction.sources.map {
+                        try VariableExpander.expand($0, variables: state.variables)
+                    }
+                    let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
+                    try await transport.copy(
+                        sources: expandedSources,
+                        destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
+                        kind: .copy
+                    )
+
+                case .add(let fileInstruction):
+                    let expandedSources = try fileInstruction.sources.map {
+                        try VariableExpander.expand($0, variables: state.variables)
+                    }
+                    let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
+                    try await transport.copy(
+                        sources: expandedSources,
+                        destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
+                        kind: .add
+                    )
+
+                case .run(let command):
+                    if !input.quiet {
+                        writeStderrLine(description(for: command))
+                    }
+                    try await runtime.run(
+                        command: command,
+                        environment: state.environment,
+                        workingDirectory: state.workingDirectory,
+                        quiet: input.quiet,
+                        log: input.log
+                    )
+
+                case .cmd(let command):
+                    state.cmd = commandToOCIArguments(command)
+
+                case .entrypoint(let command):
+                    state.entrypoint = commandToOCIArguments(command)
+                }
+            }
+
+            try await runtime.stop()
+
+            let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
+            try MacOSImagePackager.package(
+                imageDirectory: bundleURL,
+                outputTar: archiveURL,
+                reference: input.tags.first,
+                imageConfig: state.finalImage(labelOverrides: cliLabels)
+            )
+
+            await runtime.delete()
+            return .init(archiveURL: archiveURL)
+        } catch {
+            await runtime.cleanup()
+            throw error
+        }
+    }
+
+    private static func resolveBaseImage(reference: String, pull: Bool) async throws -> ClientImage {
+        if reference == "scratch" {
+            throw ContainerizationError(.unsupported, message: "darwin builds do not support FROM scratch")
+        }
+        if pull {
+            return try await ClientImage.pull(reference: reference, platform: buildPlatform)
+        }
+        return try await ClientImage.fetch(reference: reference, platform: buildPlatform)
+    }
+
+    private static func stageContainerID(buildID: String, stageIndex: Int) -> String {
+        "macos-build-\(buildID)-stage-\(stageIndex)"
+    }
+
+    private static func outputArchiveURL(for export: Builder.BuildExport, appRoot: URL, buildID: String) -> URL {
+        switch export.type {
+        case "oci":
+            return export.destination ?? appRoot
+                .appendingPathComponent("builder")
+                .appendingPathComponent(buildID)
+                .appendingPathComponent("out.tar")
+        case "tar":
+            return appRoot
+                .appendingPathComponent("builder")
+                .appendingPathComponent(buildID)
+                .appendingPathComponent("out.tar")
+        default:
+            return appRoot
+                .appendingPathComponent("builder")
+                .appendingPathComponent(buildID)
+                .appendingPathComponent("out.tar")
+        }
+    }
+
+    private static func commandToOCIArguments(_ command: CommandForm) -> [String] {
+        switch command {
+        case .exec(let arguments):
+            return arguments
+        case .shell(let value):
+            return ["/bin/sh", "-c", value]
+        }
+    }
+
+    private static func description(for command: CommandForm) -> String {
+        switch command {
+        case .exec(let args):
+            return "RUN \(args.joined(separator: " "))"
+        case .shell(let value):
+            return "RUN \(value)"
+        }
+    }
+}
+
+extension MacOSBuildEngine {
+    final class Planner {
+        private let dockerfile: Data
+        private let buildArgs: [String: String]
+        private let target: String
+
+        init(dockerfile: Data, buildArgs: [String: String], target: String) {
+            self.dockerfile = dockerfile
+            self.buildArgs = buildArgs
+            self.target = target
+        }
+
+        func makePlan() throws -> Plan {
+            let text = String(decoding: dockerfile, as: UTF8.self)
+            let logicalLines = try LogicalLineParser.parse(text)
+
+            var globalArgs = buildArgs
+            var stages: [Stage] = []
+            var aliases: Set<String> = []
+            var currentName: String?
+            var currentBaseImage: String?
+            var currentInstructions: [Instruction] = []
+
+            for logicalLine in logicalLines {
+                let parsed = try parseInstruction(logicalLine)
+                switch parsed {
+                case .arg(let argument):
+                    if currentBaseImage == nil {
+                        globalArgs[argument.name] = buildArgs[argument.name] ?? argument.defaultValue ?? ""
+                    } else {
+                        currentInstructions.append(.arg(argument))
+                    }
+
+                case .from(let from):
+                    if let baseImage = currentBaseImage {
+                        stages.append(
+                            .init(
+                                index: stages.count,
+                                name: currentName,
+                                baseImage: baseImage,
+                                instructions: currentInstructions
+                            )
+                        )
+                    }
+
+                    let variables = globalArgs
+                    let expandedPlatform = try from.platform.map {
+                        try VariableExpander.expand($0, variables: variables)
+                    }
+                    if let expandedPlatform, expandedPlatform != buildPlatform.description {
+                        throw ContainerizationError(
+                            .unsupported,
+                            message: "darwin builds require FROM --platform=darwin/arm64, got \(expandedPlatform)"
+                        )
+                    }
+
+                    let baseImage = try VariableExpander.expand(from.image, variables: variables)
+                    if aliases.contains(baseImage.lowercased()) {
+                        throw ContainerizationError(
+                            .unsupported,
+                            message: "darwin builds do not support FROM <previous-stage> in phase 1"
+                        )
+                    }
+                    let alias = from.alias?.lowercased()
+                    if let alias {
+                        guard aliases.insert(alias).inserted else {
+                            throw ContainerizationError(.invalidArgument, message: "duplicate stage alias \(alias)")
+                        }
+                    }
+                    currentName = alias
+                    currentBaseImage = baseImage
+                    currentInstructions = []
+
+                case .instruction(let instruction):
+                    guard currentBaseImage != nil else {
+                        throw ContainerizationError(.invalidArgument, message: "Dockerfile must start with FROM before \(logicalLine.keyword)")
+                    }
+                    currentInstructions.append(instruction)
+                }
+            }
+
+            if let baseImage = currentBaseImage {
+                stages.append(
+                    .init(
+                        index: stages.count,
+                        name: currentName,
+                        baseImage: baseImage,
+                        instructions: currentInstructions
+                    )
+                )
+            }
+
+            guard !stages.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "Dockerfile does not define a build stage")
+            }
+
+            let selected: Stage
+            if target.isEmpty {
+                guard let last = stages.last else {
+                    throw ContainerizationError(.internalError, message: "missing target stage")
+                }
+                selected = last
+            } else if let byName = stages.first(where: { $0.name == target.lowercased() }) {
+                selected = byName
+            } else if let byIndex = Int(target), stages.indices.contains(byIndex) {
+                selected = stages[byIndex]
+            } else {
+                throw ContainerizationError(.notFound, message: "target stage \(target) not found")
+            }
+
+            return .init(stages: stages, targetStage: selected)
+        }
+
+        struct LogicalLine {
+            let lineNumber: Int
+            let keyword: String
+            let arguments: String
+        }
+
+        private enum ParsedInstruction {
+            case from(FromInstruction)
+            case arg(ArgumentInstruction)
+            case instruction(Instruction)
+        }
+
+        private struct FromInstruction {
+            let image: String
+            let platform: String?
+            let alias: String?
+        }
+
+        private func parseInstruction(_ logicalLine: LogicalLine) throws -> ParsedInstruction {
+            switch logicalLine.keyword {
+            case "FROM":
+                return .from(try parseFrom(logicalLine.arguments))
+            case "ARG":
+                return .arg(try parseArg(logicalLine.arguments))
+            case "ENV":
+                return .instruction(.env(try parseAssignments(logicalLine.arguments, instruction: "ENV")))
+            case "WORKDIR":
+                return .instruction(.workdir(try requireNonEmpty(logicalLine.arguments, instruction: "WORKDIR")))
+            case "RUN":
+                return .instruction(.run(try parseCommand(logicalLine.arguments, instruction: "RUN")))
+            case "COPY":
+                return .instruction(.copy(try parseFileTransfer(logicalLine.arguments, instruction: "COPY")))
+            case "ADD":
+                return .instruction(.add(try parseFileTransfer(logicalLine.arguments, instruction: "ADD")))
+            case "LABEL":
+                return .instruction(.label(try parseAssignments(logicalLine.arguments, instruction: "LABEL")))
+            case "CMD":
+                return .instruction(.cmd(try parseCommand(logicalLine.arguments, instruction: "CMD")))
+            case "ENTRYPOINT":
+                return .instruction(.entrypoint(try parseCommand(logicalLine.arguments, instruction: "ENTRYPOINT")))
+            case "USER":
+                throw ContainerizationError(.unsupported, message: "darwin builds do not support USER in phase 1")
+            default:
+                throw ContainerizationError(.unsupported, message: "darwin builds do not support \(logicalLine.keyword) in phase 1")
+            }
+        }
+
+        private func parseFrom(_ value: String) throws -> FromInstruction {
+            let tokens = try ShellTokenizer.tokenize(value)
+            guard !tokens.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "FROM requires a base image")
+            }
+
+            var index = 0
+            var platform: String?
+            while index < tokens.count, tokens[index].hasPrefix("--") {
+                let option = tokens[index]
+                if option == "--platform" {
+                    let nextIndex = index + 1
+                    guard nextIndex < tokens.count else {
+                        throw ContainerizationError(.invalidArgument, message: "FROM --platform requires a value")
+                    }
+                    platform = tokens[nextIndex]
+                    index += 2
+                    continue
+                }
+                if option.hasPrefix("--platform=") {
+                    platform = String(option.dropFirst("--platform=".count))
+                    index += 1
+                    continue
+                }
+                throw ContainerizationError(.unsupported, message: "darwin builds do not support FROM option \(option)")
+            }
+
+            guard index < tokens.count else {
+                throw ContainerizationError(.invalidArgument, message: "FROM requires a base image")
+            }
+            let image = tokens[index]
+            index += 1
+
+            var alias: String?
+            if index < tokens.count {
+                guard tokens.count == index + 2, tokens[index].uppercased() == "AS" else {
+                    throw ContainerizationError(.invalidArgument, message: "invalid FROM syntax")
+                }
+                alias = tokens[index + 1]
+            }
+
+            return .init(image: image, platform: platform, alias: alias)
+        }
+
+        private func parseArg(_ value: String) throws -> ArgumentInstruction {
+            let trimmed = try requireNonEmpty(value, instruction: "ARG")
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
+            let name = parts[0].trimmingCharacters(in: .whitespaces)
+            guard Self.isValidVariableName(name) else {
+                throw ContainerizationError(.invalidArgument, message: "invalid ARG name \(name)")
+            }
+            return .init(name: name, defaultValue: parts.count == 2 ? parts[1] : nil)
+        }
+
+        private func parseAssignments(_ value: String, instruction: String) throws -> [KeyValuePair] {
+            let tokens = try ShellTokenizer.tokenize(value)
+            guard !tokens.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "\(instruction) requires at least one key/value pair")
+            }
+
+            if tokens.count == 2, !tokens[0].contains("=") {
+                return [.init(key: tokens[0], value: tokens[1])]
+            }
+
+            return try tokens.map { token in
+                let parts = token.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2, !parts[0].isEmpty else {
+                    throw ContainerizationError(.invalidArgument, message: "invalid \(instruction) assignment \(token)")
+                }
+                return .init(key: parts[0], value: parts[1])
+            }
+        }
+
+        private func parseCommand(_ value: String, instruction: String) throws -> CommandForm {
+            let trimmed = try requireNonEmpty(value, instruction: instruction)
+            if trimmed.hasPrefix("[") {
+                let payload = try JSONDecoder().decode([String].self, from: Data(trimmed.utf8))
+                guard !payload.isEmpty else {
+                    throw ContainerizationError(.invalidArgument, message: "\(instruction) exec form may not be empty")
+                }
+                return .exec(payload)
+            }
+            return .shell(trimmed)
+        }
+
+        private func parseFileTransfer(_ value: String, instruction: String) throws -> FileTransferInstruction {
+            let trimmed = try requireNonEmpty(value, instruction: instruction)
+            if trimmed.hasPrefix("[") {
+                let payload = try JSONDecoder().decode([String].self, from: Data(trimmed.utf8))
+                guard payload.count >= 2 else {
+                    throw ContainerizationError(.invalidArgument, message: "\(instruction) requires at least one source and one destination")
+                }
+                let destination = payload.last ?? ""
+                let sources = Array(payload.dropLast())
+                try validateFileTransferSources(sources, instruction: instruction)
+                return .init(sources: sources, destination: destination)
+            }
+
+            let tokens = try ShellTokenizer.tokenize(trimmed)
+            guard tokens.count >= 2 else {
+                throw ContainerizationError(.invalidArgument, message: "\(instruction) requires at least one source and one destination")
+            }
+
+            let index = 0
+            while index < tokens.count, tokens[index].hasPrefix("--") {
+                let option = tokens[index]
+                if option == "--from" || option.hasPrefix("--from=") {
+                    throw ContainerizationError(.unsupported, message: "darwin builds do not support \(instruction) --from in phase 1")
+                }
+                throw ContainerizationError(.unsupported, message: "darwin builds do not support \(instruction) option \(option)")
+            }
+
+            let remaining = Array(tokens[index...])
+            let destination = remaining.last ?? ""
+            let sources = Array(remaining.dropLast())
+            try validateFileTransferSources(sources, instruction: instruction)
+            return .init(sources: sources, destination: destination)
+        }
+
+        private func validateFileTransferSources(_ sources: [String], instruction: String) throws {
+            if instruction == "ADD", sources.contains(where: Self.looksLikeRemoteURL) {
+                throw ContainerizationError(.unsupported, message: "darwin builds do not support ADD <url> in phase 1")
+            }
+        }
+
+        private func requireNonEmpty(_ value: String, instruction: String) throws -> String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "\(instruction) requires a value")
+            }
+            return trimmed
+        }
+
+        private static func isValidVariableName(_ value: String) -> Bool {
+            guard let first = value.first, first.isLetter || first == "_" else {
+                return false
+            }
+            return value.dropFirst().allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+        }
+
+        private static func looksLikeRemoteURL(_ value: String) -> Bool {
+            let lowercased = value.lowercased()
+            return lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
+        }
+    }
+}
+
+extension MacOSBuildEngine.Planner {
+    enum LogicalLineParser {
+        static func parse(_ text: String) throws -> [MacOSBuildEngine.Planner.LogicalLine] {
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            var result: [MacOSBuildEngine.Planner.LogicalLine] = []
+            var buffer = ""
+            var bufferLineNumber = 1
+
+            for (offset, rawLine) in lines.enumerated() {
+                let lineNumber = offset + 1
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+
+                if buffer.isEmpty, (trimmed.isEmpty || trimmed.hasPrefix("#")) {
+                    continue
+                }
+
+                let hasContinuation = trailingBackslashCount(in: rawLine) % 2 == 1
+                let segment = hasContinuation ? String(rawLine.dropLast()) : rawLine
+                if buffer.isEmpty {
+                    bufferLineNumber = lineNumber
+                    buffer = segment
+                } else {
+                    buffer += " " + segment.trimmingCharacters(in: .whitespaces)
+                }
+
+                if hasContinuation {
+                    continue
+                }
+
+                let cleaned = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                buffer = ""
+                guard !cleaned.isEmpty, !cleaned.hasPrefix("#") else {
+                    continue
+                }
+
+                let parts = cleaned.split(maxSplits: 1, whereSeparator: \.isWhitespace).map(String.init)
+                let keyword = parts[0].uppercased()
+                let arguments = parts.count == 2 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+                result.append(
+                    MacOSBuildEngine.Planner.LogicalLine(
+                        lineNumber: bufferLineNumber,
+                        keyword: keyword,
+                        arguments: arguments
+                    )
+                )
+            }
+
+            guard buffer.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "unterminated line continuation in Dockerfile")
+            }
+            return result
+        }
+
+        private static func trailingBackslashCount(in line: String) -> Int {
+            var count = 0
+            for character in line.reversed() {
+                if character.isWhitespace {
+                    if count == 0 {
+                        continue
+                    }
+                    break
+                }
+                if character == "\\" {
+                    count += 1
+                    continue
+                }
+                break
+            }
+            return count
+        }
+    }
+}
+
+extension MacOSBuildEngine {
+    struct VariableExpander {
+        static func expand(_ value: String, variables: [String: String]) throws -> String {
+            var result = ""
+            var index = value.startIndex
+
+            while index < value.endIndex {
+                let character = value[index]
+                guard character == "$" else {
+                    result.append(character)
+                    index = value.index(after: index)
+                    continue
+                }
+
+                let next = value.index(after: index)
+                guard next < value.endIndex else {
+                    result.append(character)
+                    index = next
+                    continue
+                }
+
+                if value[next] == "{" {
+                    guard let closing = value[next...].firstIndex(of: "}") else {
+                        throw ContainerizationError(.invalidArgument, message: "unterminated variable expression in \(value)")
+                    }
+                    let expression = String(value[value.index(after: next)..<closing])
+                    result.append(resolve(expression: expression, variables: variables))
+                    index = value.index(after: closing)
+                    continue
+                }
+
+                let nameStart = next
+                var cursor = nameStart
+                while cursor < value.endIndex {
+                    let candidate = value[cursor]
+                    if candidate.isLetter || candidate.isNumber || candidate == "_" {
+                        cursor = value.index(after: cursor)
+                        continue
+                    }
+                    break
+                }
+
+                if cursor == nameStart {
+                    result.append(character)
+                    index = next
+                    continue
+                }
+
+                let name = String(value[nameStart..<cursor])
+                result.append(variables[name] ?? "")
+                index = cursor
+            }
+
+            return result
+        }
+
+        private static func resolve(expression: String, variables: [String: String]) -> String {
+            if let range = expression.range(of: ":-") {
+                let name = String(expression[..<range.lowerBound])
+                let fallback = String(expression[range.upperBound...])
+                let value = variables[name] ?? ""
+                return value.isEmpty ? fallback : value
+            }
+            if let range = expression.range(of: "-") {
+                let name = String(expression[..<range.lowerBound])
+                let fallback = String(expression[range.upperBound...])
+                return variables[name] ?? fallback
+            }
+            return variables[expression] ?? ""
+        }
+    }
+
+    enum ShellTokenizer {
+        static func tokenize(_ value: String) throws -> [String] {
+            var result: [String] = []
+            var current = ""
+            var quote: Character?
+            var escaping = false
+
+            for character in value {
+                if escaping {
+                    current.append(character)
+                    escaping = false
+                    continue
+                }
+
+                if character == "\\" && quote != "'" {
+                    escaping = true
+                    continue
+                }
+
+                if let activeQuote = quote {
+                    if character == activeQuote {
+                        quote = nil
+                    } else {
+                        current.append(character)
+                    }
+                    continue
+                }
+
+                if character == "\"" || character == "'" {
+                    quote = character
+                    continue
+                }
+
+                if character.isWhitespace {
+                    if !current.isEmpty {
+                        result.append(current)
+                        current.removeAll(keepingCapacity: true)
+                    }
+                    continue
+                }
+
+                current.append(character)
+            }
+
+            if escaping || quote != nil {
+                throw ContainerizationError(.invalidArgument, message: "unterminated quoted or escaped string in \(value)")
+            }
+
+            if !current.isEmpty {
+                result.append(current)
+            }
+            return result
+        }
+    }
+}
+
+extension MacOSBuildEngine {
+    final class BuildContextProvider {
+        let contextRoot: URL
+        private let rules: [DockerIgnoreRule]
+        private let allEntries: [ContextEntry]
+        private let includedEntries: [ContextEntry]
+        private let includedEntryMap: [String: ContextEntry]
+
+        init(contextRoot: URL) throws {
+            let root = contextRoot.standardizedFileURL
+            var isDirectory = ObjCBool(false)
+            guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw ContainerizationError(.notFound, message: "build context not found at \(root.path)")
+            }
+            let loadedRules = try Self.loadRules(from: root)
+            let walkedEntries = try Self.walk(root: root)
+            let included = walkedEntries.filter { !Self.isIgnored(relativePath: $0.relativePath, kind: $0.kind, rules: loadedRules) }
+
+            self.contextRoot = root
+            self.rules = loadedRules
+            self.allEntries = walkedEntries
+            self.includedEntries = included
+            self.includedEntryMap = Dictionary(uniqueKeysWithValues: included.map { ($0.relativePath, $0) })
+        }
+
+        func resolveSources(_ rawSources: [String]) throws -> [ContextEntry] {
+            var resolved: [String: ContextEntry] = [:]
+            for rawSource in rawSources {
+                let source = Self.normalizeInputPath(rawSource)
+                if source == "." || source.isEmpty {
+                    resolved[""] = .init(url: contextRoot, relativePath: "", kind: .directory)
+                    continue
+                }
+
+                if Self.containsGlobPattern(source) {
+                    let matches = includedEntries.filter { entry in
+                        Self.matches(path: entry.relativePath, pattern: source, directory: entry.kind == .directory)
+                    }
+                    guard !matches.isEmpty else {
+                        throw ContainerizationError(.notFound, message: "COPY/ADD source \(rawSource) did not match any files in the build context")
+                    }
+                    for match in matches {
+                        resolved[match.relativePath] = match
+                    }
+                    continue
+                }
+
+                let url = contextRoot.appendingPathComponent(source).standardizedFileURL
+                guard Self.isDescendant(url, of: contextRoot) else {
+                    throw ContainerizationError(.invalidArgument, message: "build source \(rawSource) escapes the build context")
+                }
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    throw ContainerizationError(.notFound, message: "build source \(rawSource) not found in the build context")
+                }
+
+                let kind = try Self.entryKind(at: url)
+                let relativePath = try Self.relativePath(of: url, from: contextRoot)
+                if kind == .directory {
+                    let hasIncludedDescendants = includedEntries.contains { entry in
+                        entry.relativePath.hasPrefix(relativePath + "/")
+                    }
+                    let ignored = Self.isIgnored(relativePath: relativePath, kind: kind, rules: rules)
+                    guard !ignored || hasIncludedDescendants else {
+                        throw ContainerizationError(.notFound, message: "build source \(rawSource) is excluded by .dockerignore")
+                    }
+                } else {
+                    guard !Self.isIgnored(relativePath: relativePath, kind: kind, rules: rules) else {
+                        throw ContainerizationError(.notFound, message: "build source \(rawSource) is excluded by .dockerignore")
+                    }
+                }
+                resolved[relativePath] = .init(url: url, relativePath: relativePath, kind: kind)
+            }
+
+            return resolved.values.sorted { $0.relativePath < $1.relativePath }
+        }
+
+        func descendants(of source: ContextEntry) -> [ContextEntry] {
+            guard source.kind == .directory else {
+                return []
+            }
+            if source.relativePath.isEmpty {
+                return includedEntries
+            }
+            let prefix = source.relativePath + "/"
+            return includedEntries.filter { $0.relativePath.hasPrefix(prefix) }
+        }
+
+        private static func loadRules(from root: URL) throws -> [DockerIgnoreRule] {
+            let ignoreURL = root.appendingPathComponent(".dockerignore")
+            guard FileManager.default.fileExists(atPath: ignoreURL.path) else {
+                return []
+            }
+
+            let content = try String(contentsOf: ignoreURL, encoding: .utf8)
+            var rules: [DockerIgnoreRule] = []
+            for rawLine in content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else {
+                    continue
+                }
+                let include = trimmed.hasPrefix("!")
+                let pattern = normalizePattern(include ? String(trimmed.dropFirst()) : trimmed)
+                guard !pattern.isEmpty else {
+                    continue
+                }
+                let regex = try NSRegularExpression(pattern: regexPattern(for: pattern), options: [])
+                rules.append(.init(include: include, regex: regex))
+            }
+            return rules
+        }
+
+        private static func walk(root: URL) throws -> [ContextEntry] {
+            let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: keys,
+                options: [],
+                errorHandler: nil
+            ) else {
+                return []
+            }
+
+            var entries: [ContextEntry] = []
+            while let url = enumerator.nextObject() as? URL {
+                let relativePath = try relativePath(of: url, from: root)
+                guard !relativePath.isEmpty else {
+                    continue
+                }
+                let kind = try entryKind(at: url)
+                entries.append(.init(url: url, relativePath: relativePath, kind: kind))
+                if kind == .symlink {
+                    enumerator.skipDescendants()
+                }
+            }
+            return entries.sorted { $0.relativePath < $1.relativePath }
+        }
+
+        private static func isIgnored(relativePath: String, kind: EntryKind, rules: [DockerIgnoreRule]) -> Bool {
+            guard !relativePath.isEmpty else {
+                return false
+            }
+
+            var excluded = false
+            let fullRange = NSRange(relativePath.startIndex..<relativePath.endIndex, in: relativePath)
+            for rule in rules {
+                if rule.regex.firstMatch(in: relativePath, options: [], range: fullRange) != nil {
+                    excluded = !rule.include
+                } else if kind == .directory {
+                    let directoryPath = relativePath + "/"
+                    let range = NSRange(directoryPath.startIndex..<directoryPath.endIndex, in: directoryPath)
+                    if rule.regex.firstMatch(in: directoryPath, options: [], range: range) != nil {
+                        excluded = !rule.include
+                    }
+                }
+            }
+            return excluded
+        }
+
+        private static func normalizeInputPath(_ value: String) -> String {
+            var path = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            while path.hasPrefix("./") {
+                path.removeFirst(2)
+            }
+            while path.hasPrefix("/") {
+                path.removeFirst()
+            }
+            if path == "." {
+                return "."
+            }
+            while path.contains("//") {
+                path = path.replacingOccurrences(of: "//", with: "/")
+            }
+            return path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+
+        private static func normalizePattern(_ value: String) -> String {
+            let preserveTrailingSlash = value.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("/")
+            var path = normalizeInputPath(value)
+            if preserveTrailingSlash, !path.isEmpty, path != "." {
+                path += "/"
+            }
+            return path
+        }
+
+        private static func containsGlobPattern(_ value: String) -> Bool {
+            value.contains("*") || value.contains("?") || value.contains("[")
+        }
+
+        private static func matches(path: String, pattern: String, directory: Bool) -> Bool {
+            let regex = try? NSRegularExpression(pattern: regexPattern(for: pattern), options: [])
+            let range = NSRange(path.startIndex..<path.endIndex, in: path)
+            if regex?.firstMatch(in: path, options: [], range: range) != nil {
+                return true
+            }
+            if directory {
+                let withSlash = path + "/"
+                let slashRange = NSRange(withSlash.startIndex..<withSlash.endIndex, in: withSlash)
+                return regex?.firstMatch(in: withSlash, options: [], range: slashRange) != nil
+            }
+            return false
+        }
+
+        private static func regexPattern(for pattern: String) -> String {
+            let directoryOnly = pattern.hasSuffix("/")
+            let normalized = directoryOnly ? String(pattern.dropLast()) : pattern
+            var result = "^"
+            var index = normalized.startIndex
+
+            while index < normalized.endIndex {
+                let character = normalized[index]
+                if character == "*" {
+                    let next = normalized.index(after: index)
+                    if next < normalized.endIndex, normalized[next] == "*" {
+                        let afterNext = normalized.index(after: next)
+                        if afterNext < normalized.endIndex, normalized[afterNext] == "/" {
+                            result += "(?:.*/)?"
+                            index = normalized.index(after: afterNext)
+                        } else {
+                            result += ".*"
+                            index = afterNext
+                        }
+                        continue
+                    }
+                    result += "[^/]*"
+                    index = next
+                    continue
+                }
+
+                if character == "?" {
+                    result += "[^/]"
+                    index = normalized.index(after: index)
+                    continue
+                }
+
+                if ".+()|^$[]{}".contains(character) {
+                    result += "\\\(character)"
+                } else {
+                    result.append(character)
+                }
+                index = normalized.index(after: index)
+            }
+
+            if directoryOnly {
+                result += "(?:/.*)?$"
+            } else {
+                result += "$"
+            }
+            return result
+        }
+
+        private static func entryKind(at url: URL) throws -> EntryKind {
+            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey])
+            if values.isSymbolicLink == true {
+                return .symlink
+            }
+            if values.isDirectory == true {
+                return .directory
+            }
+            return .file
+        }
+
+        private static func relativePath(of url: URL, from root: URL) throws -> String {
+            let rootComponents = root.standardizedFileURL.pathComponents
+            let urlComponents = url.standardizedFileURL.pathComponents
+            guard urlComponents.starts(with: rootComponents) else {
+                throw ContainerizationError(.invalidArgument, message: "\(url.path) escapes the build context")
+            }
+            return urlComponents.dropFirst(rootComponents.count).joined(separator: "/")
+        }
+
+        private static func isDescendant(_ url: URL, of root: URL) -> Bool {
+            let rootComponents = root.standardizedFileURL.pathComponents
+            let urlComponents = url.standardizedFileURL.pathComponents
+            guard rootComponents.count <= urlComponents.count else {
+                return false
+            }
+            return zip(rootComponents, urlComponents).allSatisfy(==)
+        }
+    }
+}
+
+extension MacOSBuildEngine {
+    final class FileTransport {
+        enum CopyKind {
+            case copy
+            case add
+        }
+
+        let sandboxClient: SandboxClient
+        let contextProvider: BuildContextProvider
+
+        init(sandboxClient: SandboxClient, contextProvider: BuildContextProvider) {
+            self.sandboxClient = sandboxClient
+            self.contextProvider = contextProvider
+        }
+
+        func createDirectory(at path: String, mode: UInt32? = nil) async throws {
+            let normalized = normalizeAbsolutePath(path)
+            let request = MacOSSidecarFSBeginRequestPayload(
+                txID: UUID().uuidString,
+                op: .mkdir,
+                path: normalized,
+                mode: mode,
+                mtime: currentUnixTimestamp(),
+                autoCommit: true
+            )
+            try await sandboxClient.fsBegin(request)
+        }
+
+        func copy(sources rawSources: [String], destination rawDestination: String, kind: CopyKind) async throws {
+            let sources = try contextProvider.resolveSources(rawSources)
+            let destination = normalizeDestination(rawDestination)
+
+            guard !sources.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "COPY/ADD requires at least one source")
+            }
+
+            if kind == .add, sources.count == 1, sources[0].kind == .file, Self.isArchiveFile(sources[0].url) {
+                let tempRoot = try makeTemporaryDirectory(prefix: "macos-build-add")
+                defer { try? FileManager.default.removeItem(at: tempRoot) }
+                try Self.extractArchive(at: sources[0].url, into: tempRoot)
+                try await copyDirectoryTree(
+                    root: tempRoot,
+                    destinationRoot: destination.path,
+                    includeTopLevelDirectory: nil
+                )
+                return
+            }
+
+            if kind == .add, sources.contains(where: { $0.kind == .file && Self.isArchiveFile($0.url) }) {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "darwin builds support ADD archive extraction only for a single local archive source in phase 1"
+                )
+            }
+
+            if sources.count > 1, !destination.isDirectoryHint {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "COPY/ADD with multiple sources requires the destination to end with /"
+                )
+            }
+
+            if sources.count > 1 {
+                try await createDirectory(at: destination.path)
+            }
+
+            for source in sources {
+                switch source.kind {
+                case .file:
+                    let targetPath = targetPath(for: source, destination: destination, multipleSources: sources.count > 1)
+                    try await sendFile(at: source.url, to: targetPath)
+
+                case .symlink:
+                    let targetPath = targetPath(for: source, destination: destination, multipleSources: sources.count > 1)
+                    try await sendSymlink(at: source.url, to: targetPath)
+
+                case .directory:
+                    if sources.count == 1 {
+                        try await copyContextDirectory(source, destinationRoot: destination.path, includeTopLevelDirectory: nil)
+                    } else {
+                        try await copyContextDirectory(
+                            source,
+                            destinationRoot: destination.path,
+                            includeTopLevelDirectory: source.url.lastPathComponent
+                        )
+                    }
+                }
+            }
+        }
+
+        private func copyContextDirectory(
+            _ source: ContextEntry,
+            destinationRoot: String,
+            includeTopLevelDirectory: String?
+        ) async throws {
+            try await createDirectory(at: destinationRoot)
+            if let includeTopLevelDirectory {
+                try await createDirectory(at: joinPaths(destinationRoot, includeTopLevelDirectory))
+            }
+
+            for entry in contextProvider.descendants(of: source) {
+                let relativePath = source.relativePath.isEmpty
+                    ? entry.relativePath
+                    : String(entry.relativePath.dropFirst(source.relativePath.count + 1))
+                let basePath = includeTopLevelDirectory.map { joinPaths(destinationRoot, $0) } ?? destinationRoot
+                let finalPath = joinPaths(basePath, relativePath)
+                try await sendEntry(entry, to: finalPath)
+            }
+        }
+
+        private func copyDirectoryTree(
+            root: URL,
+            destinationRoot: String,
+            includeTopLevelDirectory: String?
+        ) async throws {
+            try await createDirectory(at: destinationRoot)
+            if let includeTopLevelDirectory {
+                try await createDirectory(at: joinPaths(destinationRoot, includeTopLevelDirectory))
+            }
+
+            let entries = try Self.walkDirectoryTree(root: root)
+            for entry in entries {
+                let basePath = includeTopLevelDirectory.map { joinPaths(destinationRoot, $0) } ?? destinationRoot
+                let finalPath = joinPaths(basePath, entry.relativePath)
+                switch entry.kind {
+                case .directory:
+                    try await createDirectory(at: finalPath, mode: metadata(for: entry.url).mode)
+                case .file:
+                    try await sendFile(at: entry.url, to: finalPath)
+                case .symlink:
+                    try await sendSymlink(at: entry.url, to: finalPath)
+                }
+            }
+        }
+
+        private func sendEntry(_ entry: ContextEntry, to path: String) async throws {
+            switch entry.kind {
+            case .directory:
+                try await createDirectory(at: path, mode: metadata(for: entry.url).mode)
+            case .file:
+                try await sendFile(at: entry.url, to: path)
+            case .symlink:
+                try await sendSymlink(at: entry.url, to: path)
+            }
+        }
+
+        private func sendFile(at url: URL, to path: String) async throws {
+            let attributes = metadata(for: url)
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value ?? 0
+            let normalizedPath = normalizeAbsolutePath(path)
+
+            if fileSize <= UInt64(MacOSBuildEngine.inlineDataLimit) {
+                let data = try Data(contentsOf: url)
+                let request = MacOSSidecarFSBeginRequestPayload(
+                    txID: UUID().uuidString,
+                    op: .writeFile,
+                    path: normalizedPath,
+                    mode: attributes.mode,
+                    mtime: attributes.mtime,
+                    overwrite: true,
+                    inlineData: data,
+                    autoCommit: true
+                )
+                try await sandboxClient.fsBegin(request)
+                return
+            }
+
+            let txID = UUID().uuidString
+            let beginRequest = MacOSSidecarFSBeginRequestPayload(
+                txID: txID,
+                op: .writeFile,
+                path: normalizedPath,
+                mode: attributes.mode,
+                mtime: attributes.mtime,
+                overwrite: true,
+                autoCommit: false
+            )
+            do {
+                try await sandboxClient.fsBegin(beginRequest)
+
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+
+                var hasher = SHA256()
+                var offset: UInt64 = 0
+                while let data = try handle.read(upToCount: MacOSBuildEngine.chunkSize), !data.isEmpty {
+                    hasher.update(data: data)
+                    try await sandboxClient.fsChunk(.init(txID: txID, offset: offset, data: data))
+                    offset += UInt64(data.count)
+                }
+
+                let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+                try await sandboxClient.fsEnd(.init(txID: txID, action: .commit, digest: "sha256:\(digest)"))
+            } catch {
+                try? await sandboxClient.fsEnd(.init(txID: txID, action: .abort))
+                throw error
+            }
+        }
+
+        private func sendSymlink(at url: URL, to path: String) async throws {
+            let target = try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
+            let attributes = metadata(for: url)
+            let request = MacOSSidecarFSBeginRequestPayload(
+                txID: UUID().uuidString,
+                op: .symlink,
+                path: normalizeAbsolutePath(path),
+                mtime: attributes.mtime,
+                linkTarget: target,
+                overwrite: true,
+                autoCommit: true
+            )
+            try await sandboxClient.fsBegin(request)
+        }
+
+        private struct DestinationPath {
+            let path: String
+            let isDirectoryHint: Bool
+        }
+
+        private func targetPath(for source: ContextEntry, destination: DestinationPath, multipleSources: Bool) -> String {
+            if destination.isDirectoryHint {
+                return joinPaths(destination.path, source.url.lastPathComponent)
+            }
+            if multipleSources {
+                return joinPaths(destination.path, source.url.lastPathComponent)
+            }
+            return destination.path
+        }
+
+        private func normalizeDestination(_ value: String) -> DestinationPath {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .init(
+                path: normalizeAbsolutePath(trimmed, preserveTrailingSlash: false),
+                isDirectoryHint: trimmed.hasSuffix("/")
+            )
+        }
+
+        private func metadata(for url: URL) -> (mode: UInt32?, mtime: Int64?) {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let modeValue = (attributes?[.posixPermissions] as? NSNumber)?.uint32Value
+            let date = attributes?[.modificationDate] as? Date
+            return (modeValue, date.map { Int64($0.timeIntervalSince1970) })
+        }
+
+        private static func isArchiveFile(_ url: URL) -> Bool {
+            let name = url.lastPathComponent.lowercased()
+            return
+                name.hasSuffix(".tar")
+                || name.hasSuffix(".tar.gz")
+                || name.hasSuffix(".tgz")
+                || name.hasSuffix(".tar.bz2")
+                || name.hasSuffix(".tbz")
+                || name.hasSuffix(".tar.xz")
+                || name.hasSuffix(".txz")
+        }
+
+        private static func extractArchive(at source: URL, into destination: URL) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            process.arguments = ["-xf", source.path, "-C", destination.path]
+            let stderr = Pipe()
+            process.standardError = stderr
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "failed to extract archive"
+                throw ContainerizationError(.internalError, message: message.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+
+        private static func walkDirectoryTree(root: URL) throws -> [ContextEntry] {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey],
+                options: [],
+                errorHandler: nil
+            ) else {
+                return []
+            }
+
+            var entries: [ContextEntry] = []
+            while let url = enumerator.nextObject() as? URL {
+                let relativePath = try relativePath(of: url, from: root)
+                guard !relativePath.isEmpty else {
+                    continue
+                }
+                let kind = try entryKind(at: url)
+                entries.append(.init(url: url, relativePath: relativePath, kind: kind))
+                if kind == .symlink {
+                    enumerator.skipDescendants()
+                }
+            }
+            return entries.sorted { $0.relativePath < $1.relativePath }
+        }
+
+        private static func entryKind(at url: URL) throws -> EntryKind {
+            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+            if values.isSymbolicLink == true {
+                return .symlink
+            }
+            if values.isDirectory == true {
+                return .directory
+            }
+            return .file
+        }
+
+        private static func relativePath(of url: URL, from root: URL) throws -> String {
+            let rootComponents = root.standardizedFileURL.pathComponents
+            let urlComponents = url.standardizedFileURL.pathComponents
+            guard urlComponents.starts(with: rootComponents) else {
+                throw ContainerizationError(.invalidArgument, message: "\(url.path) escapes \(root.path)")
+            }
+            return urlComponents.dropFirst(rootComponents.count).joined(separator: "/")
+        }
+
+        private func makeTemporaryDirectory(prefix: String) throws -> URL {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(prefix)-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url
+        }
+    }
+}
+
+extension MacOSBuildEngine {
+    final class StageRuntime {
+        let containerClient: ContainerClient
+        let containerID: String
+        let sandboxClient: SandboxClient
+
+        private init(containerClient: ContainerClient, containerID: String, sandboxClient: SandboxClient) {
+            self.containerClient = containerClient
+            self.containerID = containerID
+            self.sandboxClient = sandboxClient
+        }
+
+        static func start(
+            appRoot: URL,
+            buildID: String,
+            baseImage: ClientImage,
+            stageIndex: Int,
+            cpus: Int64,
+            memory: String
+        ) async throws -> StageRuntime {
+            let containerClient = ContainerClient()
+            let containerID = MacOSBuildEngine.stageContainerID(buildID: buildID, stageIndex: stageIndex)
+            let initProcess = ProcessConfiguration(
+                executable: "/usr/bin/tail",
+                arguments: ["-f", "/dev/null"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            )
+
+            var configuration = ContainerConfiguration(id: containerID, image: baseImage.description, process: initProcess)
+            configuration.platform = MacOSBuildEngine.buildPlatform
+            configuration.runtimeHandler = MacOSBuildEngine.runtimeName
+            configuration.macosGuest = .init(snapshotEnabled: false, guiEnabled: false, agentPort: MacOSBuildEngine.defaultAgentPort)
+            configuration.resources = try Parser.resources(cpus: cpus, memory: memory)
+            configuration.resources.memoryInBytes = max(configuration.resources.memoryInBytes, 8192.mib())
+
+            try await containerClient.create(
+                configuration: configuration,
+                options: .init(autoRemove: false)
+            )
+
+            do {
+                let process = try await containerClient.bootstrap(id: containerID, stdio: [nil, nil, nil])
+                try await process.start()
+                let sandboxClient = try await SandboxClient.create(id: containerID, runtime: MacOSBuildEngine.runtimeName)
+                _ = appRoot
+                return .init(containerClient: containerClient, containerID: containerID, sandboxClient: sandboxClient)
+            } catch {
+                try? await containerClient.delete(id: containerID, force: true)
+                throw error
+            }
+        }
+
+        func run(
+            command: CommandForm,
+            environment: [String: String],
+            workingDirectory: String,
+            quiet: Bool,
+            log: Logger
+        ) async throws {
+            let processID = UUID().uuidString
+            let config: ProcessConfiguration
+            switch command {
+            case .shell(let value):
+                config = .init(
+                    executable: "/bin/sh",
+                    arguments: ["-c", value],
+                    environment: environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" },
+                    workingDirectory: workingDirectory,
+                    terminal: false,
+                    user: .id(uid: 0, gid: 0)
+                )
+            case .exec(let payload):
+                guard let executable = payload.first else {
+                    throw ContainerizationError(.invalidArgument, message: "RUN exec form requires an executable")
+                }
+                config = .init(
+                    executable: executable,
+                    arguments: Array(payload.dropFirst()),
+                    environment: environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" },
+                    workingDirectory: workingDirectory,
+                    terminal: false,
+                    user: .id(uid: 0, gid: 0)
+                )
+            }
+
+            let io = try ProcessIO.create(tty: false, interactive: false, detach: quiet)
+            defer { try? io.close() }
+
+            let process = try await containerClient.createProcess(
+                containerId: containerID,
+                processId: processID,
+                configuration: config,
+                stdio: io.stdio
+            )
+            let exitCode = try await io.handleProcess(process: process, log: log)
+            guard exitCode == 0 else {
+                throw ContainerizationError(.internalError, message: "build step failed with exit code \(exitCode)")
+            }
+        }
+
+        func stop() async throws {
+            try await containerClient.stop(
+                id: containerID,
+                opts: .init(timeoutInSeconds: MacOSBuildEngine.stageStopTimeoutSeconds, signal: SIGTERM)
+            )
+        }
+
+        func delete() async {
+            try? await containerClient.delete(id: containerID, force: true)
+        }
+
+        func cleanup() async {
+            try? await containerClient.stop(
+                id: containerID,
+                opts: .init(timeoutInSeconds: MacOSBuildEngine.stageStopTimeoutSeconds, signal: SIGTERM)
+            )
+            try? await containerClient.delete(id: containerID, force: true)
+        }
+    }
+}
+
+private func normalizeAbsolutePath(_ value: String, preserveTrailingSlash: Bool = false) -> String {
+    let components = value.split(separator: "/", omittingEmptySubsequences: true).reduce(into: [String]()) { partial, component in
+        switch component {
+        case ".":
+            break
+        case "..":
+            if !partial.isEmpty {
+                partial.removeLast()
+            }
+        default:
+            partial.append(String(component))
+        }
+    }
+    let path = "/" + components.joined(separator: "/")
+    if preserveTrailingSlash, value.hasSuffix("/"), path != "/" {
+        return path + "/"
+    }
+    return path
+}
+
+private func joinPaths(_ lhs: String, _ rhs: String) -> String {
+    let combined = lhs.hasSuffix("/") ? lhs + rhs : lhs + "/" + rhs
+    return normalizeAbsolutePath(combined)
+}
+
+private func currentUnixTimestamp() -> Int64 {
+    Int64(Date().timeIntervalSince1970)
+}
+
+private struct FileHandleTextOutputStream: TextOutputStream {
+    let fileHandle: FileHandle
+
+    mutating func write(_ string: String) {
+        try? fileHandle.write(contentsOf: Data(string.utf8))
+    }
+}
+
+private func writeStderrLine(_ line: String) {
+    var stream = FileHandleTextOutputStream(fileHandle: .standardError)
+    print(line, to: &stream)
+}

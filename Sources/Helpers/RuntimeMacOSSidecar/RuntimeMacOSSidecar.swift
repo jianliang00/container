@@ -109,13 +109,17 @@ private final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     }
 }
 
-private struct SidecarGuestAgentFrame: Codable {
+struct SidecarGuestAgentFrame: Codable {
     enum FrameType: String, Codable {
         case exec
         case stdin
         case signal
         case resize
         case close
+        case fsBegin
+        case fsChunk
+        case fsEnd
+        case ack
         case stdout
         case stderr
         case exit
@@ -136,6 +140,72 @@ private struct SidecarGuestAgentFrame: Codable {
     let data: Data?
     let exitCode: Int32?
     let message: String?
+    let op: MacOSSidecarFSOperation?
+    let path: String?
+    let mode: UInt32?
+    let uid: UInt32?
+    let gid: UInt32?
+    let mtime: Int64?
+    let linkTarget: String?
+    let overwrite: Bool?
+    let autoCommit: Bool?
+    let offset: UInt64?
+    let action: MacOSSidecarFSEndAction?
+    let digest: String?
+
+    init(
+        type: FrameType,
+        id: String? = nil,
+        executable: String? = nil,
+        arguments: [String]? = nil,
+        environment: [String]? = nil,
+        workingDirectory: String? = nil,
+        terminal: Bool? = nil,
+        signal: Int32? = nil,
+        width: UInt16? = nil,
+        height: UInt16? = nil,
+        data: Data? = nil,
+        exitCode: Int32? = nil,
+        message: String? = nil,
+        op: MacOSSidecarFSOperation? = nil,
+        path: String? = nil,
+        mode: UInt32? = nil,
+        uid: UInt32? = nil,
+        gid: UInt32? = nil,
+        mtime: Int64? = nil,
+        linkTarget: String? = nil,
+        overwrite: Bool? = nil,
+        autoCommit: Bool? = nil,
+        offset: UInt64? = nil,
+        action: MacOSSidecarFSEndAction? = nil,
+        digest: String? = nil
+    ) {
+        self.type = type
+        self.id = id
+        self.executable = executable
+        self.arguments = arguments
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.terminal = terminal
+        self.signal = signal
+        self.width = width
+        self.height = height
+        self.data = data
+        self.exitCode = exitCode
+        self.message = message
+        self.op = op
+        self.path = path
+        self.mode = mode
+        self.uid = uid
+        self.gid = gid
+        self.mtime = mtime
+        self.linkTarget = linkTarget
+        self.overwrite = overwrite
+        self.autoCommit = autoCommit
+        self.offset = offset
+        self.action = action
+        self.digest = digest
+    }
 
     static func exec(
         id: String,
@@ -163,39 +233,40 @@ private struct SidecarGuestAgentFrame: Codable {
     }
 
     static func close(id: String) -> Self {
-        .init(
-            type: .close,
-            id: id,
-            executable: nil,
-            arguments: nil,
-            environment: nil,
-            workingDirectory: nil,
-            terminal: nil,
-            signal: nil,
-            width: nil,
-            height: nil,
-            data: nil,
-            exitCode: nil,
-            message: nil
-        )
+        .init(type: .close, id: id)
     }
 
     static func stdin(id: String, data: Data) -> Self {
+        .init(type: .stdin, id: id, data: data)
+    }
+
+    static func fsBegin(_ payload: MacOSSidecarFSBeginRequestPayload) -> Self {
         .init(
-            type: .stdin,
-            id: id,
-            executable: nil,
-            arguments: nil,
-            environment: nil,
-            workingDirectory: nil,
-            terminal: nil,
-            signal: nil,
-            width: nil,
-            height: nil,
-            data: data,
-            exitCode: nil,
-            message: nil
+            type: .fsBegin,
+            id: payload.txID,
+            data: payload.inlineData,
+            op: payload.op,
+            path: payload.path,
+            mode: payload.mode,
+            uid: payload.uid,
+            gid: payload.gid,
+            mtime: payload.mtime,
+            linkTarget: payload.linkTarget,
+            overwrite: payload.overwrite,
+            autoCommit: payload.autoCommit
         )
+    }
+
+    static func fsChunk(_ payload: MacOSSidecarFSChunkRequestPayload) -> Self {
+        .init(type: .fsChunk, id: payload.txID, data: payload.data, offset: payload.offset)
+    }
+
+    static func fsEnd(_ payload: MacOSSidecarFSEndRequestPayload) -> Self {
+        .init(type: .fsEnd, id: payload.txID, action: payload.action, digest: payload.digest)
+    }
+
+    static func ack(id: String) -> Self {
+        .init(type: .ack, id: id)
     }
 }
 
@@ -635,7 +706,7 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
-            case .stdout, .stderr, .exec, .stdin, .signal, .resize, .close:
+            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
                 continue
             }
         }
@@ -660,6 +731,21 @@ final class SidecarControlServer: @unchecked Sendable {
         }
     }
 
+    private final class FSTransferSession: @unchecked Sendable {
+        let txID: String
+        let fd: Int32
+        let ownerClientFD: Int32
+        let writeLock = NSLock()
+        let stateLock = NSLock()
+        var closed = false
+
+        init(txID: String, fd: Int32, ownerClientFD: Int32) {
+            self.txID = txID
+            self.fd = fd
+            self.ownerClientFD = ownerClientFD
+        }
+    }
+
     private let socketPath: String
     private let service: MacOSSidecarService
     private let log: Logging.Logger
@@ -667,10 +753,12 @@ final class SidecarControlServer: @unchecked Sendable {
     private let eventClientLock = NSLock()
     private let eventWriteLock = NSLock()
     private let processLock = NSLock()
+    private let fsLock = NSLock()
     private var listenFD: Int32 = -1
     private var stopping = false
     private var eventClientFD: Int32 = -1
     private var processSessions: [String: ProcessStreamSession] = [:]
+    private var fsSessions: [String: FSTransferSession] = [:]
 
     init(socketPath: String, service: MacOSSidecarService, log: Logging.Logger) {
         self.socketPath = socketPath
@@ -743,6 +831,7 @@ final class SidecarControlServer: @unchecked Sendable {
         }
         clearEventClient()
         closeAllProcessSessions()
+        closeAllFSSessions()
         _ = unlink(socketPath)
     }
 
@@ -781,6 +870,7 @@ final class SidecarControlServer: @unchecked Sendable {
     private func handleClient(fd clientFD: Int32) {
         defer {
             clearEventClientIfMatches(clientFD)
+            closeOwnedFSSessions(clientFD: clientFD)
             Darwin.close(clientFD)
         }
 
@@ -920,7 +1010,73 @@ final class SidecarControlServer: @unchecked Sendable {
         Darwin.close(session.fd)
     }
 
+    private func registerFSSession(_ session: FSTransferSession) throws {
+        fsLock.lock()
+        defer { fsLock.unlock() }
+        guard fsSessions[session.txID] == nil else {
+            throw ContainerizationError(.exists, message: "filesystem transaction \(session.txID) already exists in sidecar")
+        }
+        fsSessions[session.txID] = session
+    }
+
+    private func fsSession(for txID: String) throws -> FSTransferSession {
+        fsLock.lock()
+        let session = fsSessions[txID]
+        fsLock.unlock()
+        guard let session else {
+            throw ContainerizationError(.notFound, message: "filesystem transaction \(txID) not found in sidecar")
+        }
+        return session
+    }
+
+    private func removeFSSession(_ txID: String) -> FSTransferSession? {
+        fsLock.lock()
+        let removed = fsSessions.removeValue(forKey: txID)
+        fsLock.unlock()
+        return removed
+    }
+
+    private func closeOwnedFSSessions(clientFD: Int32) {
+        let sessions: [FSTransferSession]
+        fsLock.lock()
+        let txIDs = fsSessions.values.filter { $0.ownerClientFD == clientFD }.map(\.txID)
+        sessions = txIDs.compactMap { fsSessions.removeValue(forKey: $0) }
+        fsLock.unlock()
+
+        for session in sessions {
+            closeFSSession(session)
+        }
+    }
+
+    private func closeAllFSSessions() {
+        let sessions: [FSTransferSession]
+        fsLock.lock()
+        sessions = Array(fsSessions.values)
+        fsSessions.removeAll()
+        fsLock.unlock()
+
+        for session in sessions {
+            closeFSSession(session)
+        }
+    }
+
+    private func closeFSSession(_ session: FSTransferSession) {
+        session.stateLock.lock()
+        let shouldClose = !session.closed
+        session.closed = true
+        session.stateLock.unlock()
+        guard shouldClose else { return }
+        _ = Darwin.shutdown(session.fd, SHUT_RDWR)
+        Darwin.close(session.fd)
+    }
+
     private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: ProcessStreamSession) throws {
+        session.writeLock.lock()
+        defer { session.writeLock.unlock() }
+        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: session.fd)
+    }
+
+    private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: FSTransferSession) throws {
         session.writeLock.lock()
         defer { session.writeLock.unlock() }
         try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: session.fd)
@@ -929,6 +1085,53 @@ final class SidecarControlServer: @unchecked Sendable {
     private func sendProcessControlFrame(processID: String, build: (ProcessStreamSession) -> SidecarGuestAgentFrame) throws {
         let session = try processSession(for: processID)
         try sendFrame(build(session), to: session)
+    }
+
+    private func startFSTransfer(port: UInt32, clientFD: Int32, payload: MacOSSidecarFSBeginRequestPayload) throws {
+        let fd = try syncValue {
+            try await self.service.connectVsock(port: port)
+        }
+
+        do {
+            try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.fsBegin(payload), fd: fd)
+            try waitForFSAck(fd: fd, expectedID: payload.txID)
+
+            if payload.autoCommit {
+                _ = Darwin.shutdown(fd, SHUT_RDWR)
+                Darwin.close(fd)
+                return
+            }
+
+            let session = FSTransferSession(txID: payload.txID, fd: fd, ownerClientFD: clientFD)
+            try registerFSSession(session)
+        } catch {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+            throw error
+        }
+    }
+
+    private func sendFSChunk(_ payload: MacOSSidecarFSChunkRequestPayload) throws {
+        let session = try fsSession(for: payload.txID)
+        do {
+            try sendFrame(.fsChunk(payload), to: session)
+            try waitForFSAck(fd: session.fd, expectedID: payload.txID)
+        } catch {
+            closeFSSession(session)
+            _ = removeFSSession(payload.txID)
+            throw error
+        }
+    }
+
+    private func finishFSTransfer(_ payload: MacOSSidecarFSEndRequestPayload) throws {
+        let session = try fsSession(for: payload.txID)
+        defer {
+            closeFSSession(session)
+            _ = removeFSSession(payload.txID)
+        }
+        try sendFrame(.fsEnd(payload), to: session)
+        try waitForFSAck(fd: session.fd, expectedID: payload.txID)
     }
 
     private func startProcessStream(port: UInt32, processID: String, exec: MacOSSidecarExecRequestPayload) throws {
@@ -998,13 +1201,34 @@ final class SidecarControlServer: @unchecked Sendable {
                     return
                 case .ready:
                     continue
-                case .exec, .stdin, .signal, .resize, .close:
+                case .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
                     continue
                 }
             }
         } catch {
             if !isExpectedEOF(error) {
                 emitEvent(.init(event: .processError, processID: processID, message: "sidecar process stream read failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    private func waitForFSAck(fd: Int32, expectedID: String) throws {
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .ack:
+                guard frame.id == expectedID else {
+                    throw ContainerizationError(.internalError, message: "filesystem ack transaction ID mismatch")
+                }
+                return
+            case .error:
+                throw ContainerizationError(.internalError, message: frame.message ?? "unknown guest-agent filesystem error")
+            case .exit:
+                throw ContainerizationError(.internalError, message: "guest-agent filesystem stream exited (code=\(frame.exitCode ?? 1))")
+            case .ready, .stdout, .stderr:
+                continue
+            case .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+                continue
             }
         }
     }
@@ -1025,7 +1249,7 @@ final class SidecarControlServer: @unchecked Sendable {
                         throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
                     case .exit:
                         throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
-                    case .stdout, .stderr, .exec, .stdin, .signal, .resize, .close:
+                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
                         continue
                     }
                 }
@@ -1177,15 +1401,51 @@ final class SidecarControlServer: @unchecked Sendable {
                 let nsError = error as NSError
                 return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
             }
+        case .fsBegin:
+            guard let payload = request.fsBegin else {
+                return .failure(requestID: requestID, code: "invalid_request", message: "missing filesystem begin payload")
+            }
+            let port = request.port ?? 27000
+            do {
+                try startFSTransfer(port: port, clientFD: clientFD, payload: payload)
+                return .success(requestID: requestID)
+            } catch {
+                let nsError = error as NSError
+                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+            }
+        case .fsChunk:
+            guard let payload = request.fsChunk else {
+                return .failure(requestID: requestID, code: "invalid_request", message: "missing filesystem chunk payload")
+            }
+            do {
+                try sendFSChunk(payload)
+                return .success(requestID: requestID)
+            } catch {
+                let nsError = error as NSError
+                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+            }
+        case .fsEnd:
+            guard let payload = request.fsEnd else {
+                return .failure(requestID: requestID, code: "invalid_request", message: "missing filesystem end payload")
+            }
+            do {
+                try finishFSTransfer(payload)
+                return .success(requestID: requestID)
+            } catch {
+                let nsError = error as NSError
+                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+            }
         case .vmStop:
             return try sync(requestID: requestID) {
                 self.closeAllProcessSessions()
+                self.closeAllFSSessions()
                 try await service.stopVM()
                 return .success(requestID: requestID)
             }
         case .sidecarQuit:
             let response: MacOSSidecarResponse = try sync(requestID: requestID) {
                 self.closeAllProcessSessions()
+                self.closeAllFSSessions()
                 await service.prepareForQuit()
                 return .success(requestID: requestID)
             }

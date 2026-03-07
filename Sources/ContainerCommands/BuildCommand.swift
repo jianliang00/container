@@ -148,131 +148,18 @@ extension Application {
         @Flag(name: .long, help: "Pull latest image")
         var pull: Bool = false
 
+        enum BuildRoute {
+            case linux
+            case macOS
+        }
+
         public func run() async throws {
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
             do {
-                let timeout: Duration = .seconds(300)
-                let progressConfig = try ProgressConfig(
-                    showTasks: true,
-                    showItems: true
-                )
-                let progress = ProgressBar(config: progressConfig)
-                defer {
-                    progress.finish()
-                }
-                progress.start()
-
-                progress.set(description: "Dialing builder")
-
-                let dnsNameservers = self.dns.nameservers
-                let builder: Builder? = try await withThrowingTaskGroup(of: Builder.self) { [vsockPort, cpus, memory, dnsNameservers] group in
-                    defer {
-                        group.cancelAll()
-                    }
-
-                    group.addTask { [vsockPort, cpus, memory, log, dnsNameservers] in
-                        let client = ContainerClient()
-                        while true {
-                            do {
-                                let fh = try await client.dial(id: "buildkit", port: vsockPort)
-
-                                let threadGroup: MultiThreadedEventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
-                                let b = try await Builder(socket: fh, group: threadGroup, logger: log)
-
-                                // If this call succeeds, then BuildKit is running.
-                                let _ = try await b.info()
-                                return b
-                            } catch {
-                                // If we get here, "Dialing builder" is shown for such a short period
-                                // of time that it's invisible to the user.
-                                progress.set(tasks: 0)
-                                progress.set(totalTasks: 3)
-
-                                try await BuilderStart.start(
-                                    cpus: cpus,
-                                    memory: memory,
-                                    log: log,
-                                    dnsNameservers: dnsNameservers,
-                                    progressUpdate: progress.handler,
-                                    containerSystemConfig: containerSystemConfig,
-                                )
-
-                                // wait (seconds) for builder to start listening on vsock
-                                try await Task.sleep(for: .seconds(5))
-                                continue
-                            }
-                        }
-                    }
-
-                    group.addTask {
-                        try await Task.sleep(for: timeout)
-                        throw ValidationError(
-                            """
-                                Timeout waiting for connection to builder
-                            """
-                        )
-                    }
-
-                    return try await group.next()
-                }
-
-                guard let builder else {
-                    throw ValidationError("builder is not running")
-                }
-
-                let buildFileData: Data
-                var ignoreFileData: Data? = nil
-                // Dockerfile should be read from stdin
-                if dockerfile == "-" {
-                    let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("Dockerfile-\(UUID().uuidString)")
-                    defer {
-                        try? FileManager.default.removeItem(at: tempFile)
-                    }
-
-                    guard FileManager.default.createFile(atPath: tempFile.path(), contents: nil) else {
-                        throw ContainerizationError(.internalError, message: "unable to create temporary file")
-                    }
-
-                    guard let fileHandle = try? FileHandle(forWritingTo: tempFile) else {
-                        throw ContainerizationError(.internalError, message: "unable to open temporary file for writing")
-                    }
-
-                    let bufferSize = 4096
-                    while true {
-                        let chunk = FileHandle.standardInput.readData(ofLength: bufferSize)
-                        if chunk.isEmpty { break }
-                        fileHandle.write(chunk)
-                    }
-                    try fileHandle.close()
-                    buildFileData = try Data(contentsOf: URL(filePath: tempFile.path()))
-                } else {
-                    let ignoreFileURL = URL(filePath: dockerfile + ".dockerignore")
-                    buildFileData = try Data(contentsOf: URL(filePath: dockerfile))
-                    ignoreFileData = try? Data(contentsOf: ignoreFileURL)
-                }
-
-                // BUG: See https://github.com/apple/container/issues/735.
-                // Reject dockerfiles larger than 16kb before attempting to build.
-                // TODO: Remove when #735 was been resolved.
-                let maxDockerfileSize = 16 * 1024  // 16 KiB
-                guard buildFileData.count < maxDockerfileSize else {
-                    throw ContainerizationError(
-                        .invalidArgument,
-                        message: """
-                            Dockerfile size (\(buildFileData.count) bytes) exceeds the maximum allowed size of \(maxDockerfileSize) bytes. \
-                            See https://github.com/apple/container/issues/735.
-                            """
-                    )
-                }
-
-                let secretsData: [String: Data] = try self.secrets.mapValues { secret in
-                    switch secret {
-                    case .data(let data):
-                        return data
-                    case .file(let path):
-                        return try Data(contentsOf: URL(fileURLWithPath: path))
-                    }
-                }
+                let platforms = try requestedPlatforms()
+                let buildRoute = try Self.buildRoute(for: platforms)
+                let buildFilePath = try resolveBuildFilePath()
+                let buildFileData = try loadBuildFileData(from: buildFilePath)
 
                 let systemHealth = try await ClientHealthCheck.ping(timeout: .seconds(10))
                 let exportPath = systemHealth.appRoot
@@ -310,147 +197,233 @@ extension Application {
                     return exp
                 }
 
-                try await withThrowingTaskGroup(of: Void.self) { [terminal] group in
+                switch buildRoute {
+                case .linux:
+                    let progressConfig = try ProgressConfig(
+                        showTasks: true,
+                        showItems: true
+                    )
+                    let progress = ProgressBar(config: progressConfig)
                     defer {
-                        group.cancelAll()
-                    }
-                    group.addTask {
-                        let handler = AsyncSignalHandler.create(notify: [SIGTERM, SIGINT, SIGUSR1, SIGUSR2])
-                        for await sig in handler.signals {
-                            throw ContainerizationError(.interrupted, message: "exiting on signal \(sig)")
-                        }
-                    }
-                    let platforms: Set<Platform> = try {
-                        var results: Set<Platform> = []
-                        for platform in (self.platform.flatMap { $0 }) {
-                            guard let p = try? Platform(from: platform) else {
-                                throw ValidationError("invalid platform specified \(platform)")
-                            }
-                            results.insert(p)
-                        }
-
-                        if !results.isEmpty {
-                            return results
-                        }
-
-                        if let envPlatform = try DefaultPlatform.fromEnvironment(log: log) {
-                            return [envPlatform]
-                        }
-
-                        for o in (self.os.flatMap { $0 }) {
-                            for a in (self.arch.flatMap { $0 }) {
-                                guard let platform = try? Platform(from: "\(o)/\(a)") else {
-                                    throw ValidationError("invalid os/architecture combination \(o)/\(a)")
-                                }
-                                results.insert(platform)
-                            }
-                        }
-                        return results
-                    }()
-                    group.addTask {
-                        [
-                            terminal, buildArg, secretsData, contextDir, ignoreFileData, label, noCache, target, quiet, cacheIn, cacheOut, pull, exports, imageNames, tempURL, log,
-                        ] in
-                        let config = Builder.BuildConfig(
-                            buildID: buildID,
-                            contentStore: RemoteContentStoreClient(),
-                            buildArgs: buildArg,
-                            secrets: secretsData,
-                            contextDir: contextDir,
-                            dockerfile: buildFileData,
-                            dockerignore: ignoreFileData,
-                            labels: label,
-                            noCache: noCache,
-                            platforms: [Platform](platforms),
-                            terminal: terminal,
-                            tags: imageNames,
-                            target: target,
-                            quiet: quiet,
-                            exports: exports,
-                            cacheIn: cacheIn,
-                            cacheOut: cacheOut,
-                            pull: pull,
-                            containerSystemConfig: containerSystemConfig,
-                        )
                         progress.finish()
+                    }
+                    progress.start()
 
-                        try await builder.build(config)
-
-                        let unpackProgressConfig = try ProgressConfig(
-                            description: "Unpacking built image",
-                            itemsName: "entries",
-                            showTasks: exports.count > 1,
-                            totalTasks: exports.count
-                        )
-                        let unpackProgress = ProgressBar(config: unpackProgressConfig)
+                    let builder = try await dialBuilder(progress: progress)
+                    try await withThrowingTaskGroup(of: Void.self) { [terminal] group in
                         defer {
-                            unpackProgress.finish()
+                            group.cancelAll()
                         }
-                        unpackProgress.start()
-
-                        var finalMessage = imageNames.joined(separator: "\n")
-                        let taskManager = ProgressTaskCoordinator()
-                        // Currently, only a single export can be specified.
-                        for exp in exports {
-                            unpackProgress.add(tasks: 1)
-                            let unpackTask = await taskManager.startTask()
-                            switch exp.type {
-                            case "oci":
-                                try Task.checkCancellation()
-                                guard let dest = exp.destination else {
-                                    throw ContainerizationError(.invalidArgument, message: "dest is required \(exp.rawValue)")
-                                }
-                                let result = try await ClientImage.load(from: dest.absolutePath(), force: false)
-                                guard result.rejectedMembers.isEmpty else {
-                                    log.error("archive contains invalid members", metadata: ["paths": "\(result.rejectedMembers)"])
-                                    throw ContainerizationError(.internalError, message: "failed to load archive")
-                                }
-                                for image in result.images {
-                                    try Task.checkCancellation()
-                                    try await image.unpack(platform: nil, progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: unpackProgress.handler))
-
-                                    // Tag the unpacked image with all requested tags
-                                    for tagName in imageNames {
-                                        try Task.checkCancellation()
-                                        _ = try await image.tag(new: tagName)
-                                    }
-                                }
-                            case "tar":
-                                guard let dest = exp.destination else {
-                                    throw ContainerizationError(.invalidArgument, message: "dest is required \(exp.rawValue)")
-                                }
-                                let tarURL = tempURL.appendingPathComponent("out.tar")
-                                try FileManager.default.moveItem(at: tarURL, to: dest)
-                                finalMessage = dest.absolutePath()
-                            case "local":
-                                guard let dest = exp.destination else {
-                                    throw ContainerizationError(.invalidArgument, message: "dest is required \(exp.rawValue)")
-                                }
-                                let localDir = tempURL.appendingPathComponent("local")
-
-                                guard FileManager.default.fileExists(atPath: localDir.path) else {
-                                    throw ContainerizationError(.invalidArgument, message: "expected local output not found")
-                                }
-                                try FileManager.default.copyItem(at: localDir, to: dest)
-                                finalMessage = dest.absolutePath()
-                            default:
-                                throw ContainerizationError(.invalidArgument, message: "invalid exporter \(exp.rawValue)")
+                        group.addTask {
+                            let handler = AsyncSignalHandler.create(notify: [SIGTERM, SIGINT, SIGUSR1, SIGUSR2])
+                            for await sig in handler.signals {
+                                throw ContainerizationError(.interrupted, message: "exiting on signal \(sig)")
                             }
                         }
-                        await taskManager.finish()
-                        unpackProgress.finish()
-                        print(finalMessage)
+                        group.addTask { [terminal, buildArg, contextDir, label, noCache, target, quiet, cacheIn, cacheOut, pull] in
+                            let config = Builder.BuildConfig(
+                                buildID: buildID,
+                                contentStore: RemoteContentStoreClient(),
+                                buildArgs: buildArg,
+                                contextDir: contextDir,
+                                dockerfile: buildFileData,
+                                labels: label,
+                                noCache: noCache,
+                                platforms: [Platform](platforms),
+                                terminal: terminal,
+                                tags: imageNames,
+                                target: target,
+                                quiet: quiet,
+                                exports: exports,
+                                cacheIn: cacheIn,
+                                cacheOut: cacheOut,
+                                pull: pull
+                            )
+                            progress.finish()
+                            try await builder.build(config)
+                        }
+
+                        try await group.next()
                     }
 
-                    try await group.next()
+                case .macOS:
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        defer {
+                            group.cancelAll()
+                        }
+                        group.addTask {
+                            let handler = AsyncSignalHandler.create(notify: [SIGTERM, SIGINT, SIGUSR1, SIGUSR2])
+                            for await sig in handler.signals {
+                                throw ContainerizationError(.interrupted, message: "exiting on signal \(sig)")
+                            }
+                        }
+                        group.addTask { [buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log] in
+                            let contextURL = URL(fileURLWithPath: contextDir, relativeTo: .currentDirectory()).absoluteURL
+                            let engineInput = MacOSBuildEngine.Input(
+                                appRoot: systemHealth.appRoot,
+                                buildID: buildID,
+                                contextDirectory: contextURL,
+                                dockerfile: buildFileData,
+                                buildArgs: buildArg,
+                                labelArgs: label,
+                                cpus: cpus,
+                                memory: memory,
+                                noCache: noCache,
+                                pull: pull,
+                                quiet: quiet,
+                                target: target,
+                                tags: imageNames,
+                                exports: exports,
+                                log: log
+                            )
+                            _ = try await MacOSBuildEngine.run(engineInput)
+                        }
+
+                        try await group.next()
+                    }
                 }
             } catch {
                 throw NSError(domain: "Build", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(error)"])
             }
         }
 
-        public mutating func validate() throws {
-            // NOTE: Here we check the Dockerfile exists, and set `dockerfile` to point the valid Dockerfile path or stdin
+        func requestedPlatforms() throws -> Set<Platform> {
+            var results: Set<Platform> = []
+            for platform in (self.platform.flatMap { $0 }) {
+                guard let p = try? Platform(from: platform) else {
+                    throw ValidationError("invalid platform specified \(platform)")
+                }
+                results.insert(p)
+            }
+
+            if !results.isEmpty {
+                return results
+            }
+
+            for o in (self.os.flatMap { $0 }) {
+                for a in (self.arch.flatMap { $0 }) {
+                    guard let platform = try? Platform(from: "\(o)/\(a)") else {
+                        throw ValidationError("invalid os/architecture combination \(o)/\(a)")
+                    }
+                    results.insert(platform)
+                }
+            }
+            return results
+        }
+
+        static func buildRoute(for platforms: Set<Platform>) throws -> BuildRoute {
+            let darwinPlatforms = platforms.filter { $0.os == "darwin" }
+            guard !darwinPlatforms.isEmpty else {
+                return .linux
+            }
+
+            guard platforms.count == 1, let darwinPlatform = darwinPlatforms.first else {
+                let requested = platforms.map(\.description).sorted().joined(separator: ", ")
+                throw ValidationError("darwin builds do not support mixed or multi-target platforms: \(requested)")
+            }
+
+            guard darwinPlatform.architecture == "arm64" else {
+                throw ValidationError("darwin builds require darwin/arm64, got \(darwinPlatform.description)")
+            }
+            return .macOS
+        }
+
+        private func resolveBuildFilePath() throws -> String {
+            if let file = self.file {
+                return file
+            }
+            guard
+                let resolvedPath = try BuildFile.resolvePath(
+                    contextDir: self.contextDir,
+                    log: log
+                )
+            else {
+                throw ValidationError("failed to find Dockerfile or Containerfile in the context directory \(self.contextDir)")
+            }
+            return resolvedPath
+        }
+
+        private func loadBuildFileData(from buildFilePath: String) throws -> Data {
+            if file == "-" {
+                let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("Dockerfile-\(UUID().uuidString)")
+                defer {
+                    try? FileManager.default.removeItem(at: tempFile)
+                }
+
+                guard FileManager.default.createFile(atPath: tempFile.path(), contents: nil) else {
+                    throw ContainerizationError(.internalError, message: "unable to create temporary file")
+                }
+
+                guard let fileHandle = try? FileHandle(forWritingTo: tempFile) else {
+                    throw ContainerizationError(.internalError, message: "unable to open temporary file for writing")
+                }
+
+                let bufferSize = 4096
+                while true {
+                    let chunk = FileHandle.standardInput.readData(ofLength: bufferSize)
+                    if chunk.isEmpty { break }
+                    fileHandle.write(chunk)
+                }
+                try fileHandle.close()
+                return try Data(contentsOf: URL(filePath: tempFile.path()))
+            }
+
+            return try Data(contentsOf: URL(filePath: buildFilePath))
+        }
+
+        private func dialBuilder(progress: ProgressBar) async throws -> Builder {
+            let timeout: Duration = .seconds(300)
+            let dnsNameservers = self.dns.nameservers
+            progress.set(description: "Dialing builder")
+
+            let builder: Builder? = try await withThrowingTaskGroup(of: Builder.self) { [vsockPort, cpus, memory, dnsNameservers] group in
+                defer {
+                    group.cancelAll()
+                }
+
+                group.addTask { [vsockPort, cpus, memory, log, dnsNameservers] in
+                    let client = ContainerClient()
+                    while true {
+                        do {
+                            let fh = try await client.dial(id: "buildkit", port: vsockPort)
+
+                            let threadGroup: MultiThreadedEventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
+                            let builder = try Builder(socket: fh, group: threadGroup)
+                            _ = try await builder.info()
+                            return builder
+                        } catch {
+                            progress.set(tasks: 0)
+                            progress.set(totalTasks: 3)
+
+                            try await BuilderStart.start(
+                                cpus: cpus,
+                                memory: memory,
+                                log: log,
+                                dnsNameservers: dnsNameservers,
+                                progressUpdate: progress.handler
+                            )
+
+                            try await Task.sleep(for: .seconds(5))
+                        }
+                    }
+                }
+
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    throw ValidationError("Timeout waiting for connection to builder")
+                }
+
+                return try await group.next()
+            }
+
+            guard let builder else {
+                throw ValidationError("builder is not running")
+            }
+            return builder
+        }
+
+        public func validate() throws {
+            // NOTE: We'll "validate" the Dockerfile later.
             guard FileManager.default.fileExists(atPath: contextDir) else {
                 throw ValidationError("context dir does not exist \(contextDir)")
             }

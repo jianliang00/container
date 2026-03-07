@@ -9,6 +9,9 @@ public enum MacOSSidecarMethod: String, Codable, Sendable {
     case processSignal = "process.signal"
     case processResize = "process.resize"
     case processClose = "process.close"
+    case fsBegin = "fs.begin"
+    case fsChunk = "fs.chunk"
+    case fsEnd = "fs.end"
     case vmStop = "vm.stop"
     case sidecarQuit = "sidecar.quit"
 }
@@ -48,6 +51,9 @@ public struct MacOSSidecarRequest: Codable, Sendable {
     public let signal: Int32?
     public let width: UInt16?
     public let height: UInt16?
+    public let fsBegin: MacOSSidecarFSBeginRequestPayload?
+    public let fsChunk: MacOSSidecarFSChunkRequestPayload?
+    public let fsEnd: MacOSSidecarFSEndRequestPayload?
 
     public init(
         requestID: String = UUID().uuidString,
@@ -58,7 +64,10 @@ public struct MacOSSidecarRequest: Codable, Sendable {
         data: Data? = nil,
         signal: Int32? = nil,
         width: UInt16? = nil,
-        height: UInt16? = nil
+        height: UInt16? = nil,
+        fsBegin: MacOSSidecarFSBeginRequestPayload? = nil,
+        fsChunk: MacOSSidecarFSChunkRequestPayload? = nil,
+        fsEnd: MacOSSidecarFSEndRequestPayload? = nil
     ) {
         self.requestID = requestID
         self.method = method
@@ -69,6 +78,9 @@ public struct MacOSSidecarRequest: Codable, Sendable {
         self.signal = signal
         self.width = width
         self.height = height
+        self.fsBegin = fsBegin
+        self.fsChunk = fsChunk
+        self.fsEnd = fsEnd
     }
 }
 

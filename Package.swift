@@ -102,6 +102,8 @@ let package = Package(
                 "ContainerPersistence",
                 "ContainerPlugin",
                 "ContainerResource",
+                "ContainerSandboxServiceClient",
+                "RuntimeMacOSSidecarShared",
                 "ContainerVersion",
                 "TerminalProgress",
             ],
@@ -355,7 +357,8 @@ let package = Package(
         .executableTarget(
             name: "container-macos-guest-agent",
             dependencies: [
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "RuntimeMacOSSidecarShared",
             ],
             path: "Sources/Helpers/MacOSGuestAgent"
         ),
@@ -389,6 +392,14 @@ let package = Package(
             ],
             path: "Tests/RuntimeMacOSSidecarClientTests"
         ),
+        .testTarget(
+            name: "MacOSGuestAgentTests",
+            dependencies: [
+                "RuntimeMacOSSidecarShared",
+                .target(name: "container-macos-guest-agent", condition: .when(platforms: [.macOS])),
+            ],
+            path: "Tests/MacOSGuestAgentTests"
+        ),
         .target(
             name: "ContainerSandboxService",
             dependencies: [
@@ -413,6 +424,7 @@ let package = Package(
                 "ContainerResource",
                 "TerminalProgress",
                 "ContainerXPC",
+                "RuntimeMacOSSidecarShared",
             ],
             path: "Sources/Services/ContainerSandboxService/Client"
         ),

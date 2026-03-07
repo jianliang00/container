@@ -62,6 +62,7 @@ let package = Package(
         .package(url: "https://github.com/orlandos-nl/DNSClient.git", from: "2.4.1"),
         .package(url: "https://github.com/Bouke/DNS.git", from: "1.2.0"),
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
+        .package(url: "https://github.com/facebook/zstd.git", exact: "1.5.7"),
     ],
     targets: [
         .executableTarget(
@@ -431,7 +432,8 @@ let package = Package(
         .target(
             name: "ContainerResource",
             dependencies: [
-                .product(name: "Containerization", package: "containerization")
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "libzstd", package: "zstd"),
             ]
         ),
         .testTarget(
@@ -439,6 +441,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "libzstd", package: "zstd"),
                 "ContainerAPIService",
                 "ContainerResource",
             ]

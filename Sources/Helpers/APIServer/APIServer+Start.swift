@@ -314,6 +314,7 @@ extension APIServer {
             log.info("initializing disk usage service")
 
             let service = DiskUsageService(
+                appRoot: appRoot,
                 containersService: containersService,
                 volumesService: volumesService,
                 log: log

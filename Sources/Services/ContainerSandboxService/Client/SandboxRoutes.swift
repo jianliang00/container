@@ -37,6 +37,12 @@ public enum SandboxRoutes: String {
     case exec = "com.apple.container.sandbox/exec"
     /// Dial a vsock port in the sandbox.
     case dial = "com.apple.container.sandbox/dial"
+    /// Begin a filesystem transaction in the sandbox guest.
+    case fsBegin = "com.apple.container.sandbox/fsBegin"
+    /// Send a filesystem data chunk to the sandbox guest.
+    case fsChunk = "com.apple.container.sandbox/fsChunk"
+    /// End a filesystem transaction in the sandbox guest.
+    case fsEnd = "com.apple.container.sandbox/fsEnd"
     /// Shutdown the sandbox service process.
     case shutdown = "com.apple.container.sandbox/shutdown"
     /// Get statistics for the sandbox.

@@ -162,6 +162,59 @@ struct MacOSSidecarClientTests {
 
         try server.waitForCompletion()
     }
+
+    @Test
+    func filesystemRequestsUseDedicatedPayloads() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+
+            let begin = try readRequest(from: clientFD)
+            #expect(begin.method == .fsBegin)
+            #expect(begin.port == 27000)
+            #expect(begin.fsBegin?.txID == "tx-1")
+            #expect(begin.fsBegin?.path == "/tmp/build-context.txt")
+            #expect(begin.fsBegin?.inlineData == Data("abc".utf8))
+            try writeResponse(.success(requestID: begin.requestID), to: clientFD)
+
+            let chunk = try readRequest(from: clientFD)
+            #expect(chunk.method == .fsChunk)
+            #expect(chunk.fsChunk?.txID == "tx-1")
+            #expect(chunk.fsChunk?.offset == 3)
+            #expect(chunk.fsChunk?.data == Data("def".utf8))
+            try writeResponse(.success(requestID: chunk.requestID), to: clientFD)
+
+            let end = try readRequest(from: clientFD)
+            #expect(end.method == .fsEnd)
+            #expect(end.fsEnd?.txID == "tx-1")
+            #expect(end.fsEnd?.action == .commit)
+            #expect(end.fsEnd?.digest == "sha256:test")
+            try writeResponse(.success(requestID: end.requestID), to: clientFD)
+        }
+
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+
+        try client.bootstrapStart(socketConnectRetries: 3)
+        try client.fsBegin(
+            port: 27000,
+            request: .init(
+                txID: "tx-1",
+                op: .writeFile,
+                path: "/tmp/build-context.txt",
+                inlineData: Data("abc".utf8)
+            )
+        )
+        try client.fsChunk(request: .init(txID: "tx-1", offset: 3, data: Data("def".utf8)))
+        try client.fsEnd(request: .init(txID: "tx-1", action: .commit, digest: "sha256:test"))
+
+        try server.waitForCompletion()
+    }
 }
 
 private final class FakeUnixSidecarTestServer: @unchecked Sendable {

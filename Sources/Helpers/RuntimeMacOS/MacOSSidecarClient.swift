@@ -101,6 +101,27 @@ final class MacOSSidecarClient: @unchecked Sendable {
         )
     }
 
+    func fsBegin(port: UInt32, request payload: MacOSSidecarFSBeginRequestPayload) throws {
+        _ = try requestResponse(
+            MacOSSidecarRequest(method: .fsBegin, port: port, fsBegin: payload),
+            socketConnectRetries: 1
+        )
+    }
+
+    func fsChunk(request payload: MacOSSidecarFSChunkRequestPayload) throws {
+        _ = try requestResponse(
+            MacOSSidecarRequest(method: .fsChunk, fsChunk: payload),
+            socketConnectRetries: 1
+        )
+    }
+
+    func fsEnd(request payload: MacOSSidecarFSEndRequestPayload) throws {
+        _ = try requestResponse(
+            MacOSSidecarRequest(method: .fsEnd, fsEnd: payload),
+            socketConnectRetries: 1
+        )
+    }
+
     func closeControlConnection() {
         let pendingToFail: [PendingResponse]
         stateLock.lock()

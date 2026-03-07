@@ -68,10 +68,10 @@ let package = Package(
         .package(url: "https://github.com/grpc/grpc-swift-nio-transport.git", from: "2.9.0"),
         .package(url: "https://github.com/grpc/grpc-swift-protobuf.git", from: "2.2.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.20.1"),
-        .package(url: "https://github.com/swiftlang/swift-docc-plugin.git", from: "1.1.0"),
-        .package(url: "https://github.com/mattt/swift-toml.git", from: "2.0.0"),
-        .package(url: "https://github.com/mattt/swift-configuration-toml", from: "2.0.0"),
-        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.1"),
+        .package(url: "https://github.com/orlandos-nl/DNSClient.git", from: "2.4.1"),
+        .package(url: "https://github.com/Bouke/DNS.git", from: "1.2.0"),
+        .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
+        .package(url: "https://github.com/facebook/zstd.git", exact: "1.5.7"),
     ],
     targets: [
         .executableTarget(
@@ -498,11 +498,8 @@ let package = Package(
         .target(
             name: "ContainerResource",
             dependencies: [
-                .product(name: "Collections", package: "swift-collections"),
                 .product(name: "Containerization", package: "containerization"),
-                "ContainerXPC",
-                "CAuditToken",
-                "CVersion",
+                .product(name: "libzstd", package: "zstd"),
             ]
         ),
         .testTarget(
@@ -510,6 +507,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "libzstd", package: "zstd"),
                 "ContainerAPIService",
                 "ContainerResource",
             ]

@@ -141,19 +141,12 @@ public enum MacOSDiskRebuilder {
         )
     }
 
-    /// Decompress a zstd file using the zstd command.
+    /// Decompress a zstd file using the builtin libzstd decoder.
     private static func decompressZstd(input: URL, output: URL, chunkIndex: Int) throws {
-        let process = Process()
-        process.executableURL = try ZstdTool.executableURL()
-        process.arguments = ["-d", "-f", "-o", output.path, input.path]
-        let stderrPipe = Pipe()
-        process.standardError = stderrPipe
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let err = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "unknown"
-            throw RebuildError.zstdDecompressionFailed(index: chunkIndex, message: err)
+        do {
+            try ZstdDecompressor.decompress(input: input, output: output)
+        } catch {
+            throw RebuildError.zstdDecompressionFailed(index: chunkIndex, message: "\(error)")
         }
     }
 

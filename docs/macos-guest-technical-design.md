@@ -4,7 +4,7 @@
 
 本文档关注“技术方案细节”，不覆盖镜像制作与日常排障操作步骤。操作流程请参考：
 
-- `docs/macos-guest-image-prepare.md`
+- `docs/macos-guest-local-validation-guide.md`
 - `docs/macos-guest-development-debugging.md`
 
 ## 1. 目标与背景
@@ -659,7 +659,7 @@ helper 在 `startProcess` 场景会进一步包装错误消息，增加：
 再配合：
 
 - `docs/macos-guest-development-debugging.md`（排障方法）
-- `docs/macos-guest-image-prepare.md`（镜像制作/打包链路）
+- `docs/macos-guest-local-validation-guide.md`（镜像制作、本地验证与打包链路）
 
 ## 18. 总结
 

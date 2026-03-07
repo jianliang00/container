@@ -19,6 +19,8 @@ import Foundation
 
 /// Rebuilds a complete Disk.img from chunked tar+zstd blobs described by a DiskLayout.
 public enum MacOSDiskRebuilder {
+    private static let maximumAutomaticParallelChunks = 4
+
     public enum RebuildError: Error, CustomStringConvertible {
         case missingChunkBlob(index: Int, digest: String)
         case zstdDecompressionFailed(index: Int, message: String)
@@ -51,7 +53,8 @@ public enum MacOSDiskRebuilder {
         layout: DiskLayout,
         chunkBlobPaths: [String: URL],
         outputPath: URL,
-        progressHandler: ((Int, Int) -> Void)? = nil
+        progressHandler: ((Int, Int) -> Void)? = nil,
+        maxConcurrentChunks: Int? = nil
     ) throws {
         let fm = FileManager.default
 
@@ -63,37 +66,60 @@ public enum MacOSDiskRebuilder {
         let tempPath = outputDir.appendingPathComponent(".rebuild-\(UUID().uuidString).tmp")
         defer { try? fm.removeItem(at: tempPath) }
 
-        // Create and truncate output file to logical size
-        fm.createFile(atPath: tempPath.path, contents: nil)
-        let outFd = open(tempPath.path, O_RDWR)
-        guard outFd >= 0 else {
-            throw RebuildError.cacheDirectoryCreationFailed(path: tempPath.path)
-        }
-        defer { close(outFd) }
+        do {
+            // Create and truncate output file to logical size
+            fm.createFile(atPath: tempPath.path, contents: nil)
+            let outFd = open(tempPath.path, O_RDWR)
+            guard outFd >= 0 else {
+                throw RebuildError.cacheDirectoryCreationFailed(path: tempPath.path)
+            }
+            defer { close(outFd) }
 
-        // Truncate to logical size (creates a sparse file)
-        guard ftruncate(outFd, layout.logicalSize) == 0 else {
-            throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
-        }
-
-        // Process each chunk
-        for chunk in layout.chunks {
-            guard let blobPath = chunkBlobPaths[chunk.layerDigest] else {
-                throw RebuildError.missingChunkBlob(index: chunk.index, digest: chunk.layerDigest)
+            guard ftruncate(outFd, layout.logicalSize) == 0 else {
+                throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
             }
 
-            try rebuildChunk(
-                chunkInfo: chunk,
-                blobPath: blobPath,
-                outFd: outFd
-            )
+            let parallelism = recommendedParallelism(totalChunks: layout.chunkCount, requested: maxConcurrentChunks)
+            let state = LockedValue(RebuildWorkState(nextIndex: 0, firstError: nil))
+            let progress = ProgressReporter(totalChunks: layout.chunkCount, handler: progressHandler)
 
-            progressHandler?(chunk.index, layout.chunkCount)
+            DispatchQueue.concurrentPerform(iterations: parallelism) { _ in
+                while let chunkIndex = state.withLock({ state -> Int? in
+                    guard state.firstError == nil, state.nextIndex < layout.chunkCount else {
+                        return nil
+                    }
+                    defer { state.nextIndex += 1 }
+                    return state.nextIndex
+                }) {
+                    let chunk = layout.chunks[chunkIndex]
+
+                    do {
+                        guard let blobPath = chunkBlobPaths[chunk.layerDigest] else {
+                            throw RebuildError.missingChunkBlob(index: chunk.index, digest: chunk.layerDigest)
+                        }
+                        try rebuildChunk(
+                            chunkInfo: chunk,
+                            blobPath: blobPath,
+                            outFd: outFd
+                        )
+                        progress.report(chunkIndex: chunk.index)
+                    } catch {
+                        state.withLock { current in
+                            if current.firstError == nil {
+                                current.firstError = error
+                            }
+                        }
+                        return
+                    }
+                }
+            }
+
+            if let error = state.withLock({ $0.firstError }) {
+                throw error
+            }
+
+            fsync(outFd)
         }
-
-        // Sync to disk
-        fsync(outFd)
-        close(outFd)
 
         // Atomic rename
         if fm.fileExists(atPath: outputPath.path) {
@@ -279,6 +305,52 @@ public enum MacOSDiskRebuilder {
             }
         }
         return result
+    }
+
+    private static func recommendedParallelism(totalChunks: Int, requested: Int?) -> Int {
+        guard totalChunks > 0 else {
+            return 1
+        }
+        let automaticParallelism = min(ProcessInfo.processInfo.activeProcessorCount, maximumAutomaticParallelChunks)
+        let candidate = requested ?? automaticParallelism
+        return max(1, min(totalChunks, candidate))
+    }
+}
+
+private struct RebuildWorkState {
+    var nextIndex: Int
+    var firstError: (any Error)?
+}
+
+private final class ProgressReporter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let totalChunks: Int
+    private let handler: ((Int, Int) -> Void)?
+
+    init(totalChunks: Int, handler: ((Int, Int) -> Void)?) {
+        self.totalChunks = totalChunks
+        self.handler = handler
+    }
+
+    func report(chunkIndex: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        handler?(chunkIndex, totalChunks)
+    }
+}
+
+private final class LockedValue<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+
+    init(_ value: T) {
+        self.value = value
+    }
+
+    func withLock<R>(_ body: (inout T) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
     }
 }
 #endif

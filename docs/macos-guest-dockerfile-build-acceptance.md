@@ -355,7 +355,7 @@ LABEL com.apple.container.phase=phase1
 ADD payload.tar /opt/app/archive/
 RUN test -f /opt/app/archive/sub/hello.txt
 ENTRYPOINT ["/bin/sh"]
-CMD ["-lc", "printf '%s %s\\n' \"\\$PWD\" \"\\$PHASE1_VALUE\""]
+CMD ["-lc", "printf '%s %s\\n' \"\$PWD\" \"\$PHASE1_VALUE\""]
 EOF
 ```
 

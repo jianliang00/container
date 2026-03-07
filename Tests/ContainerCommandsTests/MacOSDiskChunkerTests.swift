@@ -41,23 +41,13 @@ struct MacOSDiskChunkerTests {
             ]
         )
 
-        setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
-        defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
-        let originalPath = getenv("PATH").map { String(cString: $0) }
-        defer {
-            if let originalPath {
-                setenv("PATH", originalPath, 1)
-            } else {
-                unsetenv("PATH")
-            }
+        let results = try withBuiltinZstdOnly {
+            try MacOSDiskChunker.chunkDiskImage(
+                diskImage: diskURL,
+                blobsDir: blobsDir,
+                chunkSize: logicalSize
+            )
         }
-        setenv("PATH", "", 1)
-
-        let results = try MacOSDiskChunker.chunkDiskImage(
-            diskImage: diskURL,
-            blobsDir: blobsDir,
-            chunkSize: logicalSize
-        )
 
         #expect(results.count == 1)
 
@@ -78,11 +68,76 @@ struct MacOSDiskChunkerTests {
             ]
         )
 
-        try MacOSDiskRebuilder.rebuild(
-            layout: layout,
-            chunkBlobPaths: [chunk.blobDigest: chunk.blobURL],
-            outputPath: rebuiltURL
+        try withBuiltinZstdOnly {
+            try MacOSDiskRebuilder.rebuild(
+                layout: layout,
+                chunkBlobPaths: [chunk.blobDigest: chunk.blobURL],
+                outputPath: rebuiltURL
+            )
+        }
+
+        #expect(try Data(contentsOf: rebuiltURL) == Data(contentsOf: diskURL))
+    }
+
+    @Test
+    func chunkerAndRebuilderRoundTripMultipleChunksInParallel() throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let diskURL = tempDirectory.appendingPathComponent("Disk.img")
+        let rebuiltURL = tempDirectory.appendingPathComponent("Disk.rebuilt.img")
+        let blobsDir = tempDirectory.appendingPathComponent("blobs")
+        try FileManager.default.createDirectory(at: blobsDir, withIntermediateDirectories: true)
+
+        let chunkSize: Int64 = 256 * 1024
+        let logicalSize = chunkSize * 3
+        try createSparseDisk(
+            at: diskURL,
+            logicalSize: logicalSize,
+            writes: [
+                (offset: 4_096, data: Data("chunk-0".utf8)),
+                (offset: chunkSize + 8_192, data: Data("chunk-1".utf8)),
+                (offset: (chunkSize * 2) + 16_384, data: Data("chunk-2".utf8)),
+            ]
         )
+
+        let results = try withBuiltinZstdOnly {
+            try MacOSDiskChunker.chunkDiskImage(
+                diskImage: diskURL,
+                blobsDir: blobsDir,
+                chunkSize: chunkSize,
+                maxConcurrentChunks: 2
+            )
+        }
+
+        #expect(results.count == 3)
+        #expect(results.map(\.index) == [0, 1, 2])
+
+        let layout = DiskLayout(
+            logicalSize: logicalSize,
+            chunkSize: chunkSize,
+            chunks: results.map { result in
+                .init(
+                    index: result.index,
+                    offset: result.chunkOffset,
+                    length: result.chunkLength,
+                    layerDigest: result.blobDigest,
+                    layerSize: result.blobSize,
+                    rawDigest: result.rawDigest,
+                    rawLength: result.rawLength
+                )
+            }
+        )
+
+        let blobPaths = Dictionary(uniqueKeysWithValues: results.map { ($0.blobDigest, $0.blobURL) })
+        try withBuiltinZstdOnly {
+            try MacOSDiskRebuilder.rebuild(
+                layout: layout,
+                chunkBlobPaths: blobPaths,
+                outputPath: rebuiltURL,
+                maxConcurrentChunks: 2
+            )
+        }
 
         #expect(try Data(contentsOf: rebuiltURL) == Data(contentsOf: diskURL))
     }
@@ -121,4 +176,19 @@ private func createSparseDisk(
             }
         }
     }
+}
+
+private func withBuiltinZstdOnly<T>(_ body: () throws -> T) throws -> T {
+    setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
+    defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
+    let originalPath = getenv("PATH").map { String(cString: $0) }
+    defer {
+        if let originalPath {
+            setenv("PATH", originalPath, 1)
+        } else {
+            unsetenv("PATH")
+        }
+    }
+    setenv("PATH", "", 1)
+    return try body()
 }

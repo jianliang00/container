@@ -125,6 +125,73 @@ struct ZstdCodecTests {
         #expect(Array(rebuilt) == [0, 97, 98, 99, 0, 0, 0, 0, 89, 90, 0, 0])
     }
 
+    @Test
+    func rebuildsMultipleChunksInParallelWithoutExternalBinary() throws {
+        let tempDirectory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let chunkLength: Int64 = 16
+        let chunkPayloads: [[UInt8]] = [
+            [65, 0, 0, 66, 67, 0, 0, 0, 68, 0, 0, 0, 69, 70, 0, 0],
+            [0, 49, 50, 0, 0, 51, 0, 0, 52, 53, 0, 0, 0, 54, 0, 55],
+            [90, 0, 89, 0, 88, 0, 87, 0, 86, 0, 85, 0, 84, 0, 83, 0],
+        ]
+        let outputURL = tempDirectory.appendingPathComponent("Disk.img")
+
+        var chunks: [DiskLayout.ChunkInfo] = []
+        var blobPaths: [String: URL] = [:]
+        for (index, payload) in chunkPayloads.enumerated() {
+            let extents = Self.sparseExtents(for: payload)
+            let tarData = try Self.makeSparseChunkTar(chunkLength: chunkLength, extents: extents)
+            let compressedData = try Self.compressZstd(tarData)
+            let digest = "sha256:test-chunk-\(index)"
+            let blobURL = tempDirectory.appendingPathComponent("chunk-\(index).tar.zst")
+            try compressedData.write(to: blobURL)
+
+            chunks.append(
+                .init(
+                    index: index,
+                    offset: Int64(index) * chunkLength,
+                    length: chunkLength,
+                    layerDigest: digest,
+                    layerSize: Int64(compressedData.count),
+                    rawDigest: "sha256:unused-\(index)",
+                    rawLength: chunkLength
+                )
+            )
+            blobPaths[digest] = blobURL
+        }
+
+        let layout = DiskLayout(
+            logicalSize: chunkLength * Int64(chunkPayloads.count),
+            chunkSize: chunkLength,
+            chunks: chunks
+        )
+
+        setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
+        defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
+        let originalPath = getenv("PATH").map { String(cString: $0) }
+        defer {
+            if let originalPath {
+                setenv("PATH", originalPath, 1)
+            } else {
+                unsetenv("PATH")
+            }
+        }
+        setenv("PATH", "", 1)
+
+        try MacOSDiskRebuilder.rebuild(
+            layout: layout,
+            chunkBlobPaths: blobPaths,
+            outputPath: outputURL,
+            maxConcurrentChunks: 2
+        )
+
+        let rebuilt = try Data(contentsOf: outputURL)
+        let expected = Data(chunkPayloads.flatMap { $0 })
+        #expect(rebuilt == expected)
+    }
+
     private static func compressZstd(_ data: Data, level: Int32 = 3) throws -> Data {
         guard let context = ZSTD_createCCtx() else {
             throw CompressionError(message: "failed to create zstd compression context")
@@ -239,6 +306,44 @@ struct ZstdCodecTests {
         if remainder > 0 {
             data.append(Data(repeating: 0, count: 512 - remainder))
         }
+    }
+
+    private static func sparseExtents(for bytes: [UInt8]) -> [(offset: Int64, length: Int64, data: Data)] {
+        var extents: [(offset: Int64, length: Int64, data: Data)] = []
+        var startIndex: Int?
+
+        for (index, byte) in bytes.enumerated() {
+            if byte != 0 {
+                if startIndex == nil {
+                    startIndex = index
+                }
+                continue
+            }
+            if startIndex != nil {
+                let currentStartIndex = startIndex!
+                extents.append(
+                    (
+                        offset: Int64(currentStartIndex),
+                        length: Int64(index - currentStartIndex),
+                        data: Data(bytes[currentStartIndex..<index])
+                    )
+                )
+                startIndex = nil
+            }
+        }
+
+        if startIndex != nil {
+            let currentStartIndex = startIndex!
+            extents.append(
+                (
+                    offset: Int64(currentStartIndex),
+                    length: Int64(bytes.count - currentStartIndex),
+                    data: Data(bytes[currentStartIndex..<bytes.count])
+                )
+            )
+        }
+
+        return extents
     }
 
     private static func makeTemporaryDirectory() throws -> URL {

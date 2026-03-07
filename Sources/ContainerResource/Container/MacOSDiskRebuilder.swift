@@ -144,7 +144,7 @@ public enum MacOSDiskRebuilder {
     /// Decompress a zstd file using the builtin libzstd decoder.
     private static func decompressZstd(input: URL, output: URL, chunkIndex: Int) throws {
         do {
-            try ZstdDecompressor.decompress(input: input, output: output)
+            try ZstdCodec.decompress(input: input, output: output)
         } catch {
             throw RebuildError.zstdDecompressionFailed(index: chunkIndex, message: "\(error)")
         }

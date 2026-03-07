@@ -20,7 +20,7 @@ import libzstd
 
 @testable import ContainerResource
 
-struct ZstdDecompressorTests {
+struct ZstdCodecTests {
     @Test
     func decompressesFrameWithoutExternalBinary() throws {
         let tempDirectory = try Self.makeTemporaryDirectory()
@@ -35,7 +35,36 @@ struct ZstdDecompressorTests {
         setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
         defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
 
-        try ZstdDecompressor.decompress(input: compressedURL, output: outputURL)
+        try ZstdCodec.decompress(input: compressedURL, output: outputURL)
+
+        #expect(try Data(contentsOf: outputURL) == payload)
+    }
+
+    @Test
+    func compressesFrameWithoutExternalBinary() throws {
+        let tempDirectory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let payload = Data("builtin zstd encoder".utf8)
+        let inputURL = tempDirectory.appendingPathComponent("payload")
+        let compressedURL = tempDirectory.appendingPathComponent("payload.zst")
+        let outputURL = tempDirectory.appendingPathComponent("payload.out")
+        try payload.write(to: inputURL)
+
+        setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
+        defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
+        let originalPath = getenv("PATH").map { String(cString: $0) }
+        defer {
+            if let originalPath {
+                setenv("PATH", originalPath, 1)
+            } else {
+                unsetenv("PATH")
+            }
+        }
+        setenv("PATH", "", 1)
+
+        try ZstdCodec.compress(input: inputURL, output: compressedURL, level: 3, includeChecksum: false)
+        try ZstdCodec.decompress(input: compressedURL, output: outputURL)
 
         #expect(try Data(contentsOf: outputURL) == payload)
     }

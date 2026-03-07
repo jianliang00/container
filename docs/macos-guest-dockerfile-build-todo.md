@@ -43,7 +43,7 @@
 
 ### 1.3 还没有完成的核心目标
 
-- [ ] 真实 darwin 基础镜像上的 CLI / E2E 验收
+- [x] 真实 darwin 基础镜像上的 CLI / E2E 验收
 - [ ] darwin build 的集成测试矩阵补齐
 - [ ] `COPY` 目标已存在目录/文件等细粒度语义继续对齐 Dockerfile 行为
 - [ ] host 侧非法 symlink 等错误分类继续补齐
@@ -378,7 +378,7 @@
 
 ### 4.3 `zstd` 外部依赖收尾
 
-- [ ] 去掉 runtime/helper 对外部 `zstd` 命令和 `PATH` 的硬依赖
+- [x] 去掉 runtime/helper 对外部 `zstd` 命令和 `PATH` 的硬依赖
   - 优先把 `MacOSDiskRebuilder` 的解压路径改成 builtin / `libzstd`
   - 目标：`container run --os darwin`、运行前 chunk rebuild 不依赖宿主机 shell 环境
   - 保持对现有 `disk-chunk.v1.tar+zstd` 镜像的兼容读取
@@ -421,7 +421,7 @@
 - [x] 最小 Dockerfile 计划器
 - [x] `COPY / ADD(local)` host 编排
 - [x] 单 stage `FROM + COPY + RUN + commit`
-- [ ] 先把 runtime 侧 `zstd` 解压内建化，消除 `container run --os darwin` 对宿主 `PATH`/外部命令的依赖
+- [x] 先把 runtime 侧 `zstd` 解压内建化，消除 `container run --os darwin` 对宿主 `PATH`/外部命令的依赖
 - [ ] 真实 darwin 基础镜像上的 CLI / E2E 构建验收
 - [ ] `COPY` 目标存在态语义继续对齐
 - [ ] host 侧非法 symlink / 错误分类补齐

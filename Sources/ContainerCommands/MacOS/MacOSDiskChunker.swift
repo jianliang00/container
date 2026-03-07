@@ -377,27 +377,18 @@ enum MacOSDiskChunker {
 
     /// Compress a file using zstd with deterministic parameters.
     static func compressWithZstd(input: URL, output: URL, level: Int) throws {
-        let process = Process()
-        process.executableURL = try ZstdTool.executableURL()
-        process.arguments = [
-            "-\(level)",
-            "--single-thread",
-            "--no-check",
-            "-f",
-            "-o", output.path,
-            input.path,
-        ]
-        let stderrPipe = Pipe()
-        process.standardError = stderrPipe
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            let err = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "unknown zstd error"
+        do {
+            try ZstdCodec.compress(
+                input: input,
+                output: output,
+                level: Int32(level),
+                includeChecksum: false
+            )
+        } catch {
             throw NSError(
                 domain: "container.macos.zstd",
-                code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: "zstd compression failed: \(err)"]
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "zstd compression failed: \(error)"]
             )
         }
     }

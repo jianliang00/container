@@ -12,9 +12,9 @@
 
 配套文档：
 
-- 镜像制作/打包/推送流程：`docs/macos-guest-image-prepare.md`
+- 镜像制作、基础镜像刷新与本地验证流程：`docs/macos-guest-local-validation-guide.md`
 
-建议先复用 `docs/macos-guest-image-prepare.md` 中的环境变量约定（如 `CONTAINER_BIN`、`IMAGE_DIR`、`SEED_DIR`、`OCI_TAR`、`LOCAL_REF`）。
+建议先复用 `docs/macos-guest-local-validation-guide.md` 中的环境变量约定（如 `CONTAINER_BIN`、`BASE_REF`、`IMAGE_DIR`、`SEED_DIR`、`OCI_TAR`、`WORKROOT`）。
 
 ## 1. 当前架构（重构后）
 

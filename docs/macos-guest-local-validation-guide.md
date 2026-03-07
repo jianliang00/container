@@ -1,75 +1,59 @@
-# macOS Guest Dockerfile Build Phase 1 手工验收流程
+# macOS Guest 本地开发验证指南
 
-本文档面向 2026-03-06 当前分支，用来手工验收
-[`docs/macos-guest-dockerfile-build-design.md`](docs/macos-guest-dockerfile-build-design.md)
-里的 Phase 1 主链路。
+这份文档只保留一条本地开发常用路径：
 
-目标不是覆盖所有 Dockerfile 语义，而是确认当前已经接通的能力在真实
-`darwin/arm64` 基础镜像上可用，并且关键拒绝路径行为正确。
+1. 准备或刷新一个可运行的 `darwin/arm64` 基础镜像
+2. 用这个基础镜像验证 `container build --platform darwin/arm64`
 
-## 1. 验收范围
+除启动手工 VM 后需要在 guest 里完成初始化和安装 agent 之外，其他步骤都可以直接在宿主命令行执行。
 
-本流程覆盖：
+## 1. 前置条件
 
-- `container build --platform darwin/arm64` 走 macOS build 路径，而不是 Linux BuildKit builder
-- 支持 `FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/LABEL/CMD/ENTRYPOINT`
-- `COPY`、`.dockerignore`、symlink 与 `ADD(local archive)` 的主链路
-- `type=oci` 自动 load + tag
-- `type=tar` 正常导出，且需要手工 `image load`
-- `type=local`、`USER`、`ADD URL`、`COPY --from`、混合平台、`darwin/amd64` 的拒绝路径
+- 宿主机是 Apple Silicon
+- 在本机图形会话里执行，不要只在无 GUI 的远程 shell 里跑
+- 已安装 Xcode 命令行工具、Swift 工具链和 `zstd`
+- 首次制作基础镜像时，已准备好可用 IPSW，例如 `UniversalMac_*.ipsw`
+- 如果当前分支改了下面这些文件，先刷新基础镜像再做 build 验证：
+  - `container-macos-guest-agent`
+  - `scripts/macos-guest-agent/install.sh`
+  - `scripts/macos-guest-agent/install-in-guest-from-seed.sh`
+  - `scripts/macos-guest-agent/container-macos-guest-agent.plist`
 
-本流程不覆盖：
-
-- `USER`
-- `ADD URL`
-- 多阶段 `COPY --from`
-- `COPY` 更细粒度的“目标已存在目录/文件”对齐
-- headless CI 场景
-
-## 2. 前置条件
-
-开始前请确认：
-
-- 宿主机是 Apple Silicon，并在本机登录态图形会话里执行
-- 已有可运行的 `darwin/arm64` 基础镜像，或准备先按第 3 节制作一个；下面示例假定它的 tag 是 `local/macos-base:latest`
-- 如果当前分支修改了 `container-macos-guest-agent`、`scripts/macos-guest-agent/install.sh`、`scripts/macos-guest-agent/install-in-guest-from-seed.sh` 或 guest-agent plist，需要先按第 3.2 节刷新基础镜像，再开始验收
-- 验收时使用的基础镜像必须已经包含当前分支可识别 `fs.begin/fs.chunk/fs.end` 的 guest-agent
-- 宿主已安装 `zstd`；如果 `zstd` 不在默认搜索路径，可在 `system start` 前设置 `CONTAINER_ZSTD_BIN="$(command -v zstd)"`
-- 宿主插件目录已经是当前分支构建结果，而不是旧安装版本
-
-若以上两项还没准备好，先参考：
-
-- [`docs/macos-guest-image-prepare.md`](docs/macos-guest-image-prepare.md)
-- [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md)
-
-建议把下面这个命令先跑通，再开始后续验收：
+统一使用下面这些环境变量：
 
 ```bash
-container run --os darwin --rm local/macos-base:latest /bin/ls /
+cd /Users/jianliang/Code/container
+
+export CONTAINER_BIN="$PWD/bin/container"
+export BASE_REF="local/macos-base:latest"
+export IMAGE_DIR="/tmp/macos-image-base"
+export SEED_DIR="/tmp/macos-agent-seed"
+export OCI_TAR="/tmp/macos-image-base-oci.tar"
+export TEST_NS="local/macos-build-phase1"
+export WORKROOT="/tmp/macos-build-phase1-acceptance"
+export IPSW="/path/to/UniversalMac_xxx_Restore.ipsw"
 ```
 
-如果这一步都不稳定，先不要继续验证 `container build`。
+如果只是做 build 验证，`IPSW` 可以不设。
 
-## 3. 制作或刷新验收基础镜像
+## 2. 准备基础镜像
 
-本节的目标是得到一个可直接用于后续验收的 `BASE_REF=local/macos-base:latest`。
-
-### 3.1 没有基础镜像时：先走完整制作流程
-
-如果你本地还没有可用的 macOS 基础镜像，不要直接跳到后面的 build 验收。先按
-[`docs/macos-guest-image-prepare.md`](docs/macos-guest-image-prepare.md)
-完整跑通下面这条最小命令链：
+先确保当前仓库产物是最新的：
 
 ```bash
 cd /Users/jianliang/Code/container
 make release
 
 export CONTAINER_BIN="$PWD/bin/container"
-export BASE_REF="local/macos-base:latest"
-export IPSW="/path/to/UniversalMac_xxx_Restore.ipsw"
-export IMAGE_DIR="/tmp/macos-image-base"
-export SEED_DIR="/tmp/macos-agent-seed"
-export OCI_TAR="/tmp/macos-image-base-oci.tar"
+export CONTAINER_ZSTD_BIN="${CONTAINER_ZSTD_BIN:-$(command -v zstd)}"
+```
+
+### 2.1 首次制作基础镜像
+
+先在宿主准备镜像目录和 seed：
+
+```bash
+rm -rf "$IMAGE_DIR" "$SEED_DIR" "$OCI_TAR"
 
 "$CONTAINER_BIN" macos prepare-base \
   --ipsw "$IPSW" \
@@ -78,6 +62,8 @@ export OCI_TAR="/tmp/macos-image-base-oci.tar"
   --memory-mib 8192 \
   --cpus 4
 
+ls -lh "$IMAGE_DIR"/Disk.img "$IMAGE_DIR"/AuxiliaryStorage "$IMAGE_DIR"/HardwareModel.bin
+
 "$CONTAINER_BIN" macos guest-agent prepare -o "$SEED_DIR" --overwrite
 
 "$CONTAINER_BIN" macos start-vm \
@@ -87,7 +73,7 @@ export OCI_TAR="/tmp/macos-image-base-oci.tar"
   --memory-mib 8192
 ```
 
-在 guest 里执行：
+从这一步开始需要人工操作：在弹出的 macOS VM 里完成 Setup Assistant，进入桌面后打开 Terminal，执行：
 
 ```bash
 sudo mkdir -p /Volumes/seed
@@ -99,7 +85,7 @@ sudo tail -n 50 /var/log/container-macos-guest-agent.log
 sudo shutdown -h now
 ```
 
-guest 完全关机后，在宿主继续：
+guest 完全关机后回到宿主执行：
 
 ```bash
 "$CONTAINER_BIN" macos package \
@@ -111,45 +97,16 @@ guest 完全关机后，在宿主继续：
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
-建议最终把验收用基础镜像统一做成：
+到这里 `"$BASE_REF"` 应该已经可以直接运行。
 
-```bash
-export BASE_REF="local/macos-base:latest"
-```
+### 2.2 只刷新 guest-agent
 
-如果你在 `package` 时使用了别的 reference，先补一个 tag：
-
-```bash
-container image tag <your-loaded-ref> "$BASE_REF"
-```
-
-### 3.2 agent 有变更时：刷新基础镜像
-
-如果你当前分支改了 guest-agent 或安装脚本，不需要重跑 `prepare-base`，但需要把变更重新安装进镜像磁盘，然后重新 `package + image load`，否则后面的验收仍然会跑在旧 agent 上。
-
-下面假定你已经有一个可启动的 `IMAGE_DIR`，即之前 `prepare-base` 产出的镜像目录：
-
-```bash
-cd /Users/jianliang/Code/container
-make release
-
-export CONTAINER_BIN="$PWD/bin/container"
-export BASE_REF="local/macos-base:latest"
-export IMAGE_DIR="/tmp/macos-image-base"
-export SEED_DIR="/tmp/macos-agent-seed"
-export OCI_TAR="/tmp/macos-image-base-oci.tar"
-```
-
-重新生成注入目录：
+如果你已经有可启动的 `IMAGE_DIR`，只需要重新生成 seed、重新安装 agent，然后重新打包：
 
 ```bash
 rm -rf "$SEED_DIR"
 "$CONTAINER_BIN" macos guest-agent prepare -o "$SEED_DIR" --overwrite
-```
 
-启动手工 VM：
-
-```bash
 "$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
   --share "$SEED_DIR" \
@@ -157,7 +114,7 @@ rm -rf "$SEED_DIR"
   --memory-mib 8192
 ```
 
-在 guest 里重新安装 agent：
+这一步同样需要人工在 guest 里执行：
 
 ```bash
 sudo mkdir -p /Volumes/seed
@@ -169,7 +126,7 @@ sudo tail -n 50 /var/log/container-macos-guest-agent.log
 sudo shutdown -h now
 ```
 
-guest 完全关机后，在宿主重新打包并加载镜像：
+guest 关机后回到宿主执行：
 
 ```bash
 "$CONTAINER_BIN" macos package \
@@ -181,33 +138,16 @@ guest 完全关机后，在宿主重新打包并加载镜像：
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
-通过标准：
-
-- `launchctl print system/com.apple.container.macos.guest-agent` 正常
-- `macos package` 成功
-- `image load` 成功
-- 刷新后的 `"$BASE_REF"` 能直接 `run --os darwin`
-
-## 4. 环境初始化
-
-如果仓库根目录下的 `bin/` 和 `libexec/` 不是当前分支最新产物，先刷新一次：
+## 3. build 前初始化
 
 ```bash
 cd /Users/jianliang/Code/container
 make release
-```
-
-然后设置本次验收使用的环境变量：
-
-```bash
-cd /Users/jianliang/Code/container
 
 export CONTAINER_BIN="$PWD/bin/container"
 export BASE_REF="local/macos-base:latest"
 export TEST_NS="local/macos-build-phase1"
 export WORKROOT="/tmp/macos-build-phase1-acceptance"
-
-command -v zstd
 export CONTAINER_ZSTD_BIN="${CONTAINER_ZSTD_BIN:-$(command -v zstd)}"
 
 rm -rf "$WORKROOT"
@@ -218,35 +158,19 @@ mkdir -p "$WORKROOT"
   "${TEST_NS}:copy" \
   "${TEST_NS}:add-config" \
   "${TEST_NS}:tar" >/dev/null 2>&1 || true
-```
 
-启动当前仓库对应的 `container system` 服务：
-
-```bash
 "$CONTAINER_BIN" system stop || true
 "$CONTAINER_BIN" system start --install-root "$PWD" --disable-kernel-install --timeout 60
 "$CONTAINER_BIN" system status
-```
 
-做一次 preflight：
-
-```bash
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
-预期结果：
+如果这里都不稳定，先不要继续验证 `container build`，直接去看 [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md)。
 
-- `system start` 成功
-- `system status` 显示服务正常
-- 基础镜像能直接 `run --os darwin`
+## 4. 验证用例
 
-如果这里失败，优先回到：
-
-- [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md) 的第 4 节和第 8 节
-
-## 5. 用例 1：基础构建与路由
-
-准备最小 Dockerfile：
+### 4.1 基础构建与路由
 
 ```bash
 mkdir -p "$WORKROOT/01-smoke"
@@ -255,21 +179,13 @@ cat > "$WORKROOT/01-smoke/Dockerfile" <<EOF
 FROM --platform=darwin/arm64 ${BASE_REF}
 RUN sw_vers
 EOF
-```
 
-执行构建：
-
-```bash
 "$CONTAINER_BIN" build \
   --platform darwin/arm64 \
   --progress plain \
   -t "${TEST_NS}:smoke" \
   "$WORKROOT/01-smoke" 2>&1 | tee "$WORKROOT/01-smoke/build.log"
-```
 
-检查：
-
-```bash
 if grep -q "Dialing builder" "$WORKROOT/01-smoke/build.log"; then
   echo "unexpected linux builder path"
   exit 1
@@ -278,16 +194,9 @@ fi
 "$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:smoke" /usr/bin/sw_vers
 ```
 
-通过标准：
+预期：构建成功，日志里没有 `Dialing builder`，并且镜像能直接运行。
 
-- 构建成功
-- `build.log` 里能看到 `sw_vers` 输出
-- `build.log` 里不出现 `Dialing builder`
-- 生成的镜像已经自动 load 并打上 `"${TEST_NS}:smoke"`，可直接 `run --os darwin`
-
-## 6. 用例 2：`COPY`、`.dockerignore`、symlink
-
-准备 context：
+### 4.2 `COPY`、`.dockerignore`、symlink
 
 ```bash
 mkdir -p "$WORKROOT/02-copy/payload/nested"
@@ -312,34 +221,19 @@ RUN test "\$(/usr/bin/readlink /opt/copy-check/link.txt)" = "keep.txt"
 RUN test ! -e /opt/copy-check/debug.log
 RUN test ! -e /opt/copy-check/nested/app.log
 EOF
-```
 
-执行构建：
-
-```bash
 "$CONTAINER_BIN" build \
   --platform darwin/arm64 \
   --progress plain \
   -t "${TEST_NS}:copy" \
   "$WORKROOT/02-copy"
-```
 
-运行一次人工检查：
-
-```bash
 "$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:copy" /bin/sh -lc 'ls -l /opt/copy-check'
 ```
 
-通过标准：
+预期：`keep.txt` 存在，`link.txt` 是指向 `keep.txt` 的软链接，被 `.dockerignore` 排除的日志文件不存在。
 
-- build 内的 `RUN test ...` 全部通过
-- `/opt/copy-check/keep.txt` 存在
-- `/opt/copy-check/link.txt` 是软链接，且指向 `keep.txt`
-- 被 `.dockerignore` 排除的 `debug.log` 和 `nested/app.log` 不存在
-
-## 7. 用例 3：`ADD(local archive)` 与 image config
-
-准备 archive 和 Dockerfile：
+### 4.3 `ADD(local archive)` 与 image config
 
 ```bash
 mkdir -p "$WORKROOT/03-add-config/archive-root/sub"
@@ -357,45 +251,22 @@ RUN test -f /opt/app/archive/sub/hello.txt
 ENTRYPOINT ["/bin/sh"]
 CMD ["-lc", "printf '%s %s\\n' \"\$PWD\" \"\$PHASE1_VALUE\""]
 EOF
-```
 
-执行构建：
-
-```bash
 "$CONTAINER_BIN" build \
   --platform darwin/arm64 \
   --progress plain \
   -t "${TEST_NS}:add-config" \
   "$WORKROOT/03-add-config"
-```
 
-验证默认启动行为和 label：
-
-```bash
 "$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:add-config"
 
 "$CONTAINER_BIN" image inspect "${TEST_NS}:add-config" > "$WORKROOT/03-add-config/inspect.json"
 grep -q '"com.apple.container.phase":"phase1"' "$WORKROOT/03-add-config/inspect.json"
 ```
 
-通过标准：
+预期：默认启动输出 `/opt/app from-env`，并且 `inspect.json` 里能看到 `com.apple.container.phase=phase1`。
 
-- build 内的 `RUN test -f /opt/app/archive/sub/hello.txt` 通过，说明 `ADD(local archive)` 已解包
-- 默认启动输出正好是 `/opt/app from-env`
-- `image inspect` 结果里能找到 `com.apple.container.phase=phase1`
-
-这条用例实际覆盖了：
-
-- `ADD(local archive)`
-- `ENV`
-- `WORKDIR`
-- `LABEL`
-- `ENTRYPOINT`
-- `CMD`
-
-## 8. 用例 4：`type=tar` 导出契约
-
-执行导出：
+### 4.4 `type=tar`
 
 ```bash
 mkdir -p "$WORKROOT/out"
@@ -406,20 +277,12 @@ mkdir -p "$WORKROOT/out"
   --output type=tar,dest="$WORKROOT/out/phase1.tar" \
   -t "${TEST_NS}:tar" \
   "$WORKROOT/01-smoke"
-```
 
-先验证它没有自动 load：
-
-```bash
 if "$CONTAINER_BIN" image inspect "${TEST_NS}:tar" >/dev/null 2>&1; then
   echo "type=tar should not auto-load the image"
   exit 1
 fi
-```
 
-再验证 tar 内容并手工导入：
-
-```bash
 tar -tf "$WORKROOT/out/phase1.tar" > "$WORKROOT/out/phase1.tar.list"
 grep -q '^index.json$' "$WORKROOT/out/phase1.tar.list"
 grep -q '^oci-layout$' "$WORKROOT/out/phase1.tar.list"
@@ -428,16 +291,9 @@ grep -q '^oci-layout$' "$WORKROOT/out/phase1.tar.list"
 "$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:tar" /usr/bin/sw_vers
 ```
 
-通过标准：
+预期：`type=tar` 不会自动 load，手工 `image load` 后可以运行。
 
-- 构建成功并生成 `phase1.tar`
-- `type=tar` 不会自动 load 本地镜像
-- tar 里至少包含 `index.json` 和 `oci-layout`
-- 手工 `image load` 之后能按 `"${TEST_NS}:tar"` 运行
-
-## 9. 用例 5：关键拒绝路径
-
-先准备一个失败检测 helper：
+### 4.5 拒绝路径
 
 ```bash
 expect_fail() {
@@ -459,11 +315,7 @@ expect_fail() {
     return 1
   fi
 }
-```
 
-准备 3 个非法 Dockerfile：
-
-```bash
 mkdir -p "$WORKROOT/04-negative/user"
 mkdir -p "$WORKROOT/04-negative/add-url"
 mkdir -p "$WORKROOT/04-negative/copy-from"
@@ -485,11 +337,7 @@ RUN sw_vers
 FROM ${BASE_REF}
 COPY --from=build /tmp/out /tmp/out
 EOF
-```
 
-执行拒绝路径验证：
-
-```bash
 expect_fail mixed-platform \
   "darwin builds do not support mixed or multi-target platforms" \
   "$CONTAINER_BIN" build --platform linux/arm64,darwin/arm64 "$WORKROOT/01-smoke"
@@ -515,31 +363,24 @@ expect_fail copy-from-unsupported \
   "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/04-negative/copy-from"
 ```
 
-通过标准：
+预期：上面 6 条命令都失败，而且日志里包含对应错误文本。
 
-- 上面 6 条命令都失败
-- 每条失败日志里都包含对应的固定错误文本
+## 5. 通过标准
 
-## 10. 验收通过判定
+满足下面这些条件就够了：
 
-当下面这些条件同时成立时，可以认为当前分支的 Phase 1 主链路通过手工验收：
+- `"$BASE_REF"` 可以稳定执行 `run --os darwin`
+- 4.1 到 4.4 全部成功
+- 4.5 的 6 条拒绝路径都命中预期错误
 
-- 用例 1 到 4 全部成功
-- 用例 5 的 6 条拒绝路径全部命中预期错误
-- `type=oci` 路径下生成的镜像都能直接 `run --os darwin`
-- `type=tar` 路径下导出的 tar 能手工 `image load`
-
-仍然不在本次“通过”范围里的事项：
+这次验证不包含：
 
 - `USER`
 - `ADD URL`
 - 多阶段 `COPY --from`
 - 更完整的 Dockerfile 语义对齐
-- 自动化 CLI / E2E 测试矩阵
 
-## 11. 清理
-
-如果只想清掉本次验收留下的样例目录和镜像：
+## 6. 清理
 
 ```bash
 "$CONTAINER_BIN" image delete --force \
@@ -551,9 +392,24 @@ expect_fail copy-from-unsupported \
 rm -rf "$WORKROOT"
 ```
 
-如果验收中途需要重启服务：
+如果中途需要重启服务：
 
 ```bash
 "$CONTAINER_BIN" system stop
 "$CONTAINER_BIN" system start --install-root "$PWD" --disable-kernel-install --timeout 60
 ```
+
+## 7. 常见问题
+
+- `prepare-base` 或 `start-vm` 缺 entitlement：
+  优先用 `make release` 产物；如果必须用 `.build/release/*`，给 `container-macos-image-prepare` 和 `container-macos-vm-manager` 补签 `signing/container-runtime-macos.entitlements`。
+- 手工 VM 不弹窗：
+  说明命令不在图形会话里执行。
+- `run --os darwin` 或 `exec` 连不上 guest-agent：
+  回到 guest 里重新检查 `launchctl print system/com.apple.container.macos.guest-agent` 和 `/var/log/container-macos-guest-agent.log`。
+- `prepare-base` 安装阶段失败：
+  先检查 IPSW、网络、代理和 VPN；`Unknown option '--disk-size-gib'` 这类错误通常说明你还在用旧二进制。
+- 只改了 guest-agent：
+  走 2.2 即可，不需要重跑 `prepare-base`。
+
+如需更细的排障步骤，直接看 [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md)。

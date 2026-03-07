@@ -252,5 +252,5 @@
 
 ## 文档一致性评估
 
-- `docs/macos-guest-image-prepare.md` 与 `docs/macos-guest-development-debugging.md` 基本与当前实现一致，可作为实操文档继续维护。
+- `docs/macos-guest-local-validation-guide.md` 与 `docs/macos-guest-development-debugging.md` 基本与当前实现一致，可作为实操文档继续维护。
 - `apple-container-macos-guest.md` 需要明确定位（RFC vs 现状），避免误导。

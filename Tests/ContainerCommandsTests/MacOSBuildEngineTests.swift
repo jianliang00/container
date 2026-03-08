@@ -143,6 +143,142 @@ struct MacOSBuildEngineTests {
         #expect(!descendants.contains("temp"))
         #expect(!descendants.contains("temp/cache.txt"))
     }
+
+    @Test
+    func contextProviderRejectsSourceOutsideContext() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let provider = try MacOSBuildEngine.BuildContextProvider(contextRoot: root)
+        expectError(containing: "escapes the build context") {
+            _ = try provider.resolveSources(["../outside.txt"])
+        }
+    }
+
+    @Test
+    func contextProviderRejectsMissingSource() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let provider = try MacOSBuildEngine.BuildContextProvider(contextRoot: root)
+        expectError(containing: "not found in the build context") {
+            _ = try provider.resolveSources(["missing.txt"])
+        }
+    }
+
+    @Test
+    func contextProviderRejectsDockerignoreExcludedSource() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try write("secret\n", to: root.appendingPathComponent("secret.txt"))
+        try write("secret.txt\n", to: root.appendingPathComponent(".dockerignore"))
+
+        let provider = try MacOSBuildEngine.BuildContextProvider(contextRoot: root)
+        expectError(containing: "is excluded by .dockerignore") {
+            _ = try provider.resolveSources(["secret.txt"])
+        }
+    }
+
+    @Test
+    func contextProviderRejectsSymlinkTraversalOutsideContext() throws {
+        let root = try makeTemporaryDirectory()
+        let outside = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+
+        try write("outside\n", to: outside.appendingPathComponent("secret.txt"))
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("external"),
+            withDestinationURL: outside
+        )
+
+        let provider = try MacOSBuildEngine.BuildContextProvider(contextRoot: root)
+        expectError(containing: "escapes the build context") {
+            _ = try provider.resolveSources(["external/secret.txt"])
+        }
+    }
+
+    @Test
+    func copyDestinationResolutionUsesExistingDirectoryForSingleFile() throws {
+        let resolution = try MacOSBuildEngine.FileTransport.resolveDestination(
+            sources: [makeEntry("bin/tool", kind: .file)],
+            destination: .init(path: "/usr/local/bin", rawValue: "/usr/local/bin", isDirectoryHint: false),
+            existingKind: .directory
+        )
+
+        #expect(resolution.treatAsDirectory)
+        #expect(!resolution.createDirectoryIfMissing)
+        #expect(resolution.path == "/usr/local/bin")
+    }
+
+    @Test
+    func copyDestinationResolutionAllowsMultipleSourcesIntoExistingDirectoryWithoutSlash() throws {
+        let resolution = try MacOSBuildEngine.FileTransport.resolveDestination(
+            sources: [
+                makeEntry("a.txt", kind: .file),
+                makeEntry("b.txt", kind: .file),
+            ],
+            destination: .init(path: "/opt/app", rawValue: "/opt/app", isDirectoryHint: false),
+            existingKind: .directory
+        )
+
+        #expect(resolution.treatAsDirectory)
+        #expect(!resolution.createDirectoryIfMissing)
+        #expect(resolution.path == "/opt/app")
+    }
+
+    @Test
+    func copyDestinationResolutionRejectsMultipleSourcesToMissingNonDirectoryDestination() throws {
+        expectError(containing: "requires the destination to be an existing directory or end with /") {
+            _ = try MacOSBuildEngine.FileTransport.resolveDestination(
+                sources: [
+                    makeEntry("a.txt", kind: .file),
+                    makeEntry("b.txt", kind: .file),
+                ],
+                destination: .init(path: "/opt/app", rawValue: "/opt/app", isDirectoryHint: false),
+                existingKind: .missing
+            )
+        }
+    }
+
+    @Test
+    func copyDestinationResolutionRejectsDirectoryTreeToFileDestination() throws {
+        expectError(containing: "cannot copy a directory tree to non-directory destination") {
+            _ = try MacOSBuildEngine.FileTransport.resolveDestination(
+                sources: [makeEntry("assets", kind: .directory)],
+                destination: .init(path: "/tmp/output", rawValue: "/tmp/output", isDirectoryHint: false),
+                existingKind: .nonDirectory
+            )
+        }
+    }
+
+    @Test
+    func addArchiveDestinationResolutionUsesDirectorySemantics() throws {
+        let resolution = try MacOSBuildEngine.FileTransport.resolveDestination(
+            sources: [makeEntry("archive.tar", kind: .file)],
+            destination: .init(path: "/Applications/MyApp", rawValue: "/Applications/MyApp", isDirectoryHint: false),
+            existingKind: .missing,
+            treatSingleSourceAsDirectoryTree: true
+        )
+
+        #expect(resolution.treatAsDirectory)
+        #expect(resolution.createDirectoryIfMissing)
+        #expect(resolution.path == "/Applications/MyApp")
+    }
+
+    @Test
+    func invalidSymlinkErrorMentionsSourcePath() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let missingLink = root.appendingPathComponent("broken-link")
+        expectError(containing: "build source broken-link is an invalid symlink") {
+            _ = try MacOSBuildEngine.FileTransport.symlinkTarget(at: missingLink, sourceDescription: "broken-link")
+        }
+    }
 }
 
 private func makeTemporaryDirectory() throws -> URL {
@@ -157,4 +293,21 @@ private func write(_ value: String, to url: URL) throws {
         throw CocoaError(.fileWriteUnknown)
     }
     try data.write(to: url)
+}
+
+private func makeEntry(_ relativePath: String, kind: MacOSBuildEngine.EntryKind) -> MacOSBuildEngine.ContextEntry {
+    .init(
+        url: URL(fileURLWithPath: "/tmp/\(relativePath)"),
+        relativePath: relativePath,
+        kind: kind
+    )
+}
+
+private func expectError(containing expectedMessage: String, _ operation: () throws -> Void) {
+    do {
+        try operation()
+        Issue.record("expected error containing \(expectedMessage)")
+    } catch {
+        #expect("\(error)".contains(expectedMessage))
+    }
 }

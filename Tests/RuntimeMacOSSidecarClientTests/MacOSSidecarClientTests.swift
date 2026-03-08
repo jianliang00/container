@@ -215,6 +215,40 @@ struct MacOSSidecarClientTests {
 
         try server.waitForCompletion()
     }
+
+    @Test
+    func sidecarEventPumpPreservesEventOrder() async {
+        let pump = SidecarEventPump()
+        let recorder = EventRecorder()
+
+        let consumer = Task {
+            for await event in pump.stream {
+                await recorder.record(event)
+            }
+        }
+
+        pump.yield(.init(event: .processStdout, processID: "proc-1", data: Data("hello\n".utf8)))
+        pump.yield(.init(event: .processExit, processID: "proc-1", exitCode: 0))
+        pump.finish()
+        await consumer.value
+
+        let received = await recorder.events()
+        #expect(received.map(\.event) == [.processStdout, .processExit])
+        #expect(received.first?.data == Data("hello\n".utf8))
+        #expect(received.last?.exitCode == 0)
+    }
+}
+
+private actor EventRecorder {
+    private var received: [MacOSSidecarEvent] = []
+
+    func record(_ event: MacOSSidecarEvent) {
+        received.append(event)
+    }
+
+    func events() -> [MacOSSidecarEvent] {
+        received
+    }
 }
 
 private final class FakeUnixSidecarTestServer: @unchecked Sendable {

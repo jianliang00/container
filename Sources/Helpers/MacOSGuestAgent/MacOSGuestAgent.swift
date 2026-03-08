@@ -433,11 +433,20 @@ private final class AgentConnection: @unchecked Sendable {
 }
 
 private final class ProcessSession: @unchecked Sendable {
+    private enum OutputChannel {
+        case stdout
+        case stderr
+    }
+
     private let process: Process
     private let terminal: Bool
     private unowned let connection: AgentConnection
     private let masterHandle: FileHandle?
     private let stdinPipe: Pipe?
+    private var stdoutHandle: FileHandle?
+    private var stderrHandle: FileHandle?
+    private let outputLock = NSLock()
+    private var exitSent = false
 
     init(process: Process, terminal: Bool, connection: AgentConnection, masterHandle: FileHandle?, stdinPipe: Pipe?) {
         self.process = process
@@ -448,40 +457,24 @@ private final class ProcessSession: @unchecked Sendable {
     }
 
     func start(stdoutHandle: FileHandle? = nil, stderrHandle: FileHandle? = nil) throws {
+        self.stdoutHandle = stdoutHandle
+        self.stderrHandle = stderrHandle
+
         if let masterHandle {
             masterHandle.readabilityHandler = { [weak self] handle in
-                guard let self else { return }
-                let data = handle.availableData
-                if data.isEmpty {
-                    handle.readabilityHandler = nil
-                    return
-                }
-                try? self.connection.send(frame: .stdout(data))
+                self?.forwardAvailableData(from: handle, channel: .stdout)
             }
         } else {
             stdoutHandle?.readabilityHandler = { [weak self] handle in
-                guard let self else { return }
-                let data = handle.availableData
-                if data.isEmpty {
-                    handle.readabilityHandler = nil
-                    return
-                }
-                try? self.connection.send(frame: .stdout(data))
+                self?.forwardAvailableData(from: handle, channel: .stdout)
             }
             stderrHandle?.readabilityHandler = { [weak self] handle in
-                guard let self else { return }
-                let data = handle.availableData
-                if data.isEmpty {
-                    handle.readabilityHandler = nil
-                    return
-                }
-                try? self.connection.send(frame: .stderr(data))
+                self?.forwardAvailableData(from: handle, channel: .stderr)
             }
         }
 
         process.terminationHandler = { [weak self] process in
-            guard let self else { return }
-            try? self.connection.send(frame: .exit(process.terminationStatus))
+            self?.flushOutputAndSendExit(process.terminationStatus)
         }
 
         try process.run()
@@ -520,6 +513,8 @@ private final class ProcessSession: @unchecked Sendable {
     }
 
     func cleanup() {
+        stdoutHandle?.readabilityHandler = nil
+        stderrHandle?.readabilityHandler = nil
         stdinPipe?.fileHandleForReading.readabilityHandler = nil
         stdinPipe?.fileHandleForWriting.readabilityHandler = nil
         masterHandle?.readabilityHandler = nil
@@ -527,8 +522,66 @@ private final class ProcessSession: @unchecked Sendable {
             _ = Darwin.kill(process.processIdentifier, SIGKILL)
         }
         try? masterHandle?.close()
+        try? stdoutHandle?.close()
+        try? stderrHandle?.close()
         try? stdinPipe?.fileHandleForReading.close()
         try? stdinPipe?.fileHandleForWriting.close()
+    }
+
+    private func forwardAvailableData(from handle: FileHandle, channel: OutputChannel) {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+
+        guard !exitSent else {
+            handle.readabilityHandler = nil
+            return
+        }
+
+        let data = handle.availableData
+        if data.isEmpty {
+            handle.readabilityHandler = nil
+            return
+        }
+
+        send(data, channel: channel)
+    }
+
+    private func flushOutputAndSendExit(_ status: Int32) {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+
+        guard !exitSent else {
+            return
+        }
+
+        drainRemainingOutput(from: masterHandle, channel: .stdout)
+        drainRemainingOutput(from: stdoutHandle, channel: .stdout)
+        drainRemainingOutput(from: stderrHandle, channel: .stderr)
+
+        exitSent = true
+        try? connection.send(frame: .exit(status))
+    }
+
+    private func drainRemainingOutput(from handle: FileHandle?, channel: OutputChannel) {
+        guard let handle else { return }
+
+        while true {
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            send(data, channel: channel)
+        }
+    }
+
+    private func send(_ data: Data, channel: OutputChannel) {
+        switch channel {
+        case .stdout:
+            try? connection.send(frame: .stdout(data))
+        case .stderr:
+            try? connection.send(frame: .stderr(data))
+        }
     }
 }
 

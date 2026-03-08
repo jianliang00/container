@@ -39,15 +39,15 @@
 - [x] `RUN / WORKDIR / ENV / LABEL / CMD / ENTRYPOINT` 的单 stage 执行语义已接入
 - [x] stage stop + package + `type=oci|tar` 导出主链路已接通
 - [x] `type=local` 在 darwin build 路径上已明确报 `unsupported`
-- [x] 新增 `ContainerCommandsTests` 覆盖 darwin build 分流/计划器/context 行为
+- [x] 新增 `ContainerCommandsTests` / `CLITests` 覆盖 darwin build 分流、计划器、context、`COPY` 目标语义、错误分类与 CLI 拒绝路径行为
 
 ### 1.3 还没有完成的核心目标
 
 - [x] 真实 darwin 基础镜像上的 CLI / E2E 验收
-- [ ] darwin build 的集成测试矩阵补齐
-- [ ] `COPY` 目标已存在目录/文件等细粒度语义继续对齐 Dockerfile 行为
-- [ ] host 侧非法 symlink 等错误分类继续补齐
-- [ ] Phase 1 端到端 CLI/E2E 验收
+- [x] darwin build 的集成测试矩阵补齐
+- [x] `COPY` 目标已存在目录/文件等细粒度语义继续对齐 Dockerfile 行为
+- [x] host 侧非法 symlink 等错误分类继续补齐
+- [x] Phase 1 端到端 CLI/E2E 验收
 
 ## 2. 本轮已完成清单
 
@@ -160,6 +160,8 @@
   - `xcrun swift test --filter RuntimeMacOSSidecar`
   - `xcrun swift test --filter MacOSGuestAgentTests`
   - `xcrun swift test --filter ContainerCommandsTests`
+  - `xcrun swift test --filter CLIMacOSBuildFailureTest`
+  - `CONTAINER_ENABLE_MACOS_BUILD_E2E=1 CONTAINER_MACOS_BASE_REF=local/macos-base:agent-new xcrun swift test --filter CLIMacOSBuildE2ETest`
 
 ### 2.6 Build 主链路接线
 
@@ -256,7 +258,7 @@
 - [x] 约束所有 host 路径必须在 context 内
 - [x] 规范化源文件枚举与排序
 - [x] 处理目录、普通文件、软链接
-- [ ] 明确 `COPY` 目标路径语义
+- [x] 明确 `COPY` 目标路径语义
   - 末尾 `/`
   - 目标存在/不存在
   - 单文件到文件
@@ -264,7 +266,7 @@
 - [x] `ADD(local)` 解包策略
   - host 侧解压到 staging dir
   - 再复用同一套 fs 发送路径
-- [ ] 补 host 侧错误分类
+- [x] 补 host 侧错误分类
   - 越界路径
   - 缺失文件
   - 非法 symlink
@@ -334,23 +336,32 @@
 
 ### 3.8 CLI / 集成测试
 
-- [ ] 新增 darwin build CLI 测试
+- [x] 新增 darwin build CLI 测试
   - 平台校验
   - 不支持语法报错
   - `type=local` 报错
-- [ ] 新增 `COPY`/`ADD(local)` 端到端测试
-- [ ] 新增 `.dockerignore` 生效测试
-- [ ] 新增 `RUN sw_vers` 基础镜像构建测试
-- [ ] 新增 `type=tar` 导出测试
-- [ ] 新增 `type=oci` 导入并 tag 测试
-- [ ] 新增失败清理测试
-  - 中断后临时 container
-  - 中断后 staging dir
-  - 中断后 fs transaction
+- [x] 新增 `COPY`/`ADD(local)` 端到端测试
+  - 已添加 `CLITests`，需 `CONTAINER_ENABLE_MACOS_BUILD_E2E=1`
+  - 默认基础镜像引用：`CONTAINER_MACOS_BASE_REF` 或 `local/macos-base:latest`
+- [x] 新增 `.dockerignore` 生效测试
+  - 走同一套 env-gated darwin E2E
+- [x] 新增 `RUN sw_vers` 基础镜像构建测试
+  - 走同一套 env-gated darwin E2E
+- [x] 新增 `type=tar` 导出测试
+  - 走同一套 env-gated darwin E2E
+- [x] 新增 `type=oci` 导入并 tag 测试
+  - 走同一套 env-gated darwin E2E
+- [x] 新增失败清理测试
+  - [x] 中断后临时 container
+  - [x] 中断后 staging dir
+  - [x] 中断后 fs transaction（guest-agent 单测）
 - [x] 新增非 CLI 单元测试
   - `BuildCommand` darwin 分流
   - 最小 Dockerfile 计划器
   - build context / `.dockerignore`
+  - `COPY/ADD(local)` 目标路径解析
+  - 非法 symlink / 越界 source 错误分类
+  - darwin build CLI 拒绝路径
 
 ## 4. 已完成但还需要收尾的点
 
@@ -393,6 +404,12 @@
   - builtin 压缩产物可被 builtin 解压
   - 损坏 frame / 缺失依赖路径报错可读
 
+### 4.4 已消除问题
+
+- [x] load 镜像后第一次运行 `"$CONTAINER_BIN" run --os darwin --rm "$NEW_BASE_REF" /bin/ls /` 时无输出
+  - 已改为按 sidecar 事件流顺序投递 `stdout/stderr/exit`
+  - 真实新构建镜像首次 `run --os darwin` 已验证直接有输出
+
 ## 5. Phase 2 延后项
 
 - [ ] `USER`
@@ -427,9 +444,9 @@
 - [x] `COPY / ADD(local)` host 编排
 - [x] 单 stage `FROM + COPY + RUN + commit`
 - [x] 先把 runtime 侧 `zstd` 解压内建化，消除 `container run --os darwin` 对宿主 `PATH`/外部命令的依赖
-- [ ] 真实 darwin 基础镜像上的 CLI / E2E 构建验收
-- [ ] `COPY` 目标存在态语义继续对齐
-- [ ] host 侧非法 symlink / 错误分类补齐
+- [x] 真实 darwin 基础镜像上的 CLI / E2E 构建验收
+- [x] `COPY` 目标存在态语义继续对齐
+- [x] host 侧非法 symlink / 错误分类补齐
 
 ### 6.2 第二批
 
@@ -437,7 +454,7 @@
 - [x] `type=oci / type=tar / type=local unsupported`
 - [x] `.dockerignore`
 - [x] `--target`
-- [ ] 端到端 CLI 测试
+- [x] 端到端 CLI 测试
 
 ### 6.3 第三批
 
@@ -450,16 +467,16 @@
 
 说明：
 - 本节以“集成验收通过”为准。
-- 虽然本轮已把 darwin build 的代码主链路接通，但未完成真实 macOS guest E2E 的事项暂不勾选。
+- fs 协议增强项与 `zstd` 构建侧收尾仍在继续，但不阻塞 Phase 1 主链路验收。
 
 当以下事项全部完成时，可以认为 Phase 1 真正闭环：
 
-- [ ] `container build --platform darwin/arm64` 不经过 Linux builder
-- [ ] 支持 `FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/LABEL/CMD/ENTRYPOINT`
-- [ ] `COPY/ADD(local)` 全部走 fs 协议
-- [ ] guest 不依赖共享目录或 `tar` 工具解包
-- [ ] 可以从基础 macOS 镜像构建并 commit 新镜像
-- [ ] `--output type=oci` 可导入本地镜像库并 tag
-- [ ] `--output type=tar` 可导出 tar
-- [ ] `type=local` 明确报错
-- [ ] 核心 E2E 测试可稳定通过
+- [x] `container build --platform darwin/arm64` 不经过 Linux builder
+- [x] 支持 `FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/LABEL/CMD/ENTRYPOINT`
+- [x] `COPY/ADD(local)` 全部走 fs 协议
+- [x] guest 不依赖共享目录或 `tar` 工具解包
+- [x] 可以从基础 macOS 镜像构建并 commit 新镜像
+- [x] `--output type=oci` 可导入本地镜像库并 tag
+- [x] `--output type=tar` 可导出 tar
+- [x] `type=local` 明确报错
+- [x] 核心 E2E 测试可稳定通过

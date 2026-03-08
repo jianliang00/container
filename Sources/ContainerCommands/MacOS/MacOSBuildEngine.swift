@@ -329,14 +329,24 @@ struct MacOSBuildEngine {
                 quiet: true,
                 log: input.log
             )
+            let runtimeStopStartedAt = Date()
             try await runtime.stop()
+            MacOSExportProfiler.log(
+                "runtime.stop: \(MacOSExportProfiler.format(Date().timeIntervalSince(runtimeStopStartedAt)))"
+            )
 
+            let parentDiskSource = try await baseImage.macOSChunkedDiskSource(for: buildPlatform)
             let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
+            let packageStartedAt = Date()
             try MacOSImagePackager.package(
                 imageDirectory: bundleURL,
                 outputTar: archiveURL,
                 reference: input.tags.first,
-                imageConfig: state.finalImage(labelOverrides: cliLabels)
+                imageConfig: state.finalImage(labelOverrides: cliLabels),
+                parentDiskSource: parentDiskSource
+            )
+            MacOSExportProfiler.log(
+                "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
             )
 
             await runtime.delete()

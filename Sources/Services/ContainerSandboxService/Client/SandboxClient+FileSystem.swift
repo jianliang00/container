@@ -10,10 +10,9 @@ extension SandboxClient {
         do {
             try await client.send(request)
         } catch {
-            throw ContainerizationError(
-                .internalError,
-                message: "failed to begin filesystem transaction \(payload.txID) in container \(id)",
-                cause: error
+            throw wrapFileSystemError(
+                error,
+                message: "failed to begin filesystem transaction \(payload.txID) in container \(id)"
             )
         }
     }
@@ -24,10 +23,9 @@ extension SandboxClient {
         do {
             try await client.send(request)
         } catch {
-            throw ContainerizationError(
-                .internalError,
-                message: "failed to send filesystem chunk for transaction \(payload.txID) in container \(id)",
-                cause: error
+            throw wrapFileSystemError(
+                error,
+                message: "failed to send filesystem chunk for transaction \(payload.txID) in container \(id)"
             )
         }
     }
@@ -38,11 +36,21 @@ extension SandboxClient {
         do {
             try await client.send(request)
         } catch {
-            throw ContainerizationError(
-                .internalError,
-                message: "failed to end filesystem transaction \(payload.txID) in container \(id)",
-                cause: error
+            throw wrapFileSystemError(
+                error,
+                message: "failed to end filesystem transaction \(payload.txID) in container \(id)"
             )
         }
+    }
+
+    private func wrapFileSystemError(_ error: any Error, message: String) -> ContainerizationError {
+        if let containerError = error as? ContainerizationError {
+            return ContainerizationError(
+                containerError.code,
+                message: "\(message): \(containerError.message)",
+                cause: containerError
+            )
+        }
+        return ContainerizationError(.internalError, message: message, cause: error)
     }
 }

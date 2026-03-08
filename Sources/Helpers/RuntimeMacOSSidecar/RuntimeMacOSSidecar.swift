@@ -1173,17 +1173,28 @@ final class SidecarControlServer: @unchecked Sendable {
     private func processReadLoop(_ session: ProcessStreamSession) {
         let processID = session.processID
         var exitEmitted = false
+        var pendingExitCode: Int32?
         defer {
             closeProcessStreamSession(session)
             _ = removeProcessSession(processID)
             if !exitEmitted {
-                emitEvent(.init(event: .processExit, processID: processID, exitCode: 1))
+                emitEvent(.init(event: .processExit, processID: processID, exitCode: pendingExitCode ?? 1))
             }
         }
 
         do {
             while true {
-                let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: session.fd)
+                let frame: SidecarGuestAgentFrame
+                if pendingExitCode == nil {
+                    frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: session.fd)
+                } else {
+                    guard let drained = try readProcessFrameIfAvailable(fd: session.fd, timeoutMilliseconds: 100) else {
+                        emitEvent(.init(event: .processExit, processID: processID, exitCode: pendingExitCode))
+                        exitEmitted = true
+                        return
+                    }
+                    frame = drained
+                }
                 switch frame.type {
                 case .stdout:
                     if let data = frame.data, !data.isEmpty {
@@ -1196,9 +1207,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 case .error:
                     emitEvent(.init(event: .processError, processID: processID, message: frame.message ?? "unknown guest-agent error"))
                 case .exit:
-                    emitEvent(.init(event: .processExit, processID: processID, exitCode: frame.exitCode ?? 1))
-                    exitEmitted = true
-                    return
+                    pendingExitCode = frame.exitCode ?? 1
                 case .ready:
                     continue
                 case .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
@@ -1206,9 +1215,41 @@ final class SidecarControlServer: @unchecked Sendable {
                 }
             }
         } catch {
+            if let pendingExitCode, isExpectedEOF(error) {
+                emitEvent(.init(event: .processExit, processID: processID, exitCode: pendingExitCode))
+                exitEmitted = true
+                return
+            }
             if !isExpectedEOF(error) {
                 emitEvent(.init(event: .processError, processID: processID, message: "sidecar process stream read failed: \(error.localizedDescription)"))
             }
+        }
+    }
+
+    private func readProcessFrameIfAvailable(fd: Int32, timeoutMilliseconds: Int32) throws -> SidecarGuestAgentFrame? {
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        while true {
+            let result = withUnsafeMutablePointer(to: &descriptor) { pointer in
+                Darwin.poll(pointer, 1, timeoutMilliseconds)
+            }
+
+            if result == 0 {
+                return nil
+            }
+            if result > 0 {
+                if descriptor.revents & Int16(POLLIN) != 0 {
+                    return try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+                }
+                if descriptor.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+                    return nil
+                }
+                continue
+            }
+
+            if errno == EINTR {
+                continue
+            }
+            throw POSIXError.fromErrno()
         }
     }
 

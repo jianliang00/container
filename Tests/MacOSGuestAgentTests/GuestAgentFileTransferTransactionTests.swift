@@ -51,6 +51,55 @@ struct GuestAgentFileTransferTransactionTests {
     }
 
     @Test
+    func abortRemovesTemporaryWriteArtifact() throws {
+        let tempDir = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let outputURL = tempDir.appendingPathComponent("aborted.txt")
+        let tx = try GuestAgentFileTransferTransaction(
+            request: .init(
+                txID: "tx-abort-temp",
+                op: .writeFile,
+                path: outputURL.path,
+                inlineData: Data("temp".utf8)
+            )
+        )
+
+        #expect(temporaryTransactionArtifacts(in: tempDir).count == 1)
+
+        tx.abort()
+
+        #expect(FileManager.default.fileExists(atPath: outputURL.path) == false)
+        #expect(temporaryTransactionArtifacts(in: tempDir).isEmpty)
+    }
+
+    @Test
+    func failedCommitCanBeAbortedWithoutLeavingTemporaryFile() throws {
+        let tempDir = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let outputURL = tempDir.appendingPathComponent("payload.txt")
+        let tx = try GuestAgentFileTransferTransaction(
+            request: .init(
+                txID: "tx-digest-mismatch",
+                op: .writeFile,
+                path: outputURL.path,
+                inlineData: Data("payload".utf8)
+            )
+        )
+
+        #expect(temporaryTransactionArtifacts(in: tempDir).count == 1)
+        #expect(throws: (any Error).self) {
+            try tx.complete(action: .commit, digest: "sha256:deadbeef")
+        }
+
+        tx.abort()
+
+        #expect(FileManager.default.fileExists(atPath: outputURL.path) == false)
+        #expect(temporaryTransactionArtifacts(in: tempDir).isEmpty)
+    }
+
+    @Test
     func symlinkCommitCreatesRequestedLink() throws {
         let tempDir = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -80,5 +129,10 @@ private func makeTemporaryDirectory() throws -> URL {
 
 private func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+private func temporaryTransactionArtifacts(in directory: URL) -> [URL] {
+    (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil))?
+        .filter { $0.lastPathComponent.hasPrefix(".container-fs-") && $0.pathExtension == "tmp" } ?? []
 }
 #endif

@@ -295,10 +295,41 @@ final class MacOSSidecarClient: @unchecked Sendable {
         }
         guard response.ok else {
             let error = response.error
-            let code = error?.code ?? "unknown"
+            let rawCode = error?.code ?? "unknown"
             let message = error?.message ?? "unknown sidecar error"
             let details = error?.details.map { " (\($0))" } ?? ""
-            throw ContainerizationError(.internalError, message: "sidecar \(code): \(message)\(details)")
+            let codeSuffix = rawCode == "internalError" || rawCode == "unknown" ? "" : " [code=\(rawCode)]"
+            throw ContainerizationError(
+                Self.containerizationCode(forSidecarCode: rawCode),
+                message: "sidecar \(message)\(details)\(codeSuffix)"
+            )
+        }
+    }
+
+    private static func containerizationCode(forSidecarCode code: String) -> ContainerizationError.Code {
+        switch code {
+        case "invalidArgument", "invalid_request":
+            .invalidArgument
+        case "internalError", "request_failed", "sidecar_error", "unknown":
+            .internalError
+        case "exists":
+            .exists
+        case "notFound":
+            .notFound
+        case "cancelled":
+            .cancelled
+        case "invalidState":
+            .invalidState
+        case "empty":
+            .empty
+        case "timeout":
+            .timeout
+        case "unsupported":
+            .unsupported
+        case "interrupted":
+            .interrupted
+        default:
+            .internalError
         }
     }
 

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #if os(macOS)
+import ContainerizationError
 import Darwin
 import Foundation
 import Logging
@@ -214,6 +215,46 @@ struct MacOSSidecarClientTests {
         )
         try client.fsChunk(request: .init(txID: "tx-1", offset: 3, data: Data("def".utf8)))
         try client.fsEnd(request: .init(txID: "tx-1", action: .commit, digest: "sha256:test"))
+
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func sidecarFailureMapsKnownErrorCodeToContainerizationError() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+
+            let close = try readRequest(from: clientFD)
+            #expect(close.method == .processClose)
+            try writeResponse(
+                .failure(
+                    requestID: close.requestID,
+                    code: "notFound",
+                    message: "filesystem transaction tx-404 not found in sidecar",
+                    details: "tx_id=tx-404"
+                ),
+                to: clientFD
+            )
+        }
+
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+        try client.bootstrapStart(socketConnectRetries: 3)
+
+        do {
+            try client.processClose(processID: "proc-missing")
+            Issue.record("expected sidecar processClose to surface a notFound error")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .notFound)
+            #expect(error.message.contains("filesystem transaction tx-404 not found in sidecar"))
+            #expect(error.message.contains("tx_id=tx-404"))
+        }
 
         try server.waitForCompletion()
     }

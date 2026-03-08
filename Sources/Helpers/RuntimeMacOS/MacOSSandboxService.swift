@@ -26,6 +26,28 @@ import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
 
+final class SidecarEventPump: @unchecked Sendable {
+    let stream: AsyncStream<MacOSSidecarEvent>
+
+    private let continuation: AsyncStream<MacOSSidecarEvent>.Continuation
+
+    init() {
+        var storedContinuation: AsyncStream<MacOSSidecarEvent>.Continuation?
+        self.stream = AsyncStream { continuation in
+            storedContinuation = continuation
+        }
+        self.continuation = storedContinuation!
+    }
+
+    func yield(_ event: MacOSSidecarEvent) {
+        continuation.yield(event)
+    }
+
+    func finish() {
+        continuation.finish()
+    }
+}
+
 public actor MacOSSandboxService {
     private static let defaultAgentPort: UInt32 = 27000
 
@@ -65,6 +87,8 @@ public actor MacOSSandboxService {
     var logHandle: FileHandle?
     private var bootLogHandle: FileHandle?
     var sidecarHandle: SidecarHandle?
+    var sidecarEventPump: SidecarEventPump?
+    var sidecarEventPumpTask: Task<Void, Never>?
 
     public init(root: URL, connection: xpc_connection_t, log: Logger) {
         self.root = root

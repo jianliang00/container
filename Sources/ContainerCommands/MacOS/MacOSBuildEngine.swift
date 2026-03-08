@@ -106,6 +106,12 @@ struct MacOSBuildEngine {
         case symlink
     }
 
+    enum GuestPathKind {
+        case missing
+        case directory
+        case nonDirectory
+    }
+
     struct ContextEntry {
         let url: URL
         let relativePath: String
@@ -242,7 +248,10 @@ struct MacOSBuildEngine {
         do {
             let transport = FileTransport(
                 sandboxClient: runtime.sandboxClient,
-                contextProvider: contextProvider
+                contextProvider: contextProvider,
+                pathInspector: { path in
+                    try await runtime.inspectPath(path, log: input.log)
+                }
             )
             var state = StageState(baseConfig: baseConfig, initialBuildArguments: cliBuildArgs)
 
@@ -965,7 +974,13 @@ extension MacOSBuildEngine {
                     continue
                 }
 
-                let url = contextRoot.appendingPathComponent(source).standardizedFileURL
+                let candidateURL = contextRoot.appendingPathComponent(source)
+                let resolvedParentURL = candidateURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+                guard Self.isDescendant(resolvedParentURL, of: contextRoot) else {
+                    throw ContainerizationError(.invalidArgument, message: "build source \(rawSource) escapes the build context")
+                }
+
+                let url = resolvedParentURL.appendingPathComponent(candidateURL.lastPathComponent).standardizedFileURL
                 guard Self.isDescendant(url, of: contextRoot) else {
                     throw ContainerizationError(.invalidArgument, message: "build source \(rawSource) escapes the build context")
                 }
@@ -1206,12 +1221,24 @@ extension MacOSBuildEngine {
             case add
         }
 
+        struct DestinationResolution {
+            let path: String
+            let treatAsDirectory: Bool
+            let createDirectoryIfMissing: Bool
+        }
+
         let sandboxClient: SandboxClient
         let contextProvider: BuildContextProvider
+        let pathInspector: (String) async throws -> GuestPathKind
 
-        init(sandboxClient: SandboxClient, contextProvider: BuildContextProvider) {
+        init(
+            sandboxClient: SandboxClient,
+            contextProvider: BuildContextProvider,
+            pathInspector: @escaping (String) async throws -> GuestPathKind
+        ) {
             self.sandboxClient = sandboxClient
             self.contextProvider = contextProvider
+            self.pathInspector = pathInspector
         }
 
         func createDirectory(at path: String, mode: UInt32? = nil) async throws {
@@ -1230,58 +1257,60 @@ extension MacOSBuildEngine {
         func copy(sources rawSources: [String], destination rawDestination: String, kind: CopyKind) async throws {
             let sources = try contextProvider.resolveSources(rawSources)
             let destination = normalizeDestination(rawDestination)
+            let extractsArchive = kind == .add && sources.count == 1 && sources[0].kind == .file && Self.isArchiveFile(sources[0].url)
 
             guard !sources.isEmpty else {
                 throw ContainerizationError(.invalidArgument, message: "COPY/ADD requires at least one source")
             }
 
-            if kind == .add, sources.count == 1, sources[0].kind == .file, Self.isArchiveFile(sources[0].url) {
-                let tempRoot = try makeTemporaryDirectory(prefix: "macos-build-add")
-                defer { try? FileManager.default.removeItem(at: tempRoot) }
-                try Self.extractArchive(at: sources[0].url, into: tempRoot)
-                try await copyDirectoryTree(
-                    root: tempRoot,
-                    destinationRoot: destination.path,
-                    includeTopLevelDirectory: nil
-                )
-                return
-            }
-
-            if kind == .add, sources.contains(where: { $0.kind == .file && Self.isArchiveFile($0.url) }) {
+            if kind == .add, sources.contains(where: { $0.kind == .file && Self.isArchiveFile($0.url) }), !extractsArchive {
                 throw ContainerizationError(
                     .unsupported,
                     message: "darwin builds support ADD archive extraction only for a single local archive source in phase 1"
                 )
             }
 
-            if sources.count > 1, !destination.isDirectoryHint {
-                throw ContainerizationError(
-                    .invalidArgument,
-                    message: "COPY/ADD with multiple sources requires the destination to end with /"
-                )
+            let existingKind = try await pathInspector(destination.path)
+            let resolution = try Self.resolveDestination(
+                sources: sources,
+                destination: destination,
+                existingKind: existingKind,
+                treatSingleSourceAsDirectoryTree: extractsArchive
+            )
+
+            if resolution.treatAsDirectory, resolution.createDirectoryIfMissing {
+                try await createDirectory(at: resolution.path)
             }
 
-            if sources.count > 1 {
-                try await createDirectory(at: destination.path)
+            if extractsArchive {
+                let tempRoot = try makeTemporaryDirectory(prefix: "macos-build-add")
+                defer { try? FileManager.default.removeItem(at: tempRoot) }
+                try Self.extractArchive(at: sources[0].url, into: tempRoot)
+                try await copyDirectoryTree(
+                    root: tempRoot,
+                    destinationRoot: resolution.path,
+                    includeTopLevelDirectory: nil
+                )
+                return
             }
 
             for source in sources {
                 switch source.kind {
                 case .file:
-                    let targetPath = targetPath(for: source, destination: destination, multipleSources: sources.count > 1)
+                    let targetPath = targetPath(for: source, destinationPath: resolution.path, treatAsDirectory: resolution.treatAsDirectory)
                     try await sendFile(at: source.url, to: targetPath)
 
                 case .symlink:
-                    let targetPath = targetPath(for: source, destination: destination, multipleSources: sources.count > 1)
-                    try await sendSymlink(at: source.url, to: targetPath)
+                    let targetPath = targetPath(for: source, destinationPath: resolution.path, treatAsDirectory: resolution.treatAsDirectory)
+                    try await sendSymlink(at: source.url, sourceDescription: source.relativePath, to: targetPath)
 
                 case .directory:
                     if sources.count == 1 {
-                        try await copyContextDirectory(source, destinationRoot: destination.path, includeTopLevelDirectory: nil)
+                        try await copyContextDirectory(source, destinationRoot: resolution.path, includeTopLevelDirectory: nil)
                     } else {
                         try await copyContextDirectory(
                             source,
-                            destinationRoot: destination.path,
+                            destinationRoot: resolution.path,
                             includeTopLevelDirectory: source.url.lastPathComponent
                         )
                     }
@@ -1289,12 +1318,64 @@ extension MacOSBuildEngine {
             }
         }
 
+        static func resolveDestination(
+            sources: [ContextEntry],
+            destination: DestinationPath,
+            existingKind: GuestPathKind,
+            treatSingleSourceAsDirectoryTree: Bool = false
+        ) throws -> DestinationResolution {
+            guard !sources.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "COPY/ADD requires at least one source")
+            }
+
+            let requiresDirectoryDestination =
+                sources.count > 1
+                || sources.contains(where: { $0.kind == .directory })
+                || treatSingleSourceAsDirectoryTree
+
+            if sources.count > 1 {
+                guard destination.isDirectoryHint || existingKind == .directory else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "COPY/ADD with multiple sources requires the destination to be an existing directory or end with /"
+                    )
+                }
+            }
+
+            if requiresDirectoryDestination {
+                guard existingKind != .nonDirectory else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "COPY/ADD cannot copy a directory tree to non-directory destination \(destination.rawValue)"
+                    )
+                }
+                return .init(
+                    path: destination.path,
+                    treatAsDirectory: true,
+                    createDirectoryIfMissing: existingKind == .missing
+                )
+            }
+
+            if destination.isDirectoryHint || existingKind == .directory {
+                return .init(
+                    path: destination.path,
+                    treatAsDirectory: true,
+                    createDirectoryIfMissing: existingKind == .missing
+                )
+            }
+
+            return .init(
+                path: destination.path,
+                treatAsDirectory: false,
+                createDirectoryIfMissing: false
+            )
+        }
+
         private func copyContextDirectory(
             _ source: ContextEntry,
             destinationRoot: String,
             includeTopLevelDirectory: String?
         ) async throws {
-            try await createDirectory(at: destinationRoot)
             if let includeTopLevelDirectory {
                 try await createDirectory(at: joinPaths(destinationRoot, includeTopLevelDirectory))
             }
@@ -1314,7 +1395,6 @@ extension MacOSBuildEngine {
             destinationRoot: String,
             includeTopLevelDirectory: String?
         ) async throws {
-            try await createDirectory(at: destinationRoot)
             if let includeTopLevelDirectory {
                 try await createDirectory(at: joinPaths(destinationRoot, includeTopLevelDirectory))
             }
@@ -1329,7 +1409,7 @@ extension MacOSBuildEngine {
                 case .file:
                     try await sendFile(at: entry.url, to: finalPath)
                 case .symlink:
-                    try await sendSymlink(at: entry.url, to: finalPath)
+                    try await sendSymlink(at: entry.url, sourceDescription: entry.relativePath, to: finalPath)
                 }
             }
         }
@@ -1341,7 +1421,7 @@ extension MacOSBuildEngine {
             case .file:
                 try await sendFile(at: entry.url, to: path)
             case .symlink:
-                try await sendSymlink(at: entry.url, to: path)
+                try await sendSymlink(at: entry.url, sourceDescription: entry.relativePath, to: path)
             }
         }
 
@@ -1398,8 +1478,20 @@ extension MacOSBuildEngine {
             }
         }
 
-        private func sendSymlink(at url: URL, to path: String) async throws {
-            let target = try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
+        static func symlinkTarget(at url: URL, sourceDescription: String) throws -> String {
+            do {
+                return try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
+            } catch {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "build source \(sourceDescription) is an invalid symlink",
+                    cause: error
+                )
+            }
+        }
+
+        private func sendSymlink(at url: URL, sourceDescription: String, to path: String) async throws {
+            let target = try Self.symlinkTarget(at: url, sourceDescription: sourceDescription)
             let attributes = metadata(for: url)
             let request = MacOSSidecarFSBeginRequestPayload(
                 txID: UUID().uuidString,
@@ -1413,25 +1505,24 @@ extension MacOSBuildEngine {
             try await sandboxClient.fsBegin(request)
         }
 
-        private struct DestinationPath {
+        struct DestinationPath {
             let path: String
+            let rawValue: String
             let isDirectoryHint: Bool
         }
 
-        private func targetPath(for source: ContextEntry, destination: DestinationPath, multipleSources: Bool) -> String {
-            if destination.isDirectoryHint {
-                return joinPaths(destination.path, source.url.lastPathComponent)
+        private func targetPath(for source: ContextEntry, destinationPath: String, treatAsDirectory: Bool) -> String {
+            if treatAsDirectory {
+                return joinPaths(destinationPath, source.url.lastPathComponent)
             }
-            if multipleSources {
-                return joinPaths(destination.path, source.url.lastPathComponent)
-            }
-            return destination.path
+            return destinationPath
         }
 
         private func normalizeDestination(_ value: String) -> DestinationPath {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return .init(
                 path: normalizeAbsolutePath(trimmed, preserveTrailingSlash: false),
+                rawValue: trimmed,
                 isDirectoryHint: trimmed.hasSuffix("/")
             )
         }
@@ -1584,6 +1675,76 @@ extension MacOSBuildEngine {
             quiet: Bool,
             log: Logger
         ) async throws {
+            let io = try ProcessIO.create(tty: false, interactive: false, detach: quiet)
+            defer { try? io.close() }
+
+            let process = try await createProcess(
+                command: command,
+                environment: environment,
+                workingDirectory: workingDirectory,
+                stdio: io.stdio
+            )
+            let exitCode = try await io.handleProcess(process: process, log: log)
+            guard exitCode == 0 else {
+                throw ContainerizationError(.internalError, message: "build step failed with exit code \(exitCode)")
+            }
+        }
+
+        func inspectPath(_ path: String, log: Logger) async throws -> GuestPathKind {
+            let directoryExitCode = try await runForStatus(
+                command: .exec(["/bin/sh", "-c", "test -d \"$1\"", "sh", path]),
+                environment: [:],
+                workingDirectory: "/"
+            )
+            switch directoryExitCode {
+            case 0:
+                return .directory
+            case 1:
+                break
+            default:
+                throw ContainerizationError(.internalError, message: "failed to inspect destination path \(path)")
+            }
+
+            let existsExitCode = try await runForStatus(
+                command: .exec(["/bin/sh", "-c", "test -e \"$1\"", "sh", path]),
+                environment: [:],
+                workingDirectory: "/"
+            )
+            switch existsExitCode {
+            case 0:
+                return .nonDirectory
+            case 1:
+                return .missing
+            default:
+                throw ContainerizationError(.internalError, message: "failed to inspect destination path \(path)")
+            }
+        }
+
+        func stop() async throws {
+            try await containerClient.stop(
+                id: containerID,
+                opts: .init(timeoutInSeconds: MacOSBuildEngine.stageStopTimeoutSeconds, signal: SIGTERM)
+            )
+        }
+
+        func delete() async {
+            await deleteWithRetries()
+        }
+
+        func cleanup() async {
+            try? await containerClient.stop(
+                id: containerID,
+                opts: .init(timeoutInSeconds: MacOSBuildEngine.stageStopTimeoutSeconds, signal: SIGTERM)
+            )
+            await deleteWithRetries()
+        }
+
+        private func createProcess(
+            command: CommandForm,
+            environment: [String: String],
+            workingDirectory: String,
+            stdio: [FileHandle?]
+        ) async throws -> ClientProcess {
             let processID = UUID().uuidString
             let config: ProcessConfiguration
             switch command {
@@ -1610,38 +1771,41 @@ extension MacOSBuildEngine {
                 )
             }
 
-            let io = try ProcessIO.create(tty: false, interactive: false, detach: quiet)
-            defer { try? io.close() }
-
-            let process = try await containerClient.createProcess(
+            return try await containerClient.createProcess(
                 containerId: containerID,
                 processId: processID,
                 configuration: config,
-                stdio: io.stdio
+                stdio: stdio
             )
-            let exitCode = try await io.handleProcess(process: process, log: log)
-            guard exitCode == 0 else {
-                throw ContainerizationError(.internalError, message: "build step failed with exit code \(exitCode)")
+        }
+
+        private func runForStatus(
+            command: CommandForm,
+            environment: [String: String],
+            workingDirectory: String
+        ) async throws -> Int32 {
+            let process = try await createProcess(
+                command: command,
+                environment: environment,
+                workingDirectory: workingDirectory,
+                stdio: [nil, nil, nil]
+            )
+            try await process.start()
+            return try await process.wait()
+        }
+
+        private func deleteWithRetries(maxAttempts: Int = 20, retryDelayNanoseconds: UInt64 = 250_000_000) async {
+            for attempt in 1...maxAttempts {
+                do {
+                    try await containerClient.delete(id: containerID, force: true)
+                    return
+                } catch {
+                    guard attempt < maxAttempts else {
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                }
             }
-        }
-
-        func stop() async throws {
-            try await containerClient.stop(
-                id: containerID,
-                opts: .init(timeoutInSeconds: MacOSBuildEngine.stageStopTimeoutSeconds, signal: SIGTERM)
-            )
-        }
-
-        func delete() async {
-            try? await containerClient.delete(id: containerID, force: true)
-        }
-
-        func cleanup() async {
-            try? await containerClient.stop(
-                id: containerID,
-                opts: .init(timeoutInSeconds: MacOSBuildEngine.stageStopTimeoutSeconds, signal: SIGTERM)
-            )
-            try? await containerClient.delete(id: containerID, force: true)
         }
     }
 }

@@ -78,12 +78,18 @@ extension MacOSSandboxService {
         try bootstrapLaunchAgent(plistURL: plistURL)
 
         let client = MacOSSidecarClient(socketPath: socketURL.path, log: log)
-        client.setEventHandler { [weak self] event in
+        let eventPump = SidecarEventPump()
+        let eventPumpTask = Task { [weak self] in
             guard let self else { return }
-            Task {
+            for await event in eventPump.stream {
                 await self.handleSidecarEvent(event)
             }
         }
+        client.setEventHandler { event in
+            eventPump.yield(event)
+        }
+        sidecarEventPump = eventPump
+        sidecarEventPumpTask = eventPumpTask
         do {
             writeContainerLog(Data(("sidecar bootstrap start [label=\(launchLabel)] [socket=\(socketURL.path)]\n").utf8))
             try client.bootstrapStart(socketConnectRetries: 120)
@@ -94,6 +100,11 @@ extension MacOSSandboxService {
             writeContainerLog(Data(("sidecar vm bootstrap succeeded [label=\(launchLabel)]\n").utf8))
         } catch {
             writeContainerLog(Data(("sidecar vm bootstrap failed [label=\(launchLabel)] error=\(String(describing: error))\n").utf8))
+            client.setEventHandler(nil)
+            eventPump.finish()
+            eventPumpTask.cancel()
+            sidecarEventPump = nil
+            sidecarEventPumpTask = nil
             try? client.quit()
             try? bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
             sidecarHandle = nil
@@ -119,7 +130,12 @@ extension MacOSSandboxService {
         } catch {
             writeContainerLog(Data(("sidecar bootout failed [label=\(handle.launchLabel)] error=\(String(describing: error))\n").utf8))
         }
+        handle.client.setEventHandler(nil)
         handle.client.closeControlConnection()
+        sidecarEventPump?.finish()
+        sidecarEventPumpTask?.cancel()
+        sidecarEventPump = nil
+        sidecarEventPumpTask = nil
         sidecarHandle = nil
     }
 

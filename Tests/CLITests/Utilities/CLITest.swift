@@ -63,12 +63,20 @@ class CLITest {
 
     init() throws {}
 
+    deinit {
+        try? FileManager.default.removeItem(at: testDirURL)
+    }
+
     let testUUID = UUID().uuidString
 
-    var testDir: URL! {
-        let tempDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    private var testDirURL: URL {
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".clitests")
             .appendingPathComponent(testUUID)
+    }
+
+    var testDir: URL! {
+        let tempDir = testDirURL
         try! FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         return tempDir
     }
@@ -267,6 +275,15 @@ class CLITest {
         }
         if arguments.starts(with: ["system", "start"]) {
             return 20
+        }
+        if arguments.first == "run",
+            let osIndex = arguments.firstIndex(of: "--os"),
+            arguments.indices.contains(arguments.index(after: osIndex)),
+            arguments[arguments.index(after: osIndex)] == "darwin"
+        {
+            // First run of a freshly-built macOS image can take a few minutes
+            // before the runtime is ready to return.
+            return 300
         }
         if arguments.contains("build") {
             return 300

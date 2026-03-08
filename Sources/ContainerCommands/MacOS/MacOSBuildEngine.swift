@@ -1472,10 +1472,12 @@ extension MacOSBuildEngine {
 
             if fileSize <= UInt64(MacOSBuildEngine.inlineDataLimit) {
                 let data = try Data(contentsOf: url)
+                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
                 let request = MacOSSidecarFSBeginRequestPayload(
                     txID: UUID().uuidString,
                     op: .writeFile,
                     path: normalizedPath,
+                    digest: "sha256:\(digest)",
                     mode: attributes.mode,
                     mtime: attributes.mtime,
                     overwrite: true,

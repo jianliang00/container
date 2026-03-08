@@ -15,6 +15,7 @@ public struct MacOSSidecarFSBeginRequestPayload: Codable, Sendable {
     public let txID: String
     public let op: MacOSSidecarFSOperation
     public let path: String
+    public let digest: String?
     public let mode: UInt32?
     public let uid: UInt32?
     public let gid: UInt32?
@@ -28,6 +29,7 @@ public struct MacOSSidecarFSBeginRequestPayload: Codable, Sendable {
         txID: String,
         op: MacOSSidecarFSOperation,
         path: String,
+        digest: String? = nil,
         mode: UInt32? = nil,
         uid: UInt32? = nil,
         gid: UInt32? = nil,
@@ -40,6 +42,7 @@ public struct MacOSSidecarFSBeginRequestPayload: Codable, Sendable {
         self.txID = txID
         self.op = op
         self.path = path
+        self.digest = digest
         self.mode = mode
         self.uid = uid
         self.gid = gid

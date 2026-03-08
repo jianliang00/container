@@ -253,7 +253,8 @@ struct SidecarGuestAgentFrame: Codable {
             mtime: payload.mtime,
             linkTarget: payload.linkTarget,
             overwrite: payload.overwrite,
-            autoCommit: payload.autoCommit
+            autoCommit: payload.autoCommit,
+            digest: payload.digest
         )
     }
 
@@ -735,14 +736,18 @@ final class SidecarControlServer: @unchecked Sendable {
         let txID: String
         let fd: Int32
         let ownerClientFD: Int32
+        let op: MacOSSidecarFSOperation
+        let path: String
         let writeLock = NSLock()
         let stateLock = NSLock()
         var closed = false
 
-        init(txID: String, fd: Int32, ownerClientFD: Int32) {
+        init(txID: String, fd: Int32, ownerClientFD: Int32, op: MacOSSidecarFSOperation, path: String) {
             self.txID = txID
             self.fd = fd
             self.ownerClientFD = ownerClientFD
+            self.op = op
+            self.path = path
         }
     }
 
@@ -1044,7 +1049,7 @@ final class SidecarControlServer: @unchecked Sendable {
         fsLock.unlock()
 
         for session in sessions {
-            closeFSSession(session)
+            closeFSSession(session, reason: "owner client disconnected")
         }
     }
 
@@ -1056,16 +1061,17 @@ final class SidecarControlServer: @unchecked Sendable {
         fsLock.unlock()
 
         for session in sessions {
-            closeFSSession(session)
+            closeFSSession(session, reason: "sidecar shutdown")
         }
     }
 
-    private func closeFSSession(_ session: FSTransferSession) {
+    private func closeFSSession(_ session: FSTransferSession, reason: String? = nil) {
         session.stateLock.lock()
         let shouldClose = !session.closed
         session.closed = true
         session.stateLock.unlock()
         guard shouldClose else { return }
+        logFS("closing", session: session, extra: reason.map { ["reason": $0] } ?? [:])
         _ = Darwin.shutdown(session.fd, SHUT_RDWR)
         Darwin.close(session.fd)
     }
@@ -1088,6 +1094,19 @@ final class SidecarControlServer: @unchecked Sendable {
     }
 
     private func startFSTransfer(port: UInt32, clientFD: Int32, payload: MacOSSidecarFSBeginRequestPayload) throws {
+        logFS(
+            "begin",
+            txID: payload.txID,
+            op: payload.op,
+            path: payload.path,
+            extra: [
+                "port": "\(port)",
+                "owner_client_fd": "\(clientFD)",
+                "auto_commit": "\(payload.autoCommit)",
+                "inline_bytes": "\(payload.inlineData?.count ?? 0)",
+                "digest": payload.digest ?? "-",
+            ]
+        )
         let fd = try syncValue {
             try await self.service.connectVsock(port: port)
         }
@@ -1098,14 +1117,29 @@ final class SidecarControlServer: @unchecked Sendable {
             try waitForFSAck(fd: fd, expectedID: payload.txID)
 
             if payload.autoCommit {
+                logFS("auto-commit completed", txID: payload.txID, op: payload.op, path: payload.path)
                 _ = Darwin.shutdown(fd, SHUT_RDWR)
                 Darwin.close(fd)
                 return
             }
 
-            let session = FSTransferSession(txID: payload.txID, fd: fd, ownerClientFD: clientFD)
+            let session = FSTransferSession(
+                txID: payload.txID,
+                fd: fd,
+                ownerClientFD: clientFD,
+                op: payload.op,
+                path: payload.path
+            )
             try registerFSSession(session)
+            logFS("session registered", session: session)
         } catch {
+            logFS(
+                "begin failed",
+                txID: payload.txID,
+                op: payload.op,
+                path: payload.path,
+                extra: ["error": "\(error)"]
+            )
             _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
             throw error
@@ -1115,10 +1149,19 @@ final class SidecarControlServer: @unchecked Sendable {
     private func sendFSChunk(_ payload: MacOSSidecarFSChunkRequestPayload) throws {
         let session = try fsSession(for: payload.txID)
         do {
+            logFS(
+                "chunk",
+                session: session,
+                extra: [
+                    "offset": "\(payload.offset)",
+                    "bytes": "\(payload.data.count)",
+                ]
+            )
             try sendFrame(.fsChunk(payload), to: session)
             try waitForFSAck(fd: session.fd, expectedID: payload.txID)
         } catch {
-            closeFSSession(session)
+            logFS("chunk failed", session: session, extra: ["error": "\(error)"])
+            closeFSSession(session, reason: "chunk failed")
             _ = removeFSSession(payload.txID)
             throw error
         }
@@ -1127,9 +1170,17 @@ final class SidecarControlServer: @unchecked Sendable {
     private func finishFSTransfer(_ payload: MacOSSidecarFSEndRequestPayload) throws {
         let session = try fsSession(for: payload.txID)
         defer {
-            closeFSSession(session)
+            closeFSSession(session, reason: "transfer finished")
             _ = removeFSSession(payload.txID)
         }
+        logFS(
+            "end",
+            session: session,
+            extra: [
+                "action": payload.action.rawValue,
+                "digest": payload.digest ?? "-",
+            ]
+        )
         try sendFrame(.fsEnd(payload), to: session)
         try waitForFSAck(fd: session.fd, expectedID: payload.txID)
     }
@@ -1259,19 +1310,50 @@ final class SidecarControlServer: @unchecked Sendable {
             switch frame.type {
             case .ack:
                 guard frame.id == expectedID else {
-                    throw ContainerizationError(.internalError, message: "filesystem ack transaction ID mismatch")
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "filesystem ack transaction ID mismatch (expected=\(expectedID) actual=\(frame.id ?? "nil"))"
+                    )
                 }
                 return
             case .error:
-                throw ContainerizationError(.internalError, message: frame.message ?? "unknown guest-agent filesystem error")
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent filesystem error for transaction \(expectedID): \(frame.message ?? "unknown error")"
+                )
             case .exit:
-                throw ContainerizationError(.internalError, message: "guest-agent filesystem stream exited (code=\(frame.exitCode ?? 1))")
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent filesystem stream exited for transaction \(expectedID) (code=\(frame.exitCode ?? 1))"
+                )
             case .ready, .stdout, .stderr:
                 continue
             case .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
                 continue
             }
         }
+    }
+
+    private func logFS(
+        _ message: String,
+        txID: String,
+        op: MacOSSidecarFSOperation,
+        path: String,
+        extra: [String: String] = [:]
+    ) {
+        var metadata: Logger.Metadata = [
+            "tx_id": "\(txID)",
+            "op": "\(op.rawValue)",
+            "path": "\(path)",
+        ]
+        for (key, value) in extra {
+            metadata[key] = "\(value)"
+        }
+        log.info("filesystem transfer \(message)", metadata: metadata)
+    }
+
+    private func logFS(_ message: String, session: FSTransferSession, extra: [String: String] = [:]) {
+        logFS(message, txID: session.txID, op: session.op, path: session.path, extra: extra)
     }
 
     private func waitForGuestAgentReadyWithTimeout(fd: Int32, timeoutSeconds: TimeInterval) throws {

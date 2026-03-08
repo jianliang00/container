@@ -85,6 +85,57 @@ struct MacOSBuildEngineTests {
     }
 
     @Test
+    func plannerExecutionStagesIncludeAllStagesUpToTarget() throws {
+        let dockerfile = Data(
+            """
+            FROM registry.local/macos-base:latest AS prepare
+            RUN sw_vers
+
+            FROM registry.local/macos-build:latest AS build
+            ENV STAGE=build
+
+            FROM registry.local/macos-final:latest AS final
+            CMD ["/bin/zsh"]
+            """.utf8
+        )
+
+        let plan = try MacOSBuildEngine.Planner(
+            dockerfile: dockerfile,
+            buildArgs: [:],
+            target: "final"
+        ).makePlan()
+
+        #expect(plan.executionStages.map(\.index) == [0, 1, 2])
+        #expect(plan.executionStages.compactMap(\.name) == ["prepare", "build", "final"])
+    }
+
+    @Test
+    func plannerExecutionStagesStopAtSelectedTarget() throws {
+        let dockerfile = Data(
+            """
+            FROM registry.local/macos-base:latest AS prepare
+            RUN sw_vers
+
+            FROM registry.local/macos-build:latest AS build
+            ENV STAGE=build
+
+            FROM registry.local/macos-final:latest AS final
+            CMD ["/bin/zsh"]
+            """.utf8
+        )
+
+        let plan = try MacOSBuildEngine.Planner(
+            dockerfile: dockerfile,
+            buildArgs: [:],
+            target: "build"
+        ).makePlan()
+
+        #expect(plan.targetStage.name == "build")
+        #expect(plan.executionStages.map(\.index) == [0, 1])
+        #expect(plan.executionStages.compactMap(\.name) == ["prepare", "build"])
+    }
+
+    @Test
     func plannerRejectsCopyFromInPhaseOne() throws {
         let dockerfile = Data(
             """

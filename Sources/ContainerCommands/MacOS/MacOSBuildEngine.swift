@@ -59,6 +59,13 @@ struct MacOSBuildEngine {
     struct Plan {
         let stages: [Stage]
         let targetStage: Stage
+
+        var executionStages: [Stage] {
+            guard let targetPosition = stages.firstIndex(where: { $0.index == targetStage.index }) else {
+                return [targetStage]
+            }
+            return Array(stages.prefix(through: targetPosition))
+        }
     }
 
     struct Stage {
@@ -230,140 +237,73 @@ struct MacOSBuildEngine {
         let contextProvider = try BuildContextProvider(contextRoot: input.contextDirectory)
         let targetStage = plan.targetStage
 
-        let baseImage = try await resolveBaseImage(reference: targetStage.baseImage, pull: input.pull)
-        let baseConfig = try await baseImage.config(for: buildPlatform)
-        let bundleURL = input.appRoot
-            .appendingPathComponent("containers")
-            .appendingPathComponent(stageContainerID(buildID: input.buildID, stageIndex: targetStage.index))
+        for stage in plan.executionStages {
+            let baseImage = try await resolveBaseImage(reference: stage.baseImage, pull: input.pull)
+            let baseConfig = try await baseImage.config(for: buildPlatform)
+            let bundleURL = input.appRoot
+                .appendingPathComponent("containers")
+                .appendingPathComponent(stageContainerID(buildID: input.buildID, stageIndex: stage.index))
+            let runtime = try await StageRuntime.start(
+                appRoot: input.appRoot,
+                buildID: input.buildID,
+                baseImage: baseImage,
+                stageIndex: stage.index,
+                cpus: input.cpus,
+                memory: input.memory
+            )
 
-        let runtime = try await StageRuntime.start(
-            appRoot: input.appRoot,
-            buildID: input.buildID,
-            baseImage: baseImage,
-            stageIndex: targetStage.index,
-            cpus: input.cpus,
-            memory: input.memory
-        )
+            do {
+                let transport = FileTransport(
+                    sandboxClient: runtime.sandboxClient,
+                    contextProvider: contextProvider,
+                    pathInspector: { path in
+                        try await runtime.inspectPath(path, log: input.log)
+                    }
+                )
+                let state = try await execute(
+                    stage: stage,
+                    baseConfig: baseConfig,
+                    runtime: runtime,
+                    transport: transport,
+                    initialBuildArguments: cliBuildArgs,
+                    quiet: input.quiet,
+                    log: input.log
+                )
+                try await flushGuestFileSystem(runtime: runtime, log: input.log)
+                let runtimeStopStartedAt = Date()
+                try await runtime.stop()
+                MacOSExportProfiler.log(
+                    "runtime.stop.stage[\(stage.index)]: \(MacOSExportProfiler.format(Date().timeIntervalSince(runtimeStopStartedAt)))"
+                )
 
-        do {
-            let transport = FileTransport(
-                sandboxClient: runtime.sandboxClient,
-                contextProvider: contextProvider,
-                pathInspector: { path in
-                    try await runtime.inspectPath(path, log: input.log)
+                guard stage.index == targetStage.index else {
+                    await runtime.delete()
+                    continue
                 }
-            )
-            var state = StageState(baseConfig: baseConfig, initialBuildArguments: cliBuildArgs)
 
-            if !input.quiet {
-                writeStderrLine("Building macOS stage \(targetStage.name ?? "#\(targetStage.index)")")
+                let parentDiskSource = try await baseImage.macOSChunkedDiskSource(for: buildPlatform)
+                let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
+                let packageStartedAt = Date()
+                try MacOSImagePackager.package(
+                    imageDirectory: bundleURL,
+                    outputTar: archiveURL,
+                    reference: input.tags.first,
+                    imageConfig: state.finalImage(labelOverrides: cliLabels),
+                    parentDiskSource: parentDiskSource
+                )
+                MacOSExportProfiler.log(
+                    "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
+                )
+
+                await runtime.delete()
+                return .init(archiveURL: archiveURL)
+            } catch {
+                await runtime.cleanup()
+                throw error
             }
-
-            for instruction in targetStage.instructions {
-                switch instruction {
-                case .arg(let argument):
-                    let value = cliBuildArgs[argument.name] ?? argument.defaultValue ?? ""
-                    state.buildArguments[argument.name] = value
-
-                case .env(let pairs):
-                    var variables = state.variables
-                    for pair in pairs {
-                        let expanded = try VariableExpander.expand(pair.value, variables: variables)
-                        state.environment[pair.key] = expanded
-                        variables[pair.key] = expanded
-                    }
-
-                case .label(let pairs):
-                    var variables = state.variables
-                    for pair in pairs {
-                        let expanded = try VariableExpander.expand(pair.value, variables: variables)
-                        state.labels[pair.key] = expanded
-                        variables[pair.key] = expanded
-                    }
-
-                case .workdir(let path):
-                    let expanded = try VariableExpander.expand(path, variables: state.variables)
-                    let resolved = state.resolvedPath(for: expanded)
-                    try await transport.createDirectory(at: resolved)
-                    state.workingDirectory = resolved
-
-                case .copy(let fileInstruction):
-                    let expandedSources = try fileInstruction.sources.map {
-                        try VariableExpander.expand($0, variables: state.variables)
-                    }
-                    let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
-                    try await transport.copy(
-                        sources: expandedSources,
-                        destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
-                        kind: .copy
-                    )
-
-                case .add(let fileInstruction):
-                    let expandedSources = try fileInstruction.sources.map {
-                        try VariableExpander.expand($0, variables: state.variables)
-                    }
-                    let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
-                    try await transport.copy(
-                        sources: expandedSources,
-                        destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
-                        kind: .add
-                    )
-
-                case .run(let command):
-                    if !input.quiet {
-                        writeStderrLine(description(for: command))
-                    }
-                    try await runtime.run(
-                        command: command,
-                        environment: state.environment,
-                        workingDirectory: state.workingDirectory,
-                        quiet: input.quiet,
-                        log: input.log
-                    )
-
-                case .cmd(let command):
-                    state.cmd = commandToOCIArguments(command)
-
-                case .entrypoint(let command):
-                    state.entrypoint = commandToOCIArguments(command)
-                }
-            }
-
-            // Flush guest filesystem buffers before stopping the VM so recent
-            // COPY/ADD/WORKDIR changes are durably reflected in the packaged disk.
-            try await runtime.run(
-                command: .exec(["/bin/sync"]),
-                environment: [:],
-                workingDirectory: "/",
-                quiet: true,
-                log: input.log
-            )
-            let runtimeStopStartedAt = Date()
-            try await runtime.stop()
-            MacOSExportProfiler.log(
-                "runtime.stop: \(MacOSExportProfiler.format(Date().timeIntervalSince(runtimeStopStartedAt)))"
-            )
-
-            let parentDiskSource = try await baseImage.macOSChunkedDiskSource(for: buildPlatform)
-            let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
-            let packageStartedAt = Date()
-            try MacOSImagePackager.package(
-                imageDirectory: bundleURL,
-                outputTar: archiveURL,
-                reference: input.tags.first,
-                imageConfig: state.finalImage(labelOverrides: cliLabels),
-                parentDiskSource: parentDiskSource
-            )
-            MacOSExportProfiler.log(
-                "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
-            )
-
-            await runtime.delete()
-            return .init(archiveURL: archiveURL)
-        } catch {
-            await runtime.cleanup()
-            throw error
         }
+
+        throw ContainerizationError(.internalError, message: "missing target stage execution result")
     }
 
     private static func resolveBaseImage(reference: String, pull: Bool) async throws -> ClientImage {
@@ -416,6 +356,106 @@ struct MacOSBuildEngine {
         case .shell(let value):
             return "RUN \(value)"
         }
+    }
+
+    private static func execute(
+        stage: Stage,
+        baseConfig: ContainerizationOCI.Image,
+        runtime: StageRuntime,
+        transport: FileTransport,
+        initialBuildArguments: [String: String],
+        quiet: Bool,
+        log: Logger
+    ) async throws -> StageState {
+        var state = StageState(baseConfig: baseConfig, initialBuildArguments: initialBuildArguments)
+
+        if !quiet {
+            writeStderrLine("Building macOS stage \(stage.name ?? "#\(stage.index)")")
+        }
+
+        for instruction in stage.instructions {
+            switch instruction {
+            case .arg(let argument):
+                let value = initialBuildArguments[argument.name] ?? argument.defaultValue ?? ""
+                state.buildArguments[argument.name] = value
+
+            case .env(let pairs):
+                var variables = state.variables
+                for pair in pairs {
+                    let expanded = try VariableExpander.expand(pair.value, variables: variables)
+                    state.environment[pair.key] = expanded
+                    variables[pair.key] = expanded
+                }
+
+            case .label(let pairs):
+                var variables = state.variables
+                for pair in pairs {
+                    let expanded = try VariableExpander.expand(pair.value, variables: variables)
+                    state.labels[pair.key] = expanded
+                    variables[pair.key] = expanded
+                }
+
+            case .workdir(let path):
+                let expanded = try VariableExpander.expand(path, variables: state.variables)
+                let resolved = state.resolvedPath(for: expanded)
+                try await transport.createDirectory(at: resolved)
+                state.workingDirectory = resolved
+
+            case .copy(let fileInstruction):
+                let expandedSources = try fileInstruction.sources.map {
+                    try VariableExpander.expand($0, variables: state.variables)
+                }
+                let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
+                try await transport.copy(
+                    sources: expandedSources,
+                    destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
+                    kind: .copy
+                )
+
+            case .add(let fileInstruction):
+                let expandedSources = try fileInstruction.sources.map {
+                    try VariableExpander.expand($0, variables: state.variables)
+                }
+                let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
+                try await transport.copy(
+                    sources: expandedSources,
+                    destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
+                    kind: .add
+                )
+
+            case .run(let command):
+                if !quiet {
+                    writeStderrLine(description(for: command))
+                }
+                try await runtime.run(
+                    command: command,
+                    environment: state.environment,
+                    workingDirectory: state.workingDirectory,
+                    quiet: quiet,
+                    log: log
+                )
+
+            case .cmd(let command):
+                state.cmd = commandToOCIArguments(command)
+
+            case .entrypoint(let command):
+                state.entrypoint = commandToOCIArguments(command)
+            }
+        }
+
+        return state
+    }
+
+    private static func flushGuestFileSystem(runtime: StageRuntime, log: Logger) async throws {
+        // Flush guest filesystem buffers before stopping the VM so recent
+        // COPY/ADD/WORKDIR changes are durably reflected in the packaged disk.
+        try await runtime.run(
+            command: .exec(["/bin/sync"]),
+            environment: [:],
+            workingDirectory: "/",
+            quiet: true,
+            log: log
+        )
     }
 }
 

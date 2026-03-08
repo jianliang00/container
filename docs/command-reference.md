@@ -462,7 +462,7 @@ container stats --format json --no-stream web
 
 ### `container prune`
 
-Removes stopped containers to reclaim disk space. The command outputs the amount of space freed after deletion.
+Removes stopped containers. The command outputs the total removed container bundle size after deletion. On APFS, especially with clone-backed macOS guest data, that value can be higher than the immediate increase in free space reported by `df`.
 
 **Usage**
 

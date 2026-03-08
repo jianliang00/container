@@ -29,7 +29,10 @@ class TestCLIPruneCommand: CLITest {
             throw CLIError.executionFailed("container prune failed: \(error)")
         }
 
-        #expect(output.contains("Reclaimed Zero KB in disk space"), "should show no containers message")
+        #expect(
+            output.contains("Removed Zero KB of container bundle data"),
+            "should show no containers message"
+        )
     }
 
     @Test func testContainerPruneStoppedContainers() throws {
@@ -79,7 +82,14 @@ class TestCLIPruneCommand: CLITest {
         }
 
         #expect(output.contains(pc0Id) && output.contains(pc1Id), "should show the stopped containers id")
-        #expect(!output.contains("Reclaimed Zero KB in disk space"), "reclaimed spaces should not Zero KB")
+        #expect(
+            output.contains("container bundle data"),
+            "should describe removed container bundle data instead of reclaimed disk space"
+        )
+        #expect(
+            !output.contains("Removed Zero KB of container bundle data"),
+            "removed bundle data should not be Zero KB"
+        )
 
         let checkStatus = try getContainerStatus(npcName)
         #expect(checkStatus == "running", "not pruned container should still be running")

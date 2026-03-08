@@ -28,7 +28,7 @@ import TerminalProgress
 // MARK: ClientImage structure
 
 public struct ClientImage: Sendable {
-    private let contentStore: ContentStore = RemoteContentStoreClient()
+    private let contentStore: ContentStore
     public let description: ImageDescription
 
     public var digest: String { description.digest }
@@ -36,7 +36,12 @@ public struct ClientImage: Sendable {
     public var reference: String { description.reference }
 
     public init(description: ImageDescription) {
+        self.init(description: description, contentStore: RemoteContentStoreClient())
+    }
+
+    package init(description: ImageDescription, contentStore: ContentStore) {
         self.description = description
+        self.contentStore = contentStore
     }
 
     /// Returns the underlying OCI index for the image.
@@ -482,8 +487,28 @@ extension ClientImage {
         }
 
         try await client.send(request)
+        try await self.prewarmMacOSChunkedDisks(platform: platform, progressUpdate: progressUpdate)
 
         await progressUpdateClient?.finish()
+    }
+
+    package func prewarmMacOSChunkedDisks(
+        platform: Platform?,
+        progressUpdate: ProgressUpdateHandler? = nil
+    ) async throws {
+        let platforms = try await self.macOSPlatformsToPrewarm(requestedPlatform: platform)
+        guard !platforms.isEmpty else {
+            return
+        }
+
+        for platform in platforms {
+            if let progressUpdate {
+                await progressUpdate([
+                    .setSubDescription("for platform \(platform.description) (rebuilding macOS disk cache)")
+                ])
+            }
+            _ = try await self.macOSChunkedDiskSource(for: platform)
+        }
     }
 
     public func deleteSnapshot(platform: Platform?) async throws {
@@ -568,6 +593,14 @@ extension ClientImage {
             osFeatures: config.osFeatures,
             variant: config.variant
         )
+    }
+
+    private func macOSPlatformsToPrewarm(requestedPlatform: Platform?) async throws -> [Platform] {
+        if let requestedPlatform {
+            return requestedPlatform.os == "darwin" ? [requestedPlatform] : []
+        }
+
+        return try await self.availablePlatformsForRuntimeAutoDetect().filter { $0.os == "darwin" }
     }
 }
 

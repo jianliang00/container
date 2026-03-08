@@ -19,7 +19,7 @@ import CryptoKit
 import Foundation
 
 /// A data extent (non-hole region) within a chunk.
-struct SparseExtent {
+struct SparseExtent: Equatable {
     /// Offset relative to the chunk start.
     let offset: Int64
     /// Length of the data region.
@@ -36,6 +36,8 @@ struct ChunkResult {
     let blobSize: Int64
     let rawDigest: String
     let rawLength: Int64
+    let reusedFromParent: Bool
+    let reusedWithoutRawDigest: Bool
 }
 
 enum MacOSDiskChunker {
@@ -49,6 +51,7 @@ enum MacOSDiskChunker {
         diskImage: URL,
         blobsDir: URL,
         chunkSize: Int64 = DiskLayout.defaultChunkSize,
+        parentDiskSource: MacOSChunkedDiskSource? = nil,
         maxConcurrentChunks: Int? = nil
     ) throws -> [ChunkResult] {
         let fileSize = try Self.logicalFileSize(diskImage)
@@ -58,6 +61,12 @@ enum MacOSDiskChunker {
         }
 
         let parallelism = recommendedParallelism(totalChunks: chunkCount, requested: maxConcurrentChunks)
+        let parentReuseContext = ParentReuseContext(
+            source: parentDiskSource,
+            logicalSize: fileSize,
+            chunkSize: chunkSize,
+            chunkCount: chunkCount
+        )
         let state = LockedValue(
             ChunkWorkState(
                 nextIndex: 0,
@@ -83,7 +92,8 @@ enum MacOSDiskChunker {
                         index: chunkIndex,
                         chunkOffset: offset,
                         chunkLength: length,
-                        blobsDir: blobsDir
+                        blobsDir: blobsDir,
+                        parentReuseContext: parentReuseContext
                     )
                     state.withLock { $0.results[chunkIndex] = result }
                 } catch {
@@ -126,7 +136,8 @@ enum MacOSDiskChunker {
         index: Int,
         chunkOffset: Int64,
         chunkLength: Int64,
-        blobsDir: URL
+        blobsDir: URL,
+        parentReuseContext: ParentReuseContext?
     ) throws -> ChunkResult {
         let fd = open(diskImage.path, O_RDONLY)
         guard fd >= 0 else {
@@ -134,13 +145,36 @@ enum MacOSDiskChunker {
         }
         defer { close(fd) }
 
-        // 1. Detect sparse extents within this chunk
-        let extents = detectSparseExtents(fd: fd, regionOffset: chunkOffset, regionLength: chunkLength)
+        if let reusedChunk = try reuseChunkWithoutReadingRawBytes(
+            diskImage: diskImage,
+            fd: fd,
+            index: index,
+            chunkOffset: chunkOffset,
+            chunkLength: chunkLength,
+            blobsDir: blobsDir,
+            parentReuseContext: parentReuseContext
+        ) {
+            return reusedChunk
+        }
 
-        // 2. Compute raw digest (SHA256 of full chunk bytes including holes as zeros)
+        // 1. Compute raw digest (SHA256 of full chunk bytes including holes as zeros).
         let rawDigest = try computeRawDigest(fd: fd, offset: chunkOffset, length: chunkLength)
 
-        // 3. Generate PAX sparse tar
+        if let reusedChunk = try reuseChunkIfPossible(
+            index: index,
+            chunkOffset: chunkOffset,
+            chunkLength: chunkLength,
+            rawDigest: rawDigest,
+            blobsDir: blobsDir,
+            parentReuseContext: parentReuseContext
+        ) {
+            return reusedChunk
+        }
+
+        // 2. Detect sparse extents within this chunk.
+        let extents = detectSparseExtents(fd: fd, regionOffset: chunkOffset, regionLength: chunkLength)
+
+        // 3. Generate PAX sparse tar.
         let tempTar = FileManager.default.temporaryDirectory
             .appendingPathComponent("chunk-\(index)-\(UUID().uuidString).tar")
         defer { try? FileManager.default.removeItem(at: tempTar) }
@@ -179,8 +213,228 @@ enum MacOSDiskChunker {
             blobDigest: "sha256:\(blobDigest)",
             blobSize: blobSize,
             rawDigest: "sha256:\(rawDigest)",
-            rawLength: chunkLength
+            rawLength: chunkLength,
+            reusedFromParent: false,
+            reusedWithoutRawDigest: false
         )
+    }
+
+    private static func reuseChunkWithoutReadingRawBytes(
+        diskImage: URL,
+        fd: Int32,
+        index: Int,
+        chunkOffset: Int64,
+        chunkLength: Int64,
+        blobsDir: URL,
+        parentReuseContext: ParentReuseContext?
+    ) throws -> ChunkResult? {
+        guard let parentChunk = parentReuseContext?.candidateChunk(
+            index: index,
+            chunkOffset: chunkOffset,
+            chunkLength: chunkLength
+        ), let parentDiskImagePath = parentReuseContext?.parentDiskImagePath
+        else {
+            return nil
+        }
+
+        switch compareChunkWithParentBySharedExtents(
+        currentFD: fd,
+        parentDiskImage: parentDiskImagePath,
+        chunkOffset: chunkOffset,
+        chunkLength: chunkLength
+        ) {
+        case .match:
+            let blobURL = try materializeExistingBlob(
+                digest: parentChunk.layerDigest,
+                source: parentChunk.blobURL,
+                blobsDir: blobsDir
+            )
+            return ChunkResult(
+                index: index,
+                chunkOffset: chunkOffset,
+                chunkLength: chunkLength,
+                blobURL: blobURL,
+                blobDigest: parentChunk.layerDigest,
+                blobSize: parentChunk.layerSize,
+                rawDigest: parentChunk.rawDigest,
+                rawLength: parentChunk.rawLength,
+                reusedFromParent: true,
+                reusedWithoutRawDigest: true
+            )
+
+        case .mismatch, .unavailable:
+            return nil
+        }
+    }
+
+    private static func reuseChunkIfPossible(
+        index: Int,
+        chunkOffset: Int64,
+        chunkLength: Int64,
+        rawDigest: String,
+        blobsDir: URL,
+        parentReuseContext: ParentReuseContext?
+    ) throws -> ChunkResult? {
+        guard let parentChunk = parentReuseContext?.candidateChunk(
+            index: index,
+            chunkOffset: chunkOffset,
+            chunkLength: chunkLength
+        ), parentChunk.rawDigest == "sha256:\(rawDigest)" else {
+            return nil
+        }
+
+        let blobURL = try materializeExistingBlob(
+            digest: parentChunk.layerDigest,
+            source: parentChunk.blobURL,
+            blobsDir: blobsDir
+        )
+        return ChunkResult(
+            index: index,
+            chunkOffset: chunkOffset,
+            chunkLength: chunkLength,
+            blobURL: blobURL,
+            blobDigest: parentChunk.layerDigest,
+            blobSize: parentChunk.layerSize,
+            rawDigest: "sha256:\(rawDigest)",
+            rawLength: chunkLength,
+            reusedFromParent: true,
+            reusedWithoutRawDigest: false
+        )
+    }
+
+    private static func compareChunkWithParentBySharedExtents(
+        currentFD: Int32,
+        parentDiskImage: URL,
+        chunkOffset: Int64,
+        chunkLength: Int64
+    ) -> ChunkSharedExtentComparison {
+        let parentFD = open(parentDiskImage.path, O_RDONLY)
+        guard parentFD >= 0 else {
+            return .unavailable
+        }
+        defer { close(parentFD) }
+
+        var currentStat = stat()
+        var parentStat = stat()
+        guard fstat(currentFD, &currentStat) == 0, fstat(parentFD, &parentStat) == 0 else {
+            return .unavailable
+        }
+        guard currentStat.st_dev == parentStat.st_dev else {
+            return .unavailable
+        }
+
+        let currentExtents = detectSparseExtents(fd: currentFD, regionOffset: chunkOffset, regionLength: chunkLength)
+        let parentExtents = detectSparseExtents(fd: parentFD, regionOffset: chunkOffset, regionLength: chunkLength)
+        guard currentExtents == parentExtents else {
+            return .mismatch
+        }
+
+        for extent in currentExtents {
+            let comparison = comparePhysicalMappings(
+                currentFD: currentFD,
+                parentFD: parentFD,
+                fileOffset: chunkOffset + extent.offset,
+                length: extent.length
+            )
+            guard comparison == .match else {
+                return comparison
+            }
+        }
+        return .match
+    }
+
+    private static func comparePhysicalMappings(
+        currentFD: Int32,
+        parentFD: Int32,
+        fileOffset: Int64,
+        length: Int64
+    ) -> ChunkSharedExtentComparison {
+        var remaining = length
+        var offset = fileOffset
+
+        while remaining > 0 {
+            guard let currentExtent = physicalExtent(fd: currentFD, fileOffset: offset, maxLength: remaining),
+                let parentExtent = physicalExtent(fd: parentFD, fileOffset: offset, maxLength: remaining)
+            else {
+                return .unavailable
+            }
+            guard currentExtent.deviceOffset == parentExtent.deviceOffset else {
+                return .mismatch
+            }
+
+            let step = min(remaining, min(currentExtent.contiguousBytes, parentExtent.contiguousBytes))
+            guard step > 0 else {
+                return .unavailable
+            }
+            remaining -= step
+            offset += step
+        }
+
+        return .match
+    }
+
+    private static func physicalExtent(
+        fd: Int32,
+        fileOffset: Int64,
+        maxLength: Int64
+    ) -> PhysicalExtent? {
+        var mapping = log2phys(
+            l2p_flags: 0,
+            l2p_contigbytes: off_t(maxLength),
+            l2p_devoffset: off_t(fileOffset)
+        )
+        let result = withUnsafeMutablePointer(to: &mapping) { pointer in
+            fcntl(fd, F_LOG2PHYS_EXT, pointer)
+        }
+        guard result == 0 else {
+            return nil
+        }
+
+        let contiguousBytes = Int64(mapping.l2p_contigbytes)
+        guard contiguousBytes > 0 else {
+            return nil
+        }
+        return PhysicalExtent(
+            deviceOffset: Int64(mapping.l2p_devoffset),
+            contiguousBytes: contiguousBytes
+        )
+    }
+
+    private static func materializeExistingBlob(
+        digest: String,
+        source: URL,
+        blobsDir: URL
+    ) throws -> URL {
+        let destination = blobsDir.appendingPathComponent(blobFileName(for: digest))
+        if FileManager.default.fileExists(atPath: destination.path) {
+            return destination
+        }
+
+        let temporaryDestination = blobsDir.appendingPathComponent("\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
+        do {
+            _ = try FilesystemClone.cloneOrCopyItem(at: source, to: temporaryDestination)
+            do {
+                try FileManager.default.moveItem(at: temporaryDestination, to: destination)
+            } catch let error as NSError {
+                guard error.code == NSFileWriteFileExistsError else {
+                    throw error
+                }
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryDestination)
+            throw error
+        }
+
+        try? FileManager.default.removeItem(at: temporaryDestination)
+        return destination
+    }
+
+    private static func blobFileName(for digest: String) -> String {
+        let components = digest.split(separator: ":", maxSplits: 1)
+        if components.count == 2 {
+            return String(components[1])
+        }
+        return digest
     }
 
     // MARK: - Sparse Detection
@@ -501,6 +755,80 @@ private struct ChunkWorkState {
     var nextIndex: Int
     var firstError: (any Error)?
     var results: [ChunkResult?]
+}
+
+private struct ParentReuseContext: Sendable {
+    private let chunksByIndex: [Int: DiskLayout.ChunkInfo]
+    private let chunkBlobPaths: [String: URL]
+    let parentDiskImagePath: URL?
+
+    init?(
+        source: MacOSChunkedDiskSource?,
+        logicalSize: Int64,
+        chunkSize: Int64,
+        chunkCount: Int
+    ) {
+        guard let source else {
+            return nil
+        }
+        guard source.layout.logicalSize == logicalSize,
+            source.layout.chunkSize == chunkSize,
+            source.layout.chunkCount == chunkCount,
+            source.layout.chunks.count == chunkCount
+        else {
+            return nil
+        }
+
+        self.chunksByIndex = Dictionary(
+            source.layout.chunks.map { ($0.index, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        self.chunkBlobPaths = source.chunkBlobPaths
+        self.parentDiskImagePath = source.diskImagePath
+    }
+
+    func candidateChunk(
+        index: Int,
+        chunkOffset: Int64,
+        chunkLength: Int64
+    ) -> ReusableParentChunk? {
+        guard let parentChunk = chunksByIndex[index],
+            parentChunk.index == index,
+            parentChunk.offset == chunkOffset,
+            parentChunk.length == chunkLength,
+            parentChunk.rawLength == chunkLength,
+            let blobURL = chunkBlobPaths[parentChunk.layerDigest]
+        else {
+            return nil
+        }
+
+        return ReusableParentChunk(
+            layerDigest: parentChunk.layerDigest,
+            layerSize: parentChunk.layerSize,
+            rawDigest: parentChunk.rawDigest,
+            rawLength: parentChunk.rawLength,
+            blobURL: blobURL
+        )
+    }
+}
+
+private struct ReusableParentChunk: Sendable {
+    let layerDigest: String
+    let layerSize: Int64
+    let rawDigest: String
+    let rawLength: Int64
+    let blobURL: URL
+}
+
+private struct PhysicalExtent: Sendable {
+    let deviceOffset: Int64
+    let contiguousBytes: Int64
+}
+
+private enum ChunkSharedExtentComparison {
+    case match
+    case mismatch
+    case unavailable
 }
 
 private final class LockedValue<T>: @unchecked Sendable {

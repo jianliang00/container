@@ -49,21 +49,34 @@ enum MacOSImagePackager {
         imageDirectory: URL,
         outputTar: URL,
         reference: String?,
-        imageConfig: ContainerizationOCI.Image? = nil
+        imageConfig: ContainerizationOCI.Image? = nil,
+        parentDiskSource: MacOSChunkedDiskSource? = nil
     ) throws {
+        let packageStartedAt = Date()
         let image = try validateImageDirectory(imageDirectory)
-        let layoutDir = try createLayoutDirectory(from: image, reference: reference, imageConfig: imageConfig)
+        let layout = try createLayoutDirectory(
+            from: image,
+            reference: reference,
+            imageConfig: imageConfig,
+            parentDiskSource: parentDiskSource
+        )
         defer {
-            try? FileManager.default.removeItem(at: layoutDir)
+            try? FileManager.default.removeItem(at: layout.layoutDirectory)
         }
-        try createTar(fromLayout: layoutDir, outputTar: outputTar)
+        try createTar(fromLayout: layout.layoutDirectory, outputTar: outputTar)
+        MacOSExportProfiler.log(
+            "package.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt))) " +
+                "(chunks=\(layout.chunkResults.count), reused=\(layout.chunkResults.filter(\.reusedFromParent).count), rebuilt=\(layout.chunkResults.filter { !$0.reusedFromParent }.count))"
+        )
     }
 
     private static func createLayoutDirectory(
         from image: ImagePaths,
         reference: String?,
-        imageConfig: ContainerizationOCI.Image?
-    ) throws -> URL {
+        imageConfig: ContainerizationOCI.Image?,
+        parentDiskSource: MacOSChunkedDiskSource?
+    ) throws -> LayoutDirectoryResult {
+        let layoutStartedAt = Date()
         let fm = FileManager.default
         let layoutDir = fm.temporaryDirectory.appendingPathComponent("macos-oci-layout-\(UUID().uuidString)")
         let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
@@ -93,9 +106,18 @@ enum MacOSImagePackager {
 
         // v1 chunked disk format
         let logicalSize = try MacOSDiskChunker.logicalFileSize(image.diskImage)
+        let chunkingStartedAt = Date()
         let chunkResults = try MacOSDiskChunker.chunkDiskImage(
             diskImage: image.diskImage,
-            blobsDir: blobsDir
+            blobsDir: blobsDir,
+            parentDiskSource: parentDiskSource
+        )
+        let reusedChunkCount = chunkResults.filter(\.reusedFromParent).count
+        let fastReusedChunkCount = chunkResults.filter(\.reusedWithoutRawDigest).count
+        let rebuiltChunkCount = chunkResults.count - reusedChunkCount
+        MacOSExportProfiler.log(
+            "chunkDiskImage: \(MacOSExportProfiler.format(Date().timeIntervalSince(chunkingStartedAt))) " +
+                "(chunks=\(chunkResults.count), reused=\(reusedChunkCount), fastReused=\(fastReusedChunkCount), rebuilt=\(rebuiltChunkCount), uniqueBlobs=\(Set(chunkResults.map(\.blobDigest)).count))"
         )
 
         // Build DiskLayout
@@ -171,10 +193,14 @@ enum MacOSImagePackager {
         try Data("{\"imageLayoutVersion\":\"1.0.0\"}\n".utf8).write(to: layoutDir.appendingPathComponent("oci-layout"))
         try indexData.write(to: layoutDir.appendingPathComponent("index.json"))
 
-        return layoutDir
+        MacOSExportProfiler.log(
+            "createLayoutDirectory.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(layoutStartedAt)))"
+        )
+        return LayoutDirectoryResult(layoutDirectory: layoutDir, chunkResults: chunkResults)
     }
 
     private static func createTar(fromLayout layoutDir: URL, outputTar: URL) throws {
+        let totalStartedAt = Date()
         let fm = FileManager.default
         try fm.createDirectory(at: outputTar.deletingLastPathComponent(), withIntermediateDirectories: true)
         if fm.fileExists(atPath: outputTar.path) {
@@ -188,6 +214,7 @@ enum MacOSImagePackager {
 
         // First write the small metadata files (oci-layout, index.json)
         let smallFiles = ["oci-layout", "index.json"]
+        let metadataTarStartedAt = Date()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
         process.arguments = ["-cf", outputTar.path, "-C", layoutDir.path] + smallFiles
@@ -199,10 +226,14 @@ enum MacOSImagePackager {
             let err = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "unknown tar error"
             throw NSError(domain: "container.macos.package", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: err])
         }
+        MacOSExportProfiler.log(
+            "createTar.metadata: \(MacOSExportProfiler.format(Date().timeIntervalSince(metadataTarStartedAt)))"
+        )
 
         // Append blob files one by one, deleting each after appending to free space
         let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
         let blobFiles = try fm.contentsOfDirectory(atPath: blobsDir.path)
+        let blobAppendStartedAt = Date()
         for blob in blobFiles {
             let appendProcess = Process()
             appendProcess.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
@@ -218,6 +249,13 @@ enum MacOSImagePackager {
             // Delete the blob to free disk space immediately
             try? fm.removeItem(at: blobsDir.appendingPathComponent(blob))
         }
+        MacOSExportProfiler.log(
+            "createTar.appendBlobs: \(MacOSExportProfiler.format(Date().timeIntervalSince(blobAppendStartedAt))) " +
+                "(blobFiles=\(blobFiles.count))"
+        )
+        MacOSExportProfiler.log(
+            "createTar.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(totalStartedAt)))"
+        )
     }
 
     private static func addFileBlob(source: URL, blobsDir: URL, mediaType: String) throws -> OCIDescriptor {
@@ -261,6 +299,11 @@ enum MacOSImagePackager {
 private struct OCIPlatform: Codable {
     let architecture: String
     let os: String
+}
+
+private struct LayoutDirectoryResult {
+    let layoutDirectory: URL
+    let chunkResults: [ChunkResult]
 }
 
 private struct OCIDescriptor: Codable {

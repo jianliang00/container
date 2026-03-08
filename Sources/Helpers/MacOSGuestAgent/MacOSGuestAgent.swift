@@ -110,7 +110,7 @@ private final class VsockListener {
     }
 }
 
-private final class AgentConnection: @unchecked Sendable {
+final class AgentConnection: @unchecked Sendable {
     private let fd: Int32
     private let lock = NSLock()
     private let socketHandle: FileHandle
@@ -147,6 +147,7 @@ private final class AgentConnection: @unchecked Sendable {
         }
         session?.cleanup()
         for transaction in fileTransactions.values {
+            logFileTransaction("aborting outstanding transaction", request: transaction.request, extra: ["reason": "connection_closed"])
             transaction.abort()
         }
         fileTransactions.removeAll()
@@ -304,6 +305,7 @@ private final class AgentConnection: @unchecked Sendable {
             txID: txID,
             op: op,
             path: path,
+            digest: frame.digest,
             mode: frame.mode,
             uid: frame.uid,
             gid: frame.gid,
@@ -313,12 +315,28 @@ private final class AgentConnection: @unchecked Sendable {
             inlineData: frame.data,
             autoCommit: frame.autoCommit ?? false
         )
-        let transaction = try GuestAgentFileTransferTransaction(request: request)
+        logFileTransaction(
+            "begin",
+            request: request,
+            extra: [
+                "auto_commit": "\(request.autoCommit)",
+                "inline_bytes": "\(request.inlineData?.count ?? 0)",
+                "digest": request.digest ?? "-",
+            ]
+        )
 
-        if request.autoCommit {
-            try transaction.complete(action: .commit, digest: nil)
-        } else {
-            fileTransactions[txID] = transaction
+        do {
+            let transaction = try GuestAgentFileTransferTransaction(request: request)
+
+            if request.autoCommit {
+                try transaction.complete(action: .commit, digest: request.digest)
+                logFileTransaction("auto-commit completed", request: request)
+            } else {
+                fileTransactions[txID] = transaction
+                logFileTransaction("transaction opened", request: request)
+            }
+        } catch {
+            throw filesystemError(txID: txID, op: op, path: path, stage: "begin", error: error)
         }
 
         try send(frame: .ack(id: txID))
@@ -332,7 +350,19 @@ private final class AgentConnection: @unchecked Sendable {
             throw POSIXError(.ENOENT)
         }
 
-        try transaction.append(data: data, offset: offset)
+        logFileTransaction(
+            "chunk",
+            request: transaction.request,
+            extra: [
+                "offset": "\(offset)",
+                "bytes": "\(data.count)",
+            ]
+        )
+        do {
+            try transaction.append(data: data, offset: offset)
+        } catch {
+            throw filesystemError(transaction.request, stage: "chunk", error: error)
+        }
         try send(frame: .ack(id: txID))
     }
 
@@ -344,12 +374,27 @@ private final class AgentConnection: @unchecked Sendable {
             throw POSIXError(.ENOENT)
         }
 
+        let action = frame.action ?? .commit
+        logFileTransaction(
+            "end",
+            request: transaction.request,
+            extra: [
+                "action": action.rawValue,
+                "digest": frame.digest ?? "-",
+            ]
+        )
+
         do {
-            try transaction.complete(action: frame.action ?? .commit, digest: frame.digest)
+            try transaction.complete(action: action, digest: frame.digest)
+            logFileTransaction(
+                "transaction completed",
+                request: transaction.request,
+                extra: ["action": action.rawValue]
+            )
             try send(frame: .ack(id: txID))
         } catch {
             transaction.abort()
-            throw error
+            throw filesystemError(transaction.request, stage: "end(\(action.rawValue))", error: error)
         }
     }
 
@@ -429,6 +474,51 @@ private final class AgentConnection: @unchecked Sendable {
                 )
             }
         }
+    }
+
+    private func logFileTransaction(
+        _ message: String,
+        request: MacOSSidecarFSBeginRequestPayload,
+        extra: [String: String] = [:]
+    ) {
+        var segments = [
+            "connection fd=\(fd): filesystem \(message)",
+            "tx_id=\(request.txID)",
+            "op=\(request.op.rawValue)",
+            "path=\(request.path)",
+        ]
+        for key in extra.keys.sorted() {
+            segments.append("\(key)=\(extra[key] ?? "")")
+        }
+        logAgentInfo(segments.joined(separator: " "))
+    }
+
+    private func filesystemError(
+        _ request: MacOSSidecarFSBeginRequestPayload,
+        stage: String,
+        error: Error
+    ) -> NSError {
+        filesystemError(txID: request.txID, op: request.op, path: request.path, stage: stage, error: error)
+    }
+
+    private func filesystemError(
+        txID: String,
+        op: MacOSSidecarFSOperation,
+        path: String,
+        stage: String,
+        error: Error
+    ) -> NSError {
+        let nsError = error as NSError
+        let message =
+            "filesystem transaction tx_id=\(txID) op=\(op.rawValue) path=\(path) stage=\(stage) failed: \(describeError(error))"
+        return NSError(
+            domain: "container.macos.guest-agent.fs",
+            code: nsError.code,
+            userInfo: [
+                NSLocalizedDescriptionKey: message,
+                NSUnderlyingErrorKey: nsError,
+            ]
+        )
     }
 }
 
@@ -585,7 +675,7 @@ private final class ProcessSession: @unchecked Sendable {
     }
 }
 
-private struct GuestAgentFrame: Codable {
+struct GuestAgentFrame: Codable {
     enum FrameType: String, Codable {
         case exec
         case stdin

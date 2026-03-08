@@ -179,6 +179,7 @@ struct MacOSSidecarClientTests {
             #expect(begin.port == 27000)
             #expect(begin.fsBegin?.txID == "tx-1")
             #expect(begin.fsBegin?.path == "/tmp/build-context.txt")
+            #expect(begin.fsBegin?.digest == "sha256:abc")
             #expect(begin.fsBegin?.inlineData == Data("abc".utf8))
             try writeResponse(.success(requestID: begin.requestID), to: clientFD)
 
@@ -207,6 +208,7 @@ struct MacOSSidecarClientTests {
                 txID: "tx-1",
                 op: .writeFile,
                 path: "/tmp/build-context.txt",
+                digest: "sha256:abc",
                 inlineData: Data("abc".utf8)
             )
         )

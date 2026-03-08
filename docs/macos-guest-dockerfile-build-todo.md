@@ -371,23 +371,24 @@
 
 ### 4.1 fs 协议层可增强项
 
-- [ ] 给 sidecar / guest-agent 文件事务加更明确日志
+- [x] 给 sidecar / guest-agent 文件事务加更明确日志
   - `txID`
   - path
   - op
   - commit/abort
-- [ ] 明确 auto-commit 路径的 digest 语义
-  - 当前实现可用，但 host 侧策略还未定义
+- [x] 明确 auto-commit 路径的 digest 语义
+  - host 对小文件 `inlineData + autoCommit` 也发送 sha256 digest
+  - guest 在 auto-commit 路径直接校验 digest
 - [ ] 梳理错误码和 message 约定
-  - 方便未来 build 层做用户可读报错
+  - 本轮已补齐 `txID/op/path/stage` 上下文，build 层错误码映射仍待继续
 
 ### 4.2 测试覆盖补强
 
-- [ ] 增加 `mkdir` metadata 测试
-- [ ] 增加 digest mismatch 测试
-- [ ] 增加 `overwrite=false` 测试
+- [x] 增加 `mkdir` metadata 测试
+- [x] 增加 digest mismatch 测试
+- [x] 增加 `overwrite=false` 测试
 - [ ] 增加 sidecar 事务异常清理测试
-- [ ] 增加 guest connection close 时临时文件清理测试
+- [x] 增加 guest connection close 时临时文件清理测试
 
 ### 4.3 `zstd` 外部依赖收尾
 
@@ -395,13 +396,13 @@
   - 优先把 `MacOSDiskRebuilder` 的解压路径改成 builtin / `libzstd`
   - 目标：`container run --os darwin`、运行前 chunk rebuild 不依赖宿主机 shell 环境
   - 保持对现有 `disk-chunk.v1.tar+zstd` 镜像的兼容读取
-- [ ] 去掉打包/构建路径对外部 `zstd` 命令的依赖
+- [x] 去掉打包/构建路径对外部 `zstd` 命令的依赖
   - 把 `MacOSDiskChunker` 的压缩路径改成 builtin / `libzstd`
   - 目标：`container macos package`、darwin `container build` 不依赖宿主额外安装 `zstd`
-- [ ] 抽出共享 `zstd` codec/locator 层
+- [x] 抽出共享 `zstd` codec/locator 层
   - 避免压缩端和解压端各自维护一套行为与错误模型
   - 明确 override / fallback / diagnostics 约定
-- [ ] 补齐 `zstd` 兼容性与回归测试
+- [x] 补齐 `zstd` 兼容性与回归测试
   - 旧格式 chunk 可被 builtin 解压
   - builtin 压缩产物可被 builtin 解压
   - 损坏 frame / 缺失依赖路径报错可读
@@ -469,7 +470,7 @@
 
 说明：
 - 本节以“集成验收通过”为准。
-- fs 协议增强项与 `zstd` 构建侧收尾仍在继续，但不阻塞 Phase 1 主链路验收。
+- fs 协议错误码整理与 sidecar 异常清理收尾仍在继续，但不阻塞 Phase 1 主链路验收。
 
 当以下事项全部完成时，可以认为 Phase 1 真正闭环：
 

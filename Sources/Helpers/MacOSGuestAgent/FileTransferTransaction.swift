@@ -16,6 +16,9 @@ final class GuestAgentFileTransferTransaction {
         guard !normalizedPath.path.isEmpty else {
             throw POSIXError(.EINVAL)
         }
+        if request.digest != nil, request.op != .writeFile {
+            throw POSIXError(.EINVAL)
+        }
 
         self.request = request
         self.finalURL = normalizedPath

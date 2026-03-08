@@ -87,6 +87,7 @@ struct SidecarControlProtocolTests {
             txID: "tx-1",
             op: .writeFile,
             path: "/tmp/file.txt",
+            digest: "sha256:test",
             mode: 0o644,
             mtime: 1_730_000_000,
             overwrite: false,
@@ -116,6 +117,7 @@ struct SidecarControlProtocolTests {
         #expect(decodedPayload.txID == "tx-1")
         #expect(decodedPayload.op == .writeFile)
         #expect(decodedPayload.path == "/tmp/file.txt")
+        #expect(decodedPayload.digest == "sha256:test")
         #expect(decodedPayload.mode == 0o644)
         #expect(decodedPayload.mtime == 1_730_000_000)
         #expect(decodedPayload.overwrite == false)

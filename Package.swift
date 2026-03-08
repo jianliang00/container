@@ -394,6 +394,15 @@ let package = Package(
             path: "Tests/RuntimeMacOSSidecarClientTests"
         ),
         .testTarget(
+            name: "RuntimeMacOSSidecarTests",
+            dependencies: [
+                "RuntimeMacOSSidecarShared",
+                .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.macOS])),
+                .target(name: "container-runtime-macos-sidecar", condition: .when(platforms: [.macOS])),
+            ],
+            path: "Tests/RuntimeMacOSSidecarTests"
+        ),
+        .testTarget(
             name: "MacOSGuestAgentTests",
             dependencies: [
                 "RuntimeMacOSSidecarShared",

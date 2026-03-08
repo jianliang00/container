@@ -379,15 +379,17 @@
 - [x] 明确 auto-commit 路径的 digest 语义
   - host 对小文件 `inlineData + autoCommit` 也发送 sha256 digest
   - guest 在 auto-commit 路径直接校验 digest
-- [ ] 梳理错误码和 message 约定
-  - 本轮已补齐 `txID/op/path/stage` 上下文，build 层错误码映射仍待继续
+- [x] 梳理错误码和 message 约定
+  - sidecar response code 已统一回落到 `ContainerizationError` 已知类别
+  - `MacOSSidecarClient` / `SandboxClient+FileSystem` 现已保留原始错误分类，同时补上 container / transaction 上下文
 
 ### 4.2 测试覆盖补强
 
 - [x] 增加 `mkdir` metadata 测试
 - [x] 增加 digest mismatch 测试
 - [x] 增加 `overwrite=false` 测试
-- [ ] 增加 sidecar 事务异常清理测试
+- [x] 增加 sidecar 事务异常清理测试
+  - `RuntimeMacOSSidecarTests` 已覆盖 owner client disconnect 与 chunk ack 异常后的 session 清理
 - [x] 增加 guest connection close 时临时文件清理测试
 
 ### 4.3 `zstd` 外部依赖收尾

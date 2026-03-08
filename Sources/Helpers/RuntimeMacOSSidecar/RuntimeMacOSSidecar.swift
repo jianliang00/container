@@ -906,7 +906,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 if request.method == .vmConnectVsock {
                     try? MacOSSidecarSocketIO.sendNoFileDescriptorMarker(socketFD: clientFD)
                 }
-                let response = MacOSSidecarResponse.failure(requestID: request.requestID, code: "request_failed", message: error.localizedDescription)
+                let response = failureResponse(requestID: request.requestID, error: error)
                 try? writeEnvelope(.response(response), to: clientFD)
             }
         }
@@ -1074,6 +1074,43 @@ final class SidecarControlServer: @unchecked Sendable {
         logFS("closing", session: session, extra: reason.map { ["reason": $0] } ?? [:])
         _ = Darwin.shutdown(session.fd, SHUT_RDWR)
         Darwin.close(session.fd)
+    }
+
+    func _testRegisterFSSession(
+        txID: String,
+        fd: Int32,
+        ownerClientFD: Int32,
+        op: MacOSSidecarFSOperation,
+        path: String
+    ) throws {
+        try registerFSSession(
+            FSTransferSession(
+                txID: txID,
+                fd: fd,
+                ownerClientFD: ownerClientFD,
+                op: op,
+                path: path
+            )
+        )
+    }
+
+    func _testHasFSSession(txID: String) -> Bool {
+        fsLock.lock()
+        let exists = fsSessions[txID] != nil
+        fsLock.unlock()
+        return exists
+    }
+
+    func _testCloseOwnedFSSessions(clientFD: Int32) {
+        closeOwnedFSSessions(clientFD: clientFD)
+    }
+
+    func _testCloseAllFSSessions() {
+        closeAllFSSessions()
+    }
+
+    func _testSendFSChunk(_ payload: MacOSSidecarFSChunkRequestPayload) throws {
+        try sendFSChunk(payload)
     }
 
     private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: ProcessStreamSession) throws {
@@ -1396,6 +1433,31 @@ final class SidecarControlServer: @unchecked Sendable {
         }
     }
 
+    private func failureResponse(requestID: String, error: Error) -> MacOSSidecarResponse {
+        let normalized = normalizedError(error)
+        return .failure(
+            requestID: requestID,
+            code: normalized.code.description,
+            message: normalized.message,
+            details: responseErrorDetails(for: normalized)
+        )
+    }
+
+    private func normalizedError(_ error: Error) -> ContainerizationError {
+        if let containerError = error as? ContainerizationError {
+            return containerError
+        }
+        let nsError = error as NSError
+        return ContainerizationError(.internalError, message: nsError.localizedDescription, cause: error)
+    }
+
+    private func responseErrorDetails(for error: ContainerizationError) -> String? {
+        if let cause = error.cause {
+            return String(describing: cause)
+        }
+        return nil
+    }
+
     private func perform(request: MacOSSidecarRequest, clientFD: Int32) throws -> MacOSSidecarResponse {
         let service = self.service
         let requestID = request.requestID
@@ -1408,7 +1470,7 @@ final class SidecarControlServer: @unchecked Sendable {
         case .vmConnectVsock:
             guard let port = request.port else {
                 try MacOSSidecarSocketIO.sendNoFileDescriptorMarker(socketFD: clientFD)
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing port")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing port")
             }
             do {
                 let fd = try syncValue {
@@ -1419,30 +1481,28 @@ final class SidecarControlServer: @unchecked Sendable {
                 return .success(requestID: requestID, fdAttached: true)
             } catch {
                 try MacOSSidecarSocketIO.sendNoFileDescriptorMarker(socketFD: clientFD)
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .processStart:
             guard let exec = request.exec else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing exec payload")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing exec payload")
             }
             guard let processID = request.processID, !processID.isEmpty else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing processID")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
             }
             let port = request.port ?? 27000
             do {
                 try startProcessStream(port: port, processID: processID, exec: exec)
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .processStdin:
             guard let processID = request.processID else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing processID")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
             }
             guard let data = request.data else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing data")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing data")
             }
             do {
                 try sendProcessControlFrame(processID: processID) { _ in
@@ -1450,26 +1510,24 @@ final class SidecarControlServer: @unchecked Sendable {
                 }
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .processClose:
             guard let processID = request.processID else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing processID")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
             }
             do {
                 try sendProcessControlFrame(processID: processID) { _ in SidecarGuestAgentFrame.close(id: processID) }
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .processSignal:
             guard let processID = request.processID else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing processID")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
             }
             guard let signal = request.signal else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing signal")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing signal")
             }
             do {
                 try sendProcessControlFrame(processID: processID) { _ in
@@ -1491,15 +1549,14 @@ final class SidecarControlServer: @unchecked Sendable {
                 }
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .processResize:
             guard let processID = request.processID else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing processID")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
             }
             guard let width = request.width, let height = request.height else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing width/height")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing width/height")
             }
             do {
                 try sendProcessControlFrame(processID: processID) { _ in
@@ -1521,42 +1578,38 @@ final class SidecarControlServer: @unchecked Sendable {
                 }
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .fsBegin:
             guard let payload = request.fsBegin else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing filesystem begin payload")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem begin payload")
             }
             let port = request.port ?? 27000
             do {
                 try startFSTransfer(port: port, clientFD: clientFD, payload: payload)
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .fsChunk:
             guard let payload = request.fsChunk else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing filesystem chunk payload")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem chunk payload")
             }
             do {
                 try sendFSChunk(payload)
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .fsEnd:
             guard let payload = request.fsEnd else {
-                return .failure(requestID: requestID, code: "invalid_request", message: "missing filesystem end payload")
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem end payload")
             }
             do {
                 try finishFSTransfer(payload)
                 return .success(requestID: requestID)
             } catch {
-                let nsError = error as NSError
-                return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+                return failureResponse(requestID: requestID, error: error)
             }
         case .vmStop:
             return try sync(requestID: requestID) {
@@ -1595,8 +1648,7 @@ final class SidecarControlServer: @unchecked Sendable {
         case .success(let response):
             return response
         case .failure(let error):
-            let nsError = error as NSError
-            return .failure(requestID: requestID, code: "sidecar_error", message: nsError.localizedDescription, details: "\(nsError.domain) Code=\(nsError.code)")
+            return failureResponse(requestID: requestID, error: error)
         }
     }
 

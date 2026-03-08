@@ -49,13 +49,7 @@ public struct ClientImage: Sendable {
 
     /// Returns the manifest for the specified platform.
     public func manifest(for platform: Platform) async throws -> Manifest {
-        let index = try await self.index()
-        let desc = index.manifests.first { desc in
-            desc.platform == platform
-        }
-        guard let desc else {
-            throw ContainerizationError(.unsupported, message: "platform \(platform.description)")
-        }
+        let desc = try await manifestDescriptor(for: platform)
         guard let content: Content = try await contentStore.get(digest: desc.digest) else {
             throw ContainerizationError(.notFound, message: "content with digest \(desc.digest)")
         }
@@ -70,6 +64,40 @@ public struct ClientImage: Sendable {
             throw ContainerizationError(.notFound, message: "content with digest \(desc.digest)")
         }
         return try content.decode()
+    }
+
+    /// Returns the resolved v1 chunked macOS disk source for the specified platform.
+    /// Returns nil when the image uses the legacy single-disk layout.
+    public func macOSChunkedDiskSource(for platform: Platform) async throws -> MacOSChunkedDiskSource? {
+        let manifestDescriptor = try await manifestDescriptor(for: platform)
+        guard let manifestContent: Content = try await contentStore.get(digest: manifestDescriptor.digest) else {
+            throw ContainerizationError(.notFound, message: "content with digest \(manifestDescriptor.digest)")
+        }
+        let manifest: Manifest = try manifestContent.decode()
+        let layers = try MacOSImageLayers(manifest: manifest)
+        guard case .v1(_, _, let diskLayoutDescriptor, let diskChunks) = layers else {
+            return nil
+        }
+
+        guard let layoutContent: Content = try await contentStore.get(digest: diskLayoutDescriptor.digest) else {
+            throw ContainerizationError(.notFound, message: "content with digest \(diskLayoutDescriptor.digest)")
+        }
+        let layout: DiskLayout = try layoutContent.decode()
+
+        var chunkBlobPaths: [String: URL] = [:]
+        for chunk in diskChunks {
+            guard let content: Content = try await contentStore.get(digest: chunk.digest) else {
+                throw ContainerizationError(.notFound, message: "content with digest \(chunk.digest)")
+            }
+            chunkBlobPaths[chunk.digest] = content.path
+        }
+
+        let diskImagePath = try resolveMacOSChunkedDiskImage(
+            manifestDigest: manifestDescriptor.digest,
+            layout: layout,
+            chunkBlobPaths: chunkBlobPaths
+        )
+        return MacOSChunkedDiskSource(layout: layout, chunkBlobPaths: chunkBlobPaths, diskImagePath: diskImagePath)
     }
 
     /// Returns the resolved OCI descriptor for the image.
@@ -88,6 +116,36 @@ public struct ClientImage: Sendable {
             )
         }
         return manifest
+    }
+
+    private func manifestDescriptor(for platform: Platform) async throws -> Descriptor {
+        let index = try await self.index()
+        let desc = index.manifests.first { desc in
+            desc.platform == platform
+        }
+        guard let desc else {
+            throw ContainerizationError(.unsupported, message: "platform \(platform.description)")
+        }
+        return desc
+    }
+
+    private func resolveMacOSChunkedDiskImage(
+        manifestDigest: String,
+        layout: DiskLayout,
+        chunkBlobPaths: [String: URL]
+    ) throws -> URL {
+        let cacheDir = MacOSGuestCache.rebuildCacheDirectory()
+        let cachedPath = MacOSDiskRebuilder.rebuildCachePath(cacheDir: cacheDir, manifestDigest: manifestDigest)
+        if MacOSDiskRebuilder.cacheExists(at: cachedPath) {
+            return cachedPath
+        }
+
+        try MacOSDiskRebuilder.rebuild(
+            layout: layout,
+            chunkBlobPaths: chunkBlobPaths,
+            outputPath: cachedPath
+        )
+        return cachedPath
     }
 }
 

@@ -403,7 +403,12 @@
   - checksum / policy
 - [ ] 多阶段 `COPY --from`
 - [ ] 阶段级缓存
-- [ ] chunk `rawDigest` 复用
+- [ ] 导出链路性能优化
+  - [ ] 父镜像同索引 chunk `rawDigest` 复用
+  - [ ] `type=oci` 直写 content store，去掉 tar round-trip
+  - [ ] 用单次 tar writer / streaming writer 替代逐 blob `/usr/bin/tar -rf`
+  - [ ] `Disk.img -> tar -> zstd -> sha256/size` 改成流式单遍 I/O
+  - [ ] `type=tar` 避免 staging tar 到目标路径之间的潜在跨卷二次复制
 - [ ] `type=local` 的正式 darwin 导出语义
 - [ ] 扩展 fs metadata 操作
   - `chmod`

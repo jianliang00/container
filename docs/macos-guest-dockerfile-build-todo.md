@@ -37,6 +37,7 @@
 - [x] `MacOSBuildEngine` 最小主链路已接入 `container build`
 - [x] 最小 Dockerfile 计划器、build context、`.dockerignore`、`COPY/ADD(local)` host 编排已落地
 - [x] `RUN / WORKDIR / ENV / LABEL / CMD / ENTRYPOINT` 的单 stage 执行语义已接入
+- [x] 按 `--target` 顺序逐 stage 创建临时 macOS build container 并执行/清理已接通
 - [x] stage stop + package + `type=oci|tar` 导出主链路已接通
 - [x] `type=local` 在 darwin build 路径上已明确报 `unsupported`
 - [x] 新增 `ContainerCommandsTests` / `CLITests` 覆盖 darwin build 分流、计划器、context、`COPY` 目标语义、错误分类与 CLI 拒绝路径行为
@@ -291,8 +292,9 @@
 
 ### 3.6 stage 执行模型
 
-- [ ] 每个 stage 创建临时 macOS build container
-  - 当前已打通单 target stage 的临时 container 生命周期
+- [x] 每个 stage 创建临时 macOS build container
+  - 当前实现按 `--target` 之前的 stage 顺序逐个创建、执行并清理临时 container
+  - 仍不包含跨 stage 文件复用；`COPY --from` / `FROM <previous-stage>` 继续留在后续阶段
 - [x] stage 生命周期内保持 guest 常驻
 - [x] `FROM` 解析基础镜像
   - 限定 `darwin/arm64`

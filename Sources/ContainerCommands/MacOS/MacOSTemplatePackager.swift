@@ -50,7 +50,8 @@ enum MacOSImagePackager {
         outputTar: URL,
         reference: String?,
         imageConfig: ContainerizationOCI.Image? = nil,
-        parentDiskSource: MacOSChunkedDiskSource? = nil
+        parentDiskSource: MacOSChunkedDiskSource? = nil,
+        temporaryRootDirectory: URL? = nil
     ) throws {
         let packageStartedAt = Date()
         let image = try validateImageDirectory(imageDirectory)
@@ -58,7 +59,8 @@ enum MacOSImagePackager {
             from: image,
             reference: reference,
             imageConfig: imageConfig,
-            parentDiskSource: parentDiskSource
+            parentDiskSource: parentDiskSource,
+            temporaryRootDirectory: temporaryRootDirectory
         )
         defer {
             try? FileManager.default.removeItem(at: layout.layoutDirectory)
@@ -74,11 +76,19 @@ enum MacOSImagePackager {
         from image: ImagePaths,
         reference: String?,
         imageConfig: ContainerizationOCI.Image?,
-        parentDiskSource: MacOSChunkedDiskSource?
+        parentDiskSource: MacOSChunkedDiskSource?,
+        temporaryRootDirectory: URL?
     ) throws -> LayoutDirectoryResult {
         let layoutStartedAt = Date()
         let fm = FileManager.default
-        let layoutDir = fm.temporaryDirectory.appendingPathComponent("macos-oci-layout-\(UUID().uuidString)")
+        let layoutRoot = temporaryRootDirectory ?? fm.temporaryDirectory
+        let layoutDir = layoutRoot.appendingPathComponent("macos-oci-layout-\(UUID().uuidString)")
+        var shouldRemoveLayoutDirectory = true
+        defer {
+            if shouldRemoveLayoutDirectory {
+                try? fm.removeItem(at: layoutDir)
+            }
+        }
         let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
         try fm.createDirectory(at: blobsDir, withIntermediateDirectories: true)
 
@@ -196,6 +206,7 @@ enum MacOSImagePackager {
         MacOSExportProfiler.log(
             "createLayoutDirectory.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(layoutStartedAt)))"
         )
+        shouldRemoveLayoutDirectory = false
         return LayoutDirectoryResult(layoutDirectory: layoutDir, chunkResults: chunkResults)
     }
 

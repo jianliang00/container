@@ -38,12 +38,12 @@ extension Application {
             let containersToPrune = try await client.list(filters: filters)
 
             var prunedContainerIds = [String]()
-            var totalSize: UInt64 = 0
+            var removedBundleSize: UInt64 = 0
 
             for container in containersToPrune {
                 do {
                     let actualSize = try await client.diskUsage(id: container.id)
-                    totalSize += actualSize
+                    removedBundleSize += actualSize
                     try await client.delete(id: container.id)
                     prunedContainerIds.append(container.id)
                 } catch {
@@ -57,12 +57,12 @@ extension Application {
             }
 
             let formatter = ByteCountFormatter()
-            let freed = formatter.string(fromByteCount: Int64(totalSize))
+            let removed = formatter.string(fromByteCount: Int64(removedBundleSize))
 
             for name in prunedContainerIds {
                 print(name)
             }
-            log.info("Reclaimed \(freed) in disk space")
+            print("Removed \(removed) of container bundle data (actual free space may differ on APFS)")
         }
     }
 }

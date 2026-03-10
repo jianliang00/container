@@ -44,6 +44,8 @@ struct MacOSSidecarClientTests {
             #expect(start.processID == "proc-1")
             #expect(start.port == 27000)
             #expect(start.exec?.executable == "/bin/echo")
+            #expect(start.exec?.user == "nobody")
+            #expect(start.exec?.supplementalGroups == [20])
             try writeResponse(.success(requestID: start.requestID), to: clientFD)
 
             try writeEvent(.init(event: .processStdout, processID: "proc-1", data: Data("hello\n".utf8)), to: clientFD)
@@ -61,7 +63,12 @@ struct MacOSSidecarClientTests {
         try client.processStart(
             port: 27000,
             processID: "proc-1",
-            request: .init(executable: "/bin/echo", arguments: ["hello"])
+            request: .init(
+                executable: "/bin/echo",
+                arguments: ["hello"],
+                user: "nobody",
+                supplementalGroups: [20]
+            )
         )
 
         #expect(eventSemaphore.wait(timeout: .now() + 2) == .success)

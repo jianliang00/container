@@ -136,6 +136,63 @@ struct MacOSBuildEngineTests {
     }
 
     @Test
+    func plannerAcceptsUserInstruction() throws {
+        let dockerfile = Data(
+            """
+            FROM registry.local/macos-base:latest
+            USER nobody
+            RUN /usr/bin/id -un
+            """.utf8
+        )
+
+        let plan = try MacOSBuildEngine.Planner(
+            dockerfile: dockerfile,
+            buildArgs: [:],
+            target: ""
+        ).makePlan()
+
+        guard case .user(let user) = try #require(plan.targetStage.instructions.first) else {
+            Issue.record("expected first instruction to be USER")
+            return
+        }
+        #expect(user == "nobody")
+    }
+
+    @Test
+    func plannerRejectsMalformedUserInstruction() throws {
+        let dockerfile = Data(
+            """
+            FROM registry.local/macos-base:latest
+            USER root wheel
+            """.utf8
+        )
+
+        expectError(containing: "USER requires exactly one user specification") {
+            _ = try MacOSBuildEngine.Planner(
+                dockerfile: dockerfile,
+                buildArgs: [:],
+                target: ""
+            ).makePlan()
+        }
+    }
+
+    @Test
+    func finalImageUsesUpdatedUserValue() throws {
+        let base = ContainerizationOCI.Image(
+            created: "1970-01-01T00:00:00Z",
+            architecture: "arm64",
+            os: "darwin",
+            config: .init(user: "root", env: nil, entrypoint: nil, cmd: nil, workingDir: "/", labels: nil, stopSignal: nil),
+            rootfs: .init(type: "layers", diffIDs: [])
+        )
+        var state = MacOSBuildEngine.StageState(baseConfig: base, initialBuildArguments: [:])
+        state.user = "nobody"
+
+        let final = state.finalImage(labelOverrides: [:])
+        #expect(final.config?.user == "nobody")
+    }
+
+    @Test
     func plannerRejectsCopyFromInPhaseOne() throws {
         let dockerfile = Data(
             """

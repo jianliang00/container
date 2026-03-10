@@ -1,6 +1,6 @@
 # macOS Guest Dockerfile Build TODO
 
-本文档按 2026-03-06 当前代码状态整理，目标是把
+本文档按 2026-03-08 当前代码状态整理，目标是把
 [`docs/macos-guest-dockerfile-build-design.md`](docs/macos-guest-dockerfile-build-design.md)
 中的 Phase 1 和后续阶段拆成可执行清单，并明确哪些已经完成，哪些还没开始。
 
@@ -36,7 +36,7 @@
 - [x] `darwin/arm64` 平台校验与混合平台拒绝逻辑已接入
 - [x] `MacOSBuildEngine` 最小主链路已接入 `container build`
 - [x] 最小 Dockerfile 计划器、build context、`.dockerignore`、`COPY/ADD(local)` host 编排已落地
-- [x] `RUN / WORKDIR / ENV / LABEL / CMD / ENTRYPOINT` 的单 stage 执行语义已接入
+- [x] `RUN / WORKDIR / ENV / LABEL / CMD / ENTRYPOINT / USER` 的单 stage 执行语义已接入
 - [x] 按 `--target` 顺序逐 stage 创建临时 macOS build container 并执行/清理已接通
 - [x] stage stop + package + `type=oci|tar` 导出主链路已接通
 - [x] `type=local` 在 darwin build 路径上已明确报 `unsupported`
@@ -158,11 +158,13 @@
   - 文件：`Tests/MacOSGuestAgentTests/GuestAgentFileTransferTransactionTests.swift`
 - [x] 已验证命令
   - `xcrun swift build --product container-macos-guest-agent`
-  - `xcrun swift test --filter RuntimeMacOSSidecar`
+  - `xcrun swift test --filter RuntimeMacOSSidecarSharedTests`
+  - `xcrun swift test --filter RuntimeMacOSSidecarClientTests`
   - `xcrun swift test --filter MacOSGuestAgentTests`
-  - `xcrun swift test --filter ContainerCommandsTests`
+  - `xcrun swift test --filter MacOSBuildEngineTests`
   - `xcrun swift test --filter CLIMacOSBuildFailureTest`
   - `CONTAINER_ENABLE_MACOS_BUILD_E2E=1 CONTAINER_MACOS_BASE_REF=local/macos-base:agent-new xcrun swift test --filter CLIMacOSBuildE2ETest`
+    - 包含 `USER nobody` 正向验收场景
 
 ### 2.6 Build 主链路接线
 
@@ -174,8 +176,8 @@
 - [x] 新增 `MacOSBuildEngine`
   - 文件：`Sources/ContainerCommands/MacOS/MacOSBuildEngine.swift`
 - [x] 新增最小 Dockerfile 计划器
-  - 支持：`FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/LABEL/CMD/ENTRYPOINT`
-  - 显式拒绝：`USER`、`ADD URL`、`COPY --from`
+  - 支持：`FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/LABEL/CMD/ENTRYPOINT/USER`
+  - 显式拒绝：`ADD URL`、`COPY --from`
 - [x] 新增 build context + `.dockerignore` 处理
   - 支持 context 内路径白名单、排序枚举、目录/文件/软链接遍历
 - [x] 新增 host 侧文件传输编排
@@ -189,7 +191,7 @@
   - `RUN` 通过现有 sidecar + guest-agent 执行
 - [x] packager 已支持写入构建后的 image config
   - 文件：`Sources/ContainerCommands/MacOS/MacOSTemplatePackager.swift`
-  - 已注入：`ENV`、`WORKDIR`、`LABEL`、`CMD`、`ENTRYPOINT`
+  - 已注入：`ENV`、`WORKDIR`、`LABEL`、`CMD`、`ENTRYPOINT`、`USER`
 - [x] `type=oci|tar` 导出与 `type=local unsupported` 路径已接通
 - [x] 新增单元测试
   - 文件：`Tests/ContainerCommandsTests/MacOSBuildEngineTests.swift`
@@ -238,11 +240,15 @@
   - `RUN`
   - `COPY`
   - `ADD(local)`
+  - `USER`
   - `LABEL`
   - `CMD`
   - `ENTRYPOINT`
+- [x] 已补齐 `USER`
+  - 计划器接受 `USER <name|uid[:gid]>`
+  - `RUN` 按当前 stage 用户身份执行
+  - 最终镜像 config 写入 `config.user`
 - [x] 显式拒绝首阶段不支持语法
-  - `USER`
   - `ADD URL`
   - `COPY --from`
   - 多阶段依赖复制
@@ -417,9 +423,12 @@
 
 ## 5. Phase 2 延后项
 
-- [ ] `USER`
-  - guest 内子进程身份切换
-  - `setgid/initgroups/setuid`
+- 已提前完成：`USER`
+  - 通过 sidecar exec payload + guest-agent 子进程身份切换执行
+- [ ] 收敛 darwin runtime / guest-agent 启动不稳定
+  - 现象：`container run/build` 偶发卡在 `containerCreate` / CLI 返回链路，或 guest-agent vsock `27000` 反复 `Connection reset by peer`
+  - 影响：会干扰新镜像首次 `run` 与 `USER` 相关正向 E2E 的稳定复现
+  - 目标：把问题限定在 sidecar、guest boot 还是 apiserver 返回链路，并补最小可重复探针
 - [ ] `ADD URL`
   - host 下载
   - checksum / policy

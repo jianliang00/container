@@ -126,6 +126,44 @@ struct SidecarControlProtocolTests {
     }
 
     @Test
+    func execPayloadRoundTripPreservesUserIdentityFields() throws {
+        let exec = MacOSSidecarExecRequestPayload(
+            executable: "/usr/bin/id",
+            arguments: ["-un"],
+            environment: ["PATH=/usr/bin:/bin"],
+            workingDirectory: "/tmp",
+            terminal: false,
+            user: "nobody",
+            supplementalGroups: [20, 80]
+        )
+        let request = MacOSSidecarRequest(
+            method: .processStart,
+            port: 27000,
+            processID: "proc-user",
+            exec: exec
+        )
+
+        let (reader, writer) = try socketPair()
+        defer {
+            closeIfValid(reader)
+            closeIfValid(writer)
+        }
+
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(request), fd: writer)
+        let decoded = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: reader)
+
+        let decodedExec = try #require(decoded.request?.exec)
+        #expect(decodedExec.executable == "/usr/bin/id")
+        #expect(decodedExec.arguments == ["-un"])
+        #expect(decodedExec.environment == ["PATH=/usr/bin:/bin"])
+        #expect(decodedExec.workingDirectory == "/tmp")
+        #expect(decodedExec.user == "nobody")
+        #expect(decodedExec.uid == nil)
+        #expect(decodedExec.gid == nil)
+        #expect(decodedExec.supplementalGroups == [20, 80])
+    }
+
+    @Test
     func fileDescriptorMarkerRoundTripTransfersWorkingFD() throws {
         let (transportReader, transportWriter) = try socketPair()
         defer {

@@ -160,6 +160,9 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
         displayMode = "gui"
     }
     print("display mode: \(displayMode)")
+    if options.headless && !options.headlessDisplay && (options.agentREPL || options.agentProbe || options.controlSocketPath != nil) {
+        print("warning: pure headless is known to produce guest-agent vsock resets; retry with --headless-display if probe/repl/control fails")
+    }
     if options.agentREPL {
         print("agent repl: enabled (port \(options.agentPort))")
     }

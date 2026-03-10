@@ -146,6 +146,38 @@ private struct GuestAgentFrame: Codable {
 }
 
 final class AgentDebugger: @unchecked Sendable {
+    private final class CompletionGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed = false
+
+        func tryComplete() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if completed {
+                return false
+            }
+            completed = true
+            return true
+        }
+    }
+
+    private final class ResultBox<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<T, Error>?
+
+        func store(_ value: Result<T, Error>) {
+            lock.lock()
+            result = value
+            lock.unlock()
+        }
+
+        func load() -> Result<T, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
+
     struct ControlExecResult {
         let exitCode: Int32
         let stdout: Data
@@ -446,35 +478,64 @@ final class AgentDebugger: @unchecked Sendable {
     }
 
     private func connectOnMain(port: UInt32) throws -> Int32 {
-        guard let socketDevice = virtualMachine.socketDevices.compactMap({ $0 as? VZVirtioSocketDevice }).first else {
-            throw DebuggerError.socketDeviceUnavailable
-        }
-
         let semaphore = DispatchSemaphore(value: 0)
-        var fd: Int32?
-        var connectError: Error?
+        let gate = CompletionGate()
+        let resultBox = ResultBox<Int32>()
 
-        socketDevice.connect(toPort: port) { connectionResult in
-            switch connectionResult {
-            case .success(let connection):
-                fd = connection.fileDescriptor
-            case .failure(let error):
-                connectError = error
+        let complete: @Sendable (Result<Int32, Error>) -> Void = { value in
+            guard gate.tryComplete() else {
+                if case .success(let fd) = value {
+                    Darwin.close(fd)
+                }
+                return
             }
+            resultBox.store(value)
             semaphore.signal()
         }
 
-        let timeout = DispatchTime.now() + connectCallbackTimeoutSeconds
-        guard semaphore.wait(timeout: timeout) == .success else {
-            throw DebuggerError.connectFailed("timeout waiting for vsock connect callback")
+        if connectCallbackTimeoutSeconds > 0 {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + connectCallbackTimeoutSeconds) {
+                complete(.failure(DebuggerError.connectFailed("timeout waiting for vsock connect callback")))
+            }
         }
-        if let connectError {
-            throw connectError
+
+        let connectWork: @Sendable () -> Void = { [self] in
+            guard let socketDevice = virtualMachine.socketDevices.compactMap({ $0 as? VZVirtioSocketDevice }).first else {
+                complete(.failure(DebuggerError.socketDeviceUnavailable))
+                return
+            }
+
+            socketDevice.connect(toPort: port) { connectionResult in
+                switch connectionResult {
+                case .success(let connection):
+                    let duplicated = dup(connection.fileDescriptor)
+                    connection.close()
+                    if duplicated >= 0 {
+                        complete(.success(duplicated))
+                    } else {
+                        complete(.failure(makePOSIXError(errno)))
+                    }
+                case .failure(let error):
+                    complete(.failure(error))
+                }
+            }
         }
-        guard let fd else {
+
+        if Thread.isMainThread {
+            connectWork()
+        } else {
+            DispatchQueue.main.async(execute: connectWork)
+        }
+
+        semaphore.wait()
+        switch resultBox.load() {
+        case .success(let fd)?:
+            return fd
+        case .failure(let error)?:
+            throw error
+        case nil:
             throw DebuggerError.connectFailed("socket connect completion not called")
         }
-        return fd
     }
 
     private func startReadLoop(handle: FileHandle, generation: UInt64) {

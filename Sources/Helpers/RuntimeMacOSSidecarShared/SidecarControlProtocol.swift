@@ -22,6 +22,10 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
     public let environment: [String]?
     public let workingDirectory: String?
     public let terminal: Bool
+    public let user: String?
+    public let uid: UInt32?
+    public let gid: UInt32?
+    public let supplementalGroups: [UInt32]?
     public let stdin: Data?
 
     public init(
@@ -30,6 +34,10 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
         environment: [String]? = nil,
         workingDirectory: String? = nil,
         terminal: Bool = false,
+        user: String? = nil,
+        uid: UInt32? = nil,
+        gid: UInt32? = nil,
+        supplementalGroups: [UInt32]? = nil,
         stdin: Data? = nil
     ) {
         self.executable = executable
@@ -37,6 +45,10 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
         self.environment = environment
         self.workingDirectory = workingDirectory
         self.terminal = terminal
+        self.user = user
+        self.uid = uid
+        self.gid = gid
+        self.supplementalGroups = supplementalGroups
         self.stdin = stdin
     }
 }

@@ -597,12 +597,22 @@ extension MacOSSandboxService {
         writeContainerLog(Data(("sidecar process.start begin for \(processID) on vsock port \(agentPort)\n").utf8))
         sessions[processID] = session
 
+        let execIdentity: (user: String?, uid: UInt32?, gid: UInt32?) = switch session.config.user {
+        case .raw(let userString):
+            (userString, nil, nil)
+        case .id(let uid, let gid):
+            (nil, uid, gid)
+        }
         let request = MacOSSidecarExecRequestPayload(
             executable: session.config.executable,
             arguments: session.config.arguments,
             environment: session.config.environment,
             workingDirectory: session.config.workingDirectory,
             terminal: session.config.terminal,
+            user: execIdentity.user,
+            uid: execIdentity.uid,
+            gid: execIdentity.gid,
+            supplementalGroups: session.config.supplementalGroups.isEmpty ? nil : session.config.supplementalGroups,
             stdin: nil
         )
 

@@ -308,6 +308,62 @@ struct GuestAgentFileTransferTransactionTests {
         #expect(FileManager.default.fileExists(atPath: outputURL.path) == false)
         #expect(temporaryTransactionArtifacts(in: tempDir).isEmpty)
     }
+
+    @Test
+    func execIdentityResolvesCurrentUserByName() throws {
+        let currentUID = getuid()
+        guard let pw = getpwuid(currentUID), let name = pw.pointee.pw_name else {
+            Issue.record("current user lookup failed")
+            return
+        }
+        let userName = String(cString: name)
+
+        let resolved = try GuestAgentExecIdentity.resolve(
+            from: .init(
+                type: .exec,
+                executable: "/usr/bin/id",
+                user: userName
+            )
+        )
+        let identity = try #require(resolved)
+
+        #expect(identity.uid == currentUID)
+        #expect(identity.gid == pw.pointee.pw_gid)
+        #expect(!identity.supplementalGroups.contains(pw.pointee.pw_gid))
+    }
+
+    @Test
+    func execIdentityResolvesExplicitNumericUserAndGroup() throws {
+        let resolved = try GuestAgentExecIdentity.resolve(
+            from: .init(
+                type: .exec,
+                executable: "/usr/bin/id",
+                uid: 123,
+                gid: 456,
+                supplementalGroups: [789]
+            )
+        )
+        let identity = try #require(resolved)
+
+        #expect(identity.uid == 123)
+        #expect(identity.gid == 456)
+        #expect(identity.supplementalGroups == [789])
+    }
+
+    @Test
+    func execIdentityRejectsUnknownNamedUser() throws {
+        let unknownUser = "codex-user-\(UUID().uuidString)"
+
+        #expect(throws: (any Error).self) {
+            _ = try GuestAgentExecIdentity.resolve(
+                from: .init(
+                    type: .exec,
+                    executable: "/usr/bin/id",
+                    user: unknownUser
+                )
+            )
+        }
+    }
 }
 
 private func makeTemporaryDirectory() throws -> URL {

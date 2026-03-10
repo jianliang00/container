@@ -157,6 +157,7 @@ mkdir -p "$WORKROOT"
   "${TEST_NS}:smoke" \
   "${TEST_NS}:copy" \
   "${TEST_NS}:add-config" \
+  "${TEST_NS}:user" \
   "${TEST_NS}:tar" >/dev/null 2>&1 || true
 
 "$CONTAINER_BIN" system stop || true
@@ -293,7 +294,34 @@ grep -q '^oci-layout$' "$WORKROOT/out/phase1.tar.list"
 
 预期：`type=tar` 不会自动 load，手工 `image load` 后可以运行。
 
-### 4.5 拒绝路径
+### 4.5 `USER`
+
+```bash
+mkdir -p "$WORKROOT/04-user"
+
+cat > "$WORKROOT/04-user/Dockerfile" <<EOF
+FROM ${BASE_REF}
+USER nobody
+RUN test "\$(/usr/bin/id -un)" = "nobody"
+ENTRYPOINT ["/usr/bin/id"]
+CMD ["-un"]
+EOF
+
+"$CONTAINER_BIN" build \
+  --platform darwin/arm64 \
+  --progress plain \
+  -t "${TEST_NS}:user" \
+  "$WORKROOT/04-user"
+
+"$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:user"
+
+"$CONTAINER_BIN" image inspect "${TEST_NS}:user" > "$WORKROOT/04-user/inspect.json"
+grep -Eq '"User"[[:space:]]*:[[:space:]]*"nobody"' "$WORKROOT/04-user/inspect.json"
+```
+
+预期：构建成功，`RUN` 阶段按 `nobody` 执行，默认启动输出 `nobody`，并且镜像 inspect 结果里能看到 `User=nobody`。
+
+### 4.6 拒绝路径
 
 ```bash
 expect_fail() {
@@ -316,21 +344,15 @@ expect_fail() {
   fi
 }
 
-mkdir -p "$WORKROOT/04-negative/user"
-mkdir -p "$WORKROOT/04-negative/add-url"
-mkdir -p "$WORKROOT/04-negative/copy-from"
+mkdir -p "$WORKROOT/05-negative/add-url"
+mkdir -p "$WORKROOT/05-negative/copy-from"
 
-cat > "$WORKROOT/04-negative/user/Dockerfile" <<EOF
-FROM ${BASE_REF}
-USER builder
-EOF
-
-cat > "$WORKROOT/04-negative/add-url/Dockerfile" <<EOF
+cat > "$WORKROOT/05-negative/add-url/Dockerfile" <<EOF
 FROM ${BASE_REF}
 ADD https://example.com/file.tar /tmp/file.tar
 EOF
 
-cat > "$WORKROOT/04-negative/copy-from/Dockerfile" <<EOF
+cat > "$WORKROOT/05-negative/copy-from/Dockerfile" <<EOF
 FROM ${BASE_REF} AS build
 RUN sw_vers
 
@@ -350,32 +372,27 @@ expect_fail local-output \
   "darwin builds do not support --output type=local in phase 1" \
   "$CONTAINER_BIN" build --platform darwin/arm64 --output type=local,dest="$WORKROOT/local-out" "$WORKROOT/01-smoke"
 
-expect_fail user-unsupported \
-  "darwin builds do not support USER in phase 1" \
-  "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/04-negative/user"
-
 expect_fail add-url-unsupported \
   "darwin builds do not support ADD <url> in phase 1" \
-  "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/04-negative/add-url"
+  "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/05-negative/add-url"
 
 expect_fail copy-from-unsupported \
   "darwin builds do not support COPY --from in phase 1" \
-  "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/04-negative/copy-from"
+  "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/05-negative/copy-from"
 ```
 
-预期：上面 6 条命令都失败，而且日志里包含对应错误文本。
+预期：上面 5 条命令都失败，而且日志里包含对应错误文本。
 
 ## 5. 通过标准
 
 满足下面这些条件就够了：
 
 - `"$BASE_REF"` 可以稳定执行 `run --os darwin`
-- 4.1 到 4.4 全部成功
-- 4.5 的 6 条拒绝路径都命中预期错误
+- 4.1 到 4.5 全部成功
+- 4.6 的 5 条拒绝路径都命中预期错误
 
 这次验证不包含：
 
-- `USER`
 - `ADD URL`
 - 多阶段 `COPY --from`
 - 更完整的 Dockerfile 语义对齐
@@ -387,6 +404,7 @@ expect_fail copy-from-unsupported \
   "${TEST_NS}:smoke" \
   "${TEST_NS}:copy" \
   "${TEST_NS}:add-config" \
+  "${TEST_NS}:user" \
   "${TEST_NS}:tar"
 
 rm -rf "$WORKROOT"

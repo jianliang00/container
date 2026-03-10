@@ -6,7 +6,7 @@
 
 - 基于已有 `darwin/arm64` 基础镜像继续构建
 - 安装 Xcode、Homebrew 等工具
-- 创建用户、切换用户执行后续步骤（第二阶段）
+- 创建用户、切换用户执行后续步骤
 - 通过标准镜像流转（`load/push/pull/run`）复用
 
 ## 1. 背景与现状
@@ -25,7 +25,6 @@
 
 - 缺少基于 Dockerfile 的 macOS 镜像构建执行器
 - 缺少“从运行后磁盘提交镜像（commit）”的一体化流程
-- guest-agent 执行链路当前未完整支持按用户身份运行进程
 - 缺少面向 `COPY/ADD` 的正式文件注入协议与对应 guest 侧执行器
 
 ## 2. 目标与非目标
@@ -36,9 +35,9 @@
 2. 使用 Dockerfile 作为统一输入，不引入新的专用 DSL。
 3. 基于 `FROM` 引用已有 macOS OCI 镜像，执行指令并提交新镜像。
 4. 首阶段优先支持以下指令子集：
-   - `FROM`, `ARG`, `ENV`, `WORKDIR`, `RUN`, `COPY`, `ADD(local)`, `LABEL`, `CMD`, `ENTRYPOINT`
+   - `FROM`, `ARG`, `ENV`, `WORKDIR`, `RUN`, `COPY`, `ADD(local)`, `USER`, `LABEL`, `CMD`, `ENTRYPOINT`
 5. 第二阶段补齐高复杂度指令与语义：
-   - `USER`, `ADD(URL)`, 多阶段 `COPY --from`
+   - `ADD(URL)`, 多阶段 `COPY --from`
 6. 支持 `COPY/ADD` 本地输入注入，统一通过 `fs` 协议实现，避免依赖共享目录或 guest 内工具链。
 7. 长期支持增量复用：
    - 阶段级缓存（stage cache）
@@ -50,7 +49,7 @@
 1. 不在首版支持完整 BuildKit 特性（如 `RUN --mount=type=secret`、inline cache 全语义）。
 2. 不在首版支持跨平台多架构合并构建（只支持 `darwin/arm64`）。
 3. 不改动现有 Linux BuildKit 路径语义。
-4. 不在首版支持 `USER`、`ADD URL`、多阶段 `COPY --from`。
+4. 不在首版支持 `ADD URL`、多阶段 `COPY --from`。
 5. 不在首版承诺细粒度 build cache；首版以“先完成构建闭环”为目标。
 6. 不把首版目标定义为 headless CI；当前运行前提仍以登录态开发机为主。
 7. 不采用共享目录 / `virtiofs` 作为 `COPY/ADD` 的构建输入方案。
@@ -110,7 +109,7 @@
 | `COPY` | 是 | 通过 `fs` 协议直传并按目标路径语义落盘 |
 | `ADD`(本地) | 是 | host 解包后通过 `fs` 协议直传 |
 | `ADD`(URL) | 第二阶段 | 宿主下载到临时目录后再注入，保证可审计 |
-| `USER` | 第二阶段 | 依赖新的 guest 内子进程身份切换实现 |
+| `USER` | 是 | 更新 stage 默认用户，后续 `RUN` 与目标镜像 config 继承该身份 |
 | `LABEL` | 是 | 写入目标镜像 config |
 | `CMD`/`ENTRYPOINT` | 是 | 写入目标镜像 config |
 | 多阶段 `COPY --from` | 第二阶段 | 先留接口，后补 |
@@ -197,24 +196,22 @@
 5. `MacOSBuildEngine`
    - 基于协议能力继续补齐 `ADD(URL)`、缓存与性能优化。
 
-## 6. 用户与权限模型（`USER`，第二阶段）
+## 6. 用户与权限模型（`USER`）
 
-当前链路已携带 `ProcessConfiguration.user`，但 macOS guest 实际执行层尚未完整落地到 guest-agent；同时，guest-agent 作为长生命周期 daemon，不能简单在自身进程内永久降权后继续复用同一进程处理后续请求。
+当前实现已经把 `USER` 语义接到 macOS build 主链路：
 
-因此首阶段不承诺 `USER` 语义；第二阶段需要补齐以下能力：
-
-1. sidecar 协议 `exec payload` 增加 `user/supplementalGroups` 字段。
-2. guest-agent 引入“只影响子进程、不污染 daemon 本身”的执行模型，推荐基于 `posix_spawn` 或 `fork/exec` 的 helper，而不是直接在 daemon 内 `setuid` 后再 `Process.run()`。
-3. 子进程启动前完成身份切换：
+1. sidecar 协议 `exec payload` 增加 `user/uid/gid/supplementalGroups` 字段。
+2. build stage 维护当前默认用户；`USER <name|uid[:gid]>` 会更新后续 `RUN` 的执行身份。
+3. guest-agent 使用“只影响子进程、不污染 daemon 本身”的执行模型，在子进程启动前完成：
    - `setgid`
-   - `initgroups`（用户名场景）
+   - `setgroups` / 补充组解析
    - `setuid`
-4. 明确错误回传：
-   - 用户不存在
-   - 权限不足
-   - 组切换失败
+4. 最终镜像 config 写入 `config.user`，因此后续 `container run --os darwin` 默认也会继承该用户。
 
-完成以上改造后，`USER dev` 后的 `RUN brew ...` 才能语义正确。
+当前限制：
+
+1. 首阶段仅实现 `USER` 的执行与镜像 config 语义，不额外提供 `useradd`/`dscl` 一类用户创建封装；用户仍需通过前序 `RUN` 自行准备。
+2. `ADD URL` 与多阶段 `COPY --from` 仍然保留在后续阶段。
 
 ## 7. 镜像提交（Commit）与格式复用
 
@@ -227,7 +224,7 @@
 1. 停止该 stage build container。
 2. 读取 container bundle 下三件套文件。
 3. 复用现有 `MacOSImagePackager`/chunker 生成 OCI tar（必要时扩展 packager 以接收镜像 config 元数据）。
-4. 写入 image config（首阶段包含 `ENV/CMD/ENTRYPOINT/LABEL/WORKDIR`；第二阶段再补 `USER`）。
+4. 写入 image config（首阶段包含 `ENV/CMD/ENTRYPOINT/LABEL/WORKDIR/USER`）。
 5. 首阶段直接复用现有 `image load`/`tag` 流程导入本地 image store，而不是一开始新增独立 `commit` API。
 6. 当 commit 能力需要被 API Server 或远端客户端复用时，再抽象为内部接口或新增路由。
 
@@ -327,8 +324,8 @@
 ### Phase 1（MVP）
 
 1. `container build --platform darwin/arm64` 在 builder 拨号前调度到 `MacOSBuildEngine`。
-2. Dockerfile 仅支持受控子集：`FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/CMD/ENTRYPOINT/LABEL`。
-3. 不支持的语法（含 `USER`、`ADD URL`、`COPY --from`）在解析或计划阶段直接失败。
+2. Dockerfile 仅支持受控子集：`FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/USER/CMD/ENTRYPOINT/LABEL`。
+3. 不支持的语法（含 `ADD URL`、`COPY --from`）在解析或计划阶段直接失败。
 4. 实现基础 `fs` 协议：`fs.begin/fs.chunk/fs.end`。
 5. guest 侧支持基础文件操作：`write_file/mkdir/symlink`。
 6. `COPY/ADD(local)` 统一通过 `fs` 协议落盘，不保留共享目录或 `tar+stdin` 路径。
@@ -339,11 +336,10 @@
 
 1. 多阶段 `COPY --from`
 2. `ADD URL` 策略化下载
-3. `USER` 及 guest 内子进程身份切换
-4. 阶段级缓存
-5. chunk `rawDigest` 复用
-6. 扩展 `fs` 操作类型与错误模型
-7. 明确 `type=local` 的 darwin 输出语义
+3. 阶段级缓存
+4. chunk `rawDigest` 复用
+5. 扩展 `fs` 操作类型与错误模型
+6. 明确 `type=local` 的 darwin 输出语义
 
 ### Phase 3（优化）
 
@@ -369,21 +365,21 @@
    - `COPY` 和 `ADD`（本地）通过 `fs` 协议正确落盘
    - `.dockerignore` 生效
    - 不依赖 guest 内 `tar` 或共享目录
-4. 输出契约
+4. 用户切换
+   - `USER nobody`
+   - 后续 `RUN id -un` 输出 `nobody`
+   - 最终镜像 config 正确写入 `User`
+5. 输出契约
    - `--output type=oci` 可成功导入并打 tag
    - `--output type=tar` 可成功导出 tar
 
 ### 12.2 Phase 2 补充验收
 
-1. 用户切换
-   - `RUN` 创建用户
-   - `USER <new-user>`
-   - 后续 `RUN id -un` 输出新用户
-2. 远程输入
+1. 远程输入
    - `ADD URL` 满足策略控制并可重复校验
-3. 多阶段复制
+2. 多阶段复制
    - `COPY --from` 可从前序 stage 正确取文件
-4. 增量复用
+3. 增量复用
    - 修改少量文件后二次 build，仅少量 chunk 发生变化
 
 ## 13. 典型 Dockerfile 示例
@@ -403,7 +399,7 @@ CMD ["/bin/zsh"]
 
 ## 14. 风险与待决问题
 
-1. `USER` 需要新的 guest 内子进程启动模型；若实现方式不当，会污染长生命周期 guest-agent 自身权限状态。
+1. `USER` 已依赖新的 guest 内子进程启动模型；后续改动需要继续避免污染长生命周期 guest-agent 自身权限状态。
 2. `ADD URL` 的可重复构建语义（内容漂移）需配合 checksum 策略。
 3. Dockerfile 解析若无法复用现有 frontend，将显著放大首阶段实现成本。
 4. 当前 sidecar 依赖登录态 GUI/Aqua session，headless CI 支持仍是独立议题。

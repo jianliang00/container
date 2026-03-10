@@ -79,6 +79,7 @@ struct MacOSBuildEngine {
         case arg(ArgumentInstruction)
         case env([KeyValuePair])
         case workdir(String)
+        case user(String)
         case run(CommandForm)
         case copy(FileTransferInstruction)
         case add(FileTransferInstruction)
@@ -136,6 +137,7 @@ struct MacOSBuildEngine {
         var environment: [String: String]
         var labels: [String: String]
         var workingDirectory: String
+        var user: String?
         var cmd: [String]?
         var entrypoint: [String]?
 
@@ -145,6 +147,7 @@ struct MacOSBuildEngine {
             self.environment = Self.environmentDictionary(from: baseConfig.config?.env ?? [])
             self.labels = baseConfig.config?.labels ?? [:]
             self.workingDirectory = baseConfig.config?.workingDir ?? "/"
+            self.user = baseConfig.config?.user
             self.cmd = baseConfig.config?.cmd
             self.entrypoint = baseConfig.config?.entrypoint
         }
@@ -171,7 +174,7 @@ struct MacOSBuildEngine {
             }
             let env = environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" }
             let config = ImageConfig(
-                user: baseConfig.config?.user,
+                user: user,
                 env: env.isEmpty ? nil : env,
                 entrypoint: entrypoint,
                 cmd: cmd,
@@ -401,6 +404,10 @@ struct MacOSBuildEngine {
                 try await transport.createDirectory(at: resolved)
                 state.workingDirectory = resolved
 
+            case .user(let rawValue):
+                let expanded = try VariableExpander.expand(rawValue, variables: state.variables)
+                state.user = expanded
+
             case .copy(let fileInstruction):
                 let expandedSources = try fileInstruction.sources.map {
                     try VariableExpander.expand($0, variables: state.variables)
@@ -431,6 +438,7 @@ struct MacOSBuildEngine {
                     command: command,
                     environment: state.environment,
                     workingDirectory: state.workingDirectory,
+                    user: state.user.map { .raw(userString: $0) } ?? .id(uid: 0, gid: 0),
                     quiet: quiet,
                     log: log
                 )
@@ -453,6 +461,7 @@ struct MacOSBuildEngine {
             command: .exec(["/bin/sync"]),
             environment: [:],
             workingDirectory: "/",
+            user: .id(uid: 0, gid: 0),
             quiet: true,
             log: log
         )
@@ -600,6 +609,8 @@ extension MacOSBuildEngine {
                 return .instruction(.env(try parseAssignments(logicalLine.arguments, instruction: "ENV")))
             case "WORKDIR":
                 return .instruction(.workdir(try requireNonEmpty(logicalLine.arguments, instruction: "WORKDIR")))
+            case "USER":
+                return .instruction(.user(try parseUser(logicalLine.arguments)))
             case "RUN":
                 return .instruction(.run(try parseCommand(logicalLine.arguments, instruction: "RUN")))
             case "COPY":
@@ -612,8 +623,6 @@ extension MacOSBuildEngine {
                 return .instruction(.cmd(try parseCommand(logicalLine.arguments, instruction: "CMD")))
             case "ENTRYPOINT":
                 return .instruction(.entrypoint(try parseCommand(logicalLine.arguments, instruction: "ENTRYPOINT")))
-            case "USER":
-                throw ContainerizationError(.unsupported, message: "darwin builds do not support USER in phase 1")
             default:
                 throw ContainerizationError(.unsupported, message: "darwin builds do not support \(logicalLine.keyword) in phase 1")
             }
@@ -702,6 +711,15 @@ extension MacOSBuildEngine {
                 return .exec(payload)
             }
             return .shell(trimmed)
+        }
+
+        private func parseUser(_ value: String) throws -> String {
+            let trimmed = try requireNonEmpty(value, instruction: "USER")
+            let tokens = try ShellTokenizer.tokenize(trimmed)
+            guard tokens.count == 1, let user = tokens.first, !user.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "USER requires exactly one user specification")
+            }
+            return user
         }
 
         private func parseFileTransfer(_ value: String, instruction: String) throws -> FileTransferInstruction {
@@ -1714,6 +1732,7 @@ extension MacOSBuildEngine {
             command: CommandForm,
             environment: [String: String],
             workingDirectory: String,
+            user: ProcessConfiguration.User,
             quiet: Bool,
             log: Logger
         ) async throws {
@@ -1724,6 +1743,7 @@ extension MacOSBuildEngine {
                 command: command,
                 environment: environment,
                 workingDirectory: workingDirectory,
+                user: user,
                 stdio: io.stdio
             )
             let exitCode = try await io.handleProcess(process: process, log: log)
@@ -1785,6 +1805,7 @@ extension MacOSBuildEngine {
             command: CommandForm,
             environment: [String: String],
             workingDirectory: String,
+            user: ProcessConfiguration.User,
             stdio: [FileHandle?]
         ) async throws -> ClientProcess {
             let processID = UUID().uuidString
@@ -1797,7 +1818,7 @@ extension MacOSBuildEngine {
                     environment: environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" },
                     workingDirectory: workingDirectory,
                     terminal: false,
-                    user: .id(uid: 0, gid: 0)
+                    user: user
                 )
             case .exec(let payload):
                 guard let executable = payload.first else {
@@ -1809,7 +1830,7 @@ extension MacOSBuildEngine {
                     environment: environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" },
                     workingDirectory: workingDirectory,
                     terminal: false,
-                    user: .id(uid: 0, gid: 0)
+                    user: user
                 )
             }
 
@@ -1830,6 +1851,7 @@ extension MacOSBuildEngine {
                 command: command,
                 environment: environment,
                 workingDirectory: workingDirectory,
+                user: .id(uid: 0, gid: 0),
                 stdio: [nil, nil, nil]
             )
             try await process.start()

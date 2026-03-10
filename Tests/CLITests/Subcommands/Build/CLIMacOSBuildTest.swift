@@ -62,18 +62,18 @@ extension TestCLIMacOSBuildBase {
             assertDidNotDialLinuxBuilder(response)
         }
 
-        @Test func testDarwinBuildRejectsUSERInstruction() throws {
+        @Test func testDarwinBuildRejectsMalformedUSERInstruction() throws {
             let tempDir = try createTempDir()
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
                 FROM \(macOSBaseReference)
-                USER builder
+                USER builder wheel
                 """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir)
-            assertFailure(response, contains: "darwin builds do not support USER in phase 1")
+            assertFailure(response, contains: "USER requires exactly one user specification")
             assertDidNotDialLinuxBuilder(response)
         }
 
@@ -133,6 +133,35 @@ extension TestCLIMacOSBuildBase {
 
             let output = try runDarwinContainer(image: imageName, command: ["/usr/bin/sw_vers"])
             #expect(output.contains("macOS"))
+        }
+
+        @Test func testDarwinBuildUserInstructionAffectsRunAndImageConfig() throws {
+            let tempDir = try createTempDir()
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+            let imageName = "local/macos-build-user:\(UUID().uuidString)"
+            defer { deleteImageIfExists(imageName) }
+
+            try createContext(
+                tempDir: tempDir,
+                dockerfile: """
+                FROM \(macOSBaseReference)
+                USER nobody
+                RUN test "$(/usr/bin/id -un)" = "nobody"
+                ENTRYPOINT ["/usr/bin/id"]
+                CMD ["-un"]
+                """
+            )
+
+            let response = try runDarwinBuild(tempDir: tempDir, tag: imageName)
+            #expect(response.status == 0, "expected darwin USER build to succeed: \(response.error)")
+            assertDidNotDialLinuxBuilder(response)
+
+            let runOutput = try runDarwinContainer(image: imageName, command: [])
+            #expect(runOutput.contains("nobody"))
+
+            let inspect = try run(arguments: ["image", "inspect", imageName])
+            #expect(inspect.status == 0)
+            #expect(inspect.output.contains("nobody"))
         }
 
         @Test func testDarwinBuildCopyDockerignoreAndSymlink() throws {

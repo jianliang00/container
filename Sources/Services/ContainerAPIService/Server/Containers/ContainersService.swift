@@ -31,9 +31,16 @@ import Logging
 public actor ContainersService {
     private static let macOSRuntimeName = "container-runtime-macos"
 
+    enum StartProcessResult: Sendable {
+        case exec
+        case initProcessStarted(networks: [Attachment])
+    }
+
     struct ContainerState {
         var snapshot: ContainerSnapshot
         var client: SandboxClient?
+        var bootstrapTask: Task<SandboxClient, Error>?
+        var processStartTasks: [String: Task<StartProcessResult, Error>] = [:]
 
         func getClient() throws -> SandboxClient {
             guard let client else {
@@ -325,53 +332,74 @@ public actor ContainersService {
     /// Bootstrap the init process of the container.
     public func bootstrap(id: String, stdio: [FileHandle?]) async throws {
         self.log.debug("\(#function)")
-        try await self.lock.withLock { context in
+
+        let (task, config) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration) in
             var state = try await self.getContainerState(id: id, context: context)
 
             // We've already bootstrapped this container. Ideally we should be able to
             // return some sort of error code from the sandbox svc to check here, but this
             // is also a very simple check and faster than doing an rpc to get the same result.
-            if state.client != nil {
-                return
+            if let client = state.client {
+                return (Task { client }, state.snapshot.configuration)
             }
 
             let path = self.containerRoot.appendingPathComponent(id)
             let config = try Self.getContainerConfiguration(at: path)
+            if let task = state.bootstrapTask {
+                return (task, config)
+            }
 
-            do {
-                try Self.registerService(
-                    plugin: self.runtimePlugins.first { $0.name == config.runtimeHandler }!,
-                    loader: self.pluginLoader,
-                    configuration: config,
-                    path: path
-                )
+            try Self.registerService(
+                plugin: self.runtimePlugins.first { $0.name == config.runtimeHandler }!,
+                loader: self.pluginLoader,
+                configuration: config,
+                path: path
+            )
 
-                let runtime = state.snapshot.configuration.runtimeHandler
+            let runtime = state.snapshot.configuration.runtimeHandler
+            let task = Task {
                 let sandboxClient = try await SandboxClient.create(
                     id: id,
                     runtime: runtime
                 )
-
                 try await sandboxClient.bootstrap(stdio: stdio)
-
-                try await self.exitMonitor.registerProcess(
-                    id: id,
-                    onExit: self.handleContainerExit
-                )
-
-                state.client = sandboxClient
-                await self.setContainerState(id, state, context: context)
-            } catch {
-                let label = Self.fullLaunchdServiceLabel(
-                    runtimeName: config.runtimeHandler,
-                    instanceId: id
-                )
-
-                await self.exitMonitor.stopTracking(id: id)
-                try? ServiceManager.deregister(fullServiceLabel: label)
-
-                throw error
+                return sandboxClient
             }
+
+            state.bootstrapTask = task
+            await self.setContainerState(id, state, context: context)
+            return (task, config)
+        }
+
+        do {
+            let sandboxClient = try await task.value
+            try await self.lock.withLock { context in
+                var state = try await self.getContainerState(id: id, context: context)
+                if state.client == nil {
+                    try await self.exitMonitor.registerProcess(
+                        id: id,
+                        onExit: self.handleContainerExit
+                    )
+                    state.client = sandboxClient
+                }
+                state.bootstrapTask = nil
+                await self.setContainerState(id, state, context: context)
+            }
+        } catch {
+            let label = Self.fullLaunchdServiceLabel(
+                runtimeName: config.runtimeHandler,
+                instanceId: id
+            )
+
+            await self.exitMonitor.stopTracking(id: id)
+            try? ServiceManager.deregister(fullServiceLabel: label)
+            try? await self.lock.withLock { context in
+                var state = try await self.getContainerState(id: id, context: context)
+                state.bootstrapTask = nil
+                await self.setContainerState(id, state, context: context)
+            }
+
+            throw error
         }
     }
 
@@ -399,23 +427,33 @@ public actor ContainersService {
     public func startProcess(id: String, processID: String) async throws {
         self.log.debug("\(#function)")
 
-        try await self.lock.withLock { context in
+        enum StartWork {
+            case alreadyStarted
+            case run(task: Task<StartProcessResult, Error>, client: SandboxClient, isInit: Bool)
+        }
+
+        let work = try await self.lock.withLock { context -> StartWork in
             var state = try await self.getContainerState(id: id, context: context)
 
             let isInit = Self.isInitProcess(id: id, processID: processID)
             if state.snapshot.status == .running && isInit {
-                return
+                return .alreadyStarted
             }
 
             let client = try state.getClient()
-            try await client.startProcess(processID)
-
-            guard isInit else {
-                return
+            if let task = state.processStartTasks[processID] {
+                return .run(task: task, client: client, isInit: isInit)
             }
 
-            do {
-                let log = self.log
+            let log = self.log
+            let exitMonitor = self.exitMonitor
+            let task = Task {
+                try await client.startProcess(processID)
+
+                guard isInit else {
+                    return StartProcessResult.exec
+                }
+
                 let waitFunc: ExitMonitor.WaitHandler = {
                     log.info("registering container \(id) with exit monitor")
                     let code = try await client.wait(id)
@@ -423,17 +461,42 @@ public actor ContainersService {
 
                     return code
                 }
-                try await self.exitMonitor.track(id: id, waitingOn: waitFunc)
+                try await exitMonitor.track(id: id, waitingOn: waitFunc)
 
                 let sandboxSnapshot = try await client.state()
-                state.snapshot.status = .running
-                state.snapshot.networks = sandboxSnapshot.networks
-                state.snapshot.startedDate = Date()
-                await self.setContainerState(id, state, context: context)
-            } catch {
-                await self.exitMonitor.stopTracking(id: id)
-                try? await client.stop(options: ContainerStopOptions.default)
+                return .initProcessStarted(networks: sandboxSnapshot.networks)
+            }
+            state.processStartTasks[processID] = task
+            await self.setContainerState(id, state, context: context)
+            return .run(task: task, client: client, isInit: isInit)
+        }
 
+        switch work {
+        case .alreadyStarted:
+            return
+        case .run(let task, let client, let isInit):
+            do {
+                let result = try await task.value
+                try await self.lock.withLock { context in
+                    var state = try await self.getContainerState(id: id, context: context)
+                    state.processStartTasks.removeValue(forKey: processID)
+                    if case .initProcessStarted(let networks) = result {
+                        state.snapshot.status = .running
+                        state.snapshot.networks = networks
+                        state.snapshot.startedDate = Date()
+                    }
+                    await self.setContainerState(id, state, context: context)
+                }
+            } catch {
+                try? await self.lock.withLock { context in
+                    var state = try await self.getContainerState(id: id, context: context)
+                    state.processStartTasks.removeValue(forKey: processID)
+                    await self.setContainerState(id, state, context: context)
+                }
+                if isInit {
+                    await self.exitMonitor.stopTracking(id: id)
+                    try? await client.stop(options: ContainerStopOptions.default)
+                }
                 throw error
             }
         }

@@ -116,7 +116,7 @@ final class AgentConnection: @unchecked Sendable {
     private let socketHandle: FileHandle
 
     private var buffer = Data()
-    private var session: ProcessSession?
+    private var session: (any GuestAgentProcessSession)?
     private var fileTransactions: [String: GuestAgentFileTransferTransaction] = [:]
 
     init(fd: Int32) {
@@ -236,6 +236,21 @@ final class AgentConnection: @unchecked Sendable {
         guard let executable = frame.executable else {
             try send(frame: .error("missing executable"))
             try send(frame: .exit(1))
+            return
+        }
+
+        if let identity = try GuestAgentExecIdentity.resolve(from: frame) {
+            let session = try SpawnedProcessSession.spawn(
+                executable: executable,
+                arguments: frame.arguments ?? [],
+                environment: frame.environment ?? [],
+                workingDirectory: frame.workingDirectory,
+                terminal: frame.terminal == true,
+                identity: identity,
+                connection: self
+            )
+            self.session = session
+            try session.start(stdoutHandle: nil, stderrHandle: nil)
             return
         }
 
@@ -522,7 +537,581 @@ final class AgentConnection: @unchecked Sendable {
     }
 }
 
-private final class ProcessSession: @unchecked Sendable {
+private protocol GuestAgentProcessSession: AnyObject {
+    func start(stdoutHandle: FileHandle?, stderrHandle: FileHandle?) throws
+    func writeStdin(_ data: Data) throws
+    func closeStdin()
+    func sendSignal(_ signal: Int32) throws
+    func resize(width: UInt16, height: UInt16) throws
+    func cleanup()
+}
+
+struct GuestAgentExecIdentity {
+    let uid: uid_t
+    let gid: gid_t
+    let supplementalGroups: [gid_t]
+
+    static func resolve(from frame: GuestAgentFrame) throws -> Self? {
+        let supplementalGroups = frame.supplementalGroups ?? []
+        if let user = frame.user, !user.isEmpty {
+            return try resolve(rawUser: user, additionalGroups: supplementalGroups)
+        }
+        if let uid = frame.uid, let gid = frame.gid {
+            return .init(uid: uid_t(uid), gid: gid_t(gid), supplementalGroups: supplementalGroups.map { gid_t($0) })
+        }
+        if frame.uid == nil, frame.gid == nil, supplementalGroups.isEmpty {
+            return nil
+        }
+        throw NSError(
+            domain: "container.macos.guest-agent.exec",
+            code: Int(EINVAL),
+            userInfo: [NSLocalizedDescriptionKey: "incomplete exec user identity"]
+        )
+    }
+
+    private static func resolve(rawUser: String, additionalGroups: [UInt32]) throws -> Self {
+        let parts = rawUser.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        guard let rawUserToken = parts.first, !rawUserToken.isEmpty else {
+            throw NSError(
+                domain: "container.macos.guest-agent.exec",
+                code: Int(EINVAL),
+                userInfo: [NSLocalizedDescriptionKey: "USER may not be empty"]
+            )
+        }
+
+        let resolvedUser = try resolveUser(token: rawUserToken)
+        let gid = try parts.count == 2 ? resolveGroup(token: parts[1]) : resolvedUser.defaultGID
+        let groups = try resolveSupplementalGroups(
+            userName: resolvedUser.userName,
+            primaryGID: gid,
+            additionalGroups: additionalGroups
+        )
+        return .init(uid: resolvedUser.uid, gid: gid, supplementalGroups: groups)
+    }
+
+    private static func resolveUser(token: String) throws -> (uid: uid_t, defaultGID: gid_t, userName: String?) {
+        if let uid = UInt32(token) {
+            if let pw = getpwuid(uid_t(uid)) {
+                let userName = String(cString: pw.pointee.pw_name)
+                return (pw.pointee.pw_uid, pw.pointee.pw_gid, userName)
+            }
+            return (uid_t(uid), gid_t(uid), nil)
+        }
+        guard let pw = getpwnam(token) else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(ENOENT),
+                userInfo: [NSLocalizedDescriptionKey: "user \(token) not found"]
+            )
+        }
+        let userName = String(cString: pw.pointee.pw_name)
+        return (pw.pointee.pw_uid, pw.pointee.pw_gid, userName)
+    }
+
+    private static func resolveGroup(token: String) throws -> gid_t {
+        guard !token.isEmpty else {
+            throw NSError(
+                domain: "container.macos.guest-agent.exec",
+                code: Int(EINVAL),
+                userInfo: [NSLocalizedDescriptionKey: "group may not be empty"]
+            )
+        }
+        if let gid = UInt32(token) {
+            return gid_t(gid)
+        }
+        guard let group = getgrnam(token) else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(ENOENT),
+                userInfo: [NSLocalizedDescriptionKey: "group \(token) not found"]
+            )
+        }
+        return group.pointee.gr_gid
+    }
+
+    private static func resolveSupplementalGroups(
+        userName: String?,
+        primaryGID: gid_t,
+        additionalGroups: [UInt32]
+    ) throws -> [gid_t] {
+        _ = userName
+
+        // The primary group is applied via `setgid`. Carrying auto-resolved
+        // group memberships through `setgroups` currently breaks special guest
+        // accounts such as `nobody`, so only explicit supplemental groups are
+        // forwarded for now.
+        let groups = Set<gid_t>(additionalGroups.map { gid_t($0) })
+        return Array(groups.filter { $0 != primaryGID }).sorted()
+    }
+}
+
+private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable {
+    private let pid: pid_t
+    private let terminal: Bool
+    private unowned let connection: AgentConnection
+    private let masterHandle: FileHandle?
+    private let stdinHandle: FileHandle?
+    private let stdoutHandle: FileHandle?
+    private let stderrHandle: FileHandle?
+    private let outputLock = NSLock()
+    private var exitSent = false
+
+    private init(
+        pid: pid_t,
+        terminal: Bool,
+        connection: AgentConnection,
+        masterHandle: FileHandle?,
+        stdinHandle: FileHandle?,
+        stdoutHandle: FileHandle?,
+        stderrHandle: FileHandle?
+    ) {
+        self.pid = pid
+        self.terminal = terminal
+        self.connection = connection
+        self.masterHandle = masterHandle
+        self.stdinHandle = stdinHandle
+        self.stdoutHandle = stdoutHandle
+        self.stderrHandle = stderrHandle
+    }
+
+    static func spawn(
+        executable: String,
+        arguments: [String],
+        environment: [String],
+        workingDirectory: String?,
+        terminal: Bool,
+        identity: GuestAgentExecIdentity,
+        connection: AgentConnection
+    ) throws -> SpawnedProcessSession {
+        let preparedExec = PreparedCStringArray([executable] + arguments)
+        let preparedEnv = PreparedCStringArray(environment)
+        let preparedWorkingDirectory = workingDirectory.map(PreparedCString.init)
+
+        let execStatus = try makePipe()
+        try setCloseOnExec(execStatus.writeEnd)
+
+        var stdinPipe: RawPipe?
+        var stdoutPipe: RawPipe?
+        var stderrPipe: RawPipe?
+        var masterFD: Int32 = -1
+        var slaveFD: Int32 = -1
+
+        if terminal {
+            guard openpty(&masterFD, &slaveFD, nil, nil, nil) == 0 else {
+                throw POSIXError.fromErrno()
+            }
+        } else {
+            stdinPipe = try makePipe()
+            stdoutPipe = try makePipe()
+            stderrPipe = try makePipe()
+        }
+
+        let pid = sysFork()
+        guard pid >= 0 else {
+            closeIfValid(execStatus.readEnd)
+            closeIfValid(execStatus.writeEnd)
+            closeIfValid(masterFD)
+            closeIfValid(slaveFD)
+            closePipe(stdinPipe)
+            closePipe(stdoutPipe)
+            closePipe(stderrPipe)
+            throw POSIXError.fromErrno()
+        }
+
+        if pid == 0 {
+            closeIfValid(execStatus.readEnd)
+            if terminal {
+                closeIfValid(masterFD)
+                runChild(
+                    execStatusFD: execStatus.writeEnd,
+                    executable: preparedExec.pointer.pointee,
+                    arguments: preparedExec.pointer,
+                    environment: preparedEnv.pointer,
+                    workingDirectory: preparedWorkingDirectory?.pointer,
+                    identity: identity,
+                    stdinFD: slaveFD,
+                    stdoutFD: slaveFD,
+                    stderrFD: slaveFD,
+                    terminal: true
+                )
+            } else {
+                closeIfValid(stdinPipe?.writeEnd)
+                closeIfValid(stdoutPipe?.readEnd)
+                closeIfValid(stderrPipe?.readEnd)
+                runChild(
+                    execStatusFD: execStatus.writeEnd,
+                    executable: preparedExec.pointer.pointee,
+                    arguments: preparedExec.pointer,
+                    environment: preparedEnv.pointer,
+                    workingDirectory: preparedWorkingDirectory?.pointer,
+                    identity: identity,
+                    stdinFD: stdinPipe?.readEnd ?? -1,
+                    stdoutFD: stdoutPipe?.writeEnd ?? -1,
+                    stderrFD: stderrPipe?.writeEnd ?? -1,
+                    terminal: false
+                )
+            }
+        }
+
+        closeIfValid(execStatus.writeEnd)
+        closeIfValid(slaveFD)
+        closeIfValid(stdinPipe?.readEnd)
+        closeIfValid(stdoutPipe?.writeEnd)
+        closeIfValid(stderrPipe?.writeEnd)
+
+        if let errorCode = try readExecStatus(execStatus.readEnd) {
+            closeIfValid(masterFD)
+            closeIfValid(stdinPipe?.writeEnd)
+            closeIfValid(stdoutPipe?.readEnd)
+            closeIfValid(stderrPipe?.readEnd)
+            var status: Int32 = 0
+            _ = waitpid(pid, &status, 0)
+            throw POSIXError(POSIXErrorCode(rawValue: errorCode) ?? .EIO)
+        }
+
+        return .init(
+            pid: pid,
+            terminal: terminal,
+            connection: connection,
+            masterHandle: terminal ? FileHandle(fileDescriptor: masterFD, closeOnDealloc: true) : nil,
+            stdinHandle: terminal ? nil : FileHandle(fileDescriptor: stdinPipe?.writeEnd ?? -1, closeOnDealloc: true),
+            stdoutHandle: terminal ? nil : FileHandle(fileDescriptor: stdoutPipe?.readEnd ?? -1, closeOnDealloc: true),
+            stderrHandle: terminal ? nil : FileHandle(fileDescriptor: stderrPipe?.readEnd ?? -1, closeOnDealloc: true)
+        )
+    }
+
+    func start(stdoutHandle: FileHandle?, stderrHandle: FileHandle?) throws {
+        _ = stdoutHandle
+        _ = stderrHandle
+
+        if let masterHandle {
+            masterHandle.readabilityHandler = { [weak self] handle in
+                self?.forwardAvailableData(from: handle, channel: .stdout)
+            }
+        } else {
+            self.stdoutHandle?.readabilityHandler = { [weak self] handle in
+                self?.forwardAvailableData(from: handle, channel: .stdout)
+            }
+            self.stderrHandle?.readabilityHandler = { [weak self] handle in
+                self?.forwardAvailableData(from: handle, channel: .stderr)
+            }
+        }
+
+        Thread.detachNewThread { [weak self] in
+            self?.waitForExit()
+        }
+    }
+
+    func writeStdin(_ data: Data) throws {
+        if terminal {
+            guard let masterHandle else { return }
+            try masterHandle.write(contentsOf: data)
+        } else {
+            try stdinHandle?.write(contentsOf: data)
+        }
+    }
+
+    func closeStdin() {
+        if terminal {
+            return
+        }
+        try? stdinHandle?.close()
+    }
+
+    func sendSignal(_ signal: Int32) throws {
+        guard kill(pid, 0) == 0 else { return }
+        guard Darwin.kill(pid, signal) == 0 else {
+            throw POSIXError.fromErrno()
+        }
+    }
+
+    func resize(width: UInt16, height: UInt16) throws {
+        guard terminal, let masterHandle else { return }
+        var ws = winsize(ws_row: height, ws_col: width, ws_xpixel: 0, ws_ypixel: 0)
+        guard ioctl(masterHandle.fileDescriptor, TIOCSWINSZ, &ws) == 0 else {
+            throw POSIXError.fromErrno()
+        }
+    }
+
+    func cleanup() {
+        stdoutHandle?.readabilityHandler = nil
+        stderrHandle?.readabilityHandler = nil
+        masterHandle?.readabilityHandler = nil
+        if kill(pid, 0) == 0 {
+            _ = Darwin.kill(pid, SIGKILL)
+        }
+        try? masterHandle?.close()
+        try? stdinHandle?.close()
+        try? stdoutHandle?.close()
+        try? stderrHandle?.close()
+    }
+
+    private enum OutputChannel {
+        case stdout
+        case stderr
+    }
+
+    private func waitForExit() {
+        var status: Int32 = 0
+        let result = waitpid(pid, &status, 0)
+        let exitCode: Int32
+        if result == pid {
+            if wifexited(status) {
+                exitCode = wexitstatus(status)
+            } else if wifsignaled(status) {
+                exitCode = 128 + wtermsig(status)
+            } else {
+                exitCode = 1
+            }
+        } else {
+            exitCode = 1
+        }
+        flushOutputAndSendExit(exitCode)
+    }
+
+    private func forwardAvailableData(from handle: FileHandle, channel: OutputChannel) {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+
+        guard !exitSent else {
+            handle.readabilityHandler = nil
+            return
+        }
+
+        let data = handle.availableData
+        if data.isEmpty {
+            handle.readabilityHandler = nil
+            return
+        }
+
+        send(data, channel: channel)
+    }
+
+    private func flushOutputAndSendExit(_ status: Int32) {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+
+        guard !exitSent else {
+            return
+        }
+
+        drainRemainingOutput(from: masterHandle, channel: .stdout)
+        drainRemainingOutput(from: stdoutHandle, channel: .stdout)
+        drainRemainingOutput(from: stderrHandle, channel: .stderr)
+
+        exitSent = true
+        try? connection.send(frame: .exit(status))
+    }
+
+    private func drainRemainingOutput(from handle: FileHandle?, channel: OutputChannel) {
+        guard let handle else { return }
+
+        while true {
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            send(data, channel: channel)
+        }
+    }
+
+    private func send(_ data: Data, channel: OutputChannel) {
+        switch channel {
+        case .stdout:
+            try? connection.send(frame: .stdout(data))
+        case .stderr:
+            try? connection.send(frame: .stderr(data))
+        }
+    }
+}
+
+private struct RawPipe {
+    let readEnd: Int32
+    let writeEnd: Int32
+}
+
+@_silgen_name("fork")
+private func sysFork() -> pid_t
+
+private final class PreparedCString {
+    let pointer: UnsafeMutablePointer<CChar>
+
+    init(_ value: String) {
+        guard let pointer = strdup(value) else {
+            fatalError("failed to allocate C string")
+        }
+        self.pointer = pointer
+    }
+
+    deinit {
+        free(pointer)
+    }
+}
+
+private final class PreparedCStringArray {
+    let pointer: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+    private let count: Int
+
+    init(_ values: [String]) {
+        let storage = values.map { value -> UnsafeMutablePointer<CChar>? in
+            guard let pointer = strdup(value) else {
+                fatalError("failed to allocate C string")
+            }
+            return pointer
+        }
+        self.count = storage.count + 1
+        self.pointer = .allocate(capacity: count)
+        for (index, value) in storage.enumerated() {
+            pointer.advanced(by: index).initialize(to: value)
+        }
+        pointer.advanced(by: storage.count).initialize(to: nil)
+    }
+
+    deinit {
+        for index in 0..<(count - 1) {
+            free(pointer.advanced(by: index).pointee)
+            pointer.advanced(by: index).deinitialize(count: 1)
+        }
+        pointer.advanced(by: count - 1).deinitialize(count: 1)
+        pointer.deallocate()
+    }
+}
+
+private func makePipe() throws -> RawPipe {
+    var fds = [Int32](repeating: -1, count: 2)
+    guard pipe(&fds) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+    return .init(readEnd: fds[0], writeEnd: fds[1])
+}
+
+private func closePipe(_ pipe: RawPipe?) {
+    closeIfValid(pipe?.readEnd)
+    closeIfValid(pipe?.writeEnd)
+}
+
+private func closeIfValid(_ fd: Int32?) {
+    guard let fd, fd >= 0 else { return }
+    _ = Darwin.close(fd)
+}
+
+private func setCloseOnExec(_ fd: Int32) throws {
+    let flags = fcntl(fd, F_GETFD)
+    guard flags != -1 else {
+        throw POSIXError.fromErrno()
+    }
+    guard fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+}
+
+private func readExecStatus(_ fd: Int32) throws -> Int32? {
+    defer { closeIfValid(fd) }
+    var code: Int32 = 0
+    let bytes = withUnsafeMutablePointer(to: &code) {
+        Darwin.read(fd, $0, MemoryLayout<Int32>.size)
+    }
+    if bytes == 0 {
+        return nil
+    }
+    guard bytes == MemoryLayout<Int32>.size else {
+        throw POSIXError(.EIO)
+    }
+    return code
+}
+
+private func wifexited(_ status: Int32) -> Bool {
+    (status & 0x7f) == 0
+}
+
+private func wexitstatus(_ status: Int32) -> Int32 {
+    (status >> 8) & 0xff
+}
+
+private func wifsignaled(_ status: Int32) -> Bool {
+    let signal = status & 0x7f
+    return signal != 0 && signal != 0x7f
+}
+
+private func wtermsig(_ status: Int32) -> Int32 {
+    status & 0x7f
+}
+
+private func runChild(
+    execStatusFD: Int32,
+    executable: UnsafeMutablePointer<CChar>?,
+    arguments: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+    environment: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+    workingDirectory: UnsafeMutablePointer<CChar>?,
+    identity: GuestAgentExecIdentity,
+    stdinFD: Int32,
+    stdoutFD: Int32,
+    stderrFD: Int32,
+    terminal: Bool
+) -> Never {
+    func fail(_ code: Int32) -> Never {
+        var errorCode = code
+        _ = withUnsafePointer(to: &errorCode) {
+            Darwin.write(execStatusFD, $0, MemoryLayout<Int32>.size)
+        }
+        _exit(127)
+    }
+
+    if terminal {
+        if setsid() == -1 {
+            fail(Int32(errno))
+        }
+        _ = ioctl(stdinFD, TIOCSCTTY, 0)
+    }
+
+    if dup2(stdinFD, STDIN_FILENO) == -1 {
+        fail(Int32(errno))
+    }
+    if dup2(stdoutFD, STDOUT_FILENO) == -1 {
+        fail(Int32(errno))
+    }
+    if dup2(stderrFD, STDERR_FILENO) == -1 {
+        fail(Int32(errno))
+    }
+
+    if stdinFD > STDERR_FILENO {
+        _ = Darwin.close(stdinFD)
+    }
+    if stdoutFD > STDERR_FILENO, stdoutFD != stdinFD {
+        _ = Darwin.close(stdoutFD)
+    }
+    if stderrFD > STDERR_FILENO, stderrFD != stdinFD, stderrFD != stdoutFD {
+        _ = Darwin.close(stderrFD)
+    }
+
+        if !identity.supplementalGroups.isEmpty {
+            var groups = identity.supplementalGroups
+            let result = groups.withUnsafeMutableBufferPointer { buffer in
+                setgroups(Int32(buffer.count), buffer.baseAddress)
+            }
+            if result != 0 {
+                fail(Int32(errno))
+            }
+        }
+    if setgid(identity.gid) != 0 {
+        fail(Int32(errno))
+    }
+    if setuid(identity.uid) != 0 {
+        fail(Int32(errno))
+    }
+
+    if let workingDirectory, chdir(workingDirectory) != 0 {
+        fail(Int32(errno))
+    }
+    guard let executable else {
+        fail(Int32(EINVAL))
+    }
+    execve(executable, arguments, environment)
+    fail(Int32(errno))
+}
+
+private final class ProcessSession: GuestAgentProcessSession, @unchecked Sendable {
     private enum OutputChannel {
         case stdout
         case stderr
@@ -700,6 +1289,7 @@ struct GuestAgentFrame: Codable {
     let environment: [String]?
     let workingDirectory: String?
     let terminal: Bool?
+    let user: String?
     let signal: Int32?
     let width: UInt16?
     let height: UInt16?
@@ -711,6 +1301,7 @@ struct GuestAgentFrame: Codable {
     let mode: UInt32?
     let uid: UInt32?
     let gid: UInt32?
+    let supplementalGroups: [UInt32]?
     let mtime: Int64?
     let linkTarget: String?
     let overwrite: Bool?
@@ -727,6 +1318,7 @@ struct GuestAgentFrame: Codable {
         environment: [String]? = nil,
         workingDirectory: String? = nil,
         terminal: Bool? = nil,
+        user: String? = nil,
         signal: Int32? = nil,
         width: UInt16? = nil,
         height: UInt16? = nil,
@@ -738,6 +1330,7 @@ struct GuestAgentFrame: Codable {
         mode: UInt32? = nil,
         uid: UInt32? = nil,
         gid: UInt32? = nil,
+        supplementalGroups: [UInt32]? = nil,
         mtime: Int64? = nil,
         linkTarget: String? = nil,
         overwrite: Bool? = nil,
@@ -753,6 +1346,7 @@ struct GuestAgentFrame: Codable {
         self.environment = environment
         self.workingDirectory = workingDirectory
         self.terminal = terminal
+        self.user = user
         self.signal = signal
         self.width = width
         self.height = height
@@ -764,6 +1358,7 @@ struct GuestAgentFrame: Codable {
         self.mode = mode
         self.uid = uid
         self.gid = gid
+        self.supplementalGroups = supplementalGroups
         self.mtime = mtime
         self.linkTarget = linkTarget
         self.overwrite = overwrite

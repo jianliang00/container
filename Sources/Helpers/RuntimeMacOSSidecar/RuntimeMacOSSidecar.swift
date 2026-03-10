@@ -134,6 +134,7 @@ struct SidecarGuestAgentFrame: Codable {
     let environment: [String]?
     let workingDirectory: String?
     let terminal: Bool?
+    let user: String?
     let signal: Int32?
     let width: UInt16?
     let height: UInt16?
@@ -145,6 +146,7 @@ struct SidecarGuestAgentFrame: Codable {
     let mode: UInt32?
     let uid: UInt32?
     let gid: UInt32?
+    let supplementalGroups: [UInt32]?
     let mtime: Int64?
     let linkTarget: String?
     let overwrite: Bool?
@@ -161,6 +163,7 @@ struct SidecarGuestAgentFrame: Codable {
         environment: [String]? = nil,
         workingDirectory: String? = nil,
         terminal: Bool? = nil,
+        user: String? = nil,
         signal: Int32? = nil,
         width: UInt16? = nil,
         height: UInt16? = nil,
@@ -172,6 +175,7 @@ struct SidecarGuestAgentFrame: Codable {
         mode: UInt32? = nil,
         uid: UInt32? = nil,
         gid: UInt32? = nil,
+        supplementalGroups: [UInt32]? = nil,
         mtime: Int64? = nil,
         linkTarget: String? = nil,
         overwrite: Bool? = nil,
@@ -187,6 +191,7 @@ struct SidecarGuestAgentFrame: Codable {
         self.environment = environment
         self.workingDirectory = workingDirectory
         self.terminal = terminal
+        self.user = user
         self.signal = signal
         self.width = width
         self.height = height
@@ -198,6 +203,7 @@ struct SidecarGuestAgentFrame: Codable {
         self.mode = mode
         self.uid = uid
         self.gid = gid
+        self.supplementalGroups = supplementalGroups
         self.mtime = mtime
         self.linkTarget = linkTarget
         self.overwrite = overwrite
@@ -213,7 +219,11 @@ struct SidecarGuestAgentFrame: Codable {
         arguments: [String],
         environment: [String]?,
         workingDirectory: String?,
-        terminal: Bool
+        terminal: Bool,
+        user: String?,
+        uid: UInt32?,
+        gid: UInt32?,
+        supplementalGroups: [UInt32]?
     ) -> Self {
         .init(
             type: .exec,
@@ -223,12 +233,16 @@ struct SidecarGuestAgentFrame: Codable {
             environment: environment,
             workingDirectory: workingDirectory,
             terminal: terminal,
+            user: user,
             signal: nil,
             width: nil,
             height: nil,
             data: nil,
             exitCode: nil,
-            message: nil
+            message: nil,
+            uid: uid,
+            gid: gid,
+            supplementalGroups: supplementalGroups
         )
     }
 
@@ -1238,7 +1252,11 @@ final class SidecarControlServer: @unchecked Sendable {
                     arguments: exec.arguments,
                     environment: env,
                     workingDirectory: cwd,
-                    terminal: exec.terminal
+                    terminal: exec.terminal,
+                    user: exec.user,
+                    uid: exec.uid,
+                    gid: exec.gid,
+                    supplementalGroups: exec.supplementalGroups
                 ),
                 fd: fd
             )

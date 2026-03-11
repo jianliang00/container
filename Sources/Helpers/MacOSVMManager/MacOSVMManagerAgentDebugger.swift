@@ -198,6 +198,7 @@ final class AgentDebugger: @unchecked Sendable {
     private let virtualMachine: VZVirtualMachine
     private let port: UInt32
     private let connectRetries: Int
+    private let exitStatus: ExitStatusController
     private let retryDelayMicroseconds: useconds_t = 500_000
     private let readyTimeoutSeconds: TimeInterval = 5
     private let connectCallbackTimeoutSeconds: TimeInterval = 2
@@ -212,10 +213,11 @@ final class AgentDebugger: @unchecked Sendable {
     private var pendingReady: (generation: UInt64, semaphore: DispatchSemaphore)?
     private var pendingControlExec: PendingControlExec?
 
-    init(virtualMachine: VZVirtualMachine, port: UInt32, connectRetries: Int) {
+    init(virtualMachine: VZVirtualMachine, port: UInt32, connectRetries: Int, exitStatus: ExitStatusController) {
         self.virtualMachine = virtualMachine
         self.port = port
         self.connectRetries = connectRetries
+        self.exitStatus = exitStatus
     }
 
     func launchREPL() {
@@ -382,10 +384,11 @@ final class AgentDebugger: @unchecked Sendable {
             print("[agent-probe] success: guest-agent ready on port \(port)")
         } catch {
             print("[agent-probe] failed: \(error)")
+            exitStatus.markFailed()
         }
         disconnect()
         Task { @MainActor in
-            NSApplication.shared.terminate(nil)
+            stopApplicationRunLoop()
         }
     }
 

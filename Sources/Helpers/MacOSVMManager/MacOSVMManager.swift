@@ -3,17 +3,67 @@ import Darwin
 import Foundation
 import Virtualization
 
+struct ProcessExitError: Error {
+    let code: Int32
+}
+
+final class ExitStatusController: @unchecked Sendable {
+    private let lock = NSLock()
+    private var status: Int32 = 0
+
+    func markFailed(_ code: Int32 = 1) {
+        lock.lock()
+        defer { lock.unlock() }
+        if status == 0 {
+            status = code
+        }
+    }
+
+    func currentStatus() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        return status
+    }
+}
+
+@MainActor
+func stopApplicationRunLoop() {
+    let app = NSApplication.shared
+    app.stop(nil)
+    if let event = NSEvent.otherEvent(
+        with: .applicationDefined,
+        location: .zero,
+        modifierFlags: [],
+        timestamp: 0,
+        windowNumber: 0,
+        context: nil,
+        subtype: 0,
+        data1: 0,
+        data2: 0
+    ) {
+        app.postEvent(event, atStart: false)
+    }
+    CFRunLoopStop(CFRunLoopGetMain())
+}
+
 final class VMDelegate: NSObject, VZVirtualMachineDelegate {
+    private let exitStatus: ExitStatusController
+
+    init(exitStatus: ExitStatusController) {
+        self.exitStatus = exitStatus
+    }
+
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         Task { @MainActor in
-            NSApplication.shared.terminate(nil)
+            stopApplicationRunLoop()
         }
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         fputs("vm stopped with error: \(error)\n", stderr)
+        exitStatus.markFailed()
         Task { @MainActor in
-            NSApplication.shared.terminate(nil)
+            stopApplicationRunLoop()
         }
     }
 }
@@ -106,15 +156,17 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 
     try vmConfiguration.validate()
 
+    let exitStatus = ExitStatusController()
     let virtualMachine = VZVirtualMachine(configuration: vmConfiguration)
-    let delegate = VMDelegate()
+    let delegate = VMDelegate(exitStatus: exitStatus)
     virtualMachine.delegate = delegate
     let debugger =
         (options.agentREPL || options.agentProbe || options.controlSocketPath != nil)
         ? AgentDebugger(
             virtualMachine: virtualMachine,
             port: options.agentPort,
-            connectRetries: options.agentConnectRetries
+            connectRetries: options.agentConnectRetries,
+            exitStatus: exitStatus
         ) : nil
     let controlServer = options.controlSocketPath.map { ControlCommandServer(socketPath: $0, debugger: debugger) }
 
@@ -185,8 +237,9 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
                     try controlServer.start()
                 } catch {
                     fputs("failed to start control socket server: \(error)\n", stderr)
+                    exitStatus.markFailed()
                     Task { @MainActor in
-                        NSApplication.shared.terminate(nil)
+                        stopApplicationRunLoop()
                     }
                     return
                 }
@@ -198,8 +251,9 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
             }
         case .failure(let error):
             fputs("failed to start VM: \(error)\n", stderr)
+            exitStatus.markFailed()
             Task { @MainActor in
-                NSApplication.shared.terminate(nil)
+                stopApplicationRunLoop()
             }
         }
     }
@@ -211,6 +265,10 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     _ = vmView
 
     app.run()
+    let status = exitStatus.currentStatus()
+    if status != 0 {
+        throw ProcessExitError(code: status)
+    }
     #endif
 }
 
@@ -228,6 +286,9 @@ struct MacOSVMManagerMain {
                 try runStartCommand(options: options)
             }
         } catch {
+            if let exitError = error as? ProcessExitError {
+                exit(exitError.code)
+            }
             fputs("error: \(error)\n", stderr)
             if error is CommandError {
                 printRootUsage()

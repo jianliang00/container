@@ -261,6 +261,12 @@ quit
 
 - 成功：`[agent-probe] success: guest-agent ready on port 27000`
 - 失败：会打印连接阶段错误（如 `Code=54`、ready timeout）
+- 退出码：成功返回 `0`，失败返回非零，适合脚本化探针
+
+说明：
+
+- 如果显式使用纯 `--headless`，当前镜像/agent 组合下仍可能持续 `Code=54`
+- 同一镜像通常可用 `--headless-display` 跑通 probe，应优先用它做自动化验证
 
 ### 5.5 Unix socket 控制口（sidecar 风格调试）
 

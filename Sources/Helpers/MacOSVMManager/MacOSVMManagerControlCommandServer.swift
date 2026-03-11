@@ -204,7 +204,7 @@ final class ControlCommandServer: @unchecked Sendable {
                 try writeLineToClient(clientFD, "ok terminating")
                 stop()
                 Task { @MainActor in
-                    NSApplication.shared.terminate(nil)
+                    stopApplicationRunLoop()
                 }
             default:
                 try writeLineToClient(clientFD, "err unknown command: \(command)")

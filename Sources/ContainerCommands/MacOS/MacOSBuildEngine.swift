@@ -33,6 +33,7 @@ struct MacOSBuildEngine {
     static let inlineDataLimit = 256 * 1024
     static let chunkSize = 256 * 1024
     static let stageStopTimeoutSeconds: Int32 = 20
+    static let machineIdentifierFilename = "MachineIdentifier.bin"
 
     struct Input {
         let appRoot: URL
@@ -221,10 +222,8 @@ struct MacOSBuildEngine {
         }
 
         switch export.type {
-        case "oci", "tar":
+        case "oci", "tar", "local":
             break
-        case "local":
-            throw ContainerizationError(.unsupported, message: "darwin builds do not support --output type=local in phase 1")
         default:
             throw ContainerizationError(.unsupported, message: "unsupported darwin build output type \(export.type)")
         }
@@ -284,19 +283,27 @@ struct MacOSBuildEngine {
                     continue
                 }
 
-                let parentDiskSource = try await baseImage.macOSChunkedDiskSource(for: buildPlatform)
                 let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
-                let packageStartedAt = Date()
-                try MacOSImagePackager.package(
-                    imageDirectory: bundleURL,
-                    outputTar: archiveURL,
-                    reference: input.tags.first,
-                    imageConfig: state.finalImage(labelOverrides: cliLabels),
-                    parentDiskSource: parentDiskSource
-                )
-                MacOSExportProfiler.log(
-                    "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
-                )
+                if export.type == "local" {
+                    let exportStartedAt = Date()
+                    try exportLocalImageDirectory(from: bundleURL, to: archiveURL)
+                    MacOSExportProfiler.log(
+                        "build.localExport: \(MacOSExportProfiler.format(Date().timeIntervalSince(exportStartedAt)))"
+                    )
+                } else {
+                    let parentDiskSource = try await baseImage.macOSChunkedDiskSource(for: buildPlatform)
+                    let packageStartedAt = Date()
+                    try MacOSImagePackager.package(
+                        imageDirectory: bundleURL,
+                        outputTar: archiveURL,
+                        reference: input.tags.first,
+                        imageConfig: state.finalImage(labelOverrides: cliLabels),
+                        parentDiskSource: parentDiskSource
+                    )
+                    MacOSExportProfiler.log(
+                        "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
+                    )
+                }
 
                 await runtime.delete()
                 return .init(archiveURL: archiveURL)
@@ -335,11 +342,40 @@ struct MacOSBuildEngine {
                 .appendingPathComponent("builder")
                 .appendingPathComponent(buildID)
                 .appendingPathComponent("out.tar")
+        case "local":
+            return appRoot
+                .appendingPathComponent("builder")
+                .appendingPathComponent(buildID)
+                .appendingPathComponent("local")
         default:
             return appRoot
                 .appendingPathComponent("builder")
                 .appendingPathComponent(buildID)
                 .appendingPathComponent("out.tar")
+        }
+    }
+
+    static func exportLocalImageDirectory(from imageDirectory: URL, to outputDirectory: URL) throws {
+        let image = try MacOSImagePackager.validateImageDirectory(imageDirectory)
+        let fm = FileManager.default
+        let destination = outputDirectory.standardizedFileURL
+
+        if fm.fileExists(atPath: destination.path) {
+            try fm.removeItem(at: destination)
+        }
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let requiredFiles = [image.diskImage, image.auxiliaryStorage, image.hardwareModel]
+        for source in requiredFiles {
+            try fm.copyItem(at: source, to: destination.appendingPathComponent(source.lastPathComponent))
+        }
+
+        let machineIdentifier = image.root.appendingPathComponent(machineIdentifierFilename)
+        if fm.fileExists(atPath: machineIdentifier.path) {
+            try fm.copyItem(
+                at: machineIdentifier,
+                to: destination.appendingPathComponent(machineIdentifierFilename)
+            )
         }
     }
 

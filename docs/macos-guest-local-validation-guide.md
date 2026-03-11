@@ -138,6 +138,53 @@ guest 关机后回到宿主执行：
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
+### 2.3 自动注入当前仓库里的最新 guest-agent
+
+如果你刚改了 `container-macos-guest-agent` 或 `scripts/macos-guest-agent/*`，又不想手工准备 `$SEED_DIR`，可以直接让 `start-vm --auto-seed` 在启动时生成临时注入目录。
+
+先构建最新 agent，并显式指定二进制和脚本来源：
+
+```bash
+cd /Users/jianliang/Code/container
+
+xcrun swift build -c release --product container-macos-guest-agent
+
+export CONTAINER_MACOS_GUEST_AGENT_BIN="$PWD/.build/arm64-apple-macosx/release/container-macos-guest-agent"
+export CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent"
+
+"$CONTAINER_BIN" macos start-vm \
+  --image "$IMAGE_DIR" \
+  --auto-seed \
+  --cpus 4 \
+  --memory-mib 8192
+```
+
+guest 内仍然执行同一套安装命令：
+
+```bash
+sudo mkdir -p /Volumes/seed
+sudo mount -t virtiofs seed /Volumes/seed
+sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+
+sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 40
+sudo tail -n 50 /var/log/container-macos-guest-agent.log
+sudo shutdown -h now
+```
+
+guest 关机后重新打包并加载：
+
+```bash
+"$CONTAINER_BIN" macos package \
+  --input "$IMAGE_DIR" \
+  --output "$OCI_TAR" \
+  --reference "$BASE_REF"
+
+"$CONTAINER_BIN" image load -i "$OCI_TAR"
+"$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
+```
+
+如果你已经执行过 `make release`，并且安装目录里的 `container-macos-guest-agent` 就是最新的，也可以省略这两个环境变量，直接用 `--auto-seed`。
+
 ## 3. build 前初始化
 
 ```bash
@@ -294,7 +341,30 @@ grep -q '^oci-layout$' "$WORKROOT/out/phase1.tar.list"
 
 预期：`type=tar` 不会自动 load，手工 `image load` 后可以运行。
 
-### 4.5 `USER`
+### 4.5 `type=local`
+
+```bash
+mkdir -p "$WORKROOT/out"
+
+"$CONTAINER_BIN" build \
+  --platform darwin/arm64 \
+  --progress plain \
+  --output type=local,dest="$WORKROOT/out/local-image" \
+  "$WORKROOT/01-smoke"
+
+ls -lh \
+  "$WORKROOT/out/local-image/Disk.img" \
+  "$WORKROOT/out/local-image/AuxiliaryStorage" \
+  "$WORKROOT/out/local-image/HardwareModel.bin"
+
+"$CONTAINER_BIN" macos start-vm \
+  --image "$WORKROOT/out/local-image" \
+  --auto-seed
+```
+
+预期：`type=local` 会导出一个 macOS image directory，目录里至少包含 `Disk.img`、`AuxiliaryStorage`、`HardwareModel.bin`，并且可直接给 `macos start-vm` 使用。
+
+### 4.6 `USER`
 
 ```bash
 mkdir -p "$WORKROOT/04-user"
@@ -321,7 +391,7 @@ grep -Eq '"User"[[:space:]]*:[[:space:]]*"nobody"' "$WORKROOT/04-user/inspect.js
 
 预期：构建成功，`RUN` 阶段按 `nobody` 执行，默认启动输出 `nobody`，并且镜像 inspect 结果里能看到 `User=nobody`。
 
-### 4.6 拒绝路径
+### 4.7 拒绝路径
 
 ```bash
 expect_fail() {
@@ -368,10 +438,6 @@ expect_fail darwin-amd64 \
   "darwin builds require darwin/arm64" \
   "$CONTAINER_BIN" build --platform darwin/amd64 "$WORKROOT/01-smoke"
 
-expect_fail local-output \
-  "darwin builds do not support --output type=local in phase 1" \
-  "$CONTAINER_BIN" build --platform darwin/arm64 --output type=local,dest="$WORKROOT/local-out" "$WORKROOT/01-smoke"
-
 expect_fail add-url-unsupported \
   "darwin builds do not support ADD <url> in phase 1" \
   "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/05-negative/add-url"
@@ -381,7 +447,7 @@ expect_fail copy-from-unsupported \
   "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/05-negative/copy-from"
 ```
 
-预期：上面 5 条命令都失败，而且日志里包含对应错误文本。
+预期：上面 4 条命令都失败，而且日志里包含对应错误文本。
 
 ## 5. 通过标准
 

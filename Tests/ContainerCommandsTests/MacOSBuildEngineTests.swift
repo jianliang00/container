@@ -193,6 +193,30 @@ struct MacOSBuildEngineTests {
     }
 
     @Test
+    func exportLocalImageDirectoryCopiesVMArtifacts() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let imageDirectory = root.appendingPathComponent("image")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        try Data([0x01, 0x02, 0x03]).write(to: imageDirectory.appendingPathComponent(MacOSImagePackager.diskImageFilename))
+        try Data([0x04, 0x05]).write(to: imageDirectory.appendingPathComponent(MacOSImagePackager.auxiliaryStorageFilename))
+        try Data([0x06]).write(to: imageDirectory.appendingPathComponent(MacOSImagePackager.hardwareModelFilename))
+        try Data([0x07, 0x08]).write(
+            to: imageDirectory.appendingPathComponent(MacOSBuildEngine.machineIdentifierFilename)
+        )
+
+        let outputDirectory = root.appendingPathComponent("local-output")
+        try MacOSBuildEngine.exportLocalImageDirectory(from: imageDirectory, to: outputDirectory)
+
+        let exported = Set(try FileManager.default.contentsOfDirectory(atPath: outputDirectory.path))
+        #expect(exported.contains(MacOSImagePackager.diskImageFilename))
+        #expect(exported.contains(MacOSImagePackager.auxiliaryStorageFilename))
+        #expect(exported.contains(MacOSImagePackager.hardwareModelFilename))
+        #expect(exported.contains(MacOSBuildEngine.machineIdentifierFilename))
+    }
+
+    @Test
     func plannerRejectsCopyFromInPhaseOne() throws {
         let dockerfile = Data(
             """

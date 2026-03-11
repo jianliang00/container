@@ -48,20 +48,6 @@ extension TestCLIMacOSBuildBase {
             assertDidNotDialLinuxBuilder(response)
         }
 
-        @Test func testDarwinBuildRejectsLocalOutputInPhaseOne() throws {
-            let tempDir = try createTempDir()
-            try createContext(tempDir: tempDir, dockerfile: "FROM \(macOSBaseReference)\n")
-
-            let response = try runDarwinBuild(
-                tempDir: tempDir,
-                tag: "local/macos-build-local-output:\(UUID().uuidString)",
-                output: "type=local,dest=\(tempDir.appendingPathComponent("out").path)"
-            )
-
-            assertFailure(response, contains: "darwin builds do not support --output type=local in phase 1")
-            assertDidNotDialLinuxBuilder(response)
-        }
-
         @Test func testDarwinBuildRejectsMalformedUSERInstruction() throws {
             let tempDir = try createTempDir()
             try createContext(
@@ -300,6 +286,52 @@ extension TestCLIMacOSBuildBase {
 
             let output = try runDarwinContainer(image: imageName, command: ["/usr/bin/sw_vers"])
             #expect(output.contains("macOS"))
+        }
+
+        @Test func testDarwinBuildLocalExportProducesVMImageDirectory() throws {
+            let tempDir = try createTempDir()
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+            let imageName = "local/macos-build-local:\(UUID().uuidString)"
+            let outputDir = tempDir.appendingPathComponent("phase1-local")
+            let packagedTar = tempDir.appendingPathComponent("phase1-local-packaged.tar")
+            let repackedImageName = "local/macos-build-local-repacked:\(UUID().uuidString)"
+            defer {
+                deleteImageIfExists(imageName)
+                deleteImageIfExists(repackedImageName)
+            }
+
+            try createContext(
+                tempDir: tempDir,
+                dockerfile: """
+                FROM --platform=darwin/arm64 \(macOSBaseReference)
+                RUN /bin/sh -lc 'printf local-export > /tmp/local-export.txt && sync'
+                """
+            )
+
+            let response = try runDarwinBuild(
+                tempDir: tempDir,
+                tag: imageName,
+                output: "type=local,dest=\(outputDir.path)"
+            )
+            #expect(response.status == 0, "expected darwin local export to succeed: \(response.error)")
+            assertDidNotDialLinuxBuilder(response)
+            #expect(FileManager.default.fileExists(atPath: outputDir.appendingPathComponent("Disk.img").path))
+            #expect(FileManager.default.fileExists(atPath: outputDir.appendingPathComponent("AuxiliaryStorage").path))
+            #expect(FileManager.default.fileExists(atPath: outputDir.appendingPathComponent("HardwareModel.bin").path))
+
+            let packageResponse = try run(arguments: [
+                "macos",
+                "package",
+                "--input", outputDir.path,
+                "--output", packagedTar.path,
+                "--reference", repackedImageName,
+            ])
+            #expect(packageResponse.status == 0, "expected macos package to succeed: \(packageResponse.error)")
+            #expect(FileManager.default.fileExists(atPath: packagedTar.path))
+
+            try loadImage(from: packagedTar)
+            let output = try runDarwinContainer(image: repackedImageName, command: ["/bin/cat", "/tmp/local-export.txt"])
+            #expect(output.contains("local-export"))
         }
 
         @Test func testDarwinBuildFailureCleansStageArtifacts() throws {

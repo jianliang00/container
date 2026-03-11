@@ -279,7 +279,7 @@
 - 首阶段 `--output` 合同明确如下：
   - `type=oci`：支持。由 `MacOSBuildEngine` 生成 OCI tar，随后复用现有 `image load`/`tag` 路径导入本地镜像库。
   - `type=tar`：支持。直接输出 packager 生成的 tar。
-  - `type=local`：首阶段显式报 `unsupported`；第二阶段再定义其语义（例如导出 macOS bundle 目录）。
+  - `type=local`：支持。导出 macOS image directory，至少包含 `Disk.img`、`AuxiliaryStorage`、`HardwareModel.bin`，可直接给 `container macos start-vm` / `container macos package` 使用。
 
 ### 9.2 API Server / Images Service
 
@@ -330,7 +330,7 @@
 5. guest 侧支持基础文件操作：`write_file/mkdir/symlink`。
 6. `COPY/ADD(local)` 统一通过 `fs` 协议落盘，不保留共享目录或 `tar+stdin` 路径。
 7. commit 成镜像并可 `run/push`。
-8. 支持 `--output type=oci|tar`，`type=local` 明确报错。
+8. 支持 `--output type=oci|tar|local`，其中 `type=local` 导出可启动 VM 的 macOS image directory。
 
 ### Phase 2（增强）
 
@@ -339,7 +339,7 @@
 3. 阶段级缓存
 4. chunk `rawDigest` 复用
 5. 扩展 `fs` 操作类型与错误模型
-6. 明确 `type=local` 的 darwin 输出语义
+6. 按需增强 `type=local` 的 darwin 输出语义（如保留更多 VM 元数据、优化大文件复制）
 
 ### Phase 3（优化）
 

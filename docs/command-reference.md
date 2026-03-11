@@ -144,6 +144,34 @@ container macos start-vm --image <image-dir> --share <host-dir>
 container macos start-vm --image <image-dir> --auto-seed
 ```
 
+**Notes**
+
+*   `--auto-seed` will create a temporary virtiofs share containing:
+    *   `container-macos-guest-agent`
+    *   `install.sh`
+    *   `container-macos-guest-agent.plist`
+    *   `install-in-guest-from-seed.sh`
+*   To force `--auto-seed` to use the latest locally built agent and scripts, set:
+    *   `CONTAINER_MACOS_GUEST_AGENT_BIN=/path/to/container-macos-guest-agent`
+    *   `CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR=/path/to/scripts/macos-guest-agent`
+*   Example:
+
+```bash
+xcrun swift build -c release --product container-macos-guest-agent
+
+CONTAINER_MACOS_GUEST_AGENT_BIN="$PWD/.build/arm64-apple-macosx/release/container-macos-guest-agent" \
+CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent" \
+container macos start-vm --image <image-dir> --auto-seed
+```
+
+*   After the guest boots, mount the share and run:
+
+```bash
+sudo mkdir -p /Volumes/seed
+sudo mount -t virtiofs seed /Volumes/seed
+sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+```
+
 ### `container build`
 
 Builds an OCI image from a local build context. It reads a Dockerfile (default `Dockerfile`) or Containerfile and produces an image tagged with `-t` option. The build runs in isolation using BuildKit, and resource limits may be set for the build process itself.
@@ -197,6 +225,12 @@ container build --target production --no-cache -t my-app:prod .
 # build with multiple tags
 container build -t my-app:latest -t my-app:v1.0.0 -t my-app:stable .
 ```
+
+**Notes**
+
+*   `--output type=oci`: produces an OCI archive that is then loaded and tagged into the local image store by the CLI.
+*   `--output type=tar`: writes the exported tar to `dest` and does not auto-load it.
+*   `--output type=local`: output shape depends on platform. For Linux builds it exports the unpacked build result as a host directory; for `darwin/arm64` builds it exports a macOS image directory containing `Disk.img`, `AuxiliaryStorage`, and `HardwareModel.bin` for `container macos start-vm` / `container macos package`.
 
 ## Container Management
 

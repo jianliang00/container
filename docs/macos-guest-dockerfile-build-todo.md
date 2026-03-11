@@ -426,9 +426,14 @@
 - 已提前完成：`USER`
   - 通过 sidecar exec payload + guest-agent 子进程身份切换执行
 - [ ] 收敛 darwin runtime / guest-agent 启动不稳定
-  - 现象：`container run/build` 偶发卡在 `containerCreate` / CLI 返回链路，或 guest-agent vsock `27000` 反复 `Connection reset by peer`
-  - 影响：会干扰新镜像首次 `run` 与 `USER` 相关正向 E2E 的稳定复现
-  - 目标：把问题限定在 sidecar、guest boot 还是 apiserver 返回链路，并补最小可重复探针
+  - 已收敛：
+    - `containerCreate` / CLI 返回链路卡住：已定位为 APIServer `ContainersService` 跨 `await` 持锁，已修
+    - `macos start-vm --agent-probe` 崩溃：已定位为非主线程调用 `VZVirtioSocketDevice.connect(toPort:)`，已修
+  - 当前剩余：
+    - 纯 `container macos start-vm --headless --agent-probe/--agent-repl` 仍可能持续 `Code=54 Connection reset by peer`
+    - 同一镜像下 `--headless-display` 可连通 guest-agent，说明主 runtime/sidecar 路径与纯 headless 调试路径需要分开看
+  - 影响：会干扰把“纯 headless 调试工具不稳定”与“darwin runtime 主链路不稳定”清晰区分
+  - 下一步目标：决定纯 headless 是否仅保留为复现模式，还是增加显式失败/自动 fallback 语义
 - [ ] `ADD URL`
   - host 下载
   - checksum / policy

@@ -38,8 +38,8 @@
 - [x] 最小 Dockerfile 计划器、build context、`.dockerignore`、`COPY/ADD(local)` host 编排已落地
 - [x] `RUN / WORKDIR / ENV / LABEL / CMD / ENTRYPOINT / USER` 的单 stage 执行语义已接入
 - [x] 按 `--target` 顺序逐 stage 创建临时 macOS build container 并执行/清理已接通
-- [x] stage stop + package + `type=oci|tar` 导出主链路已接通
-- [x] `type=local` 在 darwin build 路径上已明确报 `unsupported`
+- [x] stage stop + package/export + `type=oci|tar|local` 导出主链路已接通
+- [x] `type=local` 在 darwin build 路径上已支持导出 macOS image directory
 - [x] 新增 `ContainerCommandsTests` / `CLITests` 覆盖 darwin build 分流、计划器、context、`COPY` 目标语义、错误分类与 CLI 拒绝路径行为
 
 ### 1.3 还没有完成的核心目标
@@ -192,7 +192,7 @@
 - [x] packager 已支持写入构建后的 image config
   - 文件：`Sources/ContainerCommands/MacOS/MacOSTemplatePackager.swift`
   - 已注入：`ENV`、`WORKDIR`、`LABEL`、`CMD`、`ENTRYPOINT`、`USER`
-- [x] `type=oci|tar` 导出与 `type=local unsupported` 路径已接通
+- [x] `type=oci|tar|local` 导出路径已接通
 - [x] 新增单元测试
   - 文件：`Tests/ContainerCommandsTests/MacOSBuildEngineTests.swift`
 
@@ -339,7 +339,10 @@
   - 复用现有 `image load`
   - 复用现有 `tag`
 - [x] `--output type=local`
-  - 首阶段明确报 `unsupported`
+  - 导出 macOS image directory
+  - 包含 `Disk.img`
+  - 包含 `AuxiliaryStorage`
+  - 包含 `HardwareModel.bin`
 - [x] 明确未设置 `dest` 时的行为
 
 ### 3.8 CLI / 集成测试
@@ -347,7 +350,7 @@
 - [x] 新增 darwin build CLI 测试
   - 平台校验
   - 不支持语法报错
-  - `type=local` 报错
+  - `type=local` 导出目录内容
 - [x] 新增 `COPY`/`ADD(local)` 端到端测试
   - 已添加 `CLITests`，需 `CONTAINER_ENABLE_MACOS_BUILD_E2E=1`
   - 默认基础镜像引用：`CONTAINER_MACOS_BASE_REF` 或 `local/macos-base:latest`
@@ -445,7 +448,7 @@
   - [ ] 用单次 tar writer / streaming writer 替代逐 blob `/usr/bin/tar -rf`
   - [ ] `Disk.img -> tar -> zstd -> sha256/size` 改成流式单遍 I/O
   - [ ] `type=tar` 避免 staging tar 到目标路径之间的潜在跨卷二次复制
-- [ ] `type=local` 的正式 darwin 导出语义
+- [x] `type=local` 的正式 darwin 导出语义
 - [ ] 扩展 fs metadata 操作
   - `chmod`
   - `chown`
@@ -470,7 +473,7 @@
 ### 6.2 第二批
 
 - [x] image config 注入
-- [x] `type=oci / type=tar / type=local unsupported`
+- [x] `type=oci / type=tar / type=local`
 - [x] `.dockerignore`
 - [x] `--target`
 - [x] 端到端 CLI 测试
@@ -497,5 +500,5 @@
 - [x] 可以从基础 macOS 镜像构建并 commit 新镜像
 - [x] `--output type=oci` 可导入本地镜像库并 tag
 - [x] `--output type=tar` 可导出 tar
-- [x] `type=local` 明确报错
+- [x] `--output type=local` 可导出供 `start-vm` / `macos package` 使用的 macOS image directory
 - [x] 核心 E2E 测试可稳定通过

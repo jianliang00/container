@@ -102,6 +102,7 @@ struct MacOSBuildEngine {
     struct FileTransferInstruction {
         let sources: [String]
         let destination: String
+        let fromStage: String?
     }
 
     enum CommandForm {
@@ -125,6 +126,20 @@ struct MacOSBuildEngine {
         let url: URL
         let relativePath: String
         let kind: EntryKind
+    }
+
+    struct StageCopySourceEntry {
+        let originalPath: String
+        let path: String
+        let archiveName: String
+        let kind: EntryKind
+    }
+
+    struct CachedStageSourceEntry {
+        let path: String
+        let archiveName: String
+        let kind: EntryKind
+        let url: URL
     }
 
     struct DockerIgnoreRule {
@@ -238,13 +253,30 @@ struct MacOSBuildEngine {
         let plan = try planner.makePlan()
         let contextProvider = try BuildContextProvider(contextRoot: input.contextDirectory)
         let targetStage = plan.targetStage
+        let exportRoot = input.appRoot
+            .appendingPathComponent("builder")
+            .appendingPathComponent(input.buildID)
+            .appendingPathComponent("copy-from-cache")
 
+        var stageBaseImages: [Int: ClientImage] = [:]
+        var stageBaseConfigs: [Int: ContainerizationOCI.Image] = [:]
         for stage in plan.executionStages {
             let baseImage = try await resolveBaseImage(reference: stage.baseImage, pull: input.pull)
-            let baseConfig = try await baseImage.config(for: buildPlatform)
-            let bundleURL = input.appRoot
-                .appendingPathComponent("containers")
-                .appendingPathComponent(stageContainerID(buildID: input.buildID, stageIndex: stage.index))
+            stageBaseImages[stage.index] = baseImage
+            stageBaseConfigs[stage.index] = try await baseImage.config(for: buildPlatform)
+        }
+
+        let plannedExports = try plannedCopySourceExports(
+            plan: plan,
+            baseConfigs: stageBaseConfigs,
+            initialBuildArguments: cliBuildArgs
+        )
+        var exportedStageSources: [Int: [String: CachedStageSourceEntry]] = [:]
+
+        for stage in plan.executionStages {
+            guard let baseImage = stageBaseImages[stage.index], let baseConfig = stageBaseConfigs[stage.index] else {
+                throw ContainerizationError(.internalError, message: "missing cached base image/config for stage \(stage.index)")
+            }
             let runtime = try await StageRuntime.start(
                 appRoot: input.appRoot,
                 buildID: input.buildID,
@@ -267,22 +299,39 @@ struct MacOSBuildEngine {
                     baseConfig: baseConfig,
                     runtime: runtime,
                     transport: transport,
+                    stages: plan.stages,
+                    exportedStageSources: exportedStageSources,
                     initialBuildArguments: cliBuildArgs,
                     quiet: input.quiet,
                     log: input.log
                 )
                 try await flushGuestFileSystem(runtime: runtime, log: input.log)
+
+                if stage.index != targetStage.index {
+                    if let requestedSources = plannedExports[stage.index], !requestedSources.isEmpty {
+                        exportedStageSources[stage.index] = try await exportStageSources(
+                            requestedSources,
+                            from: runtime,
+                            cacheRoot: exportRoot.appendingPathComponent("stage-\(stage.index)")
+                        )
+                    }
+                    let runtimeStopStartedAt = Date()
+                    try await runtime.stop()
+                    MacOSExportProfiler.log(
+                        "runtime.stop.stage[\(stage.index)]: \(MacOSExportProfiler.format(Date().timeIntervalSince(runtimeStopStartedAt)))"
+                    )
+                    await runtime.delete()
+                    continue
+                }
+
                 let runtimeStopStartedAt = Date()
                 try await runtime.stop()
                 MacOSExportProfiler.log(
                     "runtime.stop.stage[\(stage.index)]: \(MacOSExportProfiler.format(Date().timeIntervalSince(runtimeStopStartedAt)))"
                 )
-
-                guard stage.index == targetStage.index else {
-                    await runtime.delete()
-                    continue
-                }
-
+                let bundleURL = input.appRoot
+                    .appendingPathComponent("containers")
+                    .appendingPathComponent(runtime.containerID)
                 let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
                 if export.type == "local" {
                     let exportStartedAt = Date()
@@ -314,6 +363,34 @@ struct MacOSBuildEngine {
         }
 
         throw ContainerizationError(.internalError, message: "missing target stage execution result")
+    }
+
+    private static func exportStageSources(
+        _ requestedSources: [String],
+        from runtime: StageRuntime,
+        cacheRoot: URL
+    ) async throws -> [String: CachedStageSourceEntry] {
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+
+        var exported: [String: CachedStageSourceEntry] = [:]
+        let sourceEntries = try await runtime.resolveCopySources(requestedSources)
+        for sourceEntry in sourceEntries {
+            let exportDirectory = cacheRoot.appendingPathComponent(sourceEntry.archiveName + "-" + sourceEntry.path.sha256Prefix)
+            if FileManager.default.fileExists(atPath: exportDirectory.path) {
+                try FileManager.default.removeItem(at: exportDirectory)
+            }
+            try FileManager.default.createDirectory(at: exportDirectory, withIntermediateDirectories: true)
+            try await runtime.export(source: sourceEntry, to: exportDirectory)
+
+            exported[sourceEntry.path] = .init(
+                path: sourceEntry.path,
+                archiveName: sourceEntry.archiveName,
+                kind: sourceEntry.kind,
+                url: exportDirectory.appendingPathComponent(sourceEntry.archiveName)
+            )
+        }
+
+        return exported
     }
 
     private static func resolveBaseImage(reference: String, pull: Bool) async throws -> ClientImage {
@@ -397,11 +474,146 @@ struct MacOSBuildEngine {
         }
     }
 
+    private static func normalizedStageReference(_ value: String) -> String {
+        if Int(value) != nil {
+            return value
+        }
+        return value.lowercased()
+    }
+
+    private static func resolveCopySourceStageIndex(
+        reference: String,
+        currentStageIndex: Int,
+        stages: [Stage]
+    ) throws -> Int {
+        if let stageIndex = Int(reference) {
+            guard stages.indices.contains(stageIndex) else {
+                throw ContainerizationError(.notFound, message: "COPY --from stage \(reference) not found")
+            }
+            guard stageIndex < currentStageIndex else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "COPY --from stage \(reference) must refer to an earlier build stage"
+                )
+            }
+            return stageIndex
+        }
+
+        let normalized = normalizedStageReference(reference)
+        guard let stage = stages.first(where: { $0.name == normalized }) else {
+            throw ContainerizationError(.notFound, message: "COPY --from stage \(reference) not found")
+        }
+        guard stage.index < currentStageIndex else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "COPY --from stage \(reference) must refer to an earlier build stage"
+            )
+        }
+        return stage.index
+    }
+
+    private static func normalizedCopySourcePath(_ rawSource: String) throws -> String {
+        let trimmed = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "COPY --from source path may not be empty")
+        }
+        guard !pathContainsGlobPattern(trimmed) else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "darwin builds do not yet support wildcard COPY --from source paths"
+            )
+        }
+
+        let normalized = normalizeAbsolutePath(trimmed.hasPrefix("/") ? trimmed : "/" + trimmed)
+        guard normalized != "/" else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "darwin builds do not yet support COPY --from /"
+            )
+        }
+        return normalized
+    }
+
+    private static func plannedCopySourceExports(
+        plan: Plan,
+        baseConfigs: [Int: ContainerizationOCI.Image],
+        initialBuildArguments: [String: String]
+    ) throws -> [Int: [String]] {
+        var exports: [Int: Set<String>] = [:]
+
+        for stage in plan.executionStages {
+            guard let baseConfig = baseConfigs[stage.index] else {
+                throw ContainerizationError(.internalError, message: "missing base config for stage \(stage.index)")
+            }
+
+            var state = StageState(baseConfig: baseConfig, initialBuildArguments: initialBuildArguments)
+            for instruction in stage.instructions {
+                switch instruction {
+                case .arg(let argument):
+                    let value = initialBuildArguments[argument.name] ?? argument.defaultValue ?? ""
+                    state.buildArguments[argument.name] = value
+
+                case .env(let pairs):
+                    var variables = state.variables
+                    for pair in pairs {
+                        let expanded = try VariableExpander.expand(pair.value, variables: variables)
+                        state.environment[pair.key] = expanded
+                        variables[pair.key] = expanded
+                    }
+
+                case .label(let pairs):
+                    var variables = state.variables
+                    for pair in pairs {
+                        let expanded = try VariableExpander.expand(pair.value, variables: variables)
+                        state.labels[pair.key] = expanded
+                        variables[pair.key] = expanded
+                    }
+
+                case .workdir(let path):
+                    let expanded = try VariableExpander.expand(path, variables: state.variables)
+                    state.workingDirectory = state.resolvedPath(for: expanded)
+
+                case .user(let rawValue):
+                    let expanded = try VariableExpander.expand(rawValue, variables: state.variables)
+                    state.user = expanded
+
+                case .copy(let fileInstruction):
+                    let expandedSources = try fileInstruction.sources.map {
+                        try VariableExpander.expand($0, variables: state.variables)
+                    }
+                    if let fromStage = fileInstruction.fromStage {
+                        let sourceStageIndex = try resolveCopySourceStageIndex(
+                            reference: fromStage,
+                            currentStageIndex: stage.index,
+                            stages: plan.stages
+                        )
+                        for source in expandedSources {
+                            exports[sourceStageIndex, default: []].insert(try normalizedCopySourcePath(source))
+                        }
+                    }
+
+                case .run, .add:
+                    break
+
+                case .cmd(let command):
+                    state.cmd = commandToOCIArguments(command)
+
+                case .entrypoint(let command):
+                    state.entrypoint = commandToOCIArguments(command)
+                }
+            }
+        }
+
+        return exports.mapValues { $0.sorted() }
+    }
+
     private static func execute(
         stage: Stage,
         baseConfig: ContainerizationOCI.Image,
         runtime: StageRuntime,
         transport: FileTransport,
+        stages: [Stage],
+        exportedStageSources: [Int: [String: CachedStageSourceEntry]],
         initialBuildArguments: [String: String],
         quiet: Bool,
         log: Logger
@@ -449,11 +661,34 @@ struct MacOSBuildEngine {
                     try VariableExpander.expand($0, variables: state.variables)
                 }
                 let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
-                try await transport.copy(
-                    sources: expandedSources,
-                    destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
-                    kind: .copy
+                let resolvedDestination = state.resolvedPath(
+                    for: expandedDestination,
+                    preserveTrailingSlash: expandedDestination.hasSuffix("/")
                 )
+                if let fromStage = fileInstruction.fromStage {
+                    let sourceStageIndex = try resolveCopySourceStageIndex(
+                        reference: fromStage,
+                        currentStageIndex: stage.index,
+                        stages: stages
+                    )
+                    guard let cachedSources = exportedStageSources[sourceStageIndex] else {
+                        throw ContainerizationError(
+                            .internalError,
+                            message: "missing cached stage sources for COPY --from=\(fromStage)"
+                        )
+                    }
+                    try await transport.copyFromCache(
+                        sources: expandedSources,
+                        destination: resolvedDestination,
+                        cachedSources: cachedSources
+                    )
+                } else {
+                    try await transport.copy(
+                        sources: expandedSources,
+                        destination: resolvedDestination,
+                        kind: .copy
+                    )
+                }
 
             case .add(let fileInstruction):
                 let expandedSources = try fileInstruction.sources.map {
@@ -614,6 +849,7 @@ extension MacOSBuildEngine {
                 throw ContainerizationError(.notFound, message: "target stage \(target) not found")
             }
 
+            try validateCopySourceReferences(in: stages)
             return .init(stages: stages, targetStage: selected)
         }
 
@@ -768,7 +1004,25 @@ extension MacOSBuildEngine {
                 let destination = payload.last ?? ""
                 let sources = Array(payload.dropLast())
                 try validateFileTransferSources(sources, instruction: instruction)
-                return .init(sources: sources, destination: destination)
+                return .init(sources: sources, destination: destination, fromStage: nil)
+            }
+
+            if trimmed.hasPrefix("--"), let jsonStart = trimmed.firstIndex(of: "[") {
+                let optionPart = String(trimmed[..<jsonStart]).trimmingCharacters(in: .whitespaces)
+                let payloadPart = String(trimmed[jsonStart...]).trimmingCharacters(in: .whitespaces)
+                let optionTokens = optionPart.isEmpty ? [] : try ShellTokenizer.tokenize(optionPart)
+                var optionIndex = 0
+                let fromStage = try parseFileTransferOptions(optionTokens, instruction: instruction, index: &optionIndex)
+                if optionIndex == optionTokens.count {
+                    let payload = try JSONDecoder().decode([String].self, from: Data(payloadPart.utf8))
+                    guard payload.count >= 2 else {
+                        throw ContainerizationError(.invalidArgument, message: "\(instruction) requires at least one source and one destination")
+                    }
+                    let destination = payload.last ?? ""
+                    let sources = Array(payload.dropLast())
+                    try validateFileTransferSources(sources, instruction: instruction)
+                    return .init(sources: sources, destination: destination, fromStage: fromStage)
+                }
             }
 
             let tokens = try ShellTokenizer.tokenize(trimmed)
@@ -776,25 +1030,80 @@ extension MacOSBuildEngine {
                 throw ContainerizationError(.invalidArgument, message: "\(instruction) requires at least one source and one destination")
             }
 
-            let index = 0
-            while index < tokens.count, tokens[index].hasPrefix("--") {
-                let option = tokens[index]
-                if option == "--from" || option.hasPrefix("--from=") {
-                    throw ContainerizationError(.unsupported, message: "darwin builds do not support \(instruction) --from in phase 1")
-                }
-                throw ContainerizationError(.unsupported, message: "darwin builds do not support \(instruction) option \(option)")
+            var index = 0
+            let fromStage = try parseFileTransferOptions(tokens, instruction: instruction, index: &index)
+            let remaining = Array(tokens[index...])
+            guard remaining.count >= 2 else {
+                throw ContainerizationError(.invalidArgument, message: "\(instruction) requires at least one source and one destination")
             }
 
-            let remaining = Array(tokens[index...])
             let destination = remaining.last ?? ""
             let sources = Array(remaining.dropLast())
             try validateFileTransferSources(sources, instruction: instruction)
-            return .init(sources: sources, destination: destination)
+            return .init(sources: sources, destination: destination, fromStage: fromStage)
+        }
+
+        private func parseFileTransferOptions(
+            _ tokens: [String],
+            instruction: String,
+            index: inout Int
+        ) throws -> String? {
+            var fromStage: String?
+            while index < tokens.count, tokens[index].hasPrefix("--") {
+                let option = tokens[index]
+                if option == "--from" {
+                    guard instruction == "COPY" else {
+                        throw ContainerizationError(.unsupported, message: "darwin builds do not support \(instruction) option --from")
+                    }
+                    let nextIndex = index + 1
+                    guard nextIndex < tokens.count else {
+                        throw ContainerizationError(.invalidArgument, message: "\(instruction) --from requires a value")
+                    }
+                    guard fromStage == nil else {
+                        throw ContainerizationError(.invalidArgument, message: "\(instruction) specifies --from more than once")
+                    }
+                    fromStage = normalizedStageReference(tokens[nextIndex])
+                    index += 2
+                    continue
+                }
+                if option.hasPrefix("--from=") {
+                    guard instruction == "COPY" else {
+                        throw ContainerizationError(.unsupported, message: "darwin builds do not support \(instruction) option --from")
+                    }
+                    let value = String(option.dropFirst("--from=".count))
+                    guard !value.isEmpty else {
+                        throw ContainerizationError(.invalidArgument, message: "\(instruction) --from requires a value")
+                    }
+                    guard fromStage == nil else {
+                        throw ContainerizationError(.invalidArgument, message: "\(instruction) specifies --from more than once")
+                    }
+                    fromStage = normalizedStageReference(value)
+                    index += 1
+                    continue
+                }
+                throw ContainerizationError(.unsupported, message: "darwin builds do not support \(instruction) option \(option)")
+            }
+            return fromStage
         }
 
         private func validateFileTransferSources(_ sources: [String], instruction: String) throws {
             if instruction == "ADD", sources.contains(where: Self.looksLikeRemoteURL) {
                 throw ContainerizationError(.unsupported, message: "darwin builds do not support ADD <url> in phase 1")
+            }
+        }
+
+        private func validateCopySourceReferences(in stages: [Stage]) throws {
+            for stage in stages {
+                for instruction in stage.instructions {
+                    guard case .copy(let fileTransfer) = instruction, let fromStage = fileTransfer.fromStage else {
+                        continue
+                    }
+                    _ = try resolveCopySourceStageIndex(
+                        reference: fromStage,
+                        currentStageIndex: stage.index,
+                        stages: stages
+                    )
+                }
             }
         }
 
@@ -1412,6 +1721,70 @@ extension MacOSBuildEngine {
             }
         }
 
+        func copyFromCache(
+            sources rawSources: [String],
+            destination rawDestination: String,
+            cachedSources: [String: CachedStageSourceEntry]
+        ) async throws {
+            let sources = try rawSources.map { rawSource in
+                let path = try MacOSBuildEngine.normalizedCopySourcePath(rawSource)
+                guard let cached = cachedSources[path] else {
+                    throw ContainerizationError(.notFound, message: "COPY --from source \(rawSource) not found in exported stage cache")
+                }
+                return cached
+            }
+            let destination = normalizeDestination(rawDestination)
+            let existingKind = try await pathInspector(destination.path)
+            let resolution = try Self.resolveDestination(
+                sources: stageSourceResolutionEntries(for: sources),
+                destination: destination,
+                existingKind: existingKind
+            )
+
+            if resolution.treatAsDirectory, resolution.createDirectoryIfMissing {
+                try await createDirectory(at: resolution.path)
+            }
+
+            for source in sources {
+                switch source.kind {
+                case .file:
+                    let targetPath = targetPath(
+                        forBasename: source.archiveName,
+                        destinationPath: resolution.path,
+                        treatAsDirectory: resolution.treatAsDirectory
+                    )
+                    try await sendFile(at: source.url, to: targetPath)
+
+                case .symlink:
+                    let targetPath = targetPath(
+                        forBasename: source.archiveName,
+                        destinationPath: resolution.path,
+                        treatAsDirectory: resolution.treatAsDirectory
+                    )
+                    try await sendSymlink(
+                        at: source.url,
+                        sourceDescription: source.path,
+                        to: targetPath
+                    )
+
+                case .directory:
+                    if sources.count == 1 {
+                        try await copyDirectoryTree(
+                            root: source.url,
+                            destinationRoot: resolution.path,
+                            includeTopLevelDirectory: nil
+                        )
+                    } else {
+                        try await copyDirectoryTree(
+                            root: source.url,
+                            destinationRoot: resolution.path,
+                            includeTopLevelDirectory: source.archiveName
+                        )
+                    }
+                }
+            }
+        }
+
         static func resolveDestination(
             sources: [ContextEntry],
             destination: DestinationPath,
@@ -1601,6 +1974,16 @@ extension MacOSBuildEngine {
             try await sandboxClient.fsBegin(request)
         }
 
+        private func stageSourceResolutionEntries(for sources: [CachedStageSourceEntry]) -> [ContextEntry] {
+            sources.map {
+                .init(
+                    url: $0.url,
+                    relativePath: $0.archiveName,
+                    kind: $0.kind
+                )
+            }
+        }
+
         struct DestinationPath {
             let path: String
             let rawValue: String
@@ -1610,6 +1993,13 @@ extension MacOSBuildEngine {
         private func targetPath(for source: ContextEntry, destinationPath: String, treatAsDirectory: Bool) -> String {
             if treatAsDirectory {
                 return joinPaths(destinationPath, source.url.lastPathComponent)
+            }
+            return destinationPath
+        }
+
+        private func targetPath(forBasename basename: String, destinationPath: String, treatAsDirectory: Bool) -> String {
+            if treatAsDirectory {
+                return joinPaths(destinationPath, basename)
             }
             return destinationPath
         }
@@ -1642,7 +2032,7 @@ extension MacOSBuildEngine {
                 || name.hasSuffix(".txz")
         }
 
-        private static func extractArchive(at source: URL, into destination: URL) throws {
+        fileprivate static func extractArchive(at source: URL, into destination: URL) throws {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
             process.arguments = ["-xf", source.path, "-C", destination.path]
@@ -1656,29 +2046,37 @@ extension MacOSBuildEngine {
             }
         }
 
-        private static func walkDirectoryTree(root: URL) throws -> [ContextEntry] {
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey],
-                options: [],
-                errorHandler: nil
-            ) else {
-                return []
-            }
-
+        static func walkDirectoryTree(root: URL) throws -> [ContextEntry] {
+            let resolvedRoot = root.resolvingSymlinksInPath()
             var entries: [ContextEntry] = []
-            while let url = enumerator.nextObject() as? URL {
-                let relativePath = try relativePath(of: url, from: root)
+            try collectDirectoryTreeEntries(at: resolvedRoot, root: resolvedRoot, into: &entries)
+            return entries
+        }
+
+        private static func collectDirectoryTreeEntries(
+            at directory: URL,
+            root: URL,
+            into entries: inout [ContextEntry]
+        ) throws {
+            let children = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                options: []
+            ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+            for child in children {
+                let relativePath = try relativePath(of: child, from: root)
                 guard !relativePath.isEmpty else {
                     continue
                 }
-                let kind = try entryKind(at: url)
-                entries.append(.init(url: url, relativePath: relativePath, kind: kind))
-                if kind == .symlink {
-                    enumerator.skipDescendants()
+
+                let kind = try entryKind(at: child)
+                entries.append(.init(url: child, relativePath: relativePath, kind: kind))
+
+                if kind == .directory {
+                    try collectDirectoryTreeEntries(at: child, root: root, into: &entries)
                 }
             }
-            return entries.sorted { $0.relativePath < $1.relativePath }
         }
 
         private static func entryKind(at url: URL) throws -> EntryKind {
@@ -1693,12 +2091,16 @@ extension MacOSBuildEngine {
         }
 
         private static func relativePath(of url: URL, from root: URL) throws -> String {
-            let rootComponents = root.standardizedFileURL.pathComponents
-            let urlComponents = url.standardizedFileURL.pathComponents
+            let rootComponents = lexicalPathComponents(for: root.path)
+            let urlComponents = lexicalPathComponents(for: url.path)
             guard urlComponents.starts(with: rootComponents) else {
                 throw ContainerizationError(.invalidArgument, message: "\(url.path) escapes \(root.path)")
             }
             return urlComponents.dropFirst(rootComponents.count).joined(separator: "/")
+        }
+
+        private static func lexicalPathComponents(for path: String) -> [String] {
+            URL(fileURLWithPath: (path as NSString).standardizingPath).pathComponents
         }
 
         private func makeTemporaryDirectory(prefix: String) throws -> URL {
@@ -1818,6 +2220,78 @@ extension MacOSBuildEngine {
             }
         }
 
+        func resolveCopySources(_ rawSources: [String]) async throws -> [StageCopySourceEntry] {
+            guard !rawSources.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "COPY --from requires at least one source")
+            }
+
+            var resolved: [StageCopySourceEntry] = []
+            resolved.reserveCapacity(rawSources.count)
+            for rawSource in rawSources {
+                let normalized = try MacOSBuildEngine.normalizedCopySourcePath(rawSource)
+
+                guard let kind = try await inspectEntryKind(at: normalized) else {
+                    throw ContainerizationError(
+                        .notFound,
+                        message: "COPY --from source \(rawSource) not found in stage"
+                    )
+                }
+
+                resolved.append(.init(
+                    originalPath: rawSource,
+                    path: normalized,
+                    archiveName: URL(fileURLWithPath: normalized).lastPathComponent,
+                    kind: kind
+                ))
+            }
+            return resolved
+        }
+
+        func export(source: StageCopySourceEntry, to destinationRoot: URL) async throws {
+            let tarURL = destinationRoot.appendingPathComponent("stage-source.tar")
+            _ = FileManager.default.createFile(atPath: tarURL.path, contents: nil)
+
+            let outputHandle = try FileHandle(forWritingTo: tarURL)
+            let stdout = Pipe()
+            let stderr = Pipe()
+            defer {
+                try? outputHandle.close()
+                try? stdout.fileHandleForReading.close()
+                try? stdout.fileHandleForWriting.close()
+                try? stderr.fileHandleForWriting.close()
+                try? stderr.fileHandleForReading.close()
+                try? FileManager.default.removeItem(at: tarURL)
+            }
+
+            let arguments = try Self.tarExportArguments(for: [source.path])
+            let process = try await createProcess(
+                command: .exec(["/usr/bin/tar", "-cf", "-"] + arguments),
+                environment: [:],
+                workingDirectory: "/",
+                user: .id(uid: 0, gid: 0),
+                stdio: [nil, stdout.fileHandleForWriting, stderr.fileHandleForWriting]
+            )
+
+            try await process.start()
+            try stdout.fileHandleForWriting.close()
+            try stderr.fileHandleForWriting.close()
+
+            async let stdoutDrain: Void = Self.streamPipe(stdout.fileHandleForReading, into: outputHandle)
+            async let stderrDrain: Data = Self.readAll(from: stderr.fileHandleForReading)
+            let exitCode = try await process.wait()
+            try await stdoutDrain
+            let errorOutput = String(decoding: try await stderrDrain, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard exitCode == 0 else {
+                let message = errorOutput.isEmpty ? "failed to export stage source \(source.originalPath)" : errorOutput
+                throw ContainerizationError(.internalError, message: message)
+            }
+
+            try outputHandle.close()
+            try FileTransport.extractArchive(at: tarURL, into: destinationRoot)
+        }
+
         func stop() async throws {
             try await containerClient.stop(
                 id: containerID,
@@ -1894,6 +2368,77 @@ extension MacOSBuildEngine {
             return try await process.wait()
         }
 
+        private func inspectEntryKind(at path: String) async throws -> EntryKind? {
+            let symlinkExitCode = try await runForStatus(
+                command: .exec(["/bin/sh", "-c", "test -L \"$1\"", "sh", path]),
+                environment: [:],
+                workingDirectory: "/"
+            )
+            switch symlinkExitCode {
+            case 0:
+                return .symlink
+            case 1:
+                break
+            default:
+                throw ContainerizationError(.internalError, message: "failed to inspect stage source path \(path)")
+            }
+
+            let directoryExitCode = try await runForStatus(
+                command: .exec(["/bin/sh", "-c", "test -d \"$1\"", "sh", path]),
+                environment: [:],
+                workingDirectory: "/"
+            )
+            switch directoryExitCode {
+            case 0:
+                return .directory
+            case 1:
+                break
+            default:
+                throw ContainerizationError(.internalError, message: "failed to inspect stage source path \(path)")
+            }
+
+            let existsExitCode = try await runForStatus(
+                command: .exec(["/bin/sh", "-c", "test -e \"$1\"", "sh", path]),
+                environment: [:],
+                workingDirectory: "/"
+            )
+            switch existsExitCode {
+            case 0:
+                return .file
+            case 1:
+                return nil
+            default:
+                throw ContainerizationError(.internalError, message: "failed to inspect stage source path \(path)")
+            }
+        }
+
+        private static func tarExportArguments(for paths: [String]) throws -> [String] {
+            try paths.reduce(into: [String]()) { arguments, path in
+                let normalized = normalizeAbsolutePath(path)
+                guard normalized != "/" else {
+                    throw ContainerizationError(.unsupported, message: "COPY --from / is not supported")
+                }
+                let url = URL(fileURLWithPath: normalized)
+                let basename = url.lastPathComponent
+                let parent = url.deletingLastPathComponent().path.isEmpty ? "/" : url.deletingLastPathComponent().path
+                arguments += ["-C", parent, basename]
+            }
+        }
+
+        private static func streamPipe(_ source: FileHandle, into destination: FileHandle) async throws {
+            while let data = try source.read(upToCount: MacOSBuildEngine.chunkSize), !data.isEmpty {
+                try destination.write(contentsOf: data)
+            }
+        }
+
+        private static func readAll(from handle: FileHandle) async throws -> Data {
+            var output = Data()
+            while let data = try handle.read(upToCount: MacOSBuildEngine.chunkSize), !data.isEmpty {
+                output.append(data)
+            }
+            return output
+        }
+
         private func deleteWithRetries(maxAttempts: Int = 20, retryDelayNanoseconds: UInt64 = 250_000_000) async {
             for attempt in 1...maxAttempts {
                 do {
@@ -1930,6 +2475,10 @@ private func normalizeAbsolutePath(_ value: String, preserveTrailingSlash: Bool 
     return path
 }
 
+private func pathContainsGlobPattern(_ value: String) -> Bool {
+    value.contains("*") || value.contains("?") || value.contains("[")
+}
+
 private func joinPaths(_ lhs: String, _ rhs: String) -> String {
     let combined = lhs.hasSuffix("/") ? lhs + rhs : lhs + "/" + rhs
     return normalizeAbsolutePath(combined)
@@ -1937,6 +2486,13 @@ private func joinPaths(_ lhs: String, _ rhs: String) -> String {
 
 private func currentUnixTimestamp() -> Int64 {
     Int64(Date().timeIntervalSince1970)
+}
+
+private extension String {
+    var sha256Prefix: String {
+        let digest = SHA256.hash(data: Data(utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 private struct FileHandleTextOutputStream: TextOutputStream {

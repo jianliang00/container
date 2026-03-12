@@ -78,21 +78,18 @@ extension TestCLIMacOSBuildBase {
             assertDidNotDialLinuxBuilder(response)
         }
 
-        @Test func testDarwinBuildRejectsCopyFromInstruction() throws {
+        @Test func testDarwinBuildRejectsCopyFromUnknownStage() throws {
             let tempDir = try createTempDir()
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference) AS build
-                RUN sw_vers
-
                 FROM \(macOSBaseReference)
-                COPY --from=build /tmp/out /tmp/out
+                COPY --from=missing /tmp/out /tmp/out
                 """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir)
-            assertFailure(response, contains: "darwin builds do not support COPY --from in phase 1")
+            assertFailure(response, contains: "COPY --from stage missing not found")
             assertDidNotDialLinuxBuilder(response)
         }
     }
@@ -186,6 +183,35 @@ extension TestCLIMacOSBuildBase {
             #expect(output.contains("link.txt"))
             #expect(output.contains("-> keep.txt"))
             #expect(!output.contains("debug.log"))
+        }
+
+        @Test func testDarwinBuildCopyFromPreviousStage() throws {
+            let tempDir = try createTempDir()
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+            let imageName = "local/macos-build-copy-from:\(UUID().uuidString)"
+            defer { deleteImageIfExists(imageName) }
+
+            try createContext(
+                tempDir: tempDir,
+                dockerfile: """
+                FROM \(macOSBaseReference) AS build
+                RUN /bin/sh -lc 'mkdir -p /tmp/out/sub && printf from-stage > /tmp/out/sub/hello.txt && ln -s sub/hello.txt /tmp/out/link.txt'
+
+                FROM \(macOSBaseReference)
+                COPY --from=build /tmp/out/ /opt/copied/
+                RUN test -f /opt/copied/sub/hello.txt
+                RUN test -L /opt/copied/link.txt
+                RUN test "$(/usr/bin/readlink /opt/copied/link.txt)" = "sub/hello.txt"
+                CMD ["/bin/cat", "/opt/copied/sub/hello.txt"]
+                """
+            )
+
+            let response = try runDarwinBuild(tempDir: tempDir, tag: imageName)
+            #expect(response.status == 0, "expected darwin COPY --from build to succeed: \(response.error)")
+            assertDidNotDialLinuxBuilder(response)
+
+            let output = try runDarwinContainer(image: imageName, command: [])
+            #expect(output.contains("from-stage"))
         }
 
         @Test func testDarwinBuildAddArchiveAndImageConfig() throws {

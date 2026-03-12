@@ -216,8 +216,15 @@ extension Application {
                         }
                         group.addTask {
                             let handler = AsyncSignalHandler.create(notify: [SIGTERM, SIGINT, SIGUSR1, SIGUSR2])
-                            for await sig in handler.signals {
-                                throw ContainerizationError(.interrupted, message: "exiting on signal \(sig)")
+                            defer {
+                                handler.cancel()
+                            }
+                            try await withTaskCancellationHandler {
+                                for await sig in handler.signals {
+                                    throw ContainerizationError(.interrupted, message: "exiting on signal \(sig)")
+                                }
+                            } onCancel: {
+                                handler.cancel()
                             }
                         }
                         group.addTask { [terminal, buildArg, contextDir, label, noCache, target, quiet, cacheIn, cacheOut, pull] in
@@ -253,8 +260,15 @@ extension Application {
                         }
                         group.addTask {
                             let handler = AsyncSignalHandler.create(notify: [SIGTERM, SIGINT, SIGUSR1, SIGUSR2])
-                            for await sig in handler.signals {
-                                throw ContainerizationError(.interrupted, message: "exiting on signal \(sig)")
+                            defer {
+                                handler.cancel()
+                            }
+                            try await withTaskCancellationHandler {
+                                for await sig in handler.signals {
+                                    throw ContainerizationError(.interrupted, message: "exiting on signal \(sig)")
+                                }
+                            } onCancel: {
+                                handler.cancel()
                             }
                         }
                         group.addTask { [buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log] in

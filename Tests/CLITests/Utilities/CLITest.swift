@@ -276,6 +276,15 @@ class CLITest {
         if arguments.starts(with: ["system", "start"]) {
             return 20
         }
+        if arguments.first == "build",
+            let platformIndex = arguments.firstIndex(of: "--platform"),
+            arguments.indices.contains(arguments.index(after: platformIndex)),
+            arguments[arguments.index(after: platformIndex)] == "darwin/arm64"
+        {
+            // darwin builds package and load multi-gigabyte VM images locally,
+            // which can take substantially longer than the default CLI build timeout.
+            return 900
+        }
         if arguments.first == "run",
             let osIndex = arguments.firstIndex(of: "--os"),
             arguments.indices.contains(arguments.index(after: osIndex)),
@@ -285,7 +294,7 @@ class CLITest {
             // before the runtime is ready to return.
             return 300
         }
-        if arguments.contains("build") {
+        if arguments.first == "build" {
             return 300
         }
         return 120

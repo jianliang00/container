@@ -217,7 +217,7 @@ struct MacOSBuildEngineTests {
     }
 
     @Test
-    func plannerRejectsCopyFromInPhaseOne() throws {
+    func plannerAcceptsCopyFromPreviousStage() throws {
         let dockerfile = Data(
             """
             FROM registry.local/macos-base:latest AS build
@@ -228,7 +228,49 @@ struct MacOSBuildEngineTests {
             """.utf8
         )
 
-        #expect(throws: Error.self) {
+        let plan = try MacOSBuildEngine.Planner(
+            dockerfile: dockerfile,
+            buildArgs: [:],
+            target: ""
+        ).makePlan()
+
+        guard case .copy(let instruction) = try #require(plan.targetStage.instructions.first) else {
+            Issue.record("expected COPY instruction in final stage")
+            return
+        }
+        #expect(instruction.fromStage == "build")
+        #expect(instruction.sources == ["/tmp/out"])
+        #expect(instruction.destination == "/tmp/out")
+    }
+
+    @Test
+    func plannerRejectsCopyFromUnknownStage() throws {
+        let dockerfile = Data(
+            """
+            FROM registry.local/macos-base:latest
+            COPY --from=missing /tmp/out /tmp/out
+            """.utf8
+        )
+
+        expectError(containing: "COPY --from stage missing not found") {
+            _ = try MacOSBuildEngine.Planner(
+                dockerfile: dockerfile,
+                buildArgs: [:],
+                target: ""
+            ).makePlan()
+        }
+    }
+
+    @Test
+    func plannerRejectsCopyFromCurrentStage() throws {
+        let dockerfile = Data(
+            """
+            FROM registry.local/macos-base:latest AS build
+            COPY --from=build /tmp/out /tmp/out
+            """.utf8
+        )
+
+        expectError(containing: "must refer to an earlier build stage") {
             _ = try MacOSBuildEngine.Planner(
                 dockerfile: dockerfile,
                 buildArgs: [:],
@@ -402,6 +444,22 @@ struct MacOSBuildEngineTests {
     }
 
     @Test
+    func walkDirectoryTreeKeepsNestedFilesWhenSiblingSymlinkExists() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try write("from-stage\n", to: root.appendingPathComponent("sub/hello.txt"))
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("link.txt"),
+            withDestinationURL: URL(fileURLWithPath: "sub/hello.txt")
+        )
+
+        let entries = try MacOSBuildEngine.FileTransport.walkDirectoryTree(root: root)
+        #expect(entries.map(\.relativePath) == ["link.txt", "sub", "sub/hello.txt"])
+        #expect(entries.map(\.kind) == [.symlink, .directory, .file])
+    }
+
+    @Test
     func invalidSymlinkErrorMentionsSourcePath() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -414,7 +472,10 @@ struct MacOSBuildEngineTests {
 }
 
 private func makeTemporaryDirectory() throws -> URL {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("MacOSBuildEngineTests-\(UUID().uuidString)")
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent(".build")
+        .appendingPathComponent("test-tmp")
+        .appendingPathComponent("MacOSBuildEngineTests-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     return root
 }

@@ -177,7 +177,7 @@
   - 文件：`Sources/ContainerCommands/MacOS/MacOSBuildEngine.swift`
 - [x] 新增最小 Dockerfile 计划器
   - 支持：`FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/LABEL/CMD/ENTRYPOINT/USER`
-  - 显式拒绝：`ADD URL`、`COPY --from`
+  - 当前仍显式拒绝：`ADD URL`
 - [x] 新增 build context + `.dockerignore` 处理
   - 支持 context 内路径白名单、排序枚举、目录/文件/软链接遍历
 - [x] 新增 host 侧文件传输编排
@@ -250,8 +250,7 @@
   - 最终镜像 config 写入 `config.user`
 - [x] 显式拒绝首阶段不支持语法
   - `ADD URL`
-  - `COPY --from`
-  - 多阶段依赖复制
+  - `FROM <previous-stage>`
   - 其他未覆盖高级语法
 - [x] 明确变量展开规则
   - `ARG`
@@ -300,7 +299,7 @@
 
 - [x] 每个 stage 创建临时 macOS build container
   - 当前实现按 `--target` 之前的 stage 顺序逐个创建、执行并清理临时 container
-  - 仍不包含跨 stage 文件复用；`COPY --from` / `FROM <previous-stage>` 继续留在后续阶段
+  - 当前已支持跨 stage 文件复用的 `COPY --from`；`FROM <previous-stage>` 继续留在后续阶段
 - [x] stage 生命周期内保持 guest 常驻
 - [x] `FROM` 解析基础镜像
   - 限定 `darwin/arm64`
@@ -440,7 +439,9 @@
 - [ ] `ADD URL`
   - host 下载
   - checksum / policy
-- [ ] 多阶段 `COPY --from`
+- [x] 多阶段 `COPY --from`
+  - 当前范围：支持从前序 stage 通过别名或索引复制文件/目录/软链接
+  - 当前限制：仍不支持 `FROM <previous-stage>` 和 `COPY --from` 通配符源路径
 - [ ] 阶段级缓存
 - [ ] 导出链路性能优化
   - [ ] 父镜像同索引 chunk `rawDigest` 复用

@@ -86,9 +86,15 @@ extension Application {
                     configuration: config,
                     stdio: io.stdio
                 )
+                let startupMessage = container.configuration.macosGuest == nil
+                    ? nil
+                    : "Waiting for macOS guest..."
 
                 if self.detach {
-                    try await process.start()
+                    try await ProcessIO.startProcess(
+                        process: process,
+                        startupMessage: startupMessage
+                    )
                     try io.closeAfterStart()
                     print(containerId)
                     return
@@ -102,7 +108,11 @@ extension Application {
                     }
                 }
 
-                exitCode = try await io.handleProcess(process: process, log: log)
+                exitCode = try await io.handleProcess(
+                    process: process,
+                    log: log,
+                    startupMessage: startupMessage
+                )
             } catch {
                 if error is ContainerizationError {
                     throw error

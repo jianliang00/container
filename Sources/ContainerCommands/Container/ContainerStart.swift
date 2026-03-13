@@ -89,15 +89,25 @@ extension Application {
 
                 let process = try await client.bootstrap(id: container.id, stdio: io.stdio)
                 progress.finish()
+                let startupMessage = container.configuration.macosGuest == nil
+                    ? nil
+                    : "Waiting for macOS guest..."
 
                 if detach {
-                    try await process.start()
+                    try await ProcessIO.startProcess(
+                        process: process,
+                        startupMessage: startupMessage
+                    )
                     try io.closeAfterStart()
                     print(self.containerId)
                     return
                 }
 
-                exitCode = try await io.handleProcess(process: process, log: log)
+                exitCode = try await io.handleProcess(
+                    process: process,
+                    log: log,
+                    startupMessage: startupMessage
+                )
             } catch {
                 try? await client.stop(id: container.id)
 

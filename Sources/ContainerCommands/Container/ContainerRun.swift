@@ -130,6 +130,9 @@ extension Application {
 
                 let process = try await client.bootstrap(id: id, stdio: io.stdio)
                 progress.finish()
+                let startupMessage = configuration.macosGuest == nil
+                    ? nil
+                    : "Waiting for macOS guest..."
 
                 if !self.managementFlags.cidfile.isEmpty {
                     let path = self.managementFlags.cidfile
@@ -148,7 +151,10 @@ extension Application {
                 }
 
                 if detach {
-                    try await process.start()
+                    try await ProcessIO.startProcess(
+                        process: process,
+                        startupMessage: startupMessage
+                    )
                     try io.closeAfterStart()
                     print(id)
                     return
@@ -162,7 +168,11 @@ extension Application {
                     }
                 }
 
-                exitCode = try await io.handleProcess(process: process, log: log)
+                exitCode = try await io.handleProcess(
+                    process: process,
+                    log: log,
+                    startupMessage: startupMessage
+                )
             } catch {
                 try? await client.delete(id: id)
                 if error is ContainerizationError {

@@ -20,6 +20,8 @@ import Foundation
 import Logging
 
 public struct ProcessIO: Sendable {
+    package typealias StartupNoticeWriter = @Sendable (String) -> Void
+
     let stdin: Pipe?
     let stdout: Pipe?
     let stderr: Pipe?
@@ -147,8 +149,27 @@ public struct ProcessIO: Sendable {
     }
 
     public func handleProcess(process: ClientProcess, log: Logger) async throws -> Int32 {
+        try await handleProcess(
+            process: process,
+            log: log,
+            startupMessage: nil
+        )
+    }
+
+    package func handleProcess(
+        process: ClientProcess,
+        log: Logger,
+        startupMessage: String?,
+        startupDelayNanoseconds: UInt64 = 2_000_000_000,
+        startupWriter: @escaping StartupNoticeWriter = Self.writeStandardErrorLine
+    ) async throws -> Int32 {
         let signals = AsyncSignalHandler.create(notify: Self.signalSet)
-        try await process.start()
+        try await Self.startProcess(
+            process: process,
+            startupMessage: startupMessage,
+            startupDelayNanoseconds: startupDelayNanoseconds,
+            startupWriter: startupWriter
+        )
         try closeAfterStart()
 
         return try await withThrowingTaskGroup(of: Int32?.self, returning: Int32.self) { group in
@@ -279,6 +300,57 @@ public struct ProcessIO: Sendable {
                 break
             }
         }
+    }
+
+    package static func startProcess(
+        process: ClientProcess,
+        startupMessage: String? = nil,
+        startupDelayNanoseconds: UInt64 = 2_000_000_000,
+        startupWriter: @escaping StartupNoticeWriter = Self.writeStandardErrorLine
+    ) async throws {
+        let noticeTask = Self.makeStartupNoticeTask(
+            startupMessage: startupMessage,
+            startupDelayNanoseconds: startupDelayNanoseconds,
+            startupWriter: startupWriter
+        )
+
+        do {
+            try await process.start()
+            noticeTask?.cancel()
+            _ = await noticeTask?.result
+        } catch {
+            noticeTask?.cancel()
+            _ = await noticeTask?.result
+            throw error
+        }
+    }
+
+    private static func makeStartupNoticeTask(
+        startupMessage: String?,
+        startupDelayNanoseconds: UInt64,
+        startupWriter: @escaping StartupNoticeWriter
+    ) -> Task<Void, Never>? {
+        guard let startupMessage, !startupMessage.isEmpty else {
+            return nil
+        }
+
+        return Task {
+            do {
+                try await Task.sleep(nanoseconds: startupDelayNanoseconds)
+                guard !Task.isCancelled else {
+                    return
+                }
+                startupWriter(startupMessage)
+            } catch is CancellationError {
+            } catch {
+                return
+            }
+        }
+    }
+
+    private static func writeStandardErrorLine(_ line: String) {
+        let formatted = line.hasSuffix("\n") ? line : "\(line)\n"
+        try? FileHandle.standardError.write(contentsOf: Data(formatted.utf8))
     }
 }
 

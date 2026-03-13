@@ -286,6 +286,10 @@ struct SidecarGuestAgentFrame: Codable {
 }
 
 actor MacOSSidecarService {
+    private static let bootstrapGuestAgentRetryDelayNanoseconds: UInt64 = 500_000_000
+    private static let bootstrapGuestAgentMaxAttempts = 120
+    private static let bootstrapGuestAgentReadyTimeoutSeconds: TimeInterval = 3
+
     private final class UnsafeSendableBox<T>: @unchecked Sendable {
         let value: T
 
@@ -372,18 +376,26 @@ actor MacOSSidecarService {
             try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
         }
         log.info("bootstrapStart: starting vm", metadata: ["gui_enabled": "\(guiEnabled)"])
+        let agentPort = config.macosGuest?.agentPort ?? 27000
+        var didStartVM = false
         do {
             try await startVirtualMachine(vm)
+            didStartVM = true
+            try await validateSocketDeviceAvailable(on: vm)
+            try await waitForGuestAgentDuringBootstrap(port: agentPort)
         } catch {
+            if didStartVM {
+                try? await stopVirtualMachine(vm)
+            }
             await closeGUIWindowOnMain()
             self.vm = nil
             self.vmConfiguration = nil
             self.vmDelegate = nil
+            self.state = .created
             throw error
         }
-        try await validateSocketDeviceAvailable(on: vm)
         state = .running
-        log.info("vm started", metadata: ["state": "\(state.rawValue)"])
+        log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
     }
 
     func stopVM() async throws {
@@ -439,6 +451,60 @@ actor MacOSSidecarService {
             throw error
         case nil:
             throw ContainerizationError(.internalError, message: "ready wait finished without result")
+        }
+    }
+
+    private func waitForGuestAgentDuringBootstrap(port: UInt32) async throws {
+        try await GuestAgentBootstrapRetrier.run(
+            maxAttempts: Self.bootstrapGuestAgentMaxAttempts,
+            retryDelayNanoseconds: Self.bootstrapGuestAgentRetryDelayNanoseconds
+        ) { [self] attempt, maxAttempts in
+            if shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
+                log.info(
+                    "bootstrap guest-agent probe attempt",
+                    metadata: [
+                        "attempt": "\(attempt)",
+                        "max_attempts": "\(maxAttempts)",
+                        "port": "\(port)",
+                    ]
+                )
+            }
+
+            let fd = try await connectVsock(port: port)
+            defer {
+                _ = Darwin.shutdown(fd, SHUT_RDWR)
+                Darwin.close(fd)
+            }
+
+            do {
+                try await self.waitForGuestAgentReadyWithTimeout(
+                    fd: fd,
+                    timeoutSeconds: Self.bootstrapGuestAgentReadyTimeoutSeconds
+                )
+                if shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
+                    log.info(
+                        "bootstrap guest-agent probe succeeded",
+                        metadata: [
+                            "attempt": "\(attempt)",
+                            "max_attempts": "\(maxAttempts)",
+                            "port": "\(port)",
+                        ]
+                    )
+                }
+            } catch {
+                if shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
+                    log.warning(
+                        "bootstrap guest-agent probe failed",
+                        metadata: [
+                            "attempt": "\(attempt)",
+                            "max_attempts": "\(maxAttempts)",
+                            "port": "\(port)",
+                            "error": "\(error)",
+                        ]
+                    )
+                }
+                throw error
+            }
         }
     }
 
@@ -1691,4 +1757,42 @@ final class SidecarControlServer: @unchecked Sendable {
             throw ContainerizationError(.internalError, message: "sidecar syncValue finished without result")
         }
     }
+}
+
+package enum GuestAgentBootstrapRetrier {
+    package static func run(
+        maxAttempts: Int,
+        retryDelayNanoseconds: UInt64,
+        operation: @escaping @Sendable (_ attempt: Int, _ maxAttempts: Int) async throws -> Void
+    ) async throws {
+        let attempts = max(1, maxAttempts)
+        var lastError: Error?
+
+        for attempt in 1...attempts {
+            do {
+                try await operation(attempt, attempts)
+                return
+            } catch {
+                lastError = error
+                if attempt < attempts, retryDelayNanoseconds > 0 {
+                    try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                }
+            }
+        }
+
+        throw lastError ?? ContainerizationError(
+            .timeout,
+            message: "guest-agent bootstrap probe finished without result"
+        )
+    }
+}
+
+private func shouldLogBootstrapGuestAgentAttempt(_ attempt: Int, maxAttempts: Int) -> Bool {
+    if attempt <= 5 {
+        return true
+    }
+    if attempt == maxAttempts {
+        return true
+    }
+    return attempt % 10 == 0
 }

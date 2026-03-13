@@ -277,6 +277,9 @@ struct MacOSBuildEngine {
             guard let baseImage = stageBaseImages[stage.index], let baseConfig = stageBaseConfigs[stage.index] else {
                 throw ContainerizationError(.internalError, message: "missing cached base image/config for stage \(stage.index)")
             }
+            if !input.quiet {
+                writeStderrLine("Building macOS stage \(stage.name ?? "#\(stage.index)")")
+            }
             let runtime = try await StageRuntime.start(
                 appRoot: input.appRoot,
                 buildID: input.buildID,
@@ -619,10 +622,6 @@ struct MacOSBuildEngine {
         log: Logger
     ) async throws -> StageState {
         var state = StageState(baseConfig: baseConfig, initialBuildArguments: initialBuildArguments)
-
-        if !quiet {
-            writeStderrLine("Building macOS stage \(stage.name ?? "#\(stage.index)")")
-        }
 
         for instruction in stage.instructions {
             switch instruction {
@@ -2156,7 +2155,10 @@ extension MacOSBuildEngine {
 
             do {
                 let process = try await containerClient.bootstrap(id: containerID, stdio: [nil, nil, nil])
-                try await process.start()
+                try await ProcessIO.startProcess(
+                    process: process,
+                    startupMessage: "Waiting for macOS build guest..."
+                )
                 let sandboxClient = try await SandboxClient.create(id: containerID, runtime: MacOSBuildEngine.runtimeName)
                 _ = appRoot
                 return .init(containerClient: containerClient, containerID: containerID, sandboxClient: sandboxClient)
@@ -2184,7 +2186,11 @@ extension MacOSBuildEngine {
                 user: user,
                 stdio: io.stdio
             )
-            let exitCode = try await io.handleProcess(process: process, log: log)
+            let exitCode = try await io.handleProcess(
+                process: process,
+                log: log,
+                startupMessage: quiet ? nil : "Waiting for macOS build guest..."
+            )
             guard exitCode == 0 else {
                 throw ContainerizationError(.internalError, message: "build step failed with exit code \(exitCode)")
             }

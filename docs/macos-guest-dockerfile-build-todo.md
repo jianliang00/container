@@ -436,6 +436,24 @@
     - 同一镜像下 `--headless-display` 可连通 guest-agent，说明主 runtime/sidecar 路径与纯 headless 调试路径需要分开看
   - 影响：会干扰把“纯 headless 调试工具不稳定”与“darwin runtime 主链路不稳定”清晰区分
   - 下一步目标：决定纯 headless 是否仅保留为复现模式，还是增加显式失败/自动 fallback 语义
+- [ ] 保留 `--runtime` 的显式覆盖能力，避免客户端把 runtime 名称硬编码为平台推导值
+  - 当前问题：客户端仍要求显式 `--runtime` 必须等于按平台推断出的内建 runtime
+  - 目标：把平台兼容性和插件能力约束下沉到服务端或 runtime 元数据，避免阻断第三方 runtime
+- [ ] 修复 `MacOSSandboxService.waitForProcess(timeout:)` 的 waiter 生命周期
+  - 超时、`stop`、`shutdown`、`closeAllSessions()` 路径需要清理或失败唤醒所有 waiter
+  - 避免 continuation 在异常退出后长期悬挂
+- [ ] 在 `container-macos-guest-agent` 中忽略 `SIGPIPE`
+  - 启动时设置 `signal(SIGPIPE, SIG_IGN)`，必要时再补 socket 级处理
+  - 避免 host 提前断连时 guest-agent 在写回 `stdout/stderr/exit` 时被异常杀掉
+- [ ] 收敛 guest-agent / shared frame parser 健壮性
+  - 长度读取改为非对齐安全实现，避免 `load(as:)` 依赖内存对齐
+  - guest-agent 增加 `maxFrameSize` 限制，与 shared 协议侧保持一致
+- [ ] 实现 TTY 模式 `stdin close` 语义
+  - host EOF 触发 `process.close` 后，guest PTY 侧需要真正传递 EOF/关闭语义
+  - 补 `-it` EOF 回归测试，避免交互命令在输入结束后继续挂起
+- [ ] 继续补齐 guest-agent / 协议异常路径自动化测试
+  - 当前 sidecar/shared/client 的断连、EOF、请求匹配、session 清理已有测试
+  - 后续重点放在 guest-agent 坏帧、SIGPIPE、TTY close、EOF/断连路径
 - [ ] `ADD URL`
   - host 下载
   - checksum / policy

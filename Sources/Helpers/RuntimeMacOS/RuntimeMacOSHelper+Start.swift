@@ -58,14 +58,18 @@ extension RuntimeMacOSHelper {
                 nonisolated(unsafe) let anonymousConnection = xpc_connection_create(nil, nil)
                 let service = MacOSSandboxService(
                     root: .init(fileURLWithPath: root),
-                    connection: anonymousConnection,
                     log: log
                 )
 
                 let endpointServer = XPCServer(
                     identifier: machServiceLabel,
                     routes: [
-                        SandboxRoutes.createEndpoint.rawValue: service.createEndpoint
+                        SandboxRoutes.createEndpoint.rawValue: { message in
+                            let endpoint = xpc_endpoint_create(anonymousConnection)
+                            let reply = message.reply()
+                            reply.set(key: SandboxKeys.sandboxServiceEndpoint.rawValue, value: endpoint)
+                            return reply
+                        }
                     ],
                     log: log
                 )

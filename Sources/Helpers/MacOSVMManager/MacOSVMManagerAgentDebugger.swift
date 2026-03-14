@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 import Virtualization
 
 enum DebuggerError: Error, CustomStringConvertible {
@@ -647,10 +648,11 @@ final class AgentDebugger: @unchecked Sendable {
     private func consumeFrames(buffer: inout Data, generation: UInt64) throws {
         while buffer.count >= MemoryLayout<UInt32>.size {
             let lengthBytes = buffer.prefix(MemoryLayout<UInt32>.size)
-            let length = lengthBytes.withUnsafeBytes { raw in
-                raw.load(as: UInt32.self).bigEndian
-            }
-            let total = MemoryLayout<UInt32>.size + Int(length)
+            let payloadLength = try MacOSSidecarSocketIO.frameLength(
+                fromHeader: lengthBytes,
+                maxSize: MacOSSidecarSocketIO.defaultMaxFrameSize
+            )
+            let total = MemoryLayout<UInt32>.size + payloadLength
             guard buffer.count >= total else { return }
 
             let payload = buffer.subdata(in: MemoryLayout<UInt32>.size..<total)

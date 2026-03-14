@@ -439,15 +439,17 @@
 - [ ] 保留 `--runtime` 的显式覆盖能力，避免客户端把 runtime 名称硬编码为平台推导值
   - 当前问题：客户端仍要求显式 `--runtime` 必须等于按平台推断出的内建 runtime
   - 目标：把平台兼容性和插件能力约束下沉到服务端或 runtime 元数据，避免阻断第三方 runtime
-- [ ] 修复 `MacOSSandboxService.waitForProcess(timeout:)` 的 waiter 生命周期
-  - 超时、`stop`、`shutdown`、`closeAllSessions()` 路径需要清理或失败唤醒所有 waiter
-  - 避免 continuation 在异常退出后长期悬挂
-- [ ] 在 `container-macos-guest-agent` 中忽略 `SIGPIPE`
-  - 启动时设置 `signal(SIGPIPE, SIG_IGN)`，必要时再补 socket 级处理
+- [x] 修复 `MacOSSandboxService.waitForProcess(timeout:)` 的 waiter 生命周期
+  - `wait` 未命中进程时已直接返回 `notFound`，不再把 waiter 挂死
+  - 超时、`stop`、`shutdown`、`closeAllSessions()` 路径都会清理并唤醒 outstanding waiter
+  - 已补 `MacOSSandboxServiceWaiterTests` 覆盖 missing/timeout/closeAllSessions
+- [x] 在 `container-macos-guest-agent` 中忽略 `SIGPIPE`
+  - 启动时已设置 `signal(SIGPIPE, SIG_IGN)`
   - 避免 host 提前断连时 guest-agent 在写回 `stdout/stderr/exit` 时被异常杀掉
-- [ ] 收敛 guest-agent / shared frame parser 健壮性
-  - 长度读取改为非对齐安全实现，避免 `load(as:)` 依赖内存对齐
-  - guest-agent 增加 `maxFrameSize` 限制，与 shared 协议侧保持一致
+- [x] 收敛 guest-agent / shared frame parser 健壮性
+  - shared / guest-agent / vm-manager debugger 已统一改为非对齐安全的 frame 长度读取
+  - guest-agent 已复用 shared 侧 `maxFrameSize` 上限
+  - 已补 oversized frame 自动化测试
 - [ ] 实现 TTY 模式 `stdin close` 语义
   - host EOF 触发 `process.close` 后，guest PTY 侧需要真正传递 EOF/关闭语义
   - 补 `-it` EOF 回归测试，避免交互命令在输入结束后继续挂起

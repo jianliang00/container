@@ -364,6 +364,38 @@ struct GuestAgentFileTransferTransactionTests {
             )
         }
     }
+
+    @Test
+    func oversizedFrameReturnsErrorAndExit() throws {
+        let (serverFD, clientSocket) = try socketPair()
+        let connection = AgentConnection(fd: serverFD)
+        var clientFD = clientSocket
+        defer { closeIfValid(&clientFD) }
+
+        let runner = ConnectionRunner(connection: connection)
+        runner.start()
+
+        let ready = try readAgentFrame(from: clientFD)
+        #expect(ready.type == .ready)
+
+        try writeRawFrameHeader(
+            payloadLength: MacOSSidecarSocketIO.defaultMaxFrameSize + 1,
+            to: clientFD
+        )
+
+        let errorFrame = try readAgentFrame(from: clientFD)
+        #expect(errorFrame.type == .error)
+        #expect(errorFrame.message?.contains("invalid frame size") == true)
+
+        let exitFrame = try readAgentFrame(from: clientFD)
+        #expect(exitFrame.type == .exit)
+        #expect(exitFrame.exitCode == 1)
+
+        closeIfValid(&clientFD)
+
+        #expect(runner.wait(timeoutSeconds: 2))
+        #expect(runner.error == nil)
+    }
 }
 
 private func makeTemporaryDirectory() throws -> URL {
@@ -386,8 +418,8 @@ private func socketPair() throws -> (Int32, Int32) {
 
 private func readAgentFrame(from fd: Int32) throws -> GuestAgentFrame {
     let header = try readExact(from: fd, count: MemoryLayout<UInt32>.size)
-    let length = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-    let payload = try readExact(from: fd, count: Int(length))
+    let length = try MacOSSidecarSocketIO.frameLength(fromHeader: header)
+    let payload = try readExact(from: fd, count: length)
     return try JSONDecoder().decode(GuestAgentFrame.self, from: payload)
 }
 
@@ -416,6 +448,12 @@ private func writeAgentFrame(_ frame: GuestAgentFrame, to fd: Int32) throws {
     let header = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
     try writeAll(header, to: fd)
     try writeAll(payload, to: fd)
+}
+
+private func writeRawFrameHeader(payloadLength: Int, to fd: Int32) throws {
+    var length = UInt32(payloadLength).bigEndian
+    let header = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
+    try writeAll(header, to: fd)
 }
 
 private func writeAll(_ data: Data, to fd: Int32) throws {

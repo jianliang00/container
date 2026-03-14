@@ -76,7 +76,7 @@ public actor MacOSSandboxService {
     }
 
     let root: URL
-    private let connection: xpc_connection_t
+    private let connection: xpc_connection_t?
     let log: Logger
 
     private var sandboxState: State = .created
@@ -90,7 +90,7 @@ public actor MacOSSandboxService {
     var sidecarEventPump: SidecarEventPump?
     var sidecarEventPumpTask: Task<Void, Never>?
 
-    public init(root: URL, connection: xpc_connection_t, log: Logger) {
+    public init(root: URL, connection: xpc_connection_t? = nil, log: Logger) {
         self.root = root
         self.connection = connection
         self.log = log
@@ -102,7 +102,10 @@ public actor MacOSSandboxService {
 extension MacOSSandboxService {
     @Sendable
     public func createEndpoint(_ message: XPCMessage) async throws -> XPCMessage {
-        let endpoint = xpc_endpoint_create(self.connection)
+        guard let connection else {
+            throw ContainerizationError(.invalidState, message: "sandbox service has no XPC connection")
+        }
+        let endpoint = xpc_endpoint_create(connection)
         let reply = message.reply()
         reply.set(key: SandboxKeys.sandboxServiceEndpoint.rawValue, value: endpoint)
         return reply
@@ -254,6 +257,7 @@ extension MacOSSandboxService {
             #if arch(arm64)
             await stopAndQuitSidecarIfPresent()
             #endif
+            closeAllSessions()
             sandboxState = .shuttingDown
             return message.reply()
         default:
@@ -518,10 +522,13 @@ extension MacOSSandboxService {
 // MARK: - Process/session plumbing
 
 extension MacOSSandboxService {
-    private func waitWithoutTimeout(_ id: String) async -> ExitStatus {
+    private func waitWithoutTimeout(_ id: String) async throws -> ExitStatus {
         if let status = sessions[id]?.exitStatus {
             writeContainerLog(Data(("waitWithoutTimeout immediate hit for \(id) code=\(status.exitCode)\n").utf8))
             return status
+        }
+        guard sessions[id] != nil else {
+            throw ContainerizationError(.notFound, message: "process \(id) not found")
         }
         return await withCheckedContinuation { continuation in
             addWaiter(id: id, continuation: continuation)
@@ -535,16 +542,56 @@ extension MacOSSandboxService {
         writeContainerLog(Data(("waiter added for \(id); total=\(current.count)\n").utf8))
     }
 
+    private func removeWaiters(for id: String) -> [CheckedContinuation<ExitStatus, Never>] {
+        let continuations = waiters[id] ?? []
+        waiters[id] = []
+        return continuations
+    }
+
+    private func resumeWaiters(
+        for id: String,
+        fallbackStatus: ExitStatus,
+        reason: String
+    ) {
+        let continuations = removeWaiters(for: id)
+        guard !continuations.isEmpty else {
+            return
+        }
+
+        let status = sessions[id]?.exitStatus ?? fallbackStatus
+        writeContainerLog(
+            Data(
+                (
+                    "resuming waiters for \(id) code=\(status.exitCode) reason=\(reason) waiters=\(continuations.count)\n"
+                ).utf8
+            )
+        )
+        for continuation in continuations {
+            continuation.resume(returning: status)
+        }
+    }
+
+    private func resumeAllWaiters(reason: String, fallbackExitCode: Int32 = 255) {
+        guard !waiters.isEmpty else {
+            return
+        }
+
+        let fallbackStatus = ExitStatus(exitCode: fallbackExitCode, exitedAt: Date())
+        for id in Array(waiters.keys) {
+            resumeWaiters(for: id, fallbackStatus: fallbackStatus, reason: reason)
+        }
+    }
+
     private func completeProcess(id: String, status: ExitStatus) {
         guard var session = sessions[id] else {
-            writeContainerLog(Data(("completeProcess dropped for missing session \(id) code=\(status.exitCode)\n").utf8))
+            writeContainerLog(Data(("completeProcess missing session \(id) code=\(status.exitCode); waking waiters anyway\n").utf8))
+            resumeWaiters(for: id, fallbackStatus: status, reason: "process_completed_without_session")
             return
         }
         session.exitStatus = status
         sessions[id] = session
 
-        let continuations = waiters[id] ?? []
-        waiters[id] = []
+        let continuations = removeWaiters(for: id)
         writeContainerLog(Data(("completeProcess for \(id) code=\(status.exitCode) waiters=\(continuations.count)\n").utf8))
         for continuation in continuations {
             continuation.resume(returning: status)
@@ -555,14 +602,17 @@ extension MacOSSandboxService {
         if let status = sessions[id]?.exitStatus {
             return status
         }
+        guard sessions[id] != nil else {
+            throw ContainerizationError(.notFound, message: "process \(id) not found")
+        }
 
         if timeout == 0 {
-            return await waitWithoutTimeout(id)
+            return try await waitWithoutTimeout(id)
         }
 
         return try await withThrowingTaskGroup(of: ExitStatus.self) { group in
             group.addTask {
-                await self.waitWithoutTimeout(id)
+                try await self.waitWithoutTimeout(id)
             }
             group.addTask {
                 let delay = UInt64(max(timeout, 0)) * 1_000_000_000
@@ -570,15 +620,26 @@ extension MacOSSandboxService {
                 throw ContainerizationError(.timeout, message: "timed out waiting for process \(id)")
             }
 
-            guard let value = try await group.next() else {
-                throw ContainerizationError(.internalError, message: "wait cancelled for process \(id)")
+            do {
+                guard let value = try await group.next() else {
+                    throw ContainerizationError(.internalError, message: "wait cancelled for process \(id)")
+                }
+                group.cancelAll()
+                return value
+            } catch {
+                group.cancelAll()
+                resumeWaiters(
+                    for: id,
+                    fallbackStatus: ExitStatus(exitCode: 255, exitedAt: Date()),
+                    reason: "wait_timeout_or_cancelled"
+                )
+                throw error
             }
-            group.cancelAll()
-            return value
         }
     }
 
     private func closeAllSessions() {
+        resumeAllWaiters(reason: "sessions_closed")
         for (_, session) in sessions {
             session.stdio[0]?.readabilityHandler = nil
             try? session.stdio[1]?.close()
@@ -786,3 +847,23 @@ extension XPCMessage {
         return try JSONDecoder().decode(ContainerStopOptions.self, from: data)
     }
 }
+
+#if DEBUG
+extension MacOSSandboxService {
+    func testingAddSession(id: String, config: ProcessConfiguration) {
+        sessions[id] = Session(processID: id, config: config, stdio: [nil, nil, nil])
+    }
+
+    func testingWaitForProcess(_ id: String, timeout: Int32 = 0) async throws -> ExitStatus {
+        try await waitForProcess(id, timeout: timeout)
+    }
+
+    func testingCloseAllSessions() {
+        closeAllSessions()
+    }
+
+    func testingWaiterCount(for id: String) -> Int {
+        waiters[id]?.count ?? 0
+    }
+}
+#endif

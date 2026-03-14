@@ -159,7 +159,9 @@ let package = Package(
         ),
         .executableTarget(
             name: "container-macos-vm-manager",
-            dependencies: [],
+            dependencies: [
+                "RuntimeMacOSSidecarShared",
+            ],
             path: "Sources/Helpers/MacOSVMManager",
             linkerSettings: [
                 .linkedFramework("AppKit"),
@@ -387,6 +389,8 @@ let package = Package(
         .testTarget(
             name: "RuntimeMacOSSidecarClientTests",
             dependencies: [
+                .product(name: "Containerization", package: "containerization"),
+                "ContainerResource",
                 "RuntimeMacOSSidecarShared",
                 .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.macOS])),
                 .target(name: "container-runtime-macos", condition: .when(platforms: [.macOS])),

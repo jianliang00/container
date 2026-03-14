@@ -208,6 +208,26 @@ struct SidecarControlProtocolTests {
         let fd = try MacOSSidecarSocketIO.receiveOptionalFileDescriptorMarker(socketFD: reader)
         #expect(fd == nil)
     }
+
+    @Test
+    func oversizedFrameHeaderIsRejectedBeforePayloadRead() throws {
+        let (reader, writer) = try socketPair()
+        defer {
+            closeIfValid(reader)
+            closeIfValid(writer)
+        }
+
+        var length = UInt32(MacOSSidecarSocketIO.defaultMaxFrameSize + 1).bigEndian
+        let header = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
+        try writeAll(header, fd: writer)
+
+        do {
+            _ = try MacOSSidecarSocketIO.readFrame(fd: reader)
+            Issue.record("expected oversized frame header to be rejected")
+        } catch {
+            #expect(error.localizedDescription.contains("invalid frame size"))
+        }
+    }
 }
 
 private func socketPair() throws -> (Int32, Int32) {

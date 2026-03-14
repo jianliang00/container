@@ -30,6 +30,7 @@ struct MacOSGuestAgent: ParsableCommand {
     var port: UInt32 = 27000
 
     mutating func run() throws {
+        configureGuestAgentSignals()
         logAgentInfo("starting guest agent on vsock port \(port)")
         logAgentStartupContext()
         let listener = try VsockListener(port: port)
@@ -157,10 +158,11 @@ final class AgentConnection: @unchecked Sendable {
     private func consumeFrames() throws {
         while buffer.count >= MemoryLayout<UInt32>.size {
             let lengthBytes = buffer.prefix(MemoryLayout<UInt32>.size)
-            let length = lengthBytes.withUnsafeBytes { raw in
-                raw.load(as: UInt32.self).bigEndian
-            }
-            let total = MemoryLayout<UInt32>.size + Int(length)
+            let payloadLength = try MacOSSidecarSocketIO.frameLength(
+                fromHeader: lengthBytes,
+                maxSize: MacOSSidecarSocketIO.defaultMaxFrameSize
+            )
+            let total = MemoryLayout<UInt32>.size + payloadLength
             guard buffer.count >= total else {
                 return
             }
@@ -1403,6 +1405,10 @@ private func environmentDictionary(from envList: [String]) -> [String: String] {
         result[String(parts[0])] = String(parts[1])
     }
     return result
+}
+
+private func configureGuestAgentSignals() {
+    signal(SIGPIPE, SIG_IGN)
 }
 
 private func describeError(_ error: Error) -> String {

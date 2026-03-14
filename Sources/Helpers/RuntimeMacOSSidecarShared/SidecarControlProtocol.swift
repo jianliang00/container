@@ -200,6 +200,8 @@ public struct MacOSSidecarEnvelope: Codable, Sendable {
 }
 
 public enum MacOSSidecarSocketIO {
+    public static let defaultMaxFrameSize = 16 * 1024 * 1024
+
     public static func writeJSONFrame<T: Encodable>(_ value: T, fd: Int32, encoder: JSONEncoder = JSONEncoder()) throws {
         let payload = try encoder.encode(value)
         try writeFrame(payload, fd: fd)
@@ -217,16 +219,30 @@ public enum MacOSSidecarSocketIO {
         try writeAll(data: payload, fd: fd)
     }
 
-    public static func readFrame(fd: Int32, maxSize: Int = 16 * 1024 * 1024) throws -> Data {
+    public static func readFrame(fd: Int32, maxSize: Int = defaultMaxFrameSize) throws -> Data {
         let header = try readExact(fd: fd, count: MemoryLayout<UInt32>.size)
-        let length = header.withUnsafeBytes { raw in
-            raw.load(as: UInt32.self).bigEndian
+        let payloadLength = try frameLength(fromHeader: header, maxSize: maxSize)
+        return try readExact(fd: fd, count: payloadLength)
+    }
+
+    public static func frameLength<Bytes: DataProtocol>(
+        fromHeader header: Bytes,
+        maxSize: Int = defaultMaxFrameSize
+    ) throws -> Int {
+        guard header.count == MemoryLayout<UInt32>.size else {
+            throw makePOSIXLikeError(message: "invalid frame header size: \(header.count)")
         }
+
+        var length: UInt32 = 0
+        for byte in header {
+            length = (length << 8) | UInt32(byte)
+        }
+
         let payloadLength = Int(length)
         guard payloadLength >= 0, payloadLength <= maxSize else {
             throw makePOSIXLikeError(message: "invalid frame size: \(payloadLength)")
         }
-        return try readExact(fd: fd, count: payloadLength)
+        return payloadLength
     }
 
     public static func sendFileDescriptorMarker(socketFD: Int32, descriptorFD: Int32) throws {

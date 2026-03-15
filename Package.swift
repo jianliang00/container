@@ -190,6 +190,7 @@ let package = Package(
         .executableTarget(
             name: "container-macos-vm-manager",
             dependencies: [
+                "ContainerResource",
                 "RuntimeMacOSSidecarShared",
             ],
             path: "Sources/Helpers/MacOSVMManager",

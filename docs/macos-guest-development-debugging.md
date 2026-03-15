@@ -16,6 +16,8 @@
 
 建议先复用 `docs/macos-guest-local-validation-guide.md` 中的环境变量约定（如 `CONTAINER_BIN`、`BASE_REF`、`IMAGE_DIR`、`SEED_DIR`、`OCI_TAR`、`WORKROOT`）。
 
+除非明确为了手工调试自定义 tag，本文默认假设 seed 注入走 `com.apple.virtio-fs.automount`，guest 内路径为 `/Volumes/My Shared Files/seed`。
+
 ## 1. 当前架构（重构后）
 
 当前默认路径已经不是在 `container-runtime-macos` helper 进程内直接承载 `VZVirtualMachine`，而是：
@@ -167,7 +169,7 @@ codesign -d --entitlements :- \
 
 ### 5.2 三种启动模式（A/B 必备）
 
-如需简化流程（不手工创建 `$SEED_DIR`），可在启动时使用 `--auto-seed` 让 `start-vm` 自动创建临时注入目录并挂载：
+如需简化流程（不手工创建 `$SEED_DIR`），可在启动时使用 `--auto-seed` 让 `start-vm` 自动创建临时注入目录并挂载。默认情况下，这个 share 会直接出现在 guest 的 `/Volumes/My Shared Files/seed`：
 
 ```bash
 "$CONTAINER_BIN" macos start-vm \
@@ -300,9 +302,7 @@ quit
 ### 6.1 在 guest 内安装（通过 seed 目录）
 
 ```bash
-sudo mkdir -p /Volumes/seed
-sudo mount -t virtiofs seed /Volumes/seed
-sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
 ```
 
 ### 6.2 验证 daemon 与日志
@@ -616,9 +616,7 @@ CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent" \
 "$CONTAINER_BIN" macos guest-agent prepare -o "$SEED_DIR" --overwrite
 
 # 启动手工 VM -> 在 guest 内执行
-sudo mkdir -p /Volumes/seed
-sudo mount -t virtiofs seed /Volumes/seed
-sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
 sudo shutdown -h now
 ```
 

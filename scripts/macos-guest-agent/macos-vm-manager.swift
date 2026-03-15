@@ -16,6 +16,10 @@ import Darwin
 import Foundation
 import Virtualization
 
+let defaultAutomountTag = "com.apple.virtio-fs.automount"
+let defaultSeedShareName = "seed"
+let defaultSeedMountPath = "/Volumes/My Shared Files/seed"
+
 struct Options {
     let imageURL: URL
     let sharedDirectoryURL: URL
@@ -101,7 +105,7 @@ func printStartUsage(programName: String = executableName()) {
         Optional:
           --share <path>        Host directory to mount into guest using virtiofs
           --template <path>     Alias for --image
-          --share-tag <name>    virtiofs tag visible in guest (default: seed)
+          --share-tag <name>    virtiofs tag visible in guest (default: \(defaultAutomountTag))
           --auto-seed           Create a temporary seed directory and mount it as the virtiofs share
           --guest-agent-bin <p> Guest agent binary used with --auto-seed (default: best-effort auto-detect)
           --seed-scripts-dir <p>
@@ -118,9 +122,12 @@ func printStartUsage(programName: String = executableName()) {
                                 Number of connect retries after VM start (default: 60)
           -h, --help            Show this help
 
-        In guest, mount the shared directory with:
-          sudo mkdir -p /Volumes/<tag>
-          sudo mount -t virtiofs <tag> /Volumes/<tag>
+        In guest:
+          default automount tag:
+            \(defaultSeedMountPath)
+          custom tag:
+            sudo mkdir -p /Volumes/<tag>
+            sudo mount -t virtiofs <tag> /Volumes/<tag>
 
         With --agent-repl enabled:
           connect
@@ -256,7 +263,7 @@ func prepareSeedDirectory(
 func parseStartOptions(_ args: [String], programName: String = executableName()) throws -> Options {
     var imagePath: String?
     var sharePath: String?
-    var shareTag = "seed"
+    var shareTag = defaultAutomountTag
     var cpus = 4
     var memoryMiB: UInt64 = 8192
     var headless = false
@@ -1549,9 +1556,14 @@ func runStartCommand(options: Options) throws {
     networkDevice.attachment = VZNATNetworkDeviceAttachment()
 
     let sharedDirectory = VZSharedDirectory(url: options.sharedDirectoryURL, readOnly: false)
-    let singleDirectoryShare = VZSingleDirectoryShare(directory: sharedDirectory)
     let fileSystemDevice = VZVirtioFileSystemDeviceConfiguration(tag: options.shareTag)
-    fileSystemDevice.share = singleDirectoryShare
+    if options.shareTag == defaultAutomountTag {
+        fileSystemDevice.share = VZMultipleDirectoryShare(
+            directories: [defaultSeedShareName: sharedDirectory]
+        )
+    } else {
+        fileSystemDevice.share = VZSingleDirectoryShare(directory: sharedDirectory)
+    }
 
     let vmConfiguration = VZVirtualMachineConfiguration()
     vmConfiguration.bootLoader = bootLoader
@@ -1649,8 +1661,12 @@ func runStartCommand(options: Options) throws {
         print("control socket: \(controlSocketPath)")
     }
     print("In guest:")
-    print("  sudo mkdir -p /Volumes/\(options.shareTag)")
-    print("  sudo mount -t virtiofs \(options.shareTag) /Volumes/\(options.shareTag)")
+    if options.shareTag == defaultAutomountTag {
+        print("  shared directory is available at \(defaultSeedMountPath)")
+    } else {
+        print("  sudo mkdir -p /Volumes/\(options.shareTag)")
+        print("  sudo mount -t virtiofs \(options.shareTag) /Volumes/\(options.shareTag)")
+    }
 
     virtualMachine.start { result in
         switch result {

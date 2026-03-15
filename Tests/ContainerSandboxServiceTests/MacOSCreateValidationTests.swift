@@ -52,6 +52,64 @@ struct MacOSCreateValidationTests {
         try ContainersService.validateCreateInput(configuration: config, kernel: kernel)
     }
 
+    @Test
+    func macOSRuntimeAllowsHostPathDirectoryMounts() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let source = tempRoot.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+
+        var config = try baseConfiguration()
+        config.runtimeHandler = "container-runtime-macos"
+        config.platform = .init(arch: "arm64", os: "darwin")
+        config.mounts = [
+            .virtiofs(source: source.path, destination: "/Users/Shared/workspace", options: [])
+        ]
+
+        try ContainersService.validateCreateInput(configuration: config, kernel: nil)
+    }
+
+    @Test
+    func macOSRuntimeRejectsReadOnlyRootGuestMountPaths() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let source = tempRoot.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+
+        var config = try baseConfiguration()
+        config.runtimeHandler = "container-runtime-macos"
+        config.platform = .init(arch: "arm64", os: "darwin")
+        config.mounts = [
+            .virtiofs(source: source.path, destination: "/workspace", options: [])
+        ]
+
+        #expect(throws: Error.self) {
+            try ContainersService.validateCreateInput(configuration: config, kernel: nil)
+        }
+    }
+
+    @Test
+    func macOSRuntimeRejectsNamedVolumes() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let source = tempRoot.appendingPathComponent("volume-source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+
+        var config = try baseConfiguration()
+        config.runtimeHandler = "container-runtime-macos"
+        config.platform = .init(arch: "arm64", os: "darwin")
+        config.mounts = [
+            .volume(name: "named", format: "raw", source: source.path, destination: "/data", options: [])
+        ]
+
+        #expect(throws: Error.self) {
+            try ContainersService.validateCreateInput(configuration: config, kernel: nil)
+        }
+    }
+
     private func baseConfiguration() throws -> ContainerConfiguration {
         let imageJSON = """
             {

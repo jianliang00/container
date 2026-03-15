@@ -557,6 +557,7 @@ actor MacOSSidecarService {
         ]
         vmConfiguration.networkDevices = [createNATDevice()]
         vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        vmConfiguration.directorySharingDevices = try createDirectorySharingDevices(containerConfig: containerConfig)
         vmConfiguration.graphicsDevices = [createGraphicsDevice()]
         if containerConfig.macosGuest?.guiEnabled == true {
             vmConfiguration.keyboards = [VZUSBKeyboardConfiguration()]
@@ -570,6 +571,31 @@ actor MacOSSidecarService {
         let device = VZVirtioNetworkDeviceConfiguration()
         device.attachment = VZNATNetworkDeviceAttachment()
         return device
+    }
+
+    private func createDirectorySharingDevices(
+        containerConfig: ContainerConfiguration
+    ) throws -> [VZDirectorySharingDeviceConfiguration] {
+        let shares = try MacOSGuestMountMapping.hostPathShares(from: containerConfig.mounts)
+        guard !shares.isEmpty else {
+            return []
+        }
+
+        let directories = Dictionary(uniqueKeysWithValues: shares.map { share in
+            (
+                share.name,
+                VZSharedDirectory(
+                    url: URL(fileURLWithPath: share.source),
+                    readOnly: share.readOnly
+                )
+            )
+        })
+
+        let fileSystemDevice = VZVirtioFileSystemDeviceConfiguration(
+            tag: VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag
+        )
+        fileSystemDevice.share = VZMultipleDirectoryShare(directories: directories)
+        return [fileSystemDevice]
     }
 
     private func createGraphicsDevice() -> VZMacGraphicsDeviceConfiguration {

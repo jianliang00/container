@@ -7,6 +7,13 @@
 
 除启动手工 VM 后需要在 guest 里完成初始化和安装 agent 之外，其他步骤都可以直接在宿主命令行执行。
 
+这份指南默认使用 `container macos start-vm` 的默认 seed 注入方式：
+
+- virtiofs tag: `com.apple.virtio-fs.automount`
+- guest 内 seed 路径: `/Volumes/My Shared Files/seed`
+
+因此 guest 内不需要再手工 `mount -t virtiofs seed /Volumes/seed`。
+
 ## 1. 前置条件
 
 - 宿主机是 Apple Silicon
@@ -76,9 +83,7 @@ ls -lh "$IMAGE_DIR"/Disk.img "$IMAGE_DIR"/AuxiliaryStorage "$IMAGE_DIR"/Hardware
 从这一步开始需要人工操作：在弹出的 macOS VM 里完成 Setup Assistant，进入桌面后打开 Terminal，执行：
 
 ```bash
-sudo mkdir -p /Volumes/seed
-sudo mount -t virtiofs seed /Volumes/seed
-sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
 
 sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 40
 sudo tail -n 50 /var/log/container-macos-guest-agent.log
@@ -117,9 +122,7 @@ rm -rf "$SEED_DIR"
 这一步同样需要人工在 guest 里执行：
 
 ```bash
-sudo mkdir -p /Volumes/seed
-sudo mount -t virtiofs seed /Volumes/seed
-sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
 
 sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 40
 sudo tail -n 50 /var/log/container-macos-guest-agent.log
@@ -162,9 +165,7 @@ export CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent"
 guest 内仍然执行同一套安装命令：
 
 ```bash
-sudo mkdir -p /Volumes/seed
-sudo mount -t virtiofs seed /Volumes/seed
-sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
 
 sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 40
 sudo tail -n 50 /var/log/container-macos-guest-agent.log

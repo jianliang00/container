@@ -1,4 +1,5 @@
 import Darwin
+import ContainerResource
 import Foundation
 
 struct Options {
@@ -86,7 +87,7 @@ func printStartUsage(programName: String = executableName()) {
         Optional:
           --share <path>        Host directory to mount into guest using virtiofs
           --template <path>     Alias for --image
-          --share-tag <name>    virtiofs tag visible in guest (default: seed)
+          --share-tag <name>    virtiofs tag visible in guest (default: \(MacOSGuestMountMapping.automountTag))
           --auto-seed           Create a temporary seed directory and mount it as the virtiofs share
           --guest-agent-bin <p> Guest agent binary used with --auto-seed (default: best-effort auto-detect)
           --seed-scripts-dir <p>
@@ -103,9 +104,12 @@ func printStartUsage(programName: String = executableName()) {
                                 Number of connect retries after VM start (default: 60)
           -h, --help            Show this help
 
-        In guest, mount the shared directory with:
-          sudo mkdir -p /Volumes/<tag>
-          sudo mount -t virtiofs <tag> /Volumes/<tag>
+        In guest:
+          default automount tag:
+            \(MacOSGuestMountMapping.defaultSeedMountPath)
+          custom tag:
+            sudo mkdir -p /Volumes/<tag>
+            sudo mount -t virtiofs <tag> /Volumes/<tag>
 
         With --agent-repl enabled:
           connect
@@ -125,7 +129,7 @@ func printStartUsage(programName: String = executableName()) {
 func parseStartOptions(_ args: [String], programName: String = executableName()) throws -> Options {
     var imagePath: String?
     var sharePath: String?
-    var shareTag = "seed"
+    var shareTag = MacOSGuestMountMapping.automountTag
     var cpus = 4
     var memoryMiB: UInt64 = 8192
     var headless = false

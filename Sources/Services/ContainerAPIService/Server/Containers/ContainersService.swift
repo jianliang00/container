@@ -318,6 +318,11 @@ public actor ContainersService {
                     message: "macOS runtime requires darwin/arm64 image platform, got \(configuration.platform)"
                 )
             }
+            do {
+                _ = try MacOSGuestMountMapping.hostPathShares(from: configuration.mounts)
+            } catch let error as MacOSGuestMountMapping.Error {
+                throw ContainerizationError(.invalidArgument, message: error.localizedDescription)
+            }
             return
         }
 

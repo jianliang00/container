@@ -1,4 +1,5 @@
 import AppKit
+import ContainerResource
 import Darwin
 import Foundation
 import Virtualization
@@ -116,9 +117,14 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     networkDevice.attachment = VZNATNetworkDeviceAttachment()
 
     let sharedDirectory = VZSharedDirectory(url: options.sharedDirectoryURL, readOnly: false)
-    let singleDirectoryShare = VZSingleDirectoryShare(directory: sharedDirectory)
     let fileSystemDevice = VZVirtioFileSystemDeviceConfiguration(tag: options.shareTag)
-    fileSystemDevice.share = singleDirectoryShare
+    if options.shareTag == MacOSGuestMountMapping.automountTag {
+        fileSystemDevice.share = VZMultipleDirectoryShare(
+            directories: [MacOSGuestMountMapping.defaultSeedShareName: sharedDirectory]
+        )
+    } else {
+        fileSystemDevice.share = VZSingleDirectoryShare(directory: sharedDirectory)
+    }
 
     let vmConfiguration = VZVirtualMachineConfiguration()
     vmConfiguration.bootLoader = bootLoader
@@ -225,8 +231,12 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
         print("control socket: \(controlSocketPath)")
     }
     print("In guest:")
-    print("  sudo mkdir -p /Volumes/\(options.shareTag)")
-    print("  sudo mount -t virtiofs \(options.shareTag) /Volumes/\(options.shareTag)")
+    if options.shareTag == MacOSGuestMountMapping.automountTag {
+        print("  shared directory is available at \(MacOSGuestMountMapping.defaultSeedMountPath)")
+    } else {
+        print("  sudo mkdir -p /Volumes/\(options.shareTag)")
+        print("  sudo mount -t virtiofs \(options.shareTag) /Volumes/\(options.shareTag)")
+    }
 
     virtualMachine.start { result in
         switch result {

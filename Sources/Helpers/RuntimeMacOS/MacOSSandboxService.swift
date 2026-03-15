@@ -60,7 +60,7 @@ public actor MacOSSandboxService {
         case shuttingDown
     }
 
-    private struct Session {
+    struct Session {
         let processID: String
         let config: ProcessConfiguration
         let stdio: [FileHandle?]
@@ -68,6 +68,7 @@ public actor MacOSSandboxService {
         var started: Bool = false
         var exitStatus: ExitStatus?
         var lastAgentError: String?
+        var lastStderr: String?
     }
 
     struct SidecarHandle {
@@ -81,8 +82,9 @@ public actor MacOSSandboxService {
 
     private var sandboxState: State = .created
     var configuration: ContainerConfiguration?
-    private var sessions: [String: Session] = [:]
+    var sessions: [String: Session] = [:]
     private var waiters: [String: [CheckedContinuation<ExitStatus, Never>]] = [:]
+    var guestMountsPrepared = false
 
     var logHandle: FileHandle?
     private var bootLogHandle: FileHandle?
@@ -169,6 +171,7 @@ extension MacOSSandboxService {
         }
 
         #if arch(arm64)
+        try await prepareGuestMountsIfNeeded(containerConfig: configuration)
         try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
         writeContainerLog(Data(("startProcess using sidecar process stream path for \(processID)\n").utf8))
         #else
@@ -598,7 +601,7 @@ extension MacOSSandboxService {
         }
     }
 
-    private func waitForProcess(_ id: String, timeout: Int32 = 0) async throws -> ExitStatus {
+    func waitForProcess(_ id: String, timeout: Int32 = 0) async throws -> ExitStatus {
         if let status = sessions[id]?.exitStatus {
             return status
         }
@@ -649,7 +652,7 @@ extension MacOSSandboxService {
     }
 
     #if arch(arm64)
-    private func startSessionViaSidecarProcessStream(
+    func startSessionViaSidecarProcessStream(
         _ session: inout Session,
         containerConfig: ContainerConfiguration
     ) async throws {
@@ -730,7 +733,7 @@ extension MacOSSandboxService {
         }
     }
 
-    private func sendSignalToProcess(processID: String, signal: Int32) throws {
+    func sendSignalToProcess(processID: String, signal: Int32) throws {
         guard let session = sessions[processID] else {
             throw ContainerizationError(.notFound, message: "process \(processID) not found")
         }
@@ -778,6 +781,12 @@ extension MacOSSandboxService {
                     try? stdout.write(contentsOf: data)
                 }
                 writeContainerLog(data)
+                if let text = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                    !text.isEmpty
+                {
+                    session.lastStderr = text
+                }
             }
         case .processError:
             let text = event.message ?? "unknown sidecar process error"

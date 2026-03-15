@@ -127,10 +127,11 @@ container macos guest-agent prepare -o <output-dir> [--overwrite]
     *   `install.sh`
     *   `container-macos-guest-agent.plist`
     *   `install-in-guest-from-seed.sh`
-*   After mounting the directory inside the guest, run:
+*   `container macos start-vm` now defaults to the macOS automount tag `com.apple.virtio-fs.automount`, so the seed share appears inside the guest at `/Volumes/My Shared Files/seed`.
+*   In the default flow, run:
 
 ```bash
-sudo bash /Volumes/<tag>/install-in-guest-from-seed.sh
+sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
 ```
 
 ### `container macos start-vm`
@@ -151,6 +152,7 @@ container macos start-vm --image <image-dir> --auto-seed
     *   `install.sh`
     *   `container-macos-guest-agent.plist`
     *   `install-in-guest-from-seed.sh`
+*   With the default `--share-tag com.apple.virtio-fs.automount`, both `--share <host-dir>` and `--auto-seed` expose the seed directory inside the guest as `/Volumes/My Shared Files/seed`.
 *   To force `--auto-seed` to use the latest locally built agent and scripts, set:
     *   `CONTAINER_MACOS_GUEST_AGENT_BIN=/path/to/container-macos-guest-agent`
     *   `CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR=/path/to/scripts/macos-guest-agent`
@@ -164,13 +166,13 @@ CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent" \
 container macos start-vm --image <image-dir> --auto-seed
 ```
 
-*   After the guest boots, mount the share and run:
+*   After the guest boots, run:
 
 ```bash
-sudo mkdir -p /Volumes/seed
-sudo mount -t virtiofs seed /Volumes/seed
-sudo bash /Volumes/seed/install-in-guest-from-seed.sh
+sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
 ```
+
+*   If you intentionally override `--share-tag`, that becomes a manual-debug flow again; you must mount the virtiofs share yourself before accessing `install-in-guest-from-seed.sh`.
 
 ### `container build`
 

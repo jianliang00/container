@@ -1,5 +1,6 @@
 import ArgumentParser
 import ContainerAPIClient
+import ContainerResource
 import ContainerVersion
 import ContainerizationError
 import Foundation
@@ -40,7 +41,7 @@ extension Application {
         var autoSeed = false
 
         @Option(name: .long, help: "virtiofs tag visible in guest")
-        var shareTag: String = "seed"
+        var shareTag: String = MacOSGuestMountMapping.automountTag
 
         @Option(name: .long, help: "Path to container-macos-guest-agent binary used with --auto-seed")
         var guestAgentBin: String?
@@ -136,7 +137,7 @@ extension Application {
                 args += ["--share", share.standardizedFileURL.path]
             }
 
-            if shareTag != "seed" {
+            if shareTag != MacOSGuestMountMapping.automountTag {
                 args += ["--share-tag", shareTag]
             }
 

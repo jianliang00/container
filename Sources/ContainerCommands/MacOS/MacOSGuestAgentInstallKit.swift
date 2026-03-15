@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerResource
 import ContainerVersion
 import ContainerizationError
 import Foundation
@@ -69,9 +70,9 @@ extension Application {
             )
 
             print(output.path(percentEncoded: false))
-            print("In the guest, mount this directory with virtiofs and run:")
-            print("  sudo bash /Volumes/<tag>/install-in-guest-from-seed.sh")
-            print("  (default tag is 'seed')")
+            print("In the guest, run:")
+            print("  sudo bash '\(MacOSGuestMountMapping.defaultSeedMountPath)/install-in-guest-from-seed.sh'")
+            print("  (default automount tag: \(MacOSGuestMountMapping.automountTag))")
         }
 
         struct Sources {

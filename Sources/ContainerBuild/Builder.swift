@@ -266,6 +266,7 @@ public struct Builder: Sendable {
         public let buildArgs: [String]
         public let contextDir: String
         public let dockerfile: Data
+        public let hiddenDockerDir: String?
         public let labels: [String]
         public let noCache: Bool
         public let platforms: [Platform]
@@ -284,6 +285,7 @@ public struct Builder: Sendable {
             buildArgs: [String],
             contextDir: String,
             dockerfile: Data,
+            hiddenDockerDir: String?,
             labels: [String],
             noCache: Bool,
             platforms: [Platform],
@@ -301,6 +303,7 @@ public struct Builder: Sendable {
             self.buildArgs = buildArgs
             self.contextDir = contextDir
             self.dockerfile = dockerfile
+            self.hiddenDockerDir = hiddenDockerDir
             self.labels = labels
             self.noCache = noCache
             self.platforms = platforms
@@ -323,6 +326,9 @@ public struct Builder: Sendable {
         metadata.addString(config.terminal != nil ? "tty" : "plain", forKey: "progress")
         metadata.addString(config.target, forKey: "target")
 
+        if let hiddenDockerDir = config.hiddenDockerDir {
+            metadata.addString(hiddenDockerDir, forKey: "hidden-docker-dir")
+        }
         for tag in config.tags {
             metadata.addString(tag, forKey: "tag")
         }

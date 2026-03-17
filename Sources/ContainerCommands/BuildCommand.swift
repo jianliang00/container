@@ -46,6 +46,11 @@ extension Application {
             case tty
         }
 
+        enum SecretType: Decodable {
+            case data(Data)
+            case file(String)
+        }
+
         @Option(
             name: .shortAndLong,
             help: ArgumentHelp("Add the architecture type to the build", valueName: "value"),
@@ -114,6 +119,11 @@ extension Application {
 
         @Flag(name: .shortAndLong, help: "Suppress build output")
         var quiet: Bool = false
+
+        @Option(name: .long, help: ArgumentHelp("Set build-time secrets (format: id=<key>[,env=<ENV_VAR>|,src=<local/path>])", valueName: "id=key,..."))
+        var secret: [String] = []
+
+        var secrets: [String: SecretType] = [:]
 
         @Option(name: [.short, .customLong("tag")], help: ArgumentHelp("Name for the built image", valueName: "name"))
         var targetImageNames: [String] = {
@@ -258,6 +268,15 @@ extension Application {
                     }
                 }
 
+                let secretsData: [String: Data] = try self.secrets.mapValues { secret in
+                    switch secret {
+                    case .data(let data):
+                        return data
+                    case .file(let path):
+                        return try Data(contentsOf: URL(fileURLWithPath: path))
+                    }
+                }
+
                 let systemHealth = try await ClientHealthCheck.ping(timeout: .seconds(10))
                 let exportPath = systemHealth.appRoot
                     .appendingPathComponent(Application.BuilderCommand.builderResourceDir)
@@ -331,11 +350,12 @@ extension Application {
                         }
                         return results
                     }()
-                    group.addTask { [terminal, buildArg, contextDir, hiddenDockerDir, label, noCache, target, quiet, cacheIn, cacheOut, pull] in
+                    group.addTask { [terminal, buildArg, secretsData, contextDir, hiddenDockerDir, label, noCache, target, quiet, cacheIn, cacheOut, pull] in
                         let config = Builder.BuildConfig(
                             buildID: buildID,
                             contentStore: RemoteContentStoreClient(),
                             buildArgs: buildArg,
+                            secrets: secretsData,
                             contextDir: contextDir,
                             dockerfile: buildFileData,
                             hiddenDockerDir: hiddenDockerDir,
@@ -462,6 +482,32 @@ extension Application {
 
                 dockerfile = defaultDockerfile
                 break
+            }
+
+            // Parse --secret args
+            for secret in self.secret {
+                let parts = secret.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts[0].hasPrefix("id=") else {
+                    throw ValidationError("secret must start with id=<key> \(secret)")
+                }
+                let key = String(parts[0].dropFirst(3))
+                guard !key.contains("=") else {
+                    throw ValidationError("secret id cannot contain '=' \(key)")
+                }
+                if parts.count == 1 || parts[1].hasPrefix("env=") {
+                    let env = parts.count == 1 ? key : String(parts[1].dropFirst(4))
+                    // Using getenv/strlen over processInfo.environment to support
+                    // non-UTF-8 env var data.
+                    guard let ptr = getenv(env) else {
+                        throw ValidationError("secret env var doesn't exist \(env)")
+                    }
+                    self.secrets[key] = .data(Data(bytes: ptr, count: strlen(ptr)))
+                } else if parts[1].hasPrefix("src=") {
+                    let path = String(parts[1].dropFirst(4))
+                    self.secrets[key] = .file(path)
+                } else {
+                    throw ValidationError("secret bad value \(parts[1])")
+                }
             }
         }
     }

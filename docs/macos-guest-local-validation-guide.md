@@ -1,37 +1,38 @@
-# macOS Guest 本地开发验证指南
+# macOS Guest Local Development Validation Guide
 
-这份文档只保留一条本地开发常用路径：
+This guide keeps one common local-development path only:
 
-1. 准备或刷新一个可运行的 `darwin/arm64` 基础镜像
-2. 用这个基础镜像验证 `container build --platform darwin/arm64`
+1. prepare or refresh a runnable `darwin/arm64` base image
+2. validate `container build --platform darwin/arm64` against that base image
 
-除启动手工 VM 后需要在 guest 里完成初始化和安装 agent 之外，其他步骤都可以直接在宿主命令行执行。
+Except for the one-time in-guest initialization and agent installation that follows manual VM startup, the rest of the steps can run directly from the host terminal.
 
-这份指南默认使用 `container macos start-vm` 的默认 seed 注入方式：
+This guide assumes the default `container macos start-vm` seed injection path:
 
 - virtiofs tag: `com.apple.virtio-fs.automount`
-- guest 内 seed 路径: `/Volumes/My Shared Files/seed`
+- guest seed path: `/Volumes/My Shared Files/seed`
 
-因此 guest 内不需要再手工 `mount -t virtiofs seed /Volumes/seed`。
+That means you do not need to mount the seed path manually inside the guest.
 
-## 1. 前置条件
+## 1. Prerequisites
 
-- 宿主机是 Apple Silicon
-- 在本机图形会话里执行，不要只在无 GUI 的远程 shell 里跑
-- 已安装 Xcode 命令行工具、Swift 工具链和 `zstd`
-- 首次制作基础镜像时，已准备好可用 IPSW，例如 `UniversalMac_*.ipsw`
-- 如果当前分支改了下面这些文件，先刷新基础镜像再做 build 验证：
+- the host is Apple Silicon
+- commands run inside a local graphical session, not only over a headless remote shell
+- Xcode command line tools, the Swift toolchain, and `zstd` are installed
+- for the initial base-image creation path, you already have a usable IPSW such as `UniversalMac_*.ipsw`
+- if the current branch changed any of the following files, refresh the base image before validating build:
   - `container-macos-guest-agent`
   - `scripts/macos-guest-agent/install.sh`
   - `scripts/macos-guest-agent/install-in-guest-from-seed.sh`
   - `scripts/macos-guest-agent/container-macos-guest-agent.plist`
 
-统一使用下面这些环境变量：
+Use the following environment variables consistently:
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 
-export CONTAINER_BIN="$PWD/bin/container"
+export CONTAINER_BIN="$REPO_ROOT/bin/container"
 export BASE_REF="local/macos-base:latest"
 export IMAGE_DIR="/tmp/macos-image-base"
 export SEED_DIR="/tmp/macos-agent-seed"
@@ -41,23 +42,24 @@ export WORKROOT="/tmp/macos-build-phase1-acceptance"
 export IPSW="/path/to/UniversalMac_xxx_Restore.ipsw"
 ```
 
-如果只是做 build 验证，`IPSW` 可以不设。
+If you only want to validate build, `IPSW` can stay unset.
 
-## 2. 准备基础镜像
+## 2. Prepare the Base Image
 
-先确保当前仓库产物是最新的：
+First make sure the current repository build artifacts are up to date:
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 make release
 
-export CONTAINER_BIN="$PWD/bin/container"
+export CONTAINER_BIN="$REPO_ROOT/bin/container"
 export CONTAINER_ZSTD_BIN="${CONTAINER_ZSTD_BIN:-$(command -v zstd)}"
 ```
 
-### 2.1 首次制作基础镜像
+### 2.1 Create the Base Image for the First Time
 
-先在宿主准备镜像目录和 seed：
+Prepare the image directory and seed on the host:
 
 ```bash
 rm -rf "$IMAGE_DIR" "$SEED_DIR" "$OCI_TAR"
@@ -80,7 +82,7 @@ ls -lh "$IMAGE_DIR"/Disk.img "$IMAGE_DIR"/AuxiliaryStorage "$IMAGE_DIR"/Hardware
   --memory-mib 8192
 ```
 
-从这一步开始需要人工操作：在弹出的 macOS VM 里完成 Setup Assistant，进入桌面后打开 Terminal，执行：
+From this point, manual guest interaction is required. In the launched macOS VM, complete Setup Assistant, reach the desktop, open Terminal, and run:
 
 ```bash
 sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
@@ -90,7 +92,7 @@ sudo tail -n 50 /var/log/container-macos-guest-agent.log
 sudo shutdown -h now
 ```
 
-guest 完全关机后回到宿主执行：
+After the guest fully powers off, return to the host and run:
 
 ```bash
 "$CONTAINER_BIN" macos package \
@@ -102,11 +104,11 @@ guest 完全关机后回到宿主执行：
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
-到这里 `"$BASE_REF"` 应该已经可以直接运行。
+At this point, `"$BASE_REF"` should be directly runnable.
 
-### 2.2 只刷新 guest-agent
+### 2.2 Refresh Only the Guest Agent
 
-如果你已经有可启动的 `IMAGE_DIR`，只需要重新生成 seed、重新安装 agent，然后重新打包：
+If you already have a bootable `IMAGE_DIR`, you can regenerate the seed, reinstall the agent, and repackage without recreating the base image:
 
 ```bash
 rm -rf "$SEED_DIR"
@@ -119,7 +121,7 @@ rm -rf "$SEED_DIR"
   --memory-mib 8192
 ```
 
-这一步同样需要人工在 guest 里执行：
+Inside the guest, run the same installation steps:
 
 ```bash
 sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
@@ -129,7 +131,7 @@ sudo tail -n 50 /var/log/container-macos-guest-agent.log
 sudo shutdown -h now
 ```
 
-guest 关机后回到宿主执行：
+After shutdown, return to the host and run:
 
 ```bash
 "$CONTAINER_BIN" macos package \
@@ -141,19 +143,20 @@ guest 关机后回到宿主执行：
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
-### 2.3 自动注入当前仓库里的最新 guest-agent
+### 2.3 Auto-Inject the Latest Guest Agent from the Current Repository
 
-如果你刚改了 `container-macos-guest-agent` 或 `scripts/macos-guest-agent/*`，又不想手工准备 `$SEED_DIR`，可以直接让 `start-vm --auto-seed` 在启动时生成临时注入目录。
+If you just changed `container-macos-guest-agent` or anything under `scripts/macos-guest-agent/*` and do not want to prepare `$SEED_DIR` manually, let `start-vm --auto-seed` create a temporary injection directory during startup.
 
-先构建最新 agent，并显式指定二进制和脚本来源：
+Build the latest agent first and point explicitly at the binary and script sources:
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 
 xcrun swift build -c release --product container-macos-guest-agent
 
-export CONTAINER_MACOS_GUEST_AGENT_BIN="$PWD/.build/arm64-apple-macosx/release/container-macos-guest-agent"
-export CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent"
+export CONTAINER_MACOS_GUEST_AGENT_BIN="$REPO_ROOT/.build/arm64-apple-macosx/release/container-macos-guest-agent"
+export CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$REPO_ROOT/scripts/macos-guest-agent"
 
 "$CONTAINER_BIN" macos start-vm \
   --image "$IMAGE_DIR" \
@@ -162,7 +165,7 @@ export CONTAINER_MACOS_GUEST_AGENT_SCRIPTS_DIR="$PWD/scripts/macos-guest-agent"
   --memory-mib 8192
 ```
 
-guest 内仍然执行同一套安装命令：
+Inside the guest, run the same installation commands:
 
 ```bash
 sudo bash '/Volumes/My Shared Files/seed/install-in-guest-from-seed.sh'
@@ -172,7 +175,7 @@ sudo tail -n 50 /var/log/container-macos-guest-agent.log
 sudo shutdown -h now
 ```
 
-guest 关机后重新打包并加载：
+After shutdown, repackage and reload:
 
 ```bash
 "$CONTAINER_BIN" macos package \
@@ -184,15 +187,16 @@ guest 关机后重新打包并加载：
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
-如果你已经执行过 `make release`，并且安装目录里的 `container-macos-guest-agent` 就是最新的，也可以省略这两个环境变量，直接用 `--auto-seed`。
+If you already ran `make release` and the installed `container-macos-guest-agent` is current, you can omit the two override variables and use `--auto-seed` directly.
 
-## 3. build 前初始化
+## 3. Pre-Build Initialization
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 make release
 
-export CONTAINER_BIN="$PWD/bin/container"
+export CONTAINER_BIN="$REPO_ROOT/bin/container"
 export BASE_REF="local/macos-base:latest"
 export TEST_NS="local/macos-build-phase1"
 export WORKROOT="/tmp/macos-build-phase1-acceptance"
@@ -209,17 +213,17 @@ mkdir -p "$WORKROOT"
   "${TEST_NS}:tar" >/dev/null 2>&1 || true
 
 "$CONTAINER_BIN" system stop || true
-"$CONTAINER_BIN" system start --install-root "$PWD" --disable-kernel-install --timeout 60
+"$CONTAINER_BIN" system start --install-root "$REPO_ROOT" --disable-kernel-install --timeout 60
 "$CONTAINER_BIN" system status
 
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
-如果这里都不稳定，先不要继续验证 `container build`，直接去看 [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md)。
+If this is not stable, do not continue to `container build`. Go directly to [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md).
 
-## 4. 验证用例
+## 4. Validation Cases
 
-### 4.1 基础构建与路由
+### 4.1 Basic Build and Dispatch
 
 ```bash
 mkdir -p "$WORKROOT/01-smoke"
@@ -243,9 +247,9 @@ fi
 "$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:smoke" /usr/bin/sw_vers
 ```
 
-预期：构建成功，日志里没有 `Dialing builder`，并且镜像能直接运行。
+Expected result: the build succeeds, the logs do not contain `Dialing builder`, and the image runs directly.
 
-### 4.2 `COPY`、`.dockerignore`、symlink
+### 4.2 `COPY`, `.dockerignore`, and Symlinks
 
 ```bash
 mkdir -p "$WORKROOT/02-copy/payload/nested"
@@ -280,9 +284,9 @@ EOF
 "$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:copy" /bin/sh -lc 'ls -l /opt/copy-check'
 ```
 
-预期：`keep.txt` 存在，`link.txt` 是指向 `keep.txt` 的软链接，被 `.dockerignore` 排除的日志文件不存在。
+Expected result: `keep.txt` exists, `link.txt` points to `keep.txt`, and files excluded by `.dockerignore` are absent.
 
-### 4.3 `ADD(local archive)` 与 image config
+### 4.3 `ADD(local archive)` and Image Config
 
 ```bash
 mkdir -p "$WORKROOT/03-add-config/archive-root/sub"
@@ -313,7 +317,7 @@ EOF
 grep -q '"com.apple.container.phase":"phase1"' "$WORKROOT/03-add-config/inspect.json"
 ```
 
-预期：默认启动输出 `/opt/app from-env`，并且 `inspect.json` 里能看到 `com.apple.container.phase=phase1`。
+Expected result: the default startup prints `/opt/app from-env`, and `inspect.json` contains `com.apple.container.phase=phase1`.
 
 ### 4.4 `type=tar`
 
@@ -340,7 +344,7 @@ grep -q '^oci-layout$' "$WORKROOT/out/phase1.tar.list"
 "$CONTAINER_BIN" run --os darwin --rm "${TEST_NS}:tar" /usr/bin/sw_vers
 ```
 
-预期：`type=tar` 不会自动 load，手工 `image load` 后可以运行。
+Expected result: `type=tar` does not auto-load the image, but after `image load` the image runs correctly.
 
 ### 4.5 `type=local`
 
@@ -363,7 +367,7 @@ ls -lh \
   --auto-seed
 ```
 
-预期：`type=local` 会导出一个 macOS image directory，目录里至少包含 `Disk.img`、`AuxiliaryStorage`、`HardwareModel.bin`，并且可直接给 `macos start-vm` 使用。
+Expected result: `type=local` exports a macOS image directory containing at least `Disk.img`, `AuxiliaryStorage`, and `HardwareModel.bin`, and that directory works with `macos start-vm`.
 
 ### 4.6 `USER`
 
@@ -390,9 +394,9 @@ EOF
 grep -Eq '"User"[[:space:]]*:[[:space:]]*"nobody"' "$WORKROOT/04-user/inspect.json"
 ```
 
-预期：构建成功，`RUN` 阶段按 `nobody` 执行，默认启动输出 `nobody`，并且镜像 inspect 结果里能看到 `User=nobody`。
+Expected result: the build succeeds, the `RUN` step executes as `nobody`, the default startup prints `nobody`, and image inspection shows `User=nobody`.
 
-### 4.7 拒绝路径
+### 4.7 Rejection Paths
 
 ```bash
 expect_fail() {
@@ -448,23 +452,23 @@ expect_fail copy-from-unsupported \
   "$CONTAINER_BIN" build --platform darwin/arm64 "$WORKROOT/05-negative/copy-from"
 ```
 
-预期：上面 4 条命令都失败，而且日志里包含对应错误文本。
+Expected result: all four commands fail, and each log contains the expected error text.
 
-## 5. 通过标准
+## 5. Pass Criteria
 
-满足下面这些条件就够了：
+Validation is sufficient when all of the following are true:
 
-- `"$BASE_REF"` 可以稳定执行 `run --os darwin`
-- 4.1 到 4.5 全部成功
-- 4.6 的 5 条拒绝路径都命中预期错误
+- `"$BASE_REF"` runs reliably with `run --os darwin`
+- sections 4.1 through 4.6 all succeed
+- the four rejection-path checks in 4.7 fail with the expected messages
 
-这次验证不包含：
+This validation does not cover:
 
 - `ADD URL`
-- 多阶段 `COPY --from`
-- 更完整的 Dockerfile 语义对齐
+- multi-stage `COPY --from`
+- broader Dockerfile semantic alignment
 
-## 6. 清理
+## 6. Cleanup
 
 ```bash
 "$CONTAINER_BIN" image delete --force \
@@ -477,24 +481,24 @@ expect_fail copy-from-unsupported \
 rm -rf "$WORKROOT"
 ```
 
-如果中途需要重启服务：
+If you need to restart the service during validation:
 
 ```bash
 "$CONTAINER_BIN" system stop
-"$CONTAINER_BIN" system start --install-root "$PWD" --disable-kernel-install --timeout 60
+"$CONTAINER_BIN" system start --install-root "$REPO_ROOT" --disable-kernel-install --timeout 60
 ```
 
-## 7. 常见问题
+## 7. Common Issues
 
-- `prepare-base` 或 `start-vm` 缺 entitlement：
-  优先用 `make release` 产物；如果必须用 `.build/release/*`，给 `container-macos-image-prepare` 和 `container-macos-vm-manager` 补签 `signing/container-runtime-macos.entitlements`。
-- 手工 VM 不弹窗：
-  说明命令不在图形会话里执行。
-- `run --os darwin` 或 `exec` 连不上 guest-agent：
-  回到 guest 里重新检查 `launchctl print system/com.apple.container.macos.guest-agent` 和 `/var/log/container-macos-guest-agent.log`。
-- `prepare-base` 安装阶段失败：
-  先检查 IPSW、网络、代理和 VPN；`Unknown option '--disk-size-gib'` 这类错误通常说明你还在用旧二进制。
-- 只改了 guest-agent：
-  走 2.2 即可，不需要重跑 `prepare-base`。
+- missing entitlements in `prepare-base` or `start-vm`:
+  Prefer the `make release` output. If you must run binaries from `.build/release/*`, sign `container-macos-image-prepare` and `container-macos-vm-manager` with `signing/container-runtime-macos.entitlements`.
+- manual VM window does not appear:
+  The command is probably not running inside a graphical session.
+- `run --os darwin` or `exec` cannot connect to the guest-agent:
+  Re-check `launchctl print system/com.apple.container.macos.guest-agent` and `/var/log/container-macos-guest-agent.log` inside the guest.
+- `prepare-base` fails during installation:
+  Check the IPSW, network access, proxy, and VPN setup first. Errors such as `Unknown option '--disk-size-gib'` usually mean an outdated binary is still in use.
+- only the guest-agent changed:
+  Follow section 2.2. You do not need to run `prepare-base` again.
 
-如需更细的排障步骤，直接看 [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md)。
+For deeper debugging, go straight to [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md).

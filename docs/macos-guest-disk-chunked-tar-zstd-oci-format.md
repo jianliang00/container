@@ -1,75 +1,77 @@
-# macOS Guest 镜像：分块 tar(sparse)+zstd 的 OCI 格式（v1）
+# macOS Guest Image OCI Format: Chunked tar(sparse)+zstd (v1)
 
-本文档定义一套用于 **macOS Guest** 镜像分发的 OCI 兼容格式，用于解决：
+This document defines an OCI-compatible format for distributing **macOS guest** images. It is designed to solve the following problems:
 
-- push/pull 时避免上传/下载 RAW `Disk.img` 的 64GiB 线性字节流；
-- 通过按 1GiB 分块生成多个 blob，使新版本镜像可以复用旧版本未变更的 chunk blob；
-- 在 pull/load 后立即重建可运行的 `Disk.img`（保稀疏），并允许在缓存缺失时按需重建作为回退。
+- avoid uploading and downloading the full 64 GiB linear byte stream of a raw `Disk.img` during push and pull
+- split the disk into 1 GiB blobs so a new image version can reuse unchanged chunk blobs from an older version
+- rebuild a runnable sparse `Disk.img` immediately after `pull` or `load`, while still allowing on-demand rebuild as a fallback if the cache is missing
 
-该格式面向生产环境：强调 **确定性**（digest 稳定以实现 registry 复用）、**可校验**、**可演进**。
+This format is intended for production use. It emphasizes **determinism** (stable digests for registry reuse), **verifiability**, and **evolvability**.
 
-## 1. 背景与现状
+## 1. Background and Current State
 
-当前实现把 `Disk.img` 作为一个单独的 OCI layer blob（自定义 mediaType），registry push/pull 会按 digest 上传/下载该 blob 的完整字节流。对于 RAW 磁盘镜像，即使其中存在稀疏洞（逻辑 64GiB、物理占用更小），也会在 push/pull 时退化为传输 64GiB。
+The current implementation stores `Disk.img` as a single OCI layer blob with a custom media type. Registry push and pull transfer the entire blob byte stream by digest. For raw disk images, even when the file contains sparse holes and the physical usage is much smaller than the logical 64 GiB size, push and pull still degenerate into transferring the full 64 GiB.
 
-## 2. 术语
+## 2. Terminology
 
-- **logicalSize**：磁盘镜像逻辑大小（例如 64GiB）。
-- **chunkSize**：每个 chunk 的逻辑大小（固定 1GiB）。
-- **chunk**：以固定 offset 切分的磁盘片段；最后一块可小于 1GiB。
-- **sparse tar**：tar 归档对“洞”采用稀疏编码（仅记录非空 extents）。
-- **rebuild**：将 chunk blob 解包并按 offset 写回，生成可运行的 `Disk.img`。
+- **logicalSize**: logical size of the disk image, for example 64 GiB
+- **chunkSize**: logical size of each chunk, fixed at 1 GiB
+- **chunk**: a disk segment cut at a fixed offset; the last chunk may be smaller than 1 GiB
+- **sparse tar**: a tar archive that encodes holes sparsely and records only non-empty extents
+- **rebuild**: unpack chunk blobs and write them back by offset to produce a runnable `Disk.img`
 
-## 3. 设计目标
+## 3. Design Goals
 
-- **OCI 兼容**：符合 OCI Image Spec 的 index/manifest/config 结构，registry 无需理解内容语义。
-- **push/pull 体积可控**：disk 数据以 tar(sparse)+zstd 存储。
-- **blob 复用**：chunk 内容未变则 blob digest 不变，push 时复用已有 blob。
-- **运行前已准备**：强制在 pull/load 后立即重建 `Disk.img` 缓存。
-- **健壮性**：若缓存缺失/损坏，允许按需重建作为回退路径。
+- **OCI-compatible**: follows the OCI Image Spec structure for index, manifest, and config, without requiring the registry to understand the content semantics
+- **bounded transfer size**: stores disk data as tar(sparse)+zstd
+- **blob reuse**: unchanged chunk contents keep the same blob digest and are reused on push
+- **ready before run**: requires rebuilding the `Disk.img` cache immediately after `pull` or `load`
+- **robustness**: allows on-demand rebuild as a fallback when the cache is missing or damaged
 
-## 4. OCI 对象模型
+## 4. OCI Object Model
 
-### 4.1 平台
+### 4.1 Platform
 
-固定：
+Fixed values:
 
 - `os = darwin`
 - `architecture = arm64`
 
-### 4.2 Media Types（v1）
+### 4.2 Media Types (v1)
 
-保留现有：
+Existing media types kept as-is:
 
 - `application/vnd.apple.container.macos.hardware-model`
 - `application/vnd.apple.container.macos.auxiliary-storage`
 
-新增：
+New media types:
 
 - `application/vnd.apple.container.macos.disk-layout.v1+json`
 - `application/vnd.apple.container.macos.disk-chunk.v1.tar+zstd`
 
-说明：
+Notes:
 
-- `disk-layout` 作为独立 layer，携带 chunk 列表、offset、长度、校验等元数据。
-- 每个 `disk-chunk` 是一个独立 layer blob，内容为 tar(sparse)+zstd。
+- `disk-layout` is a standalone layer carrying chunk metadata such as offsets, lengths, and checksums.
+- Each `disk-chunk` is an independent layer blob whose payload is tar(sparse)+zstd.
 
-### 4.3 Manifest layers 顺序（建议固定）
+### 4.3 Manifest Layer Order (Recommended to Be Fixed)
 
-建议 layers 顺序固定，利于一致性与调试：
+Use a fixed layer order for consistency and debugging:
 
 1. hardwareModel
 2. auxiliaryStorage
-3. diskLayout（JSON）
+3. diskLayout (JSON)
 4. diskChunk[0..N-1]
 
-> 注意：OCI 语义上 layer 顺序通常用于 rootfs 叠加；本方案把 OCI 作为 artifact 载体，不依赖 rootfs 叠加语义。顺序固定仅用于实现一致性。
+> Note: in normal OCI semantics, layer order is used for rootfs overlay behavior. This design uses OCI as an artifact transport. Fixed ordering is only for implementation consistency.
 
-### 4.4 OCI config 扩展字段（推荐）
+### 4.4 OCI Config Extension Fields (Recommended)
 
-仍使用标准 mediaType：`application/vnd.oci.image.config.v1+json`。
+Continue using the standard config media type:
 
-在 config 的 `config` 节点增加扩展字段，便于快速判别格式：
+- `application/vnd.oci.image.config.v1+json`
+
+Add extension fields under the config's `config` node so the format can be recognized quickly:
 
 ```json
 {
@@ -84,9 +86,9 @@
 }
 ```
 
-## 5. diskLayout.v1+json 规范
+## 5. `diskLayout.v1+json` Specification
 
-### 5.1 Schema（建议）
+### 5.1 Schema (Recommended)
 
 ```json
 {
@@ -110,17 +112,17 @@
 }
 ```
 
-字段说明：
+Field descriptions:
 
-- `logicalSize`：最终 `Disk.img` 逻辑大小，重建时必须 truncate 到该值。
-- `chunkSize`：固定 1GiB（1073741824）。
-- `chunkCount`：`ceil(logicalSize / chunkSize)`。
-- `layerDigest/layerSize`：OCI layer blob digest/size（压缩态）。
-- `rawDigest/rawLength`：chunk 的原始字节序列摘要与长度，用于跨实现校验与调试。
+- `logicalSize`: logical size of the final `Disk.img`; rebuild must truncate to this size
+- `chunkSize`: fixed at 1 GiB (`1073741824`)
+- `chunkCount`: `ceil(logicalSize / chunkSize)`
+- `layerDigest/layerSize`: digest and size of the compressed OCI layer blob
+- `rawDigest/rawLength`: digest and length of the raw chunk byte stream, used for cross-implementation validation and debugging
 
-### 5.2 chunk layer annotations（推荐冗余）
+### 5.2 Chunk Layer Annotations (Recommended Redundancy)
 
-每个 chunk 的 layer descriptor 建议写入 annotations（便于不读 layout 也能定位）：
+Each chunk layer descriptor should also carry annotations so tools can locate the chunk without reading the layout:
 
 - `org.apple.container.macos.chunk.index = "<int>"`
 - `org.apple.container.macos.chunk.offset = "<bytes>"`
@@ -128,132 +130,131 @@
 - `org.apple.container.macos.chunk.raw.digest = "sha256:..."`
 - `org.apple.container.macos.chunk.raw.length = "<bytes>"`
 
-## 6. diskChunk.v1.tar+zstd 内容规范
+## 6. `diskChunk.v1.tar+zstd` Content Specification
 
-每个 chunk layer blob 内容为：
+Each chunk layer blob consists of:
 
-1. tar（PAX，sparse enabled）
-2. zstd 压缩输出
+1. tar (PAX, sparse enabled)
+2. zstd-compressed output
 
-### 6.1 tar 约束（强制）
+### 6.1 tar Constraints (Required)
 
-- tar 格式：PAX（不使用 GNU 私有扩展）。
-- tar 内只允许 **一个 entry**，路径固定为：`disk.chunk`。
-- entry 类型：regular file。
-- entry 逻辑大小必须等于 `chunk.length`。
-- entry 必须使用 sparse 表达（洞不写入 tar 数据流）。
+- tar format: PAX, without GNU-private extensions
+- exactly **one entry** in the tar, with a fixed path: `disk.chunk`
+- entry type: regular file
+- entry logical size must equal `chunk.length`
+- the entry must use sparse encoding, so holes are not written to the tar data stream
 
-### 6.2 确定性要求（强制）
+### 6.2 Determinism Requirements (Required)
 
-为确保“相同 chunk 内容”在不同时间/不同机器得到相同 blob digest，必须固定：
+To ensure the same chunk content yields the same blob digest across time and machines, the following must be fixed:
 
-- tar header 元数据固定化：
-  - uid=0、gid=0、uname=""、gname=""；
-  - mode 固定（例如 0644）；
-  - mtime 固定（例如 0）。
-- tar 内容仅 1 个 entry，避免目录遍历顺序影响。
-- zstd 参数固定：
-  - level 固定（例如 3）；
-  - 建议固定单线程；
-  - 不使用外部字典；
-  - 不引入时间戳/随机字段。
+- tar header metadata:
+  - `uid=0`, `gid=0`, `uname=""`, `gname=""`
+  - fixed mode, for example `0644`
+  - fixed mtime, for example `0`
+- tar content contains only one entry, avoiding directory traversal ordering differences
+- zstd parameters:
+  - fixed compression level, for example `3`
+  - preferably fixed single-threaded output
+  - no external dictionary
+  - no timestamps or random fields
 
-`rawDigest` 用于验证“解包后的原始 chunk 字节序列”正确性，即使未来替换 tar/zstd 实现，也能保持可校验。
+`rawDigest` validates the unpacked raw chunk byte stream, so correctness remains checkable even if the tar or zstd implementation changes later.
 
-## 7. 生命周期：package / push / pull / load / rebuild / run
+## 7. Lifecycle: `package` / `push` / `pull` / `load` / `rebuild` / `run`
 
-### 7.1 package（生成镜像）
+### 7.1 `package` (Create the Image)
 
-输入：镜像目录包含 `Disk.img` / `AuxiliaryStorage` / `HardwareModel.bin`。
+Input: an image directory containing `Disk.img`, `AuxiliaryStorage`, and `HardwareModel.bin`.
 
-流程：
+Flow:
 
-1. 计算 `logicalSize`（Disk.img 逻辑大小）；
-2. 按固定 offset 切分 `Disk.img` 为 chunk（chunkSize=1GiB）；
-3. 对每个 chunk：
-   - 生成 tar(PAX sparse)（只含 `disk.chunk`）；
-   - 以 zstd 压缩；
-   - 得到 `diskChunk` layer blob（digest/size）；
-   - 计算并记录 `rawDigest/rawLength`；
-4. 生成 `diskLayout.v1+json` layer，记录所有 chunk 元数据；
-5. 生成 OCI manifest/index，并写入 blobs/sha256。
+1. Compute `logicalSize`, the logical size of `Disk.img`.
+2. Split `Disk.img` into chunks at fixed offsets using `chunkSize=1GiB`.
+3. For each chunk:
+   - generate tar(PAX sparse) containing only `disk.chunk`
+   - compress it with zstd
+   - produce a `diskChunk` layer blob and record its digest and size
+   - compute and record `rawDigest/rawLength`
+4. Generate the `diskLayout.v1+json` layer with metadata for all chunks.
+5. Generate the OCI manifest and index, and write blobs under `blobs/sha256`.
 
-### 7.2 push（上传到 registry）
+### 7.2 `push` (Upload to a Registry)
 
-push 的去重粒度是 blob digest。由于 disk 被分为多个 chunk：
+Push deduplicates at blob digest granularity. Because the disk is chunked:
 
-- 未变化的 chunk digest 不变，push 时可复用 registry 已存在的 blob；
-- 变化的 chunk 仅上传对应 blob，不需要上传整盘内容。
+- unchanged chunks keep the same digest and reuse registry blobs
+- changed chunks upload only their own blobs instead of re-uploading the full disk
 
-### 7.3 pull/load（导入到本地内容库）——强制立即重建
+### 7.3 `pull` / `load` (Import into the Local Content Store): Rebuild Immediately
 
-要求：
+Requirements:
 
-- pull：拉取镜像后，必须立即执行 rebuild；
-- load：从 tar 导入镜像后，必须立即执行 rebuild。
+- after `pull`, rebuild must run immediately
+- after `load` from tar, rebuild must run immediately
 
-原因：
+Reasons:
 
-- 运行时不应在首次 `run` 时才做重建，避免用户体验抖动；
-- 重建结果可缓存，并用于后续容器 clone（写时复制）。
+- runtime should not defer rebuild until the first `run`, which would create user-visible latency
+- rebuilt output can be cached and reused for later copy-on-write clones
 
-### 7.4 rebuild（重建 Disk.img 缓存）——必须保稀疏
+### 7.4 `rebuild` (Rebuild the `Disk.img` Cache): Sparse Output Required
 
-输入：
+Input:
 
 - `diskLayout` JSON
-- 所有 `diskChunk` blob（tar.zst）
+- all `diskChunk` blobs (`tar.zst`)
 
-输出：
+Output:
 
-- 一个可运行的 `Disk.img` 文件（逻辑大小=logicalSize）
+- one runnable `Disk.img` file with logical size equal to `logicalSize`
 
-重建规则：
+Rebuild rules:
 
-1. 创建输出文件并 truncate 到 `logicalSize`；
-2. 对每个 chunk：
-   - 解压 zstd；
-   - 读取 tar entry 的 sparse extents；
-   - 对每个非空 extent：`seek(offset+extentOffset)` 写入数据；
-   - 对洞区间：只 `seek` 跳过，不写入（保持稀疏）。
-3. 可选校验：
-   - 对每个 chunk 计算 rawDigest 并与 layout 对比（用于完整性检查）。
+1. Create the output file and truncate it to `logicalSize`.
+2. For each chunk:
+   - decompress zstd
+   - read sparse extents from the tar entry
+   - for each non-empty extent, write data at `seek(offset + extentOffset)`
+   - for holes, only seek without writing so sparsity is preserved
+3. Optional validation:
+   - compute `rawDigest` for each chunk and compare it with the layout
 
-缓存策略：
+Cache strategy:
 
-- 缓存 key 建议使用 `manifestDigest + chunkSize + layoutVersion`；
-- 缓存产物包含 `Disk.img`；
-- 缓存缺失时允许按需重建（见 7.5）。
+- recommended cache key: `manifestDigest + chunkSize + layoutVersion`
+- cache output includes `Disk.img`
+- if the cache is missing, on-demand rebuild remains allowed as described below
 
-### 7.5 运行时回退：缓存缺失允许按需重建
+### 7.5 Runtime Fallback: Rebuild on Demand if the Cache Is Missing
 
-即使采用“强制 pull/load 后立即重建”，仍需要回退：
+Even when rebuild is required immediately after `pull` or `load`, a fallback is still necessary:
 
-- 缓存被清理；
-- rebuild 过程中中断；
-- 用户直接拷贝 content store 而未触发 rebuild。
+- the cache may have been cleaned up
+- rebuild may have been interrupted
+- a user may copy the content store without triggering rebuild
 
-回退策略：
+Fallback policy:
 
-- runtime 在启动前发现 `Disk.img` 缓存缺失时，触发一次 rebuild 并写入缓存；
-- rebuild 成功后再进入正常启动流程。
+- if runtime detects that the `Disk.img` cache is missing before startup, trigger rebuild once and write the cache
+- continue to normal startup only after rebuild succeeds
 
-## 8. 兼容性与迁移策略
+## 8. Compatibility and Migration
 
-需要支持两种 disk 表达：
+Support both disk representations:
 
-- v0（旧）：单一 raw disk-image layer（现有实现）。
-- v1（新）：diskLayout + diskChunk*。
+- v0: one raw disk-image layer, the current legacy implementation
+- v1: `diskLayout` plus `diskChunk*`
 
-解析规则（建议）：
+Recommended parsing rules:
 
-1. 若 manifest 存在 `disk-layout.v1+json`，优先按 v1 处理；
-2. 否则回退到 v0 raw disk-image 处理。
+1. If the manifest contains `disk-layout.v1+json`, process it as v1.
+2. Otherwise fall back to the v0 raw disk-image path.
 
-## 9. 操作与运维建议
+## 9. Operational Recommendations
 
-- chunkSize 固定为 1GiB，chunk 数量约 64 个（64GiB 镜像），生产可接受。
-- 建议将 rebuild 缓存与 content store 分离目录，便于 GC 与故障排查。
-- rebuild 应支持断点/幂等：对同一缓存 key 可重复执行并覆盖。
-- 若启用每 chunk rawDigest 校验，会增加 rebuild CPU 成本，但能显著增强生产可靠性。
-
+- Keep `chunkSize` fixed at 1 GiB. A 64 GiB image produces about 64 chunks, which is acceptable for production.
+- Keep rebuild cache and content store in separate directories for easier garbage collection and troubleshooting.
+- Rebuild should be resumable and idempotent. The same cache key should be safe to rebuild repeatedly and overwrite.
+- Per-chunk `rawDigest` validation increases rebuild CPU cost but materially improves production reliability.

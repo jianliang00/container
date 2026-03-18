@@ -1,388 +1,389 @@
-# macOS Guest Dockerfile 镜像构建方案设计（基于现有 container 项目）
+# macOS Guest Dockerfile Image Build Design (Based on the Current `container` Project)
 
-本文档给出一套可落地的设计：让当前项目在已有 macOS guest 运行时与 chunked OCI 镜像能力基础上，支持“像 Linux 镜像一样”使用 Dockerfile 进行增量构建，输入基础镜像，输出新镜像。
+This document proposes an implementation that allows the current project to build macOS images incrementally from Dockerfiles, much like Linux images, on top of the existing macOS guest runtime and chunked OCI image support. The input is a base image and a Dockerfile. The output is a new image.
 
-目标场景包括：
+Target scenarios include:
 
-- 基于已有 `darwin/arm64` 基础镜像继续构建
-- 安装 Xcode、Homebrew 等工具
-- 创建用户、切换用户执行后续步骤
-- 通过标准镜像流转（`load/push/pull/run`）复用
+- continuing a build from an existing `darwin/arm64` base image
+- installing tools such as Xcode and Homebrew
+- creating users and switching users for later build steps
+- reusing the result through standard image flows such as `load`, `push`, `pull`, and `run`
 
-## 1. 背景与现状
+## 1. Background and Current State
 
-当前代码能力（与本设计直接相关）：
+Current capabilities relevant to this design:
 
-- `container build` 现有实现以 BuildKit 为核心，定位 Linux 构建路径。
-- macOS guest 已具备：
-  - `container run --os darwin` 启动与进程执行
-  - sidecar + guest-agent 协议
-  - `container macos package` 将 `Disk.img/AuxiliaryStorage/HardwareModel.bin` 打包成 OCI
-  - `disk-layout.v1 + disk-chunk.v1.tar+zstd` 分块格式
-  - runtime 启动前的 chunk 重建
+- `container build` is currently centered on BuildKit and is positioned as the Linux build path.
+- The macOS guest path already has:
+  - `container run --os darwin` for boot and process execution
+  - the sidecar + guest-agent protocol
+  - `container macos package` for packaging `Disk.img`, `AuxiliaryStorage`, and `HardwareModel.bin` as OCI
+  - the `disk-layout.v1 + disk-chunk.v1.tar+zstd` chunked format
+  - runtime rebuild of chunks before startup
 
-现状差距：
+Current gaps:
 
-- 缺少基于 Dockerfile 的 macOS 镜像构建执行器
-- 缺少“从运行后磁盘提交镜像（commit）”的一体化流程
-- 缺少面向 `COPY/ADD` 的正式文件注入协议与对应 guest 侧执行器
+- no Dockerfile-based macOS build executor
+- no integrated "commit image from a modified running disk" flow
+- no formal file injection protocol and guest-side executor for `COPY` and `ADD`
 
-## 2. 目标与非目标
+## 2. Goals and Non-Goals
 
-### 2.1 目标
+### 2.1 Goals
 
-1. 在 `container build` 内支持 `--platform darwin/arm64`。
-2. 使用 Dockerfile 作为统一输入，不引入新的专用 DSL。
-3. 基于 `FROM` 引用已有 macOS OCI 镜像，执行指令并提交新镜像。
-4. 首阶段优先支持以下指令子集：
+1. Support `--platform darwin/arm64` in `container build`.
+2. Use Dockerfile as the single build input, without introducing a new DSL.
+3. Resolve `FROM` from an existing macOS OCI image, execute instructions, and commit the result as a new image.
+4. Prioritize the following instruction subset in phase 1:
    - `FROM`, `ARG`, `ENV`, `WORKDIR`, `RUN`, `COPY`, `ADD(local)`, `USER`, `LABEL`, `CMD`, `ENTRYPOINT`
-5. 第二阶段补齐高复杂度指令与语义：
-   - `ADD(URL)`, 多阶段 `COPY --from`
-6. 支持 `COPY/ADD` 本地输入注入，统一通过 `fs` 协议实现，避免依赖共享目录或 guest 内工具链。
-7. 长期支持增量复用：
-   - 阶段级缓存（stage cache）
-   - 后续演进到指令级缓存（instruction cache）
-   - chunk blob 级复用（基于 `rawDigest`）
+5. Add more complex instructions and semantics in phase 2:
+   - `ADD(URL)` and multi-stage `COPY --from`
+6. Support local `COPY` and `ADD` injection through a unified `fs` protocol instead of shared directories or guest-side tooling.
+7. Support long-term incremental reuse:
+   - stage-level cache
+   - later evolution toward instruction-level cache
+   - chunk blob reuse based on `rawDigest`
 
-### 2.2 非目标（首阶段）
+### 2.2 Non-Goals for the First Phase
 
-1. 不在首版支持完整 BuildKit 特性（如 `RUN --mount=type=secret`、inline cache 全语义）。
-2. 不在首版支持跨平台多架构合并构建（只支持 `darwin/arm64`）。
-3. 不改动现有 Linux BuildKit 路径语义。
-4. 不在首版支持 `ADD URL`、多阶段 `COPY --from`。
-5. 不在首版承诺细粒度 build cache；首版以“先完成构建闭环”为目标。
-6. 不把首版目标定义为 headless CI；当前运行前提仍以登录态开发机为主。
-7. 不采用共享目录 / `virtiofs` 作为 `COPY/ADD` 的构建输入方案。
+1. Do not support the full BuildKit feature set in the first version, such as `RUN --mount=type=secret` or complete inline-cache semantics.
+2. Do not support cross-platform or multi-architecture merged builds in the first version. Only `darwin/arm64` is supported.
+3. Do not change the behavior of the existing Linux BuildKit path.
+4. Do not support `ADD URL` or multi-stage `COPY --from` in the first version.
+5. Do not promise fine-grained build cache in the first version. The first priority is a working end-to-end build flow.
+6. Do not target headless CI in the first version. The current execution model still assumes a logged-in development machine.
+7. Do not use shared directories or `virtiofs` as the build input path for `COPY` and `ADD`.
 
-## 3. 总体架构
+## 3. Overall Architecture
 
-### 3.1 构建入口策略
+### 3.1 Build Entry Strategy
 
-保留单一入口：`container build`。
+Keep a single entry point: `container build`.
 
-- 在 `BuildCommand` 完成 `--platform/--os/--arch` 解析后立即分流，且分流必须发生在“拨号或启动 BuildKit builder”之前。
-- `linux/*`：继续走现有 BuildKit 流程。
-- 单一目标 `darwin/arm64`：进入新 `MacOSBuildEngine`。
-- 混合平台或多目标平台（例如同时构建 `linux/amd64,darwin/arm64`）：首阶段显式报错，不做隐式拆分。
+- After `BuildCommand` parses `--platform`, `--os`, and `--arch`, dispatch immediately, before dialing or starting any BuildKit builder.
+- `linux/*`: continue using the existing BuildKit path.
+- `darwin/arm64` as a single target: dispatch to a new `MacOSBuildEngine`.
+- Mixed or multi-target platform builds, for example `linux/amd64,darwin/arm64`: return an explicit error in the first phase rather than silently splitting the build.
 
-这样避免用户记忆新命令，同时不影响现有 Linux 生态。
+This avoids making users learn a new command while preserving the Linux path.
 
-### 3.2 Dockerfile 解析策略
+### 3.2 Dockerfile Parsing Strategy
 
-首阶段不建议手写一套完整 Dockerfile parser/front-end。
+The first phase should avoid hand-writing a full Dockerfile parser or front-end.
 
-1. 优先复用现有 Dockerfile parser/front-end 或与其兼容的 AST/expansion 结果，避免重新实现完整语法、变量展开与转义细节。
-2. 首阶段只保证支持下文矩阵中的指令及常见 shell/exec form；其他语法在解析或计划阶段直接返回 `unsupported`。
-3. 若复用路径暂不可得，才退化为“最小子集 parser”，但该实现只服务首阶段，不视为长期方案。
+1. Prefer reusing the existing Dockerfile parser or front-end, or at least an AST or expansion result compatible with it, rather than reimplementing syntax, variable expansion, and escaping rules.
+2. Only guarantee support for the instructions listed in the matrix below. Return `unsupported` during parsing or planning for anything else.
+3. Fall back to a minimal parser only if reuse is not available. Treat that implementation as phase-1-only, not a long-term direction.
 
-### 3.3 新增核心组件
+### 3.3 New Core Components
 
 1. `MacOSBuildEngine`
-   - 负责 Dockerfile 解析、stage 执行、最终提交。
+   - owns Dockerfile parsing, stage execution, and final commit
 2. `MacOSDockerfileExecutor`
-   - 将 Dockerfile 指令映射为对临时 build container 的操作。
+   - maps Dockerfile instructions to operations against a temporary macOS build container
 3. `MacOSImageCommitter`
-   - 从 build container 的磁盘产物生成 OCI（复用现有 packager/chunker）。
+   - produces OCI output from the build container's disk artifacts by reusing the current packager and chunker
 4. `MacOSBuildCache`
-   - 第二阶段开始管理阶段级缓存与 chunk 复用索引。
+   - later manages stage-level cache and chunk reuse indexes
 5. `BuildContextProvider`
-   - 将 context（`.dockerignore` 过滤后）规范化为可传输输入集合。
+   - normalizes the build context, after `.dockerignore`, into a transferable input set
 6. `MacOSBuildFileTransport`
-   - 负责 host -> sidecar -> guest-agent 的文件协议传输（`fs.begin/fs.chunk/fs.end`）。
+   - handles file transfer from host -> sidecar -> guest-agent using `fs.begin` / `fs.chunk` / `fs.end`
 
-### 3.4 执行时对象关系
+### 3.4 Runtime Object Relationships
 
-1. 每个 Dockerfile stage 对应一个临时 macOS build container（运行时 `container-runtime-macos`）。
-2. stage 生命周期内保持 VM 常驻，避免每条 `RUN` 冷启动。
-3. 首阶段仅保证“stage 结束时 commit 一次”，作为阶段产物输出；细粒度指令 checkpoint 不在首版范围内。
-4. 第二阶段在 stage 产物基础上支持多阶段 `FROM`/`COPY --from` 复用。
+1. Each Dockerfile stage corresponds to one temporary macOS build container running under `container-runtime-macos`.
+2. Keep the VM alive for the lifetime of the stage to avoid cold-starting for every `RUN`.
+3. In phase 1, commit only once at the end of the stage and use that as the stage output. Fine-grained instruction checkpoints are out of scope.
+4. In phase 2, reuse stage outputs for multi-stage `FROM` and `COPY --from`.
 
-## 4. 指令语义与支持矩阵
+## 4. Instruction Semantics and Support Matrix
 
-| 指令 | 首阶段支持 | 处理方式 |
-|---|---|---|
-| `FROM` | 是 | 拉取/解析 `darwin/arm64` 基础镜像，创建 stage 根磁盘 |
-| `ARG` | 是 | 解析期和执行期变量表 |
-| `ENV` | 是 | 更新 stage 环境，影响后续 `RUN` 与镜像 config |
-| `WORKDIR` | 是 | 在 guest 内确保目录存在，更新 stage 默认 cwd |
-| `RUN` | 是 | 通过 sidecar + guest-agent 执行，记录退出码与日志 |
-| `COPY` | 是 | 通过 `fs` 协议直传并按目标路径语义落盘 |
-| `ADD`(本地) | 是 | host 解包后通过 `fs` 协议直传 |
-| `ADD`(URL) | 第二阶段 | 宿主下载到临时目录后再注入，保证可审计 |
-| `USER` | 是 | 更新 stage 默认用户，后续 `RUN` 与目标镜像 config 继承该身份 |
-| `LABEL` | 是 | 写入目标镜像 config |
-| `CMD`/`ENTRYPOINT` | 是 | 写入目标镜像 config |
-| 多阶段 `COPY --from` | 第二阶段 | 先留接口，后补 |
+| Instruction | Phase 1 | Handling |
+| --- | --- | --- |
+| `FROM` | Yes | pull or resolve a `darwin/arm64` base image and create the stage root disk |
+| `ARG` | Yes | maintain parse-time and execution-time variable tables |
+| `ENV` | Yes | update stage environment and persist to later `RUN` steps and the image config |
+| `WORKDIR` | Yes | ensure the directory exists in the guest and update the stage default cwd |
+| `RUN` | Yes | execute through sidecar + guest-agent and capture exit status and logs |
+| `COPY` | Yes | transfer over `fs` and materialize to the destination path using Dockerfile semantics |
+| `ADD` (local) | Yes | unpack on the host and then transfer over `fs` |
+| `ADD` (URL) | Phase 2 | download to a host temporary directory first so the operation stays auditable |
+| `USER` | Yes | update the stage default user for later `RUN` steps and persist it into the image config |
+| `LABEL` | Yes | write to the image config |
+| `CMD` / `ENTRYPOINT` | Yes | write to the image config |
+| Multi-stage `COPY --from` | Phase 2 | reserve the interface now and add it later |
 
-## 5. `COPY/ADD` 输入注入方案（仅保留 `fs` 协议）
+## 5. `COPY` and `ADD` Input Injection (`fs` Protocol Only)
 
-结论：`COPY/ADD` 统一采用 host ↔ sidecar ↔ guest-agent 的 `fs` 协议，不再把共享目录或 guest 内 `tar` 解包保留为正式方案。
+Decision: make `COPY` and `ADD` use the host <-> sidecar <-> guest-agent `fs` protocol as the single official path. Shared directories and guest-side `tar` extraction are not retained as supported solutions.
 
-### 5.1 设计决策
+### 5.1 Design Decisions
 
-1. 共享目录 / `virtiofs` 不纳入本设计：其可用性依赖 guest 侧授权与交互式访问条件，不适合作为非交互 build 主链路。
-2. guest 内 `tar` 解包不纳入本设计：它依赖 guest 镜像内工具链，且难以作为长期稳定语义。
-3. 因此，`COPY/ADD(local)` 的唯一正式路径为协议化文件写入。
+1. Shared directories and `virtiofs` are not part of this design because they depend on guest-side access assumptions and interactive environments, which are a poor fit for the main non-interactive build path.
+2. Guest-side `tar` extraction is not part of this design because it depends on guest image tooling and is difficult to stabilize as long-term behavior.
+3. Therefore, protocol-driven file writes are the only supported path for `COPY` and `ADD(local)`.
 
-### 5.2 设计原则
+### 5.2 Design Principles
 
-1. 所有路径解析、白名单和越界校验在 host 侧完成，guest 仅执行受控文件操作。
-2. 协议默认流式传输，支持大文件、可重试和背压控制。
-3. 小文件可 inline，一次请求完成，减少协议往返成本。
-4. 写入采用“临时文件 + 原子 rename”提交，避免中断留下半成品。
-5. 首阶段只实现 `COPY/ADD(local)` 必需的基础操作，不预先扩展成通用文件系统 RPC。
+1. Resolve paths, enforce whitelists, and reject path escapes on the host. The guest performs only controlled file operations.
+2. The protocol is stream-oriented by default so it can support large files, retries, and backpressure.
+3. Small files may be inlined to reduce round trips.
+4. Use "temporary file + atomic rename" for writes so interrupted transfers do not leave partial results.
+5. In phase 1, implement only the minimal operations required for `COPY` and `ADD(local)`. Do not turn this into a general-purpose filesystem RPC up front.
 
-### 5.3 协议模型（3 个基础操作）
+### 5.3 Protocol Model (Three Basic Operations)
 
 1. `fs.begin`
-   - 入参：`txId`, `op`, `path`, `mode`, `uid/gid`（可选）, `mtime`（可选）, `linkTarget`（可选）, `overwrite`, `inlineData`（可选）, `autoCommit`（可选，默认 `false`）等。
-   - 作用：声明一次文件系统事务（例如 `write_file`, `mkdir`, `symlink`）；当 `autoCommit=true` 且无需后续分块时，可在一次请求内完成提交。
+   - input: `txId`, `op`, `path`, `mode`, optional `uid/gid`, optional `mtime`, optional `linkTarget`, `overwrite`, optional `inlineData`, optional `autoCommit` (default `false`), and related metadata
+   - purpose: declare a filesystem transaction such as `write_file`, `mkdir`, or `symlink`. If `autoCommit=true` and no later chunks are needed, the operation may complete in a single request.
 2. `fs.chunk`
-   - 入参：`txId`, `offset`, `data`（二进制块）。
-   - 作用：仅在需要数据流时发送（通常用于 `write_file` 且 `autoCommit=false`）。
+   - input: `txId`, `offset`, `data`
+   - purpose: stream data when needed, typically for `write_file` with `autoCommit=false`
 3. `fs.end`
-   - 入参：`txId`, `commit|abort`, `digest`（可选）。
-   - 作用：提交或回滚事务；提交时可做完整性校验与原子落盘。`autoCommit=true` 的事务可省略 `fs.end`。
+   - input: `txId`, `commit|abort`, optional `digest`
+   - purpose: commit or roll back the transaction, with optional integrity verification on commit. Transactions with `autoCommit=true` may omit `fs.end`.
 
-首阶段基础操作类型：`write_file`, `mkdir`, `symlink`。
+Required phase-1 operations: `write_file`, `mkdir`, `symlink`.
 
-后续按需要扩展：`chmod`, `chown`, `utime`, `rename`, `remove`。
+Possible later additions: `chmod`, `chown`, `utime`, `rename`, `remove`.
 
-### 5.4 传输策略
+### 5.4 Transfer Strategy
 
-1. metadata-only 操作（首阶段为 `mkdir/symlink`）默认使用 `fs.begin(autoCommit=true)` 一次请求完成。
-2. 小文件（例如 `<=256KiB`）可由 `fs.begin` 的 `inlineData` 携带；建议配合 `autoCommit=true`，跳过 `fs.chunk/fs.end`。
-3. 大文件走 `fs.chunk` 流式发送（建议块大小 `64KiB~1MiB`，默认 `256KiB`），流程为 `fs.begin(autoCommit=false) -> fs.chunk* -> fs.end(commit)`。
-4. 单块失败支持重试；流式事务失败时 `fs.end(abort)` 后清理临时文件。
+1. Metadata-only operations, which means `mkdir` and `symlink` in phase 1, should default to a single `fs.begin(autoCommit=true)` request.
+2. Small files, for example `<=256 KiB`, can use `inlineData` on `fs.begin`, ideally together with `autoCommit=true`, and skip `fs.chunk` and `fs.end`.
+3. Large files should stream through `fs.chunk` with a suggested block size between `64 KiB` and `1 MiB`, defaulting to `256 KiB`, using the flow `fs.begin(autoCommit=false) -> fs.chunk* -> fs.end(commit)`.
+4. Failed chunk writes should be retryable. Failed streamed transactions should use `fs.end(abort)` and clean up temporary files.
 
-### 5.5 指令映射
+### 5.5 Instruction Mapping
 
 1. `COPY`
-   - host 展开源文件列表并排序；
-   - 按目录/文件/软链接映射为 `fs` 操作序列；
-   - 按 Dockerfile 目标路径语义落盘。
-2. `ADD`（本地 tar）
-   - host 解包到临时 staging；
-   - 再复用同一套 `fs` 操作序列下发。
+   - expand and sort source files on the host
+   - map directories, regular files, and symlinks to `fs` operations
+   - materialize them according to Dockerfile destination semantics
+2. `ADD` from a local tar archive
+   - unpack into a temporary staging directory on the host
+   - then reuse the same `fs` operation sequence
 3. `ADD URL`
-   - host 下载并校验；
-   - 作为普通文件（或归档）进入上述流程。
+   - download and validate on the host
+   - then feed the result through the same path as a regular file or archive
 
-### 5.6 Phase 1 范围
+### 5.6 Phase 1 Scope
 
-首阶段必须交付：
-
-1. `RuntimeMacOSSidecarShared`
-   - 新增 `fs.begin/fs.chunk/fs.end` 方法与 payload 结构。
-2. `RuntimeMacOSSidecar`
-   - 新增 `fs` 请求分发与 vsock 透传。
-3. `MacOSGuestAgent`
-   - 支持基础操作：`write_file`, `mkdir`, `symlink`，包含临时文件落盘、提交、回滚。
-4. `MacOSSidecarClient` / `MacOSSandboxService`
-   - 暴露 `fs` 发送接口，复用现有连接管理与错误回传。
-5. `MacOSBuildEngine`
-   - `COPY/ADD(local)` 统一走 `fs` 协议发送路径。
-
-### 5.7 后续扩展
+Phase 1 must deliver:
 
 1. `RuntimeMacOSSidecarShared`
-   - 继续扩展 metadata 字段与附加操作类型。
+   - new `fs.begin`, `fs.chunk`, and `fs.end` methods and payload structures
 2. `RuntimeMacOSSidecar`
-   - 增加并发窗口、背压与诊断能力。
+   - new `fs` request dispatch and vsock forwarding
 3. `MacOSGuestAgent`
-   - 增加 `chmod/chown/utime/rename/remove` 等扩展操作。
-4. `MacOSSidecarClient` / `MacOSSandboxService`
-   - 完善错误分类与重试策略。
+   - support for `write_file`, `mkdir`, and `symlink`, including temporary writes, commit, and rollback
+4. `MacOSSidecarClient` and `MacOSSandboxService`
+   - an `fs` sending interface that reuses the current connection and error handling path
 5. `MacOSBuildEngine`
-   - 基于协议能力继续补齐 `ADD(URL)`、缓存与性能优化。
+   - unified `COPY` and `ADD(local)` transport over the `fs` protocol
 
-## 6. 用户与权限模型（`USER`）
+### 5.7 Later Extensions
 
-当前实现已经把 `USER` 语义接到 macOS build 主链路：
+1. `RuntimeMacOSSidecarShared`
+   - more metadata fields and operation kinds
+2. `RuntimeMacOSSidecar`
+   - concurrent windows, backpressure, and diagnostics
+3. `MacOSGuestAgent`
+   - `chmod`, `chown`, `utime`, `rename`, `remove`, and other extended operations
+4. `MacOSSidecarClient` and `MacOSSandboxService`
+   - stronger error classification and retry policy
+5. `MacOSBuildEngine`
+   - `ADD(URL)`, caching, and performance optimization on top of the protocol
 
-1. sidecar 协议 `exec payload` 增加 `user/uid/gid/supplementalGroups` 字段。
-2. build stage 维护当前默认用户；`USER <name|uid[:gid]>` 会更新后续 `RUN` 的执行身份。
-3. guest-agent 使用“只影响子进程、不污染 daemon 本身”的执行模型，在子进程启动前完成：
+## 6. User and Permission Model (`USER`)
+
+The current implementation already wires `USER` semantics into the macOS build path:
+
+1. The sidecar exec payload now includes `user`, `uid`, `gid`, and `supplementalGroups`.
+2. Each build stage tracks the current default user. `USER <name|uid[:gid]>` updates the identity used by later `RUN` steps.
+3. The guest-agent uses a child-process-only model that does not mutate daemon privileges. Before launching the child process it applies:
    - `setgid`
-   - `setgroups` / 补充组解析
+   - `setgroups` and supplemental group resolution
    - `setuid`
-4. 最终镜像 config 写入 `config.user`，因此后续 `container run --os darwin` 默认也会继承该用户。
+4. The final image config writes `config.user`, so a later `container run --os darwin` also inherits the same default user.
 
-当前限制：
+Current limitations:
 
-1. 首阶段仅实现 `USER` 的执行与镜像 config 语义，不额外提供 `useradd`/`dscl` 一类用户创建封装；用户仍需通过前序 `RUN` 自行准备。
-2. `ADD URL` 与多阶段 `COPY --from` 仍然保留在后续阶段。
+1. Phase 1 supports `USER` execution semantics and image config persistence only. It does not provide wrappers such as `useradd` or `dscl`; user creation still belongs in earlier `RUN` steps.
+2. `ADD URL` and multi-stage `COPY --from` remain later-phase work.
 
-## 7. 镜像提交（Commit）与格式复用
+## 7. Image Commit and Format Reuse
 
-### 7.1 提交目标
+### 7.1 Commit Target
 
-把 stage 当前磁盘状态（`Disk.img` + `AuxiliaryStorage` + `HardwareModel.bin`）提交为新的 OCI 镜像。
+Commit the current stage disk state, meaning `Disk.img`, `AuxiliaryStorage`, and `HardwareModel.bin`, as a new OCI image.
 
-### 7.2 提交流程
+### 7.2 Commit Flow
 
-1. 停止该 stage build container。
-2. 读取 container bundle 下三件套文件。
-3. 复用现有 `MacOSImagePackager`/chunker 生成 OCI tar（必要时扩展 packager 以接收镜像 config 元数据）。
-4. 写入 image config（首阶段包含 `ENV/CMD/ENTRYPOINT/LABEL/WORKDIR/USER`）。
-5. 首阶段直接复用现有 `image load`/`tag` 流程导入本地 image store，而不是一开始新增独立 `commit` API。
-6. 当 commit 能力需要被 API Server 或远端客户端复用时，再抽象为内部接口或新增路由。
+1. Stop the stage build container.
+2. Read the three bundle files from the container bundle.
+3. Reuse the existing `MacOSImagePackager` and chunker to generate OCI tar, extending the packager if needed so it can accept image config metadata.
+4. Write the image config, which in phase 1 includes `ENV`, `CMD`, `ENTRYPOINT`, `LABEL`, `WORKDIR`, and `USER`.
+5. Reuse the current `image load` and `tag` flow to import into the local image store rather than introducing a standalone `commit` API up front.
+6. If commit later needs to be shared by the API server or remote clients, factor it into an internal interface or add a dedicated route then.
 
-### 7.3 与现有 chunked OCI 的关系
+### 7.3 Relationship to the Existing Chunked OCI Format
 
-直接复用当前 `disk-layout.v1 + disk-chunk.v1.tar+zstd` 方案，不引入新格式。
+Reuse the current `disk-layout.v1 + disk-chunk.v1.tar+zstd` design directly. No new image format is introduced.
 
-## 8. 缓存与增量构建
+## 8. Cache and Incremental Build
 
-### 8.1 首阶段行为
+### 8.1 Phase 1 Behavior
 
-首阶段以“功能闭环优先”为原则，不承诺细粒度 build cache：
+The first phase prioritizes a working end-to-end flow over fine-grained cache:
 
-1. 同一次 build 内只维护 stage 执行状态，不做持久化指令缓存。
-2. 重复 build 主要复用已有基础镜像、本地 image store 和 OCI blob 去重能力。
-3. `--no-cache` 仍保留为 CLI 兼容参数；在首阶段 darwin 路径下，其效果等价于“显式要求全量重跑”。
+1. Keep only in-memory stage execution state within a single build. Do not persist instruction-level cache.
+2. Repeated builds mainly reuse the existing base image, local image store, and OCI blob deduplication.
+3. Keep `--no-cache` for CLI compatibility. On the darwin path in phase 1, it is equivalent to forcing a full rebuild.
 
-### 8.2 第二阶段：阶段级缓存
+### 8.2 Phase 2: Stage-Level Cache
 
-缓存键建议包含：
+Suggested cache key inputs:
 
 - `FROM` digest
-- stage 内受支持指令的规范化结果
-- 相关上下文文件 digest（`COPY/ADD(local)`）
-- `ARG/ENV/WORKDIR` 相关状态
+- normalized results of all supported instructions in the stage
+- digests of related context files for `COPY` and `ADD(local)`
+- relevant `ARG`, `ENV`, and `WORKDIR` state
 
-命中后可跳过整个 stage 执行，直接复用此前 commit 的阶段镜像。
+When the key matches, skip the entire stage and reuse a previously committed stage image.
 
-### 8.3 第二阶段：chunk 级复用
+### 8.3 Phase 2: Chunk-Level Reuse
 
-在 `MacOSDiskChunker` 增加“父镜像 layout 对比模式”：
+Add a "compare with parent layout" mode to `MacOSDiskChunker`:
 
-1. 计算本次 chunk `rawDigest`
-2. 若与父镜像同 index chunk 的 `rawDigest` 相同，直接复用父 `layerDigest/layerSize`
-3. 仅对变化 chunk 重新 tar+zstd
+1. compute `rawDigest` for the current chunk
+2. if the current chunk matches the parent image chunk at the same index, reuse the parent's `layerDigest/layerSize`
+3. only re-run tar + zstd for changed chunks
 
-收益：推送时只上传变化 chunk，显著降低 Xcode/Homebrew 大镜像迭代成本。
+Benefit: pushing uploads only changed chunks, which matters for large iterative images such as Xcode and Homebrew environments.
 
-### 8.4 第三阶段：指令级缓存
+### 8.4 Phase 3: Instruction-Level Cache
 
-指令级缓存依赖“每条可缓存指令后都能生成并索引中间 checkpoint”，因此不在首阶段承诺。只有在阶段级缓存稳定后，再演进到 instruction cache。
+Instruction-level cache depends on indexing intermediate checkpoints after each cacheable instruction. That should not be promised in phase 1. Add it only after stage-level cache is stable.
 
-## 9. 与现有命令和服务的集成
+## 9. Integration with Existing Commands and Services
 
 ### 9.1 CLI
 
-保持 `container build`。
+Keep `container build`.
 
-- 新增校验：`darwin` 仅允许 `arm64`。
-- 分流必须发生在现有 BuildKit builder 拨号之前；darwin 路径不应为了“保持形式一致”而先启动 Linux builder。
-- 首阶段继续支持 `-f`, `-t`, `--build-arg`, `--target`, `--no-cache`, `--output`。
-- 首阶段 `--output` 合同明确如下：
-  - `type=oci`：支持。由 `MacOSBuildEngine` 生成 OCI tar，随后复用现有 `image load`/`tag` 路径导入本地镜像库。
-  - `type=tar`：支持。直接输出 packager 生成的 tar。
-  - `type=local`：支持。导出 macOS image directory，至少包含 `Disk.img`、`AuxiliaryStorage`、`HardwareModel.bin`，可直接给 `container macos start-vm` / `container macos package` 使用。
+- add validation that `darwin` only supports `arm64`
+- perform darwin dispatch before any BuildKit builder dial
+- in phase 1 continue supporting `-f`, `-t`, `--build-arg`, `--target`, `--no-cache`, and `--output`
+- define phase-1 `--output` behavior as follows:
+  - `type=oci`: supported; `MacOSBuildEngine` generates OCI tar and then reuses the current `image load` and `tag` path
+  - `type=tar`: supported; outputs the packager tar directly
+  - `type=local`: supported; exports a macOS image directory containing at least `Disk.img`, `AuxiliaryStorage`, and `HardwareModel.bin`, suitable for `container macos start-vm` and `container macos package`
 
-### 9.2 API Server / Images Service
+### 9.2 API Server and Images Service
 
-首阶段不强制新增 `commit` 路由。
+Do not require a new `commit` route in phase 1.
 
-1. `MacOSBuildEngine` 可先直接复用现有 packager 和 `image load`/`tag` 流程完成闭环。
-2. 若后续 API Server 也需要“从运行后 macOS 容器提交镜像”的能力，再抽象为内部接口或新增路由。
+1. `MacOSBuildEngine` can close the loop by reusing the packager and current `image load` and `tag` flows.
+2. Only factor out a reusable commit interface or add a route if the API server later needs to commit a running macOS container.
 
-### 9.3 兼容性
+### 9.3 Compatibility
 
-继续兼容：
+Continue reading both existing image shapes:
 
-- v0（单 `disk-image` layer）镜像读取
-- v1（chunked）镜像读取
+- v0: a single `disk-image` layer
+- v1: chunked layout
 
-构建输出统一为 v1（推荐）。
+Build output should standardize on v1.
 
-## 10. 可靠性、安全与运行前提
+## 10. Reliability, Security, and Runtime Assumptions
 
-### 10.1 运行前提
+### 10.1 Runtime Assumptions
 
-1. 宿主必须是 Apple Silicon，且目标镜像固定为 `darwin/arm64`。
-2. 当前 macOS sidecar 运行模式依赖登录态 GUI/Aqua session；首阶段目标环境是本地开发机，而非 headless CI。
-3. 若未来需要无人值守构建，需要单独设计 sidecar/VM 启动模型，而不是默认复用当前交互式 LaunchAgent 约束。
+1. The host must be Apple Silicon, and the image target stays fixed at `darwin/arm64`.
+2. The current macOS sidecar execution model depends on a logged-in GUI or Aqua session. The first-phase target environment is a local development machine, not headless CI.
+3. If unattended build support becomes necessary later, it should come from a separate sidecar and VM startup design, not by silently stretching the current interactive LaunchAgent model.
 
-### 10.2 可靠性
+### 10.2 Reliability
 
-1. stage VM 崩溃自动失败并保留诊断日志。
-2. build 中断后可清理临时容器与挂载目录。
-3. 长任务（如 Xcode 解包）支持超时参数。
+1. If the stage VM crashes, fail the build and retain diagnostic logs.
+2. Clean up temporary containers and mount directories after interruption.
+3. Support timeout parameters for long-running steps such as Xcode extraction.
 
-### 10.3 安全
+### 10.3 Security
 
-1. `COPY/ADD(local)` 默认且唯一通过 `fs` 协议注入输入。
-2. host 侧先完成 context 白名单、`.dockerignore` 过滤和路径越界校验。
-3. guest 仅执行受控落盘操作，不暴露共享目录作为构建输入面。
-4. host 路径严格限制在 build context。
-5. `ADD URL` 在第二阶段默认启用协议与域名策略（可配置）。
+1. `COPY` and `ADD(local)` must use the `fs` protocol as the default and only input path.
+2. The host must apply build context allowlists, `.dockerignore`, and path escape validation before sending data.
+3. The guest should perform only controlled write operations and should not expose shared directories as a build input surface.
+4. Host paths must stay strictly inside the build context.
+5. `ADD URL` should later enforce a configurable protocol and domain policy.
 
-## 11. 分阶段实施计划
+## 11. Phased Implementation Plan
 
-### Phase 1（MVP）
+### Phase 1 (MVP)
 
-1. `container build --platform darwin/arm64` 在 builder 拨号前调度到 `MacOSBuildEngine`。
-2. Dockerfile 仅支持受控子集：`FROM/ARG/ENV/WORKDIR/RUN/COPY/ADD(local)/USER/CMD/ENTRYPOINT/LABEL`。
-3. 不支持的语法（含 `ADD URL`、`COPY --from`）在解析或计划阶段直接失败。
-4. 实现基础 `fs` 协议：`fs.begin/fs.chunk/fs.end`。
-5. guest 侧支持基础文件操作：`write_file/mkdir/symlink`。
-6. `COPY/ADD(local)` 统一通过 `fs` 协议落盘，不保留共享目录或 `tar+stdin` 路径。
-7. commit 成镜像并可 `run/push`。
-8. 支持 `--output type=oci|tar|local`，其中 `type=local` 导出可启动 VM 的 macOS image directory。
+1. Dispatch `container build --platform darwin/arm64` to `MacOSBuildEngine` before any builder dial.
+2. Support only the controlled Dockerfile subset:
+   `FROM`, `ARG`, `ENV`, `WORKDIR`, `RUN`, `COPY`, `ADD(local)`, `USER`, `CMD`, `ENTRYPOINT`, `LABEL`.
+3. Fail unsupported syntax, including `ADD URL` and `COPY --from`, during parsing or planning.
+4. Implement the baseline `fs` protocol: `fs.begin`, `fs.chunk`, `fs.end`.
+5. Implement guest-side `write_file`, `mkdir`, and `symlink`.
+6. Route all `COPY` and `ADD(local)` writes through `fs`, with no shared-directory or `tar+stdin` fallback.
+7. Commit a new image that can be `run` and `push`ed.
+8. Support `--output type=oci|tar|local`, where `type=local` exports a runnable macOS image directory.
 
-### Phase 2（增强）
+### Phase 2 (Enhancements)
 
-1. 多阶段 `COPY --from`
-2. `ADD URL` 策略化下载
-3. 阶段级缓存
-4. chunk `rawDigest` 复用
-5. 扩展 `fs` 操作类型与错误模型
-6. 按需增强 `type=local` 的 darwin 输出语义（如保留更多 VM 元数据、优化大文件复制）
+1. multi-stage `COPY --from`
+2. policy-controlled `ADD URL`
+3. stage-level cache
+4. chunk `rawDigest` reuse
+5. expanded `fs` operation types and error model
+6. improvements to `type=local` output semantics as needed
 
-### Phase 3（优化）
+### Phase 3 (Optimization)
 
-1. 并行 chunk 压缩
-2. 构建失败恢复与断点复用
-3. `fs` 传输层性能优化（并发窗口、背压、自适应 chunk）
-4. 指令级缓存
-5. 更完整 Dockerfile 特性对齐（按优先级迭代）
+1. parallel chunk compression
+2. build failure recovery and partial reuse
+3. `fs` transfer performance optimization with concurrent windows, backpressure, and adaptive chunks
+4. instruction-level cache
+5. broader Dockerfile feature parity based on priority
 
-## 12. 验收标准
+## 12. Acceptance Criteria
 
-### 12.1 Phase 1 验收
+### 12.1 Phase 1 Acceptance
 
-满足以下场景即通过：
+The following scenarios must pass:
 
-1. 基础构建
+1. Basic build
    - `FROM local/macos-base:latest`
    - `RUN sw_vers`
-   - 成功产出并可 `container run --os darwin` 执行
-2. 工具安装
-   - Dockerfile 安装 Homebrew 并可 `brew --version`
-3. 上下文复制
-   - `COPY` 和 `ADD`（本地）通过 `fs` 协议正确落盘
-   - `.dockerignore` 生效
-   - 不依赖 guest 内 `tar` 或共享目录
-4. 用户切换
+   - the output image runs successfully with `container run --os darwin`
+2. Tool installation
+   - a Dockerfile installs Homebrew and `brew --version` succeeds
+3. Context copy
+   - `COPY` and `ADD(local)` materialize correctly through the `fs` protocol
+   - `.dockerignore` is enforced
+   - guest-side `tar` or shared directories are not required
+4. User switching
    - `USER nobody`
-   - 后续 `RUN id -un` 输出 `nobody`
-   - 最终镜像 config 正确写入 `User`
-5. 输出契约
-   - `--output type=oci` 可成功导入并打 tag
-   - `--output type=tar` 可成功导出 tar
+   - a later `RUN id -un` prints `nobody`
+   - the final image config stores the correct `User`
+5. Output contract
+   - `--output type=oci` imports successfully and can be tagged
+   - `--output type=tar` exports a valid tar
 
-### 12.2 Phase 2 补充验收
+### 12.2 Additional Phase 2 Acceptance
 
-1. 远程输入
-   - `ADD URL` 满足策略控制并可重复校验
-2. 多阶段复制
-   - `COPY --from` 可从前序 stage 正确取文件
-3. 增量复用
-   - 修改少量文件后二次 build，仅少量 chunk 发生变化
+1. Remote input
+   - `ADD URL` obeys policy control and remains verifiable
+2. Multi-stage copy
+   - `COPY --from` retrieves files correctly from previous stages
+3. Incremental reuse
+   - after changing a small number of files, a rebuild changes only a small number of chunks
 
-## 13. 典型 Dockerfile 示例
+## 13. Example Dockerfile
 
 ```dockerfile
 FROM local/macos-base:latest
@@ -397,16 +398,16 @@ RUN brew --version
 CMD ["/bin/zsh"]
 ```
 
-## 14. 风险与待决问题
+## 14. Risks and Open Questions
 
-1. `USER` 已依赖新的 guest 内子进程启动模型；后续改动需要继续避免污染长生命周期 guest-agent 自身权限状态。
-2. `ADD URL` 的可重复构建语义（内容漂移）需配合 checksum 策略。
-3. Dockerfile 解析若无法复用现有 frontend，将显著放大首阶段实现成本。
-4. 当前 sidecar 依赖登录态 GUI/Aqua session，headless CI 支持仍是独立议题。
-5. 首阶段将基础 `fs` 协议前移后，文件传输吞吐、事务开销与错误恢复路径需要尽早验证。
-6. Xcode 安装耗时和许可证处理策略（建议以脚本标准化）。
-7. macOS 构建资源占用高，需明确默认 `cpus/memory` 和并发限制。
+1. `USER` depends on the new guest child-process launch model; future changes must keep daemon privilege state isolated.
+2. Reproducible `ADD URL` semantics require a checksum strategy to handle content drift.
+3. If the Dockerfile parser cannot reuse an existing front-end, phase-1 implementation cost rises substantially.
+4. The current sidecar still depends on a logged-in GUI or Aqua session. Headless CI support remains a separate problem.
+5. Moving the baseline `fs` protocol earlier in the architecture means throughput, transaction overhead, and failure recovery need early validation.
+6. Xcode install time and license-handling should be standardized through scripts.
+7. macOS builds are resource-intensive, so default CPU, memory, and concurrency limits need to be defined.
 
 ---
 
-该方案默认以“最小破坏”集成到现有代码：Linux BuildKit 不改，macOS 增量引擎独立演进；镜像格式复用现有 chunked OCI，保障落地速度与兼容性。
+This design aims for minimal disruption to the current codebase: Linux BuildKit stays unchanged, the macOS incremental engine evolves independently, and the image format keeps using the current chunked OCI layout for faster delivery and compatibility.

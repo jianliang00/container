@@ -1,73 +1,73 @@
-# macOS guest 下基于 automount 的 volume 映射方案
+# Volume Mapping Based on macOS Guest Automount
 
-当前推荐把默认 automount tag `com.apple.virtio-fs.automount` 作为 macOS guest 里所有 hostPath volume 的统一入口，不再回到“每个 volume 一个自定义 tag，再手工挂到 `/Users/...`”这条路径。
+The recommended approach is to use the default automount tag, `com.apple.virtio-fs.automount`, as the single entry point for all `hostPath` volumes in the macOS guest. The older approach of assigning a custom tag per volume and mounting each one manually under `/Users/...` should not be the primary path.
 
-## 核心思路
+## Core Idea
 
-- host 侧把多个 `Filesystem.virtiofs` 聚合成一个 `VZMultipleDirectoryShare`
-- guest 侧统一从 `/Volumes/My Shared Files/<share-id>` 访问这些目录
-- `-v hostPath:guestPath[:opts]` 的 `guestPath` 不直接通过 `mount_virtiofs` 落到任意路径，而是由 guest runtime 再做一层受控映射
+- Aggregate multiple `Filesystem.virtiofs` entries into one `VZMultipleDirectoryShare` on the host.
+- Access all shared directories from `/Volumes/My Shared Files/<share-id>` inside the guest.
+- Do not mount `guestPath` from `-v hostPath:guestPath[:opts]` directly to an arbitrary location with `mount_virtiofs`; let the guest runtime provide a controlled mapping layer instead.
 
-这样做的原因很简单：默认 automount 这条链路已经验证过会被系统视为 `local, automounted`，并且在无人登录时也能由 system guest-agent 直接读取；自定义 tag + 非 `/Volumes` 挂载点则是已知高风险区。
+This approach is preferred because the default automount path is already known to be treated by the system as `local, automounted`, and the system guest-agent can read it even when no user is logged in. Custom tags plus mount points outside `/Volumes` are a known high-risk area.
 
-## `-v` 怎么映射
+## How `-v` Should Map
 
-建议把每个 `-v` 解析成两层路径：
+Treat each `-v` as two separate paths:
 
-- 真实共享路径：`/Volumes/My Shared Files/<share-id>`
-- workload 期望路径：`guestPath`
+- Real shared path: `/Volumes/My Shared Files/<share-id>`
+- Workload-facing path: `guestPath`
 
-例如：
+Example:
 
 - `-v /host/work:/Users/Shared/workspace`
-- host 侧共享名可以是 `v-workspace`
-- guest 里真实数据在 `/Volumes/My Shared Files/v-workspace`
-- runtime 再把 `/Users/Shared/workspace` 映射到这个真实路径
+- Host-side share name: `v-workspace`
+- Real data path in the guest: `/Volumes/My Shared Files/v-workspace`
+- Runtime mapping: `/Users/Shared/workspace` points to that real path
 
-`<share-id>` 应该满足两点：
+`<share-id>` should satisfy two requirements:
 
-- 稳定，可从 mount 配置重复生成
-- 无空格，避免把 `My Shared Files` 之外的路径复杂度继续扩散到构建工具
+- It is stable and can be regenerated from the mount configuration.
+- It contains no spaces, so path handling complexity does not spread beyond `My Shared Files`.
 
-## guest 内的映射方式
+## Mapping Strategy Inside the Guest
 
-第一版建议直接用 symlink，不追求和 Linux bind mount 完全等价。
+The first version should use symlinks directly instead of trying to fully match Linux bind-mount semantics.
 
-做法：
+Suggested behavior:
 
-- 在 guest 启动 workload 前读取 `config.mounts`
-- 对每个 `virtiofs` mount，确认 `/Volumes/My Shared Files/<share-id>` 已出现
-- 如果 `guestPath` 不存在，则创建父目录并建立 symlink
-- 如果 `guestPath` 已存在，只接受“不存在”或“空目录”这类可安全接管的情况；其他情况直接报错
-- `guestPath` 只允许落在 macOS guest 的稳定可写前缀下，例如 `/Users/...`、`/private/...`、`/tmp/...`、`/var/...`、`/usr/local/...`、`/opt/...`
+- Read `config.mounts` before starting the workload in the guest.
+- For each `virtiofs` mount, verify that `/Volumes/My Shared Files/<share-id>` exists.
+- If `guestPath` does not exist, create the parent directory and create a symlink.
+- If `guestPath` already exists, only accept cases that are safe to take over, such as a missing path or an empty directory. Fail for all other cases.
+- Restrict `guestPath` to stable writable prefixes in the macOS guest, such as `/Users/...`, `/private/...`, `/tmp/...`, `/var/...`, `/usr/local/...`, `/opt/...`.
 
-这样能先把主链路做通，同时避免重新引入自定义 tag 和额外挂载动作。
+This keeps the main path working without reintroducing custom tags or extra mount operations.
 
-## 读写和选项
+## Read/Write Modes and Options
 
-- `rw`：默认读写
-- `ro`：host 侧对应目录用只读 `VZSharedDirectory`
+- `rw`: default read-write mode
+- `ro`: use a read-only `VZSharedDirectory` for the corresponding host directory
 
-也就是说，`-v /host/cache:/cache:ro` 最终仍然会落到 `/Volumes/My Shared Files/<share-id>`，只是这个 share 本身是只读的。
+In other words, `-v /host/cache:/cache:ro` still resolves to `/Volumes/My Shared Files/<share-id>`, but the share itself is read-only.
 
-## 实现落点
+## Implementation Order
 
-建议按这个顺序做：
+Recommended sequence:
 
-1. macOS runtime 开始真正消费 `config.mounts` 里的 `Filesystem.virtiofs`
-2. 现有单目录 share 升级成 `VZMultipleDirectoryShare`
-3. 在 guest-agent / sidecar 的 workload 启动前增加 volume 映射步骤
-4. 第一版只支持 `hostPath:absGuestPath[:ro]`
-5. 后面再考虑 named volume、tmpfs、ConfigMap/Secret 这类注入能力
+1. Make the macOS runtime consume `Filesystem.virtiofs` entries from `config.mounts`.
+2. Upgrade the current single-directory share to `VZMultipleDirectoryShare`.
+3. Add a volume-mapping step before workload startup in the guest-agent or sidecar.
+4. Support only `hostPath:absGuestPath[:ro]` in the first version.
+5. Consider named volumes, `tmpfs`, and ConfigMap/Secret-style injection later.
 
-## 边界
+## Boundaries
 
-第一版最好明确限制：
+The first version should explicitly limit the scope:
 
-- 不保证覆盖已有非空目录
-- 不支持把 volume 映射到受保护系统路径
-- 不支持 `/workspace` 这类 sealed system volume 顶层新路径
-- 不追求完全复制 Linux bind mount 语义
-- 自定义 `--share-tag` 保留给手工调试，不作为 `-v` 主链路
+- Do not guarantee overlaying existing non-empty directories.
+- Do not support mapping volumes onto protected system paths.
+- Do not support creating new top-level paths such as `/workspace` on a sealed system volume.
+- Do not try to fully replicate Linux bind-mount semantics.
+- Keep custom `--share-tag` support only for manual debugging, not for the main `-v` flow.
 
-这个方案的重点不是“把 virtiofs 挂到任意位置”，而是“始终留在默认 automount 的安全路径里，再由 runtime 提供一层稳定映射”。
+The point of this design is not to mount `virtiofs` anywhere. The point is to stay inside the default automount path and let the runtime expose a stable mapping layer on top of it.

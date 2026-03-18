@@ -10,29 +10,31 @@ Place these files in this directory before building:
 - `Xcode.xip`: the Apple silicon Xcode archive downloaded from Apple.
 - `node.tar`: a tar archive created from the root of a darwin/arm64 Node.js installation so that the archive contains `bin/node`, `bin/npm`, and related files.
 
-One way to prepare the context from this repository root is:
+One way to prepare the context from the repository root is:
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 
-ln -f "$PWD/Xcode_26.3_Apple_silicon.xip" \
-  "$PWD/docs/examples/macos-xcode-node/Xcode.xip"
+ln -f "$REPO_ROOT/Xcode_26.3_Apple_silicon.xip" \
+  "$REPO_ROOT/docs/examples/macos-xcode-node/Xcode.xip"
 
 tar -C "$HOME/.local/share/mise/installs/node/22.19.0" \
-  -cf "$PWD/docs/examples/macos-xcode-node/node.tar" .
+  -cf "$REPO_ROOT/docs/examples/macos-xcode-node/node.tar" .
 ```
 
 ## Build
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 
 bin/container build \
   --platform darwin/arm64 \
   --progress plain \
-  -f "$PWD/docs/examples/macos-xcode-node/Dockerfile" \
+  -f "$REPO_ROOT/docs/examples/macos-xcode-node/Dockerfile" \
   -t local/macos-xcode-node-ready:latest \
-  "$PWD/docs/examples/macos-xcode-node"
+  "$REPO_ROOT/docs/examples/macos-xcode-node"
 ```
 
 ## Verify

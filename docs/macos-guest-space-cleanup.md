@@ -1,35 +1,36 @@
-# macOS Guest 磁盘空间清理速查
+# macOS Guest Disk Space Cleanup Quick Reference
 
-本文档整理一套在当前仓库开发环境里可重复执行的清理流程，目标是：
+This document describes a repeatable cleanup workflow for the current repository's development environment. The goals are:
 
-1. 快速判断空间到底被谁占了
-2. 按“先安全、后激进”的顺序清掉常见残留
-3. 清理后把 `container system` 恢复到可继续开发的状态
+1. Identify where disk space is actually being used.
+2. Remove common leftovers in a safe-first, aggressive-later order.
+3. Return `container system` to a usable development state after cleanup.
 
-本文默认你在仓库根目录执行，并且平时就是用当前仓库构建产物管理 `container system`。
+This guide assumes you run commands from the repository root and use build artifacts from the current checkout to manage `container system`.
 
-## 1. 先统一命令入口
+## 1. Use One Consistent Command Entry Point
 
-在当前分支开发态里，`system stop/start/status` 建议始终使用同一套二进制和参数，不要混用 debug/release/安装版。
+During branch development, use the same binary and the same arguments for `system stop`, `system start`, and `system status`. Do not mix debug, release, and separately installed builds.
 
-本地开发推荐：
+Recommended local setup:
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 
-export SYSTEM_BIN="$PWD/.build/debug/container"
+export SYSTEM_BIN="$REPO_ROOT/.build/debug/container"
 export DATA_ROOT="$HOME/Library/Application Support/com.apple.container"
 export CACHE_ROOT="$HOME/Library/Caches/com.apple.container"
 export TMP_ROOT="${TMPDIR%/}"
 ```
 
-如果你平时不是这样启动 `container system`，把 `SYSTEM_BIN` 换成你实际在用的那一套，但后面的 `stop/start/status` 要保持一致。
+If you normally start `container system` in a different way, change `SYSTEM_BIN` to match your environment. The important part is to keep `stop`, `start`, and `status` on the same binary and install root.
 
-实战里已经踩过一个坑：如果服务原本是按 debug 开发态拉起来的，中途改用另一套 release/安装版二进制去 `system start`，可能会出现 `cannot find network plugin` 或 launchd 里仍然挂着旧 install root。下次清理时不要混用。
+A common failure mode is starting the service from a debug build and later running `system start` from a different release or installed binary. That can lead to errors such as `cannot find network plugin`, or leave launchd pointing at an outdated install root.
 
-## 2. 先看空间在哪
+## 2. Check Where the Space Went
 
-优先看 Data 卷，不要只看 `/`：
+Prefer checking the Data volume instead of only `/`:
 
 ```bash
 df -h /System/Volumes/Data
@@ -41,84 +42,84 @@ find "$TMP_ROOT" -maxdepth 1 -name 'macos-oci-layout-*' -exec du -sh {} + 2>/dev
 du -sh /private/tmp/macos-image-base 2>/dev/null
 ```
 
-经验上最常见的大头是：
+The most common large consumers are:
 
-- stopped 容器：`container prune`
-- 本地镜像：`container image delete --all --force`
+- stopped containers: `container prune`
+- local images: `container image delete --all --force`
 - `macos-guest-disk-cache`
 - `rebuild-cache`
-- `TMPDIR` 下面的 `macos-oci-layout-*`
+- `macos-oci-layout-*` under `TMPDIR`
 - `/private/tmp/macos-image-base`
 
-其中 `/private/tmp/macos-image-base` 常常是手工测试要保留的镜像目录，不确定时先不要删。
+`/private/tmp/macos-image-base` is often a manually maintained image directory. If you are not sure whether you still need it, leave it alone.
 
-## 3. 一遍清理的推荐顺序
+## 3. Recommended Cleanup Order
 
-### 3.1 先清 stopped 容器
+### 3.1 Remove Stopped Containers First
 
 ```bash
 "$SYSTEM_BIN" prune
 ```
 
-这一步只会删除 stopped 容器，不会碰镜像和 cache。
+This only removes stopped containers. It does not touch images or caches.
 
-### 3.2 不需要保留镜像时，清空本地镜像
+### 3.2 Remove Local Images When You Do Not Need to Keep Them
 
 ```bash
 "$SYSTEM_BIN" image list
 "$SYSTEM_BIN" image delete --all --force
 ```
 
-`image delete` / `image prune` 现在会顺带清理“已经不再被任何本地 image 引用”的 `rebuild-cache` 条目，但仍被当前 image 引用的 cache 不会自动删除。
+`image delete` and `image prune` already clean up `rebuild-cache` entries that are no longer referenced by any local image. Cache entries still referenced by current images are not removed automatically.
 
-如果你还要继续复用某个 base image，就不要做这一步，或者只删不用的 tag。
+If you still want to reuse a base image, skip this step or delete only the tags you no longer need.
 
-### 3.3 删除 `macos-oci-layout-*` 临时目录
+### 3.3 Remove `macos-oci-layout-*` Temporary Directories
 
-`container macos package` 过程中可能在 `TMPDIR` 留下大体积 OCI layout 临时目录。
+`container macos package` may leave large temporary OCI layout directories under `TMPDIR`.
 
-先看有哪些：
+Inspect them first:
 
 ```bash
 find "$TMP_ROOT" -maxdepth 1 -name 'macos-oci-layout-*' -print
 ```
 
-确认后删除：
+Delete them after confirmation:
 
 ```bash
 find "$TMP_ROOT" -maxdepth 1 -name 'macos-oci-layout-*' -exec rm -rf {} +
 ```
 
-### 3.4 需要保留 `macos-image-base` 时，跳过它
+### 3.4 Skip `macos-image-base` If You Still Need It
 
-如果你还要继续拿同一个镜像目录做测试，不要删除：
+If you are still using the same image directory for testing, do not remove:
 
 ```bash
 /private/tmp/macos-image-base
 ```
 
-如果你确认这个目录已经没用了，再手工删：
+Delete it manually only after you confirm it is no longer needed:
 
 ```bash
 rm -rf /private/tmp/macos-image-base
 ```
 
-## 4. 清理 macOS guest 缓存
+## 4. Clean macOS Guest Caches
 
-这两类 cache 可以回收很多空间，但建议先停服务再删：
+These two caches can free a large amount of space, but stop the service before removing them:
 
 - `"$DATA_ROOT/macos-guest-disk-cache"`
 - `"$CACHE_ROOT/rebuild-cache"`
 
-这两类缓存删除后，下次 `run --os darwin` 时会按需重新生成。
+Both caches are regenerated on demand the next time you run `run --os darwin`.
 
-### 4.1 停服务
+### 4.1 Stop the Service
 
 ```bash
 "$SYSTEM_BIN" system stop
 ```
 
-### 4.2 清 `macos-guest-disk-cache`
+### 4.2 Remove `macos-guest-disk-cache`
 
 ```bash
 du -sh "$DATA_ROOT/macos-guest-disk-cache" 2>/dev/null
@@ -126,7 +127,7 @@ find "$DATA_ROOT/macos-guest-disk-cache" -mindepth 1 -maxdepth 1 -exec rm -rf {}
 du -sh "$DATA_ROOT/macos-guest-disk-cache" 2>/dev/null
 ```
 
-### 4.3 清 `rebuild-cache`
+### 4.3 Remove `rebuild-cache`
 
 ```bash
 du -sh "$CACHE_ROOT/rebuild-cache" 2>/dev/null
@@ -134,25 +135,26 @@ find "$CACHE_ROOT/rebuild-cache" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/de
 du -sh "$CACHE_ROOT/rebuild-cache" 2>/dev/null
 ```
 
-### 4.4 恢复服务
+### 4.4 Restart the Service
 
-当前仓库开发态建议这样恢复：
+For local development from this repository:
 
 ```bash
-"$SYSTEM_BIN" system start --install-root "$PWD" --disable-kernel-install
+"$SYSTEM_BIN" system start --install-root "$REPO_ROOT" --disable-kernel-install
 "$SYSTEM_BIN" system status
 ```
 
-如果你平时不是这样启动服务，改成你平时那套启动命令即可。关键点只有一个：`stop/start/status` 用同一套 binary 和 install root。
+If you normally start the service differently, use your standard startup command. The key requirement is still the same: `stop`, `start`, and `status` must use the same binary and install root.
 
-## 5. 一条最小清理链路
+## 5. Minimal Cleanup Path
 
-如果你只是想“照着跑一遍”，下面这组命令就是最常用的一套：
+If you just want a single sequence to run end to end, this is the most commonly used baseline:
 
 ```bash
-cd /Users/jianliang/Code/container
+export REPO_ROOT="${REPO_ROOT:-$PWD}"
+cd "$REPO_ROOT"
 
-export SYSTEM_BIN="$PWD/.build/debug/container"
+export SYSTEM_BIN="$REPO_ROOT/.build/debug/container"
 export DATA_ROOT="$HOME/Library/Application Support/com.apple.container"
 export CACHE_ROOT="$HOME/Library/Caches/com.apple.container"
 export TMP_ROOT="${TMPDIR%/}"
@@ -167,22 +169,24 @@ find "$TMP_ROOT" -maxdepth 1 -name 'macos-oci-layout-*' -exec rm -rf {} +
 "$SYSTEM_BIN" system stop
 find "$DATA_ROOT/macos-guest-disk-cache" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
 find "$CACHE_ROOT/rebuild-cache" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
-"$SYSTEM_BIN" system start --install-root "$PWD" --disable-kernel-install
+"$SYSTEM_BIN" system start --install-root "$REPO_ROOT" --disable-kernel-install
 "$SYSTEM_BIN" system status
 
 df -h /System/Volumes/Data
 "$SYSTEM_BIN" system df
 ```
 
-如果这次还不需要保留任何镜像，可以在 `prune` 后面追加：
+If you do not need to keep any local images for this cleanup, add:
 
 ```bash
 "$SYSTEM_BIN" image delete --all --force
 ```
 
-## 6. 清理后的复查
+after `prune`.
 
-至少复查这几项：
+## 6. Post-Cleanup Checks
+
+At minimum, verify:
 
 ```bash
 df -h /System/Volumes/Data
@@ -193,32 +197,32 @@ du -sh "$CACHE_ROOT"/rebuild-cache 2>/dev/null
 find "$TMP_ROOT" -maxdepth 1 -name 'macos-oci-layout-*' -print
 ```
 
-如果 `df -h /` 和 `df -h /System/Volumes/Data` 看起来不一致，不要误判。APFS 下应以 Data 卷的剩余空间为准。
+If `df -h /` and `df -h /System/Volumes/Data` do not match, do not over-interpret `/`. On APFS, the Data volume is the one that matters.
 
-## 7. 本次实战里实际回收过的空间类型
+## 7. Typical High-Impact Space Consumers
 
-这次开发过程中，实际清理过的主要大项包括：
+In one representative cleanup, the largest reclaimable categories were:
 
-- stopped 容器，约 `200+ GB`
-- `TMPDIR` 下的 `macos-oci-layout-*`，约 `50 GB`
-- `macos-guest-disk-cache`，约 `27 GB`
-- `rebuild-cache`，约 `83 GB`
+- stopped containers: about `200+ GB`
+- `macos-oci-layout-*` under `TMPDIR`: about `50 GB`
+- `macos-guest-disk-cache`: about `27 GB`
+- `rebuild-cache`: about `83 GB`
 
-这几个目录都很容易在反复 `prepare/package/load/run --os darwin` 后重新堆起来。
+These directories can grow quickly after repeated `prepare`, `package`, `load`, and `run --os darwin` cycles.
 
-## 8. 什么时候不要删
+## 8. When Not to Delete Things
 
-下面这些场景要先停一下：
+Pause before cleanup in the following cases:
 
-- 你还要继续复用 `/private/tmp/macos-image-base` 做手工 VM 或重新 `package`
-- 你还要继续复用某个本地 base image
-- 你当前正在跑 `container run --os darwin`
-- 你不确定当前 `container system` 是用哪套 binary 启动的
+- You still need `/private/tmp/macos-image-base` for manual VM use or another `package` run.
+- You still need a local base image.
+- You currently have `container run --os darwin` running.
+- You are not sure which binary started the current `container system`.
 
-最后一种最容易把环境搞乱。先用：
+The last case is the easiest way to create an inconsistent environment. Check first:
 
 ```bash
 "$SYSTEM_BIN" system status
 ```
 
-确认当前服务和你手里的 binary 是同一路径，再执行清理。
+Make sure the running service matches the binary you are using before you continue.

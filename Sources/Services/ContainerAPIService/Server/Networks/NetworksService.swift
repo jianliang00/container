@@ -339,6 +339,8 @@ public actor NetworksService {
     }
 
     /// Perform a hostname lookup on all networks.
+    ///
+    /// - Parameter hostname: A canonical DNS hostname with a trailing dot (e.g. `"example.com."`).
     public func lookup(hostname: String) async throws -> Attachment? {
         try await self.stateLock.withLock { _ in
             for state in await self.serviceStates.values {

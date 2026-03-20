@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+#if canImport(XCTest)
 import XCTest
 
 @testable import TerminalProgress
@@ -772,3 +773,4 @@ final class ProgressBarTests: XCTestCase {
         XCTAssertEqual(output, "⠋ Task 50% (1 of 2 files) [0s]")
     }
 }
+#endif

@@ -1,14 +1,17 @@
 import AppKit
 import ArgumentParser
 import ContainerLog
+import ContainerNetworkServiceClient
 import ContainerResource
 import ContainerVersion
+import ContainerXPC
 import ContainerizationError
 import Darwin
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
 @preconcurrency import Virtualization
+import vmnet
 
 @MainActor
 @main
@@ -119,6 +122,9 @@ struct SidecarGuestAgentFrame: Codable {
         case fsBegin
         case fsChunk
         case fsEnd
+        case networkConfigure
+        case networkInspect
+        case networkState
         case ack
         case stdout
         case stderr
@@ -154,6 +160,8 @@ struct SidecarGuestAgentFrame: Codable {
     let offset: UInt64?
     let action: MacOSSidecarFSEndAction?
     let digest: String?
+    let networkConfiguration: MacOSGuestNetworkConfiguration?
+    let network: MacOSGuestNetworkSnapshot?
 
     init(
         type: FrameType,
@@ -182,7 +190,9 @@ struct SidecarGuestAgentFrame: Codable {
         autoCommit: Bool? = nil,
         offset: UInt64? = nil,
         action: MacOSSidecarFSEndAction? = nil,
-        digest: String? = nil
+        digest: String? = nil,
+        networkConfiguration: MacOSGuestNetworkConfiguration? = nil,
+        network: MacOSGuestNetworkSnapshot? = nil
     ) {
         self.type = type
         self.id = id
@@ -211,6 +221,8 @@ struct SidecarGuestAgentFrame: Codable {
         self.offset = offset
         self.action = action
         self.digest = digest
+        self.networkConfiguration = networkConfiguration
+        self.network = network
     }
 
     static func exec(
@@ -283,12 +295,28 @@ struct SidecarGuestAgentFrame: Codable {
     static func ack(id: String) -> Self {
         .init(type: .ack, id: id)
     }
+
+    static func networkConfigure(_ configuration: MacOSGuestNetworkConfiguration) -> Self {
+        .init(type: .networkConfigure, networkConfiguration: configuration)
+    }
+
+    static let networkInspect = SidecarGuestAgentFrame(type: .networkInspect)
+
+    static func networkState(_ snapshot: MacOSGuestNetworkSnapshot) -> Self {
+        .init(type: .networkState, network: snapshot)
+    }
 }
 
 actor MacOSSidecarService {
     private static let bootstrapGuestAgentRetryDelayNanoseconds: UInt64 = 500_000_000
     private static let bootstrapGuestAgentMaxAttempts = 120
     private static let bootstrapGuestAgentReadyTimeoutSeconds: TimeInterval = 3
+
+    private struct PreparedNetworking {
+        let attachments: [Attachment]
+        let deviceConfigurations: [VZVirtioNetworkDeviceConfiguration]
+        let guestConfiguration: MacOSGuestNetworkConfiguration?
+    }
 
     private final class UnsafeSendableBox<T>: @unchecked Sendable {
         let value: T
@@ -348,44 +376,56 @@ actor MacOSSidecarService {
         self.log = log
     }
 
-    func bootstrapStart() async throws {
+    func bootstrapStart() async throws -> MacOSSidecarBootstrapResult {
         if state == .running, vm != nil {
             log.info("bootstrapStart skipped; vm already running")
-            return
+            return .init()
         }
 
         log.info("bootstrapStart: loading container config")
         let config = try loadContainerConfiguration()
-        let guiEnabled = config.macosGuest?.guiEnabled ?? false
-        log.info(
-            "bootstrapStart: building vm configuration",
-            metadata: [
-                "cpus": "\(config.resources.cpus)",
-                "memory": "\(config.resources.memoryInBytes)",
-                "gui_enabled": "\(guiEnabled)",
-            ])
-        let vmConfiguration = try makeVirtualMachineConfiguration(containerConfig: config)
-        self.vmConfiguration = vmConfiguration
-
-        log.info("bootstrapStart: creating VZVirtualMachine")
-        let created = try await createVirtualMachineOnMain(configuration: vmConfiguration)
-        let vm = created.vm
-        self.vmDelegate = created.delegate
-        self.vm = vm
-        if guiEnabled {
-            try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
-        }
-        log.info("bootstrapStart: starting vm", metadata: ["gui_enabled": "\(guiEnabled)"])
+        let preparedNetworking = try await prepareNetworking(containerConfig: config)
         let agentPort = config.macosGuest?.agentPort ?? 27000
+        var createdVM: VZVirtualMachine?
         var didStartVM = false
         do {
+            let guiEnabled = config.macosGuest?.guiEnabled ?? false
+            log.info(
+                "bootstrapStart: building vm configuration",
+                metadata: [
+                    "cpus": "\(config.resources.cpus)",
+                    "memory": "\(config.resources.memoryInBytes)",
+                    "gui_enabled": "\(guiEnabled)",
+                ])
+            let vmConfiguration = try makeVirtualMachineConfiguration(
+                containerConfig: config,
+                networkDevices: preparedNetworking.deviceConfigurations
+            )
+            self.vmConfiguration = vmConfiguration
+
+            log.info("bootstrapStart: creating VZVirtualMachine")
+            let created = try await createVirtualMachineOnMain(configuration: vmConfiguration)
+            let vm = created.vm
+            createdVM = vm
+            self.vmDelegate = created.delegate
+            self.vm = vm
+            if guiEnabled {
+                try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
+            }
+            log.info("bootstrapStart: starting vm", metadata: ["gui_enabled": "\(guiEnabled)"])
             try await startVirtualMachine(vm)
             didStartVM = true
             try await validateSocketDeviceAvailable(on: vm)
             try await waitForGuestAgentDuringBootstrap(port: agentPort)
+            if let guestConfiguration = preparedNetworking.guestConfiguration {
+                _ = try await configureGuestNetwork(port: agentPort, configuration: guestConfiguration)
+            }
         } catch {
-            if didStartVM {
-                try? await stopVirtualMachine(vm)
+            if didStartVM, let createdVM {
+                try? await stopVirtualMachine(createdVM)
+            }
+            if !preparedNetworking.attachments.isEmpty {
+                await releaseAttachments(preparedNetworking.attachments)
             }
             await closeGUIWindowOnMain()
             self.vm = nil
@@ -396,6 +436,7 @@ actor MacOSSidecarService {
         }
         state = .running
         log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
+        return .init(attachments: preparedNetworking.attachments)
     }
 
     func stopVM() async throws {
@@ -527,7 +568,10 @@ actor MacOSSidecarService {
         return try JSONDecoder().decode(ContainerConfiguration.self, from: data)
     }
 
-    private func makeVirtualMachineConfiguration(containerConfig: ContainerConfiguration) throws -> VZVirtualMachineConfiguration {
+    private func makeVirtualMachineConfiguration(
+        containerConfig: ContainerConfiguration,
+        networkDevices: [VZVirtioNetworkDeviceConfiguration]
+    ) throws -> VZVirtualMachineConfiguration {
         let hardwareData = try Data(contentsOf: hardwareModelPath())
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareData) else {
             throw ContainerizationError(.invalidState, message: "invalid hardware model data")
@@ -555,7 +599,7 @@ actor MacOSSidecarService {
                 attachment: try VZDiskImageStorageDeviceAttachment(url: diskImagePath(), readOnly: false)
             )
         ]
-        vmConfiguration.networkDevices = [createNATDevice()]
+        vmConfiguration.networkDevices = networkDevices
         vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         vmConfiguration.directorySharingDevices = try createDirectorySharingDevices(containerConfig: containerConfig)
         vmConfiguration.graphicsDevices = [createGraphicsDevice()]
@@ -571,6 +615,187 @@ actor MacOSSidecarService {
         let device = VZVirtioNetworkDeviceConfiguration()
         device.attachment = VZNATNetworkDeviceAttachment()
         return device
+    }
+
+    private func prepareNetworking(containerConfig: ContainerConfiguration) async throws -> PreparedNetworking {
+        guard containerConfig.networks.count <= 1 else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "macOS guest runtime currently supports at most one network attachment"
+            )
+        }
+
+        if let attachmentConfiguration = containerConfig.networks.first {
+            guard #available(macOS 26, *) else {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "explicit macOS guest network attachments require macOS 26 or newer"
+                )
+            }
+
+            let client = NetworkClient(id: attachmentConfiguration.network)
+            let (attachment, additionalData) = try await client.allocate(
+                hostname: attachmentConfiguration.options.hostname,
+                macAddress: attachmentConfiguration.options.macAddress
+            )
+
+            do {
+                let device = try createVmnetDevice(
+                    attachment: attachment,
+                    serializedNetwork: try requireSerializedNetwork(
+                        additionalData,
+                        networkID: attachmentConfiguration.network
+                    )
+                )
+                return PreparedNetworking(
+                    attachments: [attachment],
+                    deviceConfigurations: [device],
+                    guestConfiguration: guestConfiguration(
+                        attachment: attachment,
+                        dns: containerConfig.dns
+                    )
+                )
+            } catch {
+                try? await client.deallocate(hostname: attachment.hostname)
+                throw error
+            }
+        }
+
+        let dnsConfiguration = guestConfiguration(attachment: nil, dns: containerConfig.dns)
+        return PreparedNetworking(
+            attachments: [],
+            deviceConfigurations: [createNATDevice()],
+            guestConfiguration: dnsConfiguration?.isEmpty == true ? nil : dnsConfiguration
+        )
+    }
+
+    private func guestConfiguration(
+        attachment: Attachment?,
+        dns: ContainerConfiguration.DNSConfiguration?
+    ) -> MacOSGuestNetworkConfiguration? {
+        let nameservers: [String]
+        if let dns, !dns.nameservers.isEmpty {
+            nameservers = dns.nameservers
+        } else if let attachment {
+            nameservers = [attachment.ipv4Gateway.description]
+        } else {
+            nameservers = []
+        }
+
+        let searchDomains = dns?.searchDomains ?? []
+        let domain = dns?.domain
+        let shouldConfigureNetworking =
+            attachment != nil || !nameservers.isEmpty || !searchDomains.isEmpty || domain != nil
+        guard shouldConfigureNetworking else {
+            return nil
+        }
+
+        return MacOSGuestNetworkConfiguration(
+            interfaceMACAddress: attachment?.macAddress?.description,
+            ipv4Address: attachment?.ipv4Address.address.description,
+            ipv4PrefixLength: attachment.map { UInt8($0.ipv4Address.prefix.length) },
+            ipv4Gateway: attachment?.ipv4Gateway.description,
+            nameservers: nameservers,
+            searchDomains: searchDomains,
+            domain: domain
+        )
+    }
+
+    @available(macOS 26, *)
+    private func createVmnetDevice(
+        attachment: Attachment,
+        serializedNetwork: XPCMessage
+    ) throws -> VZVirtioNetworkDeviceConfiguration {
+        var status: vmnet_return_t = .VMNET_SUCCESS
+        guard
+            let network = vmnet_network_create_with_serialization(serializedNetwork.underlying, &status),
+            status == .VMNET_SUCCESS
+        else {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to materialize vmnet network from serialized data (status \(status.rawValue))"
+            )
+        }
+
+        let device = VZVirtioNetworkDeviceConfiguration()
+        device.attachment = VZVmnetNetworkDeviceAttachment(network: network)
+        if let macAddress = attachment.macAddress?.description {
+            guard let resolved = VZMACAddress(string: macAddress) else {
+                throw ContainerizationError(.invalidArgument, message: "invalid network MAC address \(macAddress)")
+            }
+            device.macAddress = resolved
+        }
+        return device
+    }
+
+    private func configureGuestNetwork(
+        port: UInt32,
+        configuration: MacOSGuestNetworkConfiguration
+    ) async throws -> MacOSGuestNetworkSnapshot {
+        let fd = try await connectVsock(port: port)
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+
+        try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: Self.bootstrapGuestAgentReadyTimeoutSeconds)
+        try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.networkConfigure(configuration), fd: fd)
+        return try waitForGuestNetworkState(fd: fd)
+    }
+
+    private nonisolated func waitForGuestNetworkState(fd: Int32) throws -> MacOSGuestNetworkSnapshot {
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .networkState:
+                guard let network = frame.network else {
+                    throw ContainerizationError(.internalError, message: "guest-agent network operation returned no payload")
+                }
+                return network
+            case .error:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent network operation failed: \(frame.message ?? "unknown error")"
+                )
+            case .exit:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent network operation exited unexpectedly (code=\(frame.exitCode ?? 1))"
+                )
+            case .ready, .ack, .stdout, .stderr:
+                continue
+            case .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd, .networkConfigure, .networkInspect:
+                continue
+            }
+        }
+    }
+
+    private func requireSerializedNetwork(_ additionalData: XPCMessage?, networkID: String) throws -> XPCMessage {
+        guard let additionalData else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "network \(networkID) did not return serialized vmnet state"
+            )
+        }
+        return additionalData
+    }
+
+    private func releaseAttachments(_ attachments: [Attachment]) async {
+        for attachment in attachments {
+            let client = NetworkClient(id: attachment.network)
+            do {
+                try await client.deallocate(hostname: attachment.hostname)
+            } catch {
+                log.error(
+                    "failed to release network attachment after bootstrap failure",
+                    metadata: [
+                        "network": "\(attachment.network)",
+                        "hostname": "\(attachment.hostname)",
+                        "error": "\(error)",
+                    ]
+                )
+            }
+        }
     }
 
     private func createDirectorySharingDevices(
@@ -813,7 +1038,7 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
-            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd, .networkConfigure, .networkInspect, .networkState:
                 continue
             }
         }
@@ -1328,6 +1553,34 @@ final class SidecarControlServer: @unchecked Sendable {
         try waitForFSAck(fd: session.fd, expectedID: payload.txID)
     }
 
+    private func inspectGuestNetwork(port: UInt32) throws -> MacOSGuestNetworkSnapshot {
+        try guestNetworkRequest(port: port, frame: .networkInspect)
+    }
+
+    private func configureGuestNetwork(
+        port: UInt32,
+        configuration: MacOSGuestNetworkConfiguration
+    ) throws -> MacOSGuestNetworkSnapshot {
+        try guestNetworkRequest(port: port, frame: .networkConfigure(configuration))
+    }
+
+    private func guestNetworkRequest(
+        port: UInt32,
+        frame: SidecarGuestAgentFrame
+    ) throws -> MacOSGuestNetworkSnapshot {
+        let fd = try syncValue {
+            try await self.service.connectVsock(port: port)
+        }
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+
+        try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: fd)
+        return try waitForGuestNetworkState(fd: fd)
+    }
+
     private func startProcessStream(port: UInt32, processID: String, exec: MacOSSidecarExecRequestPayload) throws {
         let fd = try syncValue {
             try await self.service.connectVsock(port: port)
@@ -1408,7 +1661,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     pendingExitCode = frame.exitCode ?? 1
                 case .ready:
                     continue
-                case .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+                case .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd, .networkConfigure, .networkInspect, .networkState:
                     continue
                 }
             }
@@ -1475,7 +1728,34 @@ final class SidecarControlServer: @unchecked Sendable {
                 )
             case .ready, .stdout, .stderr:
                 continue
-            case .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+            case .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd, .networkConfigure, .networkInspect, .networkState:
+                continue
+            }
+        }
+    }
+
+    private func waitForGuestNetworkState(fd: Int32) throws -> MacOSGuestNetworkSnapshot {
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .networkState:
+                guard let network = frame.network else {
+                    throw ContainerizationError(.internalError, message: "guest-agent network inspection returned no payload")
+                }
+                return network
+            case .error:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent network inspection failed: \(frame.message ?? "unknown error")"
+                )
+            case .exit:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent network inspection exited unexpectedly (code=\(frame.exitCode ?? 1))"
+                )
+            case .ready, .ack, .stdout, .stderr:
+                continue
+            case .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd, .networkConfigure, .networkInspect:
                 continue
             }
         }
@@ -1519,7 +1799,7 @@ final class SidecarControlServer: @unchecked Sendable {
                         throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
                     case .exit:
                         throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
-                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd, .networkConfigure, .networkInspect, .networkState:
                         continue
                     }
                 }
@@ -1574,8 +1854,9 @@ final class SidecarControlServer: @unchecked Sendable {
         switch request.method {
         case .vmBootstrapStart:
             return try sync(requestID: requestID) {
-                try await service.bootstrapStart()
-                return .success(requestID: requestID)
+                let result = try await service.bootstrapStart()
+                let data = try JSONEncoder().encode(result)
+                return .success(requestID: requestID, data: data)
             }
         case .vmConnectVsock:
             guard let port = request.port else {
@@ -1718,6 +1999,15 @@ final class SidecarControlServer: @unchecked Sendable {
             do {
                 try finishFSTransfer(payload)
                 return .success(requestID: requestID)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .networkInspect:
+            let port = request.port ?? 27000
+            do {
+                let snapshot = try inspectGuestNetwork(port: port)
+                let data = try JSONEncoder().encode(snapshot)
+                return .success(requestID: requestID, data: data)
             } catch {
                 return failureResponse(requestID: requestID, error: error)
             }

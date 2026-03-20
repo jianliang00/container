@@ -132,9 +132,6 @@ public struct Utility {
             if management.initImage != nil {
                 throw ContainerizationError(.unsupported, message: "--init-image is not supported for --os darwin")
             }
-            if !management.networks.isEmpty {
-                throw ContainerizationError(.unsupported, message: "--network is not supported for --os darwin; guest networking uses Virtualization NAT")
-            }
             if !management.publishPorts.isEmpty {
                 throw ContainerizationError(.unsupported, message: "--publish is not supported for --os darwin")
             }
@@ -276,7 +273,21 @@ public struct Utility {
         config.virtualization = management.virtualization
 
         if isMacOSRuntime {
-            config.networks = []
+            let parsedNetworks = try management.networks.map { try Parser.network($0) }
+            if management.networks.contains(ClientNetwork.noNetworkName) {
+                guard management.networks.count == 1 else {
+                    throw ContainerizationError(
+                        .unsupported,
+                        message: "no other networks may be created along with network \(ClientNetwork.noNetworkName)"
+                    )
+                }
+                config.networks = []
+            } else {
+                config.networks = try getDarwinAttachmentConfigurations(
+                    containerId: config.id,
+                    networks: parsedNetworks
+                )
+            }
         } else {
             // Parse network specifications with properties
             let parsedNetworks = try management.networks.map { try Parser.network($0) }
@@ -301,8 +312,25 @@ public struct Utility {
             }
         }
 
-        if isMacOSRuntime || management.dnsDisabled {
+        let hasExplicitDNSSettings =
+            !management.dns.nameservers.isEmpty
+            || management.dns.domain != nil
+            || !management.dns.searchDomains.isEmpty
+            || !management.dns.options.isEmpty
+
+        if management.dnsDisabled {
             config.dns = nil
+        } else if isMacOSRuntime {
+            if hasExplicitDNSSettings {
+                config.dns = .init(
+                    nameservers: management.dns.nameservers,
+                    domain: management.dns.domain,
+                    searchDomains: management.dns.searchDomains,
+                    options: management.dns.options
+                )
+            } else {
+                config.dns = nil
+            }
         } else {
             let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
             config.dns = .init(
@@ -496,6 +524,39 @@ public struct Utility {
             throw ContainerizationError(.invalidState, message: "builtin network is not present")
         }
         return [AttachmentConfiguration(network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil))]
+    }
+
+    static func getDarwinAttachmentConfigurations(
+        containerId: String,
+        networks: [Parser.ParsedNetwork]
+    ) throws -> [AttachmentConfiguration] {
+        guard networks.count <= 1 else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "macOS guest runtime currently supports at most one --network attachment"
+            )
+        }
+
+        for network in networks {
+            if let mac = network.macAddress {
+                try validMACAddress(mac)
+            }
+        }
+
+        let fqdn: String
+        if containerId.contains(".") {
+            fqdn = "\(containerId)."
+        } else {
+            fqdn = containerId
+        }
+
+        return try networks.map { network in
+            let macAddress = try network.macAddress.map { try MACAddress($0) }
+            return AttachmentConfiguration(
+                network: network.name,
+                options: AttachmentOptions(hostname: fqdn, macAddress: macAddress)
+            )
+        }
     }
 
     private static func getKernel(management: Flags.Management) async throws -> Kernel {

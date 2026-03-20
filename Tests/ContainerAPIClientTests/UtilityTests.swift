@@ -168,4 +168,32 @@ struct UtilityTests {
             )
         }
     }
+
+    @Test("darwin explicit network attachment preserves the requested network and MAC")
+    func testDarwinAttachmentConfigurations() throws {
+        let attachments = try Utility.getDarwinAttachmentConfigurations(
+            containerId: "guest-instance",
+            networks: [
+                .init(name: "backend", macAddress: "02:42:ac:11:00:02")
+            ]
+        )
+
+        #expect(attachments.count == 1)
+        #expect(attachments[0].network == "backend")
+        #expect(attachments[0].options.hostname == "guest-instance")
+        #expect(attachments[0].options.macAddress?.description == "02:42:ac:11:00:02")
+    }
+
+    @Test("darwin runtime rejects multiple explicit networks")
+    func testDarwinAttachmentConfigurationsRejectMultipleNetworks() throws {
+        #expect(throws: ContainerizationError.self) {
+            _ = try Utility.getDarwinAttachmentConfigurations(
+                containerId: "guest-instance",
+                networks: [
+                    .init(name: "backend"),
+                    .init(name: "frontend")
+                ]
+            )
+        }
+    }
 }

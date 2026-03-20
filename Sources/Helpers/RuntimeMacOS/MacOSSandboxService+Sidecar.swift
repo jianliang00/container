@@ -53,7 +53,7 @@ extension MacOSSandboxService {
         )
     }
 
-    func startVirtualMachineViaSidecar(config: ContainerConfiguration) async throws {
+    func startVirtualMachineViaSidecar(config: ContainerConfiguration) async throws -> [Attachment] {
         let launchLabel = sidecarLaunchLabel(config: config)
         let plistURL = sidecarPlistPath()
         let socketURL = sidecarSocketPath(config: config)
@@ -92,12 +92,13 @@ extension MacOSSandboxService {
         sidecarEventPumpTask = eventPumpTask
         do {
             writeContainerLog(Data(("sidecar bootstrap start [label=\(launchLabel)] [socket=\(socketURL.path)]\n").utf8))
-            try client.bootstrapStart(socketConnectRetries: 120)
+            let result = try client.bootstrapStart(socketConnectRetries: 120)
             sidecarHandle = SidecarHandle(
                 launchLabel: launchLabel,
                 client: client
             )
             writeContainerLog(Data(("sidecar vm bootstrap succeeded [label=\(launchLabel)]\n").utf8))
+            return result.attachments
         } catch {
             writeContainerLog(Data(("sidecar vm bootstrap failed [label=\(launchLabel)] error=\(String(describing: error))\n").utf8))
             client.setEventHandler(nil)

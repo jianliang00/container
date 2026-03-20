@@ -36,8 +36,12 @@ final class MacOSSidecarClient: @unchecked Sendable {
         stateLock.unlock()
     }
 
-    func bootstrapStart(socketConnectRetries: Int = 120) throws {
-        _ = try request(method: .vmBootstrapStart, socketConnectRetries: socketConnectRetries)
+    func bootstrapStart(socketConnectRetries: Int = 120) throws -> MacOSSidecarBootstrapResult {
+        let response = try request(method: .vmBootstrapStart, socketConnectRetries: socketConnectRetries)
+        guard let data = response.data else {
+            return .init()
+        }
+        return try JSONDecoder().decode(MacOSSidecarBootstrapResult.self, from: data)
     }
 
     func stopVM() throws {
@@ -120,6 +124,17 @@ final class MacOSSidecarClient: @unchecked Sendable {
             MacOSSidecarRequest(method: .fsEnd, fsEnd: payload),
             socketConnectRetries: 1
         )
+    }
+
+    func networkInspect(port: UInt32) throws -> MacOSGuestNetworkSnapshot {
+        let response = try requestResponse(
+            MacOSSidecarRequest(method: .networkInspect, port: port),
+            socketConnectRetries: 1
+        )
+        guard let data = response.data else {
+            throw ContainerizationError(.internalError, message: "sidecar response for network.inspect missing payload")
+        }
+        return try JSONDecoder().decode(MacOSGuestNetworkSnapshot.self, from: data)
     }
 
     func closeControlConnection() {

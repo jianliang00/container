@@ -110,6 +110,39 @@ struct MacOSCreateValidationTests {
         }
     }
 
+    @Test
+    func macOSRuntimeRejectsMultipleNetworkAttachments() throws {
+        var config = try baseConfiguration()
+        config.runtimeHandler = "container-runtime-macos"
+        config.platform = .init(arch: "arm64", os: "darwin")
+        config.networks = [
+            .init(network: "backend", options: .init(hostname: "guest-a")),
+            .init(network: "frontend", options: .init(hostname: "guest-b")),
+        ]
+
+        #expect(throws: Error.self) {
+            try ContainersService.validateCreateInput(configuration: config, kernel: nil)
+        }
+    }
+
+    @Test
+    func macOSRuntimeSingleNetworkAttachmentDependsOnHostAvailability() throws {
+        var config = try baseConfiguration()
+        config.runtimeHandler = "container-runtime-macos"
+        config.platform = .init(arch: "arm64", os: "darwin")
+        config.networks = [
+            .init(network: "backend", options: .init(hostname: "guest-a"))
+        ]
+
+        if #available(macOS 26, *) {
+            try ContainersService.validateCreateInput(configuration: config, kernel: nil)
+        } else {
+            #expect(throws: Error.self) {
+                try ContainersService.validateCreateInput(configuration: config, kernel: nil)
+            }
+        }
+    }
+
     private func baseConfiguration() throws -> ContainerConfiguration {
         let imageJSON = """
             {

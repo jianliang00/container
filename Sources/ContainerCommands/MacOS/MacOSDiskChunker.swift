@@ -228,20 +228,21 @@ enum MacOSDiskChunker {
         blobsDir: URL,
         parentReuseContext: ParentReuseContext?
     ) throws -> ChunkResult? {
-        guard let parentChunk = parentReuseContext?.candidateChunk(
-            index: index,
-            chunkOffset: chunkOffset,
-            chunkLength: chunkLength
-        ), let parentDiskImagePath = parentReuseContext?.parentDiskImagePath
+        guard
+            let parentChunk = parentReuseContext?.candidateChunk(
+                index: index,
+                chunkOffset: chunkOffset,
+                chunkLength: chunkLength
+            ), let parentDiskImagePath = parentReuseContext?.parentDiskImagePath
         else {
             return nil
         }
 
         switch compareChunkWithParentBySharedExtents(
-        currentFD: fd,
-        parentDiskImage: parentDiskImagePath,
-        chunkOffset: chunkOffset,
-        chunkLength: chunkLength
+            currentFD: fd,
+            parentDiskImage: parentDiskImagePath,
+            chunkOffset: chunkOffset,
+            chunkLength: chunkLength
         ) {
         case .match:
             let blobURL = try materializeExistingBlob(
@@ -275,11 +276,13 @@ enum MacOSDiskChunker {
         blobsDir: URL,
         parentReuseContext: ParentReuseContext?
     ) throws -> ChunkResult? {
-        guard let parentChunk = parentReuseContext?.candidateChunk(
-            index: index,
-            chunkOffset: chunkOffset,
-            chunkLength: chunkLength
-        ), parentChunk.rawDigest == "sha256:\(rawDigest)" else {
+        guard
+            let parentChunk = parentReuseContext?.candidateChunk(
+                index: index,
+                chunkOffset: chunkOffset,
+                chunkLength: chunkLength
+            ), parentChunk.rawDigest == "sha256:\(rawDigest)"
+        else {
             return nil
         }
 
@@ -476,7 +479,7 @@ enum MacOSDiskChunker {
     /// Compute SHA256 of raw chunk bytes (reading through holes as zeros).
     private static func computeRawDigest(fd: Int32, offset: Int64, length: Int64) throws -> String {
         var hasher = SHA256()
-        let bufSize = 1 << 20 // 1 MiB
+        let bufSize = 1 << 20  // 1 MiB
         var remaining = length
 
         lseek(fd, offset, SEEK_SET)
@@ -641,14 +644,14 @@ enum MacOSDiskChunker {
         // Compute checksum
         // First fill checksum field with spaces
         for i in 148..<156 {
-            header[i] = 0x20 // space
+            header[i] = 0x20  // space
         }
         var checksum: UInt32 = 0
         for byte in header {
             checksum += UInt32(byte)
         }
         writeOctal(&header, offset: 148, value: UInt64(checksum), width: 7)
-        header[155] = 0x20 // trailing space
+        header[155] = 0x20  // trailing space
 
         return header
     }
@@ -669,7 +672,7 @@ enum MacOSDiskChunker {
         for i in 0..<count {
             header[offset + i] = bytes[i]
         }
-        header[offset + count] = 0 // null terminator
+        header[offset + count] = 0  // null terminator
     }
 
     // MARK: - Zstd Compression

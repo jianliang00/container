@@ -139,7 +139,8 @@ public enum MacOSDiskRebuilder {
         manifestDigest: String
     ) -> URL {
         let safeDigest = manifestDigest.replacingOccurrences(of: ":", with: "-")
-        return cacheDir
+        return
+            cacheDir
             .appendingPathComponent(safeDigest)
             .appendingPathComponent("Disk.img")
     }
@@ -222,7 +223,7 @@ public enum MacOSDiskRebuilder {
         }
 
         // Read data and write extents to output
-        let bufSize = 1 << 20 // 1 MiB
+        let bufSize = 1 << 20  // 1 MiB
         let buf = UnsafeMutableRawPointer.allocate(byteCount: bufSize, alignment: 16)
         defer { buf.deallocate() }
 

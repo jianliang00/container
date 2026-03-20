@@ -173,11 +173,10 @@ extension Application {
         static func writeInstallKit(sources: Sources, outputDirectory: URL, overwrite: Bool) throws {
             let fm = FileManager.default
             if fm.fileExists(atPath: outputDirectory.path) {
-                if overwrite {
-                    try fm.removeItem(at: outputDirectory)
-                } else {
+                guard overwrite else {
                     throw ContainerizationError(.exists, message: "output directory already exists: \(outputDirectory.path(percentEncoded: false))")
                 }
+                try fm.removeItem(at: outputDirectory)
             }
             try fm.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 

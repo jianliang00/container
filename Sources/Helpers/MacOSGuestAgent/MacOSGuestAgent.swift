@@ -1087,15 +1087,15 @@ private func runChild(
         _ = Darwin.close(stderrFD)
     }
 
-        if !identity.supplementalGroups.isEmpty {
-            var groups = identity.supplementalGroups
-            let result = groups.withUnsafeMutableBufferPointer { buffer in
-                setgroups(Int32(buffer.count), buffer.baseAddress)
-            }
-            if result != 0 {
-                fail(Int32(errno))
-            }
+    if !identity.supplementalGroups.isEmpty {
+        var groups = identity.supplementalGroups
+        let result = groups.withUnsafeMutableBufferPointer { buffer in
+            setgroups(Int32(buffer.count), buffer.baseAddress)
         }
+        if result != 0 {
+            fail(Int32(errno))
+        }
+    }
     if setgid(identity.gid) != 0 {
         fail(Int32(errno))
     }

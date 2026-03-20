@@ -1,3 +1,18 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2026 Apple Inc. and the container project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
 #if os(macOS)
 import Darwin
 import Foundation
@@ -52,11 +67,12 @@ struct SidecarControlServerTests {
         let pair = try makeSocketPair()
         let peerFD = LockedValue<Int32?>(pair.peer)
         defer {
-            closeIfValid(peerFD.withLock { fd in
-                let current = fd
-                fd = nil
-                return current
-            })
+            closeIfValid(
+                peerFD.withLock { fd in
+                    let current = fd
+                    fd = nil
+                    return current
+                })
         }
 
         try server._testRegisterFSSession(
@@ -79,11 +95,12 @@ struct SidecarControlServerTests {
                 }
                 let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
                 receivedFrame.withLock { $0 = frame }
-                closeIfValid(peerFD.withLock { current in
-                    let fd = current
-                    current = nil
-                    return fd
-                })
+                closeIfValid(
+                    peerFD.withLock { current in
+                        let fd = current
+                        current = nil
+                        return fd
+                    })
             } catch {
                 readerError.withLock { $0 = error }
             }

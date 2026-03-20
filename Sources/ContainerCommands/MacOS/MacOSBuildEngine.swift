@@ -413,22 +413,26 @@ struct MacOSBuildEngine {
     private static func outputArchiveURL(for export: Builder.BuildExport, appRoot: URL, buildID: String) -> URL {
         switch export.type {
         case "oci":
-            return export.destination ?? appRoot
+            return export.destination
+                ?? appRoot
                 .appendingPathComponent("builder")
                 .appendingPathComponent(buildID)
                 .appendingPathComponent("out.tar")
         case "tar":
-            return appRoot
+            return
+                appRoot
                 .appendingPathComponent("builder")
                 .appendingPathComponent(buildID)
                 .appendingPathComponent("out.tar")
         case "local":
-            return appRoot
+            return
+                appRoot
                 .appendingPathComponent("builder")
                 .appendingPathComponent(buildID)
                 .appendingPathComponent("local")
         default:
-            return appRoot
+            return
+                appRoot
                 .appendingPathComponent("builder")
                 .appendingPathComponent(buildID)
                 .appendingPathComponent("out.tar")
@@ -1140,7 +1144,7 @@ extension MacOSBuildEngine.Planner {
                 let lineNumber = offset + 1
                 let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
 
-                if buffer.isEmpty, (trimmed.isEmpty || trimmed.hasPrefix("#")) {
+                if buffer.isEmpty, trimmed.isEmpty || trimmed.hasPrefix("#") {
                     continue
                 }
 
@@ -1448,12 +1452,14 @@ extension MacOSBuildEngine {
 
         private static func walk(root: URL) throws -> [ContextEntry] {
             let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: keys,
-                options: [],
-                errorHandler: nil
-            ) else {
+            guard
+                let enumerator = FileManager.default.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: keys,
+                    options: [],
+                    errorHandler: nil
+                )
+            else {
                 return []
             }
 
@@ -1847,7 +1853,8 @@ extension MacOSBuildEngine {
             }
 
             for entry in contextProvider.descendants(of: source) {
-                let relativePath = source.relativePath.isEmpty
+                let relativePath =
+                    source.relativePath.isEmpty
                     ? entry.relativePath
                     : String(entry.relativePath.dropFirst(source.relativePath.count + 1))
                 let basePath = includeTopLevelDirectory.map { joinPaths(destinationRoot, $0) } ?? destinationRoot
@@ -2243,12 +2250,13 @@ extension MacOSBuildEngine {
                     )
                 }
 
-                resolved.append(.init(
-                    originalPath: rawSource,
-                    path: normalized,
-                    archiveName: URL(fileURLWithPath: normalized).lastPathComponent,
-                    kind: kind
-                ))
+                resolved.append(
+                    .init(
+                        originalPath: rawSource,
+                        path: normalized,
+                        archiveName: URL(fileURLWithPath: normalized).lastPathComponent,
+                        kind: kind
+                    ))
             }
             return resolved
         }
@@ -2494,8 +2502,8 @@ private func currentUnixTimestamp() -> Int64 {
     Int64(Date().timeIntervalSince1970)
 }
 
-private extension String {
-    var sha256Prefix: String {
+extension String {
+    fileprivate var sha256Prefix: String {
         let digest = SHA256.hash(data: Data(utf8))
         return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }

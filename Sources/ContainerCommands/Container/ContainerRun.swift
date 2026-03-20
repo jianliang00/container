@@ -130,7 +130,8 @@ extension Application {
 
                 let process = try await client.bootstrap(id: id, stdio: io.stdio)
                 progress.finish()
-                let startupMessage = configuration.macosGuest == nil
+                let startupMessage =
+                    configuration.macosGuest == nil
                     ? nil
                     : "Waiting for macOS guest..."
 

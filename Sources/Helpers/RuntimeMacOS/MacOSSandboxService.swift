@@ -15,12 +15,14 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerImagesServiceClient
+import ContainerNetworkServiceClient
 import ContainerResource
 import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
 import ContainerizationError
 import ContainerizationOCI
+import ContainerizationExtras
 import Darwin
 import Foundation
 import Logging
@@ -85,6 +87,7 @@ public actor MacOSSandboxService {
     var sessions: [String: Session] = [:]
     private var waiters: [String: [CheckedContinuation<ExitStatus, Never>]] = [:]
     var guestMountsPrepared = false
+    private var reportedNetworks: [Attachment] = []
 
     var logHandle: FileHandle?
     private var bootLogHandle: FileHandle?
@@ -133,7 +136,12 @@ extension MacOSSandboxService {
         sessions[config.id] = initSession
 
         #if arch(arm64)
-        try await startOrRestoreVirtualMachine(config: config)
+        let attachments = try await startOrRestoreVirtualMachine(config: config)
+        if attachments.isEmpty {
+            await refreshReportedNetworks(config: config)
+        } else {
+            reportedNetworks = attachments
+        }
         #else
         throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
         #endif
@@ -246,9 +254,11 @@ extension MacOSSandboxService {
         await stopAndQuitSidecarIfPresent()
         writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
         #endif
+        await releaseReportedNetworks()
 
         closeAllSessions()
         writeContainerLog(Data(("stop: sessions closed\n").utf8))
+        reportedNetworks = []
         sandboxState = .stopped(0)
         return message.reply()
     }
@@ -260,7 +270,9 @@ extension MacOSSandboxService {
             #if arch(arm64)
             await stopAndQuitSidecarIfPresent()
             #endif
+            await releaseReportedNetworks()
             closeAllSessions()
+            reportedNetworks = []
             sandboxState = .shuttingDown
             return message.reply()
         default:
@@ -282,12 +294,12 @@ extension MacOSSandboxService {
 
         let snapshot = SandboxSnapshot(
             status: status,
-            networks: [],
+            networks: reportedNetworks,
             containers: [
                 ContainerSnapshot(
                     configuration: configuration,
                     status: status,
-                    networks: [],
+                    networks: reportedNetworks,
                     startedDate: nil
                 )
             ]
@@ -516,10 +528,81 @@ extension MacOSSandboxService {
     }
 
     #if arch(arm64)
-    private func startOrRestoreVirtualMachine(config: ContainerConfiguration) async throws {
+    private func startOrRestoreVirtualMachine(config: ContainerConfiguration) async throws -> [Attachment] {
         try await startVirtualMachineViaSidecar(config: config)
     }
     #endif
+
+    private func releaseReportedNetworks() async {
+        guard !reportedNetworks.isEmpty else {
+            return
+        }
+
+        for attachment in reportedNetworks where attachment.network != "virtualization-nat" {
+            let client = NetworkClient(id: attachment.network)
+            do {
+                try await client.deallocate(hostname: attachment.hostname)
+            } catch {
+                writeContainerLog(
+                    Data(
+                        (
+                            "failed to release network attachment network=\(attachment.network) hostname=\(attachment.hostname): \(describeError(error))\n"
+                        ).utf8
+                    )
+                )
+            }
+        }
+    }
+
+    private func refreshReportedNetworks(config: ContainerConfiguration) async {
+        do {
+            reportedNetworks = try inspectReportedNetworks(config: config)
+            if let network = reportedNetworks.first {
+                writeContainerLog(
+                    Data(
+                        (
+                            "network inspection succeeded network=\(network.network) ipv4=\(network.ipv4Address) gateway=\(network.ipv4Gateway) mac=\(network.macAddress?.description ?? "unavailable")\n"
+                        ).utf8
+                    )
+                )
+            } else {
+                writeContainerLog(Data(("network inspection returned no attachments\n").utf8))
+            }
+        } catch {
+            reportedNetworks = []
+            writeContainerLog(Data(("network inspection failed: \(describeError(error))\n").utf8))
+        }
+    }
+
+    private func inspectReportedNetworks(config: ContainerConfiguration) throws -> [Attachment] {
+        guard let sidecarHandle else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+
+        let agentPort = config.macosGuest?.agentPort ?? Self.defaultAgentPort
+        let snapshot = try sidecarHandle.client.networkInspect(port: agentPort)
+        let assignedIPv4 = try CIDRv4("\(snapshot.ipv4Address)/\(snapshot.prefixLength)")
+        let gateway = try ipv4Address(from: snapshot.gateway)
+        let macAddress = try snapshot.macAddress.map(MACAddress.init)
+        return [
+            Attachment(
+                network: "virtualization-nat",
+                hostname: config.id,
+                ipv4Address: assignedIPv4,
+                ipv4Gateway: gateway,
+                ipv6Address: nil,
+                macAddress: macAddress
+            )
+        ]
+    }
+
+    private func ipv4Address(from text: String) throws -> IPv4Address {
+        var address = in_addr()
+        guard inet_pton(AF_INET, text, &address) == 1 else {
+            throw ContainerizationError(.invalidState, message: "invalid IPv4 address: \(text)")
+        }
+        return IPv4Address(UInt32(bigEndian: address.s_addr))
+    }
 }
 
 // MARK: - Process/session plumbing

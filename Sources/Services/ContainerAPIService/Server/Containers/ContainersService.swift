@@ -318,6 +318,20 @@ public actor ContainersService {
                     message: "macOS runtime requires darwin/arm64 image platform, got \(configuration.platform)"
                 )
             }
+            guard configuration.networks.count <= 1 else {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "macOS runtime currently supports at most one network attachment"
+                )
+            }
+            if !configuration.networks.isEmpty {
+                guard #available(macOS 26, *) else {
+                    throw ContainerizationError(
+                        .unsupported,
+                        message: "explicit macOS guest network attachments require macOS 26 or newer"
+                    )
+                }
+            }
             do {
                 _ = try MacOSGuestMountMapping.hostPathShares(from: configuration.mounts)
             } catch let error as MacOSGuestMountMapping.Error {

@@ -15,7 +15,9 @@
 //===----------------------------------------------------------------------===//
 
 #if os(macOS)
+import ContainerResource
 import ContainerizationError
+import ContainerizationExtras
 import Darwin
 import Foundation
 import Logging
@@ -37,7 +39,22 @@ struct MacOSSidecarClientTests {
         server.start { clientFD in
             let bootstrap = try readRequest(from: clientFD)
             #expect(bootstrap.method == .vmBootstrapStart)
-            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+            let bootstrapPayload = MacOSSidecarBootstrapResult(
+                attachments: [
+                    Attachment(
+                        network: "backend",
+                        hostname: "guest-a",
+                        ipv4Address: try CIDRv4("192.168.64.2/24"),
+                        ipv4Gateway: try IPv4Address("192.168.64.1"),
+                        ipv6Address: nil,
+                        macAddress: try MACAddress("02:42:ac:11:00:02")
+                    )
+                ]
+            )
+            try writeResponse(
+                .success(requestID: bootstrap.requestID, data: try JSONEncoder().encode(bootstrapPayload)),
+                to: clientFD
+            )
 
             let start = try readRequest(from: clientFD)
             #expect(start.method == .processStart)
@@ -59,7 +76,9 @@ struct MacOSSidecarClientTests {
             eventSemaphore.signal()
         }
 
-        try client.bootstrapStart(socketConnectRetries: 3)
+        let bootstrapResult = try client.bootstrapStart(socketConnectRetries: 3)
+        #expect(bootstrapResult.attachments.count == 1)
+        #expect(bootstrapResult.attachments[0].network == "backend")
         try client.processStart(
             port: 27000,
             processID: "proc-1",
@@ -139,7 +158,7 @@ struct MacOSSidecarClientTests {
 
         let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
         defer { client.closeControlConnection() }
-        try client.bootstrapStart(socketConnectRetries: 3)
+        _ = try client.bootstrapStart(socketConnectRetries: 3)
 
         let result1 = LockedValue<Error?>(nil)
         let result2 = LockedValue<Error?>(nil)
@@ -209,7 +228,7 @@ struct MacOSSidecarClientTests {
         let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
         defer { client.closeControlConnection() }
 
-        try client.bootstrapStart(socketConnectRetries: 3)
+        _ = try client.bootstrapStart(socketConnectRetries: 3)
         try client.fsBegin(
             port: 27000,
             request: .init(
@@ -222,6 +241,42 @@ struct MacOSSidecarClientTests {
         )
         try client.fsChunk(request: .init(txID: "tx-1", offset: 3, data: Data("def".utf8)))
         try client.fsEnd(request: .init(txID: "tx-1", action: .commit, digest: "sha256:test"))
+
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func networkInspectDecodesStructuredPayload() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        let expected = MacOSGuestNetworkSnapshot(
+            interfaceName: "en0",
+            ipv4Address: "192.168.64.2",
+            prefixLength: 24,
+            gateway: "192.168.64.1",
+            macAddress: "02:42:ac:11:00:02"
+        )
+
+        server.start { clientFD in
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+
+            let inspect = try readRequest(from: clientFD)
+            #expect(inspect.method == .networkInspect)
+            #expect(inspect.port == 27000)
+            let data = try JSONEncoder().encode(expected)
+            try writeResponse(.success(requestID: inspect.requestID, data: data), to: clientFD)
+        }
+
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+        _ = try client.bootstrapStart(socketConnectRetries: 3)
+
+        let actual = try client.networkInspect(port: 27000)
+        #expect(actual == expected)
 
         try server.waitForCompletion()
     }
@@ -252,7 +307,7 @@ struct MacOSSidecarClientTests {
 
         let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
         defer { client.closeControlConnection() }
-        try client.bootstrapStart(socketConnectRetries: 3)
+        _ = try client.bootstrapStart(socketConnectRetries: 3)
 
         do {
             try client.processClose(processID: "proc-missing")

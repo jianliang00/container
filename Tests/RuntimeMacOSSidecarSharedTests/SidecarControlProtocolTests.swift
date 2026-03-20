@@ -15,6 +15,8 @@
 //===----------------------------------------------------------------------===//
 
 import Darwin
+import ContainerResource
+import ContainerizationExtras
 import Foundation
 import Testing
 
@@ -50,8 +52,17 @@ struct SidecarControlProtocolTests {
 
     @Test
     func responseAndEventRoundTripPreserveFields() throws {
+        let responsePayload = try JSONEncoder().encode(
+            MacOSGuestNetworkSnapshot(
+                interfaceName: "en0",
+                ipv4Address: "192.168.64.2",
+                prefixLength: 24,
+                gateway: "192.168.64.1",
+                macAddress: "02:42:ac:11:00:02"
+            )
+        )
         let response = MacOSSidecarEnvelope.response(
-            .success(requestID: "req-1", fdAttached: true)
+            .success(requestID: "req-1", fdAttached: true, data: responsePayload)
         )
         let eventPayload = Data("stdout\n".utf8)
         let event = MacOSSidecarEnvelope.event(
@@ -74,6 +85,7 @@ struct SidecarControlProtocolTests {
         #expect(decodedResponse.response?.requestID == "req-1")
         #expect(decodedResponse.response?.ok == true)
         #expect(decodedResponse.response?.fdAttached == true)
+        #expect(decodedResponse.response?.data == responsePayload)
 
         #expect(decodedEvent.kind == .event)
         #expect(decodedEvent.event?.event == .processStdout)
@@ -123,6 +135,41 @@ struct SidecarControlProtocolTests {
         #expect(decodedPayload.overwrite == false)
         #expect(decodedPayload.inlineData == Data("abc".utf8))
         #expect(decodedPayload.autoCommit == true)
+    }
+
+    @Test
+    func bootstrapPayloadRoundTripPreservesAttachments() throws {
+        let attachment = Attachment(
+            network: "backend",
+            hostname: "guest-a",
+            ipv4Address: try CIDRv4("192.168.64.2/24"),
+            ipv4Gateway: try IPv4Address("192.168.64.1"),
+            ipv6Address: nil,
+            macAddress: try MACAddress("02:42:ac:11:00:02")
+        )
+        let bootstrap = MacOSSidecarBootstrapResult(attachments: [attachment])
+        let response = MacOSSidecarEnvelope.response(
+            .success(requestID: "req-bootstrap", data: try JSONEncoder().encode(bootstrap))
+        )
+
+        let (reader, writer) = try socketPair()
+        defer {
+            closeIfValid(reader)
+            closeIfValid(writer)
+        }
+
+        try MacOSSidecarSocketIO.writeJSONFrame(response, fd: writer)
+        let decoded = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: reader)
+
+        let responsePayload = try #require(decoded.response)
+        let data = try #require(responsePayload.data)
+        let decodedBootstrap = try JSONDecoder().decode(MacOSSidecarBootstrapResult.self, from: data)
+        #expect(decodedBootstrap.attachments.count == 1)
+        #expect(decodedBootstrap.attachments[0].network == "backend")
+        #expect(decodedBootstrap.attachments[0].hostname == "guest-a")
+        #expect(decodedBootstrap.attachments[0].ipv4Address.description == "192.168.64.2/24")
+        #expect(decodedBootstrap.attachments[0].ipv4Gateway.description == "192.168.64.1")
+        #expect(decodedBootstrap.attachments[0].macAddress?.description == "02:42:ac:11:00:02")
     }
 
     @Test

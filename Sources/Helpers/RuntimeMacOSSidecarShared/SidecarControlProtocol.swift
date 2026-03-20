@@ -12,8 +12,31 @@ public enum MacOSSidecarMethod: String, Codable, Sendable {
     case fsBegin = "fs.begin"
     case fsChunk = "fs.chunk"
     case fsEnd = "fs.end"
+    case networkInspect = "network.inspect"
     case vmStop = "vm.stop"
     case sidecarQuit = "sidecar.quit"
+}
+
+public struct MacOSGuestNetworkSnapshot: Codable, Sendable, Equatable {
+    public let interfaceName: String
+    public let ipv4Address: String
+    public let prefixLength: UInt8
+    public let gateway: String
+    public let macAddress: String?
+
+    public init(
+        interfaceName: String,
+        ipv4Address: String,
+        prefixLength: UInt8,
+        gateway: String,
+        macAddress: String?
+    ) {
+        self.interfaceName = interfaceName
+        self.ipv4Address = ipv4Address
+        self.prefixLength = prefixLength
+        self.gateway = gateway
+        self.macAddress = macAddress
+    }
 }
 
 public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
@@ -112,25 +135,29 @@ public struct MacOSSidecarResponse: Codable, Sendable {
     public let requestID: String
     public let ok: Bool
     public let fdAttached: Bool?
+    public let data: Data?
     public let error: MacOSSidecarErrorPayload?
 
     public init(
         requestID: String,
         ok: Bool,
         fdAttached: Bool? = nil,
+        data: Data? = nil,
         error: MacOSSidecarErrorPayload? = nil
     ) {
         self.requestID = requestID
         self.ok = ok
         self.fdAttached = fdAttached
+        self.data = data
         self.error = error
     }
 
     public static func success(
         requestID: String,
-        fdAttached: Bool? = nil
+        fdAttached: Bool? = nil,
+        data: Data? = nil
     ) -> Self {
-        .init(requestID: requestID, ok: true, fdAttached: fdAttached, error: nil)
+        .init(requestID: requestID, ok: true, fdAttached: fdAttached, data: data, error: nil)
     }
 
     public static func failure(requestID: String, code: String, message: String, details: String? = nil) -> Self {

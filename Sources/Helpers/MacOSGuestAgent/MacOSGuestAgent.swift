@@ -227,8 +227,38 @@ final class AgentConnection: @unchecked Sendable {
             try appendFileTransaction(frame: frame)
         case .fsEnd:
             try finishFileTransaction(frame: frame)
-        case .stdout, .stderr, .exit, .error, .ready, .ack:
+        case .networkConfigure:
+            try configureNetwork(frame: frame)
+        case .networkInspect:
+            try inspectNetwork()
+        case .stdout, .stderr, .exit, .error, .ready, .ack, .networkState:
             break
+        }
+    }
+
+    private func configureNetwork(frame: GuestAgentFrame) throws {
+        guard let configuration = frame.networkConfiguration else {
+            throw makePOSIXLikeError(message: "missing guest network configuration")
+        }
+
+        do {
+            let snapshot = try GuestNetworkManager.configure(configuration)
+            try send(frame: .networkState(snapshot))
+        } catch {
+            let message = "failed to configure network: \(describeError(error))"
+            logAgentError(message)
+            try send(frame: .error(message))
+        }
+    }
+
+    private func inspectNetwork() throws {
+        do {
+            let snapshot = try GuestNetworkInspector.inspect()
+            try send(frame: .networkState(snapshot))
+        } catch {
+            let message = "failed to inspect network: \(describeError(error))"
+            logAgentError(message)
+            try send(frame: .error(message))
         }
     }
 
@@ -1276,6 +1306,9 @@ struct GuestAgentFrame: Codable {
         case fsBegin
         case fsChunk
         case fsEnd
+        case networkConfigure
+        case networkInspect
+        case networkState
         case ack
         case stdout
         case stderr
@@ -1311,6 +1344,8 @@ struct GuestAgentFrame: Codable {
     let offset: UInt64?
     let action: MacOSSidecarFSEndAction?
     let digest: String?
+    let networkConfiguration: MacOSGuestNetworkConfiguration?
+    let network: MacOSGuestNetworkSnapshot?
 
     init(
         type: FrameType,
@@ -1339,7 +1374,9 @@ struct GuestAgentFrame: Codable {
         autoCommit: Bool? = nil,
         offset: UInt64? = nil,
         action: MacOSSidecarFSEndAction? = nil,
-        digest: String? = nil
+        digest: String? = nil,
+        networkConfiguration: MacOSGuestNetworkConfiguration? = nil,
+        network: MacOSGuestNetworkSnapshot? = nil
     ) {
         self.type = type
         self.id = id
@@ -1368,6 +1405,8 @@ struct GuestAgentFrame: Codable {
         self.offset = offset
         self.action = action
         self.digest = digest
+        self.networkConfiguration = networkConfiguration
+        self.network = network
     }
 
     static let ready = GuestAgentFrame(
@@ -1392,6 +1431,167 @@ struct GuestAgentFrame: Codable {
 
     static func ack(id: String) -> Self {
         .init(type: .ack, id: id)
+    }
+
+    static func networkConfigure(_ configuration: MacOSGuestNetworkConfiguration) -> Self {
+        .init(type: .networkConfigure, networkConfiguration: configuration)
+    }
+
+    static let networkInspect = GuestAgentFrame(type: .networkInspect)
+
+    static func networkState(_ snapshot: MacOSGuestNetworkSnapshot) -> Self {
+        .init(type: .networkState, network: snapshot)
+    }
+}
+
+enum GuestNetworkInspector {
+    struct DefaultRoute: Equatable {
+        let interfaceName: String
+        let gateway: String
+    }
+
+    struct InterfaceDetails: Equatable {
+        let ipv4Address: String
+        let prefixLength: UInt8
+        let macAddress: String?
+    }
+
+    static func inspect() throws -> MacOSGuestNetworkSnapshot {
+        let routeOutput = try runCommand(executable: "/usr/sbin/route", arguments: ["-n", "get", "default"])
+        let route = try parseDefaultRoute(routeOutput)
+        let ifconfigOutput = try runCommand(executable: "/sbin/ifconfig", arguments: [route.interfaceName])
+        let details = try parseInterfaceDetails(ifconfigOutput)
+        return MacOSGuestNetworkSnapshot(
+            interfaceName: route.interfaceName,
+            ipv4Address: details.ipv4Address,
+            prefixLength: details.prefixLength,
+            gateway: route.gateway,
+            macAddress: details.macAddress
+        )
+    }
+
+    static func parseDefaultRoute(_ output: String) throws -> DefaultRoute {
+        var interfaceName: String?
+        var gateway: String?
+
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let separator = line.firstIndex(of: ":") else {
+                continue
+            }
+            let key = String(line[..<separator]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespaces)
+            switch key {
+            case "interface":
+                interfaceName = value
+            case "gateway":
+                gateway = value
+            default:
+                continue
+            }
+        }
+
+        guard let interfaceName, !interfaceName.isEmpty else {
+            throw makePOSIXLikeError(message: "route output missing default interface")
+        }
+        guard let gateway, !gateway.isEmpty else {
+            throw makePOSIXLikeError(message: "route output missing default gateway")
+        }
+
+        return DefaultRoute(interfaceName: interfaceName, gateway: gateway)
+    }
+
+    static func parseInterfaceDetails(_ output: String) throws -> InterfaceDetails {
+        var ipv4Address: String?
+        var prefixLengthValue: UInt8?
+        var macAddress: String?
+
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("inet ") {
+                let components = line.split(whereSeparator: \.isWhitespace)
+                if components.count >= 4 {
+                    ipv4Address = String(components[1])
+                    if let netmaskIndex = components.firstIndex(of: "netmask"), netmaskIndex + 1 < components.count {
+                        prefixLengthValue = try Self.prefixLength(fromNetmask: String(components[netmaskIndex + 1]))
+                    }
+                }
+            } else if line.hasPrefix("ether ") {
+                let components = line.split(whereSeparator: \.isWhitespace)
+                if components.count >= 2 {
+                    macAddress = String(components[1])
+                }
+            }
+        }
+
+        guard let ipv4Address, !ipv4Address.isEmpty else {
+            throw makePOSIXLikeError(message: "ifconfig output missing IPv4 address")
+        }
+        guard let prefixLengthValue else {
+            throw makePOSIXLikeError(message: "ifconfig output missing IPv4 prefix")
+        }
+
+        return InterfaceDetails(
+            ipv4Address: ipv4Address,
+            prefixLength: prefixLengthValue,
+            macAddress: macAddress
+        )
+    }
+
+    static func runCommand(executable: String, arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let stderrText = String(data: stderrData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown error"
+            throw makePOSIXLikeError(
+                message: "\(executable) \(arguments.joined(separator: " ")) failed: \(stderrText)"
+            )
+        }
+
+        return String(data: stdoutData, encoding: .utf8) ?? ""
+    }
+
+    static func prefixLength(fromNetmask text: String) throws -> UInt8 {
+        if let hex = parseHexNetmask(text) {
+            return UInt8(hex.nonzeroBitCount)
+        }
+        if let dotted = parseDottedQuadNetmask(text) {
+            return UInt8(dotted.nonzeroBitCount)
+        }
+        throw makePOSIXLikeError(message: "unsupported netmask format: \(text)")
+    }
+
+    static func parseHexNetmask(_ text: String) -> UInt32? {
+        guard text.hasPrefix("0x") || text.hasPrefix("0X") else {
+            return nil
+        }
+        return UInt32(text.dropFirst(2), radix: 16)
+    }
+
+    static func parseDottedQuadNetmask(_ text: String) -> UInt32? {
+        let octets = text.split(separator: ".")
+        guard octets.count == 4 else {
+            return nil
+        }
+        var value: UInt32 = 0
+        for octet in octets {
+            guard let byte = UInt8(octet) else {
+                return nil
+            }
+            value = (value << 8) | UInt32(byte)
+        }
+        return value
     }
 }
 

@@ -24,6 +24,7 @@ let releaseVersion = ProcessInfo.processInfo.environment["RELEASE_VERSION"] ?? "
 let gitCommit = ProcessInfo.processInfo.environment["GIT_COMMIT"] ?? "unspecified"
 let builderShimVersion = "0.8.0"
 let scVersion = "0.25.0"
+let testingDependency: Target.Dependency = .product(name: "Testing", package: "swift-testing")
 
 let package = Package(
     name: "container",
@@ -63,6 +64,7 @@ let package = Package(
         .package(url: "https://github.com/Bouke/DNS.git", from: "1.2.0"),
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
         .package(url: "https://github.com/facebook/zstd.git", exact: "1.5.7"),
+        .package(url: "https://github.com/swiftlang/swift-testing.git", exact: "6.2.4"),
     ],
     targets: [
         .executableTarget(
@@ -77,6 +79,7 @@ let package = Package(
         .testTarget(
             name: "CLITests",
             dependencies: [
+                testingDependency,
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationArchive", package: "containerization"),
@@ -125,12 +128,14 @@ let package = Package(
         .testTarget(
             name: "ContainerBuildTests",
             dependencies: [
+                testingDependency,
                 "ContainerBuild"
             ]
         ),
         .testTarget(
             name: "ContainerCommandsTests",
             dependencies: [
+                testingDependency,
                 "ContainerCommands"
             ]
         ),
@@ -213,6 +218,7 @@ let package = Package(
         .testTarget(
             name: "ContainerAPIClientTests",
             dependencies: [
+                testingDependency,
                 .product(name: "Containerization", package: "containerization"),
                 "ContainerAPIClient",
                 "ContainerResource",
@@ -296,6 +302,7 @@ let package = Package(
         .testTarget(
             name: "ContainerNetworkServiceTests",
             dependencies: [
+                testingDependency,
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerNetworkService",
@@ -336,6 +343,7 @@ let package = Package(
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerImagesServiceClient",
+                "ContainerNetworkServiceClient",
                 "ContainerLog",
                 "ContainerResource",
                 "ContainerSandboxServiceClient",
@@ -351,8 +359,10 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
+                "ContainerNetworkServiceClient",
                 "ContainerLog",
                 "ContainerResource",
+                "ContainerXPC",
                 "RuntimeMacOSSidecarShared",
                 "ContainerVersion",
             ],
@@ -362,6 +372,7 @@ let package = Package(
             name: "container-macos-guest-agent",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerResource",
                 "RuntimeMacOSSidecarShared",
             ],
             path: "Sources/Helpers/MacOSGuestAgent"
@@ -377,12 +388,15 @@ let package = Package(
         ),
         .target(
             name: "RuntimeMacOSSidecarShared",
-            dependencies: [],
+            dependencies: [
+                "ContainerResource",
+            ],
             path: "Sources/Helpers/RuntimeMacOSSidecarShared"
         ),
         .testTarget(
             name: "RuntimeMacOSSidecarSharedTests",
             dependencies: [
+                testingDependency,
                 "RuntimeMacOSSidecarShared"
             ],
             path: "Tests/RuntimeMacOSSidecarSharedTests"
@@ -390,6 +404,7 @@ let package = Package(
         .testTarget(
             name: "RuntimeMacOSSidecarClientTests",
             dependencies: [
+                testingDependency,
                 .product(name: "Containerization", package: "containerization"),
                 "ContainerResource",
                 "RuntimeMacOSSidecarShared",
@@ -401,6 +416,7 @@ let package = Package(
         .testTarget(
             name: "RuntimeMacOSSidecarTests",
             dependencies: [
+                testingDependency,
                 "RuntimeMacOSSidecarShared",
                 .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.macOS])),
                 .target(name: "container-runtime-macos-sidecar", condition: .when(platforms: [.macOS])),
@@ -410,6 +426,7 @@ let package = Package(
         .testTarget(
             name: "MacOSGuestAgentTests",
             dependencies: [
+                testingDependency,
                 "RuntimeMacOSSidecarShared",
                 .target(name: "container-macos-guest-agent", condition: .when(platforms: [.macOS])),
             ],
@@ -453,6 +470,7 @@ let package = Package(
         .testTarget(
             name: "ContainerResourceTests",
             dependencies: [
+                testingDependency,
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "libzstd", package: "zstd"),
@@ -486,12 +504,14 @@ let package = Package(
         .testTarget(
             name: "ContainerPluginTests",
             dependencies: [
+                testingDependency,
                 "ContainerPlugin"
             ]
         ),
         .testTarget(
             name: "ContainerSandboxServiceTests",
             dependencies: [
+                testingDependency,
                 .product(name: "Containerization", package: "containerization"),
                 "ContainerAPIService",
                 "ContainerResource",
@@ -514,7 +534,10 @@ let package = Package(
         ),
         .testTarget(
             name: "TerminalProgressTests",
-            dependencies: ["TerminalProgress"]
+            dependencies: [
+                testingDependency,
+                "TerminalProgress",
+            ]
         ),
         .target(
             name: "DNSServer",
@@ -529,6 +552,7 @@ let package = Package(
         .testTarget(
             name: "DNSServerTests",
             dependencies: [
+                testingDependency,
                 .product(name: "DNS", package: "DNS"),
                 "DNSServer",
             ]
@@ -544,7 +568,10 @@ let package = Package(
         ),
         .testTarget(
             name: "SocketForwarderTests",
-            dependencies: ["SocketForwarder"]
+            dependencies: [
+                testingDependency,
+                "SocketForwarder",
+            ]
         ),
         .target(
             name: "ContainerVersion",

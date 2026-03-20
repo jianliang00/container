@@ -53,9 +53,9 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference)
-                USER builder wheel
-                """
+                    FROM \(macOSBaseReference)
+                    USER builder wheel
+                    """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir)
@@ -68,9 +68,9 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference)
-                ADD https://example.com/file.tar /tmp/file.tar
-                """
+                    FROM \(macOSBaseReference)
+                    ADD https://example.com/file.tar /tmp/file.tar
+                    """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir)
@@ -83,9 +83,9 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference)
-                COPY --from=missing /tmp/out /tmp/out
-                """
+                    FROM \(macOSBaseReference)
+                    COPY --from=missing /tmp/out /tmp/out
+                    """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir)
@@ -105,9 +105,9 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM --platform=darwin/arm64 \(macOSBaseReference)
-                RUN sw_vers
-                """
+                    FROM --platform=darwin/arm64 \(macOSBaseReference)
+                    RUN sw_vers
+                    """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir, tag: imageName)
@@ -127,12 +127,12 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference)
-                USER nobody
-                RUN test "$(/usr/bin/id -un)" = "nobody"
-                ENTRYPOINT ["/usr/bin/id"]
-                CMD ["-un"]
-                """
+                    FROM \(macOSBaseReference)
+                    USER nobody
+                    RUN test "$(/usr/bin/id -un)" = "nobody"
+                    ENTRYPOINT ["/usr/bin/id"]
+                    CMD ["-un"]
+                    """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir, tag: imageName)
@@ -156,15 +156,15 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference)
-                WORKDIR /opt/copy-check
-                COPY payload/ /opt/copy-check/
-                RUN test -f /opt/copy-check/keep.txt
-                RUN test -L /opt/copy-check/link.txt
-                RUN test "$(/usr/bin/readlink /opt/copy-check/link.txt)" = "keep.txt"
-                RUN test ! -e /opt/copy-check/debug.log
-                RUN test ! -e /opt/copy-check/nested/app.log
-                """,
+                    FROM \(macOSBaseReference)
+                    WORKDIR /opt/copy-check
+                    COPY payload/ /opt/copy-check/
+                    RUN test -f /opt/copy-check/keep.txt
+                    RUN test -L /opt/copy-check/link.txt
+                    RUN test "$(/usr/bin/readlink /opt/copy-check/link.txt)" = "keep.txt"
+                    RUN test ! -e /opt/copy-check/debug.log
+                    RUN test ! -e /opt/copy-check/nested/app.log
+                    """,
                 context: [
                     .file("payload/keep.txt", content: Data("keep\n".utf8)),
                     .file("payload/debug.log", content: Data("ignore\n".utf8)),
@@ -194,16 +194,16 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference) AS build
-                RUN /bin/sh -lc 'mkdir -p /tmp/out/sub && printf from-stage > /tmp/out/sub/hello.txt && ln -s sub/hello.txt /tmp/out/link.txt'
+                    FROM \(macOSBaseReference) AS build
+                    RUN /bin/sh -lc 'mkdir -p /tmp/out/sub && printf from-stage > /tmp/out/sub/hello.txt && ln -s sub/hello.txt /tmp/out/link.txt'
 
-                FROM \(macOSBaseReference)
-                COPY --from=build /tmp/out/ /opt/copied/
-                RUN test -f /opt/copied/sub/hello.txt
-                RUN test -L /opt/copied/link.txt
-                RUN test "$(/usr/bin/readlink /opt/copied/link.txt)" = "sub/hello.txt"
-                CMD ["/bin/cat", "/opt/copied/sub/hello.txt"]
-                """
+                    FROM \(macOSBaseReference)
+                    COPY --from=build /tmp/out/ /opt/copied/
+                    RUN test -f /opt/copied/sub/hello.txt
+                    RUN test -L /opt/copied/link.txt
+                    RUN test "$(/usr/bin/readlink /opt/copied/link.txt)" = "sub/hello.txt"
+                    CMD ["/bin/cat", "/opt/copied/sub/hello.txt"]
+                    """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir, tag: imageName)
@@ -231,15 +231,15 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM \(macOSBaseReference)
-                ENV PHASE1_VALUE=from-env
-                WORKDIR /opt/app
-                LABEL com.apple.container.phase=phase1
-                ADD payload.tar /opt/app/archive/
-                RUN test -f /opt/app/archive/sub/hello.txt
-                ENTRYPOINT ["/bin/sh"]
-                CMD ["-lc", "printf '%s %s\\n' $PWD $PHASE1_VALUE"]
-                """
+                    FROM \(macOSBaseReference)
+                    ENV PHASE1_VALUE=from-env
+                    WORKDIR /opt/app
+                    LABEL com.apple.container.phase=phase1
+                    ADD payload.tar /opt/app/archive/
+                    RUN test -f /opt/app/archive/sub/hello.txt
+                    ENTRYPOINT ["/bin/sh"]
+                    CMD ["-lc", "printf '%s %s\\n' $PWD $PHASE1_VALUE"]
+                    """
             )
 
             let response = try runDarwinBuild(tempDir: tempDir, tag: imageName)
@@ -265,9 +265,9 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM --platform=darwin/arm64 \(macOSBaseReference)
-                RUN sw_vers
-                """
+                    FROM --platform=darwin/arm64 \(macOSBaseReference)
+                    RUN sw_vers
+                    """
             )
 
             let response = try runDarwinBuild(
@@ -295,9 +295,9 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM --platform=darwin/arm64 \(macOSBaseReference)
-                RUN sw_vers
-                """
+                    FROM --platform=darwin/arm64 \(macOSBaseReference)
+                    RUN sw_vers
+                    """
             )
 
             let response = try runDarwinBuild(
@@ -329,9 +329,9 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM --platform=darwin/arm64 \(macOSBaseReference)
-                RUN /bin/sh -lc 'printf local-export > /tmp/local-export.txt && sync'
-                """
+                    FROM --platform=darwin/arm64 \(macOSBaseReference)
+                    RUN /bin/sh -lc 'printf local-export > /tmp/local-export.txt && sync'
+                    """
             )
 
             let response = try runDarwinBuild(
@@ -373,10 +373,10 @@ extension TestCLIMacOSBuildBase {
             try createContext(
                 tempDir: tempDir,
                 dockerfile: """
-                FROM --platform=darwin/arm64 \(macOSBaseReference)
-                COPY payload.txt /opt/payload.txt
-                RUN /bin/sh -lc 'exit 17'
-                """,
+                    FROM --platform=darwin/arm64 \(macOSBaseReference)
+                    COPY payload.txt /opt/payload.txt
+                    RUN /bin/sh -lc 'exit 17'
+                    """,
                 context: [
                     .file("payload.txt", content: Data("cleanup\n".utf8))
                 ]

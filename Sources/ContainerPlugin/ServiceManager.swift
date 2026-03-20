@@ -40,23 +40,7 @@ public struct ServiceManager {
         launchctl.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         launchctl.arguments = args
 
-        if captureOutput {
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            launchctl.standardOutput = stdoutPipe
-            launchctl.standardError = stderrPipe
-
-            try launchctl.run()
-            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            launchctl.waitUntilExit()
-
-            return LaunchctlCommandResult(
-                status: launchctl.terminationStatus,
-                stdout: decodeOutput(data: stdoutData),
-                stderr: decodeOutput(data: stderrData)
-            )
-        } else {
+        guard captureOutput else {
             let null = FileHandle.nullDevice
             launchctl.standardOutput = null
             launchctl.standardError = null
@@ -70,6 +54,21 @@ public struct ServiceManager {
                 stderr: ""
             )
         }
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        launchctl.standardOutput = stdoutPipe
+        launchctl.standardError = stderrPipe
+
+        try launchctl.run()
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        launchctl.waitUntilExit()
+
+        return LaunchctlCommandResult(
+            status: launchctl.terminationStatus,
+            stdout: decodeOutput(data: stdoutData),
+            stderr: decodeOutput(data: stderrData)
+        )
     }
 
     private static func runLaunchctlCommand(args: [String]) throws -> Int32 {

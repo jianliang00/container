@@ -82,12 +82,12 @@ struct DiskUsageTests {
     @Test("DiskUsageStats decodes legacy payloads without cache fields")
     func testLegacyDiskUsageDecoding() throws {
         let payload = """
-        {
-          "images": { "total": 1, "active": 1, "sizeInBytes": 1024, "reclaimable": 0 },
-          "containers": { "total": 2, "active": 1, "sizeInBytes": 2048, "reclaimable": 1024 },
-          "volumes": { "total": 3, "active": 1, "sizeInBytes": 4096, "reclaimable": 512 }
-        }
-        """.data(using: .utf8)!
+            {
+              "images": { "total": 1, "active": 1, "sizeInBytes": 1024, "reclaimable": 0 },
+              "containers": { "total": 2, "active": 1, "sizeInBytes": 2048, "reclaimable": 1024 },
+              "volumes": { "total": 3, "active": 1, "sizeInBytes": 4096, "reclaimable": 512 }
+            }
+            """.data(using: .utf8)!
 
         let decoded = try JSONDecoder().decode(DiskUsageStats.self, from: payload)
 

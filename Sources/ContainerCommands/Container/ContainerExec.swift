@@ -86,7 +86,8 @@ extension Application {
                     configuration: config,
                     stdio: io.stdio
                 )
-                let startupMessage = container.configuration.macosGuest == nil
+                let startupMessage =
+                    container.configuration.macosGuest == nil
                     ? nil
                     : "Waiting for macOS guest..."
 

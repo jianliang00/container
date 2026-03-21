@@ -856,8 +856,8 @@ extension XPCMessage {
     }
 }
 
-#if DEBUG
 extension MacOSSandboxService {
+    // These hooks are used by release-mode test builds in CI.
     func testingAddSession(id: String, config: ProcessConfiguration) {
         sessions[id] = Session(processID: id, config: config, stdio: [nil, nil, nil])
     }
@@ -874,4 +874,3 @@ extension MacOSSandboxService {
         waiters[id]?.count ?? 0
     }
 }
-#endif

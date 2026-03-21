@@ -183,10 +183,11 @@ struct UtilityTests {
             options: ["debug"]
         )
 
-        let resolved = Utility.resolveMacOSGuestNetworking(
+        let resolved = try #require(Utility.resolveMacOSGuestNetworking(
+            containerID: "macos-guest",
             management: management,
             override: .init(networks: [attachment], dns: dns)
-        )
+        ))
 
         #expect(resolved.networks.count == 1)
         #expect(resolved.networks[0].network == "default")
@@ -207,10 +208,11 @@ struct UtilityTests {
         management.dns.searchDomains = ["svc.example.internal"]
         management.dns.options = ["ndots:2"]
 
-        let resolved = Utility.resolveMacOSGuestNetworking(
+        let resolved = try #require(Utility.resolveMacOSGuestNetworking(
+            containerID: "macos-guest",
             management: management,
             override: .init(networks: [])
-        )
+        ))
 
         let resolvedDNS = try #require(resolved.dns)
         #expect(resolvedDNS.nameservers == ["9.9.9.9"])
@@ -228,16 +230,98 @@ struct UtilityTests {
             options: .init(hostname: "macos-guest")
         )
 
-        let resolved = Utility.resolveMacOSGuestNetworking(
+        let resolved = try #require(Utility.resolveMacOSGuestNetworking(
+            containerID: "macos-guest",
             management: management,
             override: .init(
                 networks: [attachment],
                 dns: .init(nameservers: ["1.1.1.1"])
             )
-        )
+        ))
 
         #expect(resolved.networks.count == 1)
         #expect(resolved.networks[0].options.hostname == "macos-guest")
         #expect(resolved.dns == nil)
+    }
+
+    @Test("macOS guest networking remains unset without CLI networking flags")
+    func testResolveMacOSGuestNetworkingReturnsNilWithoutOverrideOrFlags() throws {
+        let management = try Flags.Management.parse([])
+
+        let resolved = try Utility.resolveMacOSGuestNetworking(
+            containerID: "macos-guest",
+            management: management,
+            override: nil
+        )
+
+        #expect(resolved == nil)
+    }
+
+    @Test("macOS guest networking parses a single CLI network attachment")
+    func testResolveMacOSGuestNetworkingParsesSingleCLINetwork() throws {
+        var management = try Flags.Management.parse([])
+        management.networks = ["backend,mac=02:42:ac:11:00:02"]
+
+        let resolved = try #require(
+            Utility.resolveMacOSGuestNetworking(
+                containerID: "macos-guest",
+                management: management,
+                override: nil
+            )
+        )
+
+        #expect(resolved.networks.count == 1)
+        #expect(resolved.networks[0].network == "backend")
+        #expect(resolved.networks[0].options.hostname == "macos-guest")
+        #expect(resolved.networks[0].options.macAddress?.description == "02:42:ac:11:00:02")
+        let dns = try #require(resolved.dns)
+        #expect(dns.nameservers.isEmpty)
+    }
+
+    @Test("macOS guest networking uses default network when only DNS is specified")
+    func testResolveMacOSGuestNetworkingUsesDefaultNetworkForDNSOnly() throws {
+        var management = try Flags.Management.parse([])
+        management.dns.nameservers = ["9.9.9.9"]
+
+        let resolved = try #require(
+            Utility.resolveMacOSGuestNetworking(
+                containerID: "macos-guest",
+                management: management,
+                override: nil
+            )
+        )
+
+        #expect(resolved.networks.count == 1)
+        #expect(resolved.networks[0].network == ClientNetwork.defaultNetworkName)
+        let dns = try #require(resolved.dns)
+        #expect(dns.nameservers == ["9.9.9.9"])
+    }
+
+    @Test("macOS guest networking rejects multiple CLI network attachments")
+    func testResolveMacOSGuestNetworkingRejectsMultipleNetworks() throws {
+        var management = try Flags.Management.parse([])
+        management.networks = ["default", "extra"]
+
+        #expect(throws: ContainerizationError.self) {
+            _ = try Utility.resolveMacOSGuestNetworking(
+                containerID: "macos-guest",
+                management: management,
+                override: nil
+            )
+        }
+    }
+
+    @Test("macOS guest networking rejects none network")
+    func testResolveMacOSGuestNetworkingRejectsNoneNetwork() throws {
+        var management = try Flags.Management.parse([])
+        management.networks = [ClientNetwork.noNetworkName]
+
+        #expect(throws: ContainerizationError.self) {
+            _ = try Utility.resolveMacOSGuestNetworking(
+                containerID: "macos-guest",
+                management: management,
+                override: nil
+            )
+        }
     }
 }

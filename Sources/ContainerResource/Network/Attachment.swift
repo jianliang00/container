@@ -17,7 +17,7 @@
 import ContainerizationExtras
 
 /// A snapshot of a network interface allocated to a sandbox.
-public struct Attachment: Codable, Sendable {
+public struct Attachment: Codable, Sendable, Equatable {
     public struct DNSConfiguration: Codable, Sendable, Equatable {
         public let nameservers: [String]
         public let domain: String?

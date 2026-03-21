@@ -67,8 +67,8 @@ enum MacOSImagePackager {
         }
         try createTar(fromLayout: layout.layoutDirectory, outputTar: outputTar)
         MacOSExportProfiler.log(
-            "package.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt))) " +
-                "(chunks=\(layout.chunkResults.count), reused=\(layout.chunkResults.filter(\.reusedFromParent).count), rebuilt=\(layout.chunkResults.filter { !$0.reusedFromParent }.count))"
+            "package.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt))) "
+                + "(chunks=\(layout.chunkResults.count), reused=\(layout.chunkResults.filter(\.reusedFromParent).count), rebuilt=\(layout.chunkResults.filter { !$0.reusedFromParent }.count))"
         )
     }
 
@@ -93,13 +93,15 @@ enum MacOSImagePackager {
         try fm.createDirectory(at: blobsDir, withIntermediateDirectories: true)
 
         // Use fixed timestamp for deterministic config digest
-        let configValue = imageConfig ?? ContainerizationOCI.Image(
-            created: "1970-01-01T00:00:00Z",
-            architecture: "arm64",
-            os: "darwin",
-            config: nil,
-            rootfs: .init(type: "layers", diffIDs: [])
-        )
+        let configValue =
+            imageConfig
+            ?? ContainerizationOCI.Image(
+                created: "1970-01-01T00:00:00Z",
+                architecture: "arm64",
+                os: "darwin",
+                config: nil,
+                rootfs: .init(type: "layers", diffIDs: [])
+            )
         let configData = try JSONEncoder().encode(configValue)
         let config = try writeJSONBlob(configData, blobsDir: blobsDir, mediaType: "application/vnd.oci.image.config.v1+json")
 
@@ -126,8 +128,8 @@ enum MacOSImagePackager {
         let fastReusedChunkCount = chunkResults.filter(\.reusedWithoutRawDigest).count
         let rebuiltChunkCount = chunkResults.count - reusedChunkCount
         MacOSExportProfiler.log(
-            "chunkDiskImage: \(MacOSExportProfiler.format(Date().timeIntervalSince(chunkingStartedAt))) " +
-                "(chunks=\(chunkResults.count), reused=\(reusedChunkCount), fastReused=\(fastReusedChunkCount), rebuilt=\(rebuiltChunkCount), uniqueBlobs=\(Set(chunkResults.map(\.blobDigest)).count))"
+            "chunkDiskImage: \(MacOSExportProfiler.format(Date().timeIntervalSince(chunkingStartedAt))) "
+                + "(chunks=\(chunkResults.count), reused=\(reusedChunkCount), fastReused=\(fastReusedChunkCount), rebuilt=\(rebuiltChunkCount), uniqueBlobs=\(Set(chunkResults.map(\.blobDigest)).count))"
         )
 
         // Build DiskLayout
@@ -261,8 +263,7 @@ enum MacOSImagePackager {
             try? fm.removeItem(at: blobsDir.appendingPathComponent(blob))
         }
         MacOSExportProfiler.log(
-            "createTar.appendBlobs: \(MacOSExportProfiler.format(Date().timeIntervalSince(blobAppendStartedAt))) " +
-                "(blobFiles=\(blobFiles.count))"
+            "createTar.appendBlobs: \(MacOSExportProfiler.format(Date().timeIntervalSince(blobAppendStartedAt))) " + "(blobFiles=\(blobFiles.count))"
         )
         MacOSExportProfiler.log(
             "createTar.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(totalStartedAt)))"

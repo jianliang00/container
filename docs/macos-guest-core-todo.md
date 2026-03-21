@@ -69,7 +69,7 @@ The goal is not to implement Kubernetes integration directly in this repository.
 - [ ] `docs/macos-runtime-control-api.md`
 - [ ] `docs/macos-network-control-api.md`
 - [ ] `docs/macos-guest-sandbox-runtime-design.md`
-- [ ] `docs/macos-guest-networking-design.md`
+- [x] `docs/macos-guest-networking-design.md`
 - [ ] `docs/macos-guest-workload-image-design.md`
 
 ### Exit Criteria
@@ -87,18 +87,19 @@ Give the macOS sandbox stable, queryable, reclaimable network state without intr
 
 ### TODO
 
-- [ ] Introduce a `NetworkBackend` abstraction in the macOS runtime and replace hard-coded NAT in the sidecar.
-- [ ] Support two backends in the first phase:
+- [x] Introduce a `NetworkBackend` abstraction in the macOS runtime and replace hard-coded NAT in the sidecar.
+- [x] Support two backends in the first phase:
   - `virtualizationNAT` for the compatibility path
   - `vmnetShared` as the new network foundation MVP
-- [ ] Restore internal network configuration input on the darwin path, at least for:
+- [x] Restore internal network configuration input on the darwin path, at least for:
   - `ContainerConfiguration.networks`
   - `ContainerConfiguration.dns`
   - `SandboxSnapshot.networks`
-- [ ] Include network configuration in sidecar bootstrap input.
-- [ ] Introduce a dedicated `guest network manager` instead of embedding network setup into the generic exec path.
-- [ ] Complete interface matching, IP/prefix/gateway configuration, DNS writes, and result reporting during sandbox startup.
-- [ ] Persist and report network state on the host, including at least:
+- [x] Include network configuration in sidecar bootstrap input.
+- [x] Introduce a dedicated `guest network manager` instead of embedding network setup into the generic exec path.
+- [x] Complete interface matching, IP/prefix/gateway configuration, DNS writes, and result reporting during sandbox startup.
+  - DNS `options` still warn and remain unsupported in the guest manager.
+- [x] Persist and report network state on the host, including at least:
   - sandbox IP
   - gateway
   - DNS
@@ -109,10 +110,13 @@ Give the macOS sandbox stable, queryable, reclaimable network state without intr
   - `InspectSandboxNetwork`
   - `ReleaseSandboxNetwork`
 - [ ] Define restart recovery and resource cleanup semantics for sidecar, apiserver, and helper restarts.
+- [ ] Reconcile guest-visible resolver presentation with host-side DNS projection.
+  - Current validation shows the guest may surface a link-local IPv6 resolver while host snapshots project the IPv4 gateway fallback.
 
 ### Notes
 
 - The first phase can expose only internal APIs. A general CLI `--network` flow for `run --os darwin` is not required immediately.
+- The darwin CLI still keeps `--network` disabled in phase 1; internal callers must inject guest attachments through configuration APIs instead.
 - The initial target is single-node, single-NIC, single-network, IPv4-first.
 
 ### Exit Criteria

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerizationOCI
+import ContainerResource
 import Foundation
 import Testing
 
@@ -214,6 +215,39 @@ struct MacOSBuildEngineTests {
         #expect(exported.contains(MacOSImagePackager.auxiliaryStorageFilename))
         #expect(exported.contains(MacOSImagePackager.hardwareModelFilename))
         #expect(exported.contains(MacOSBuildEngine.machineIdentifierFilename))
+    }
+
+    @Test
+    func stageBuildContainerPinsVirtualizationNATBackend() throws {
+        let process = ProcessConfiguration(
+            executable: "/usr/bin/tail",
+            arguments: ["-f", "/dev/null"],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+        let image = ImageDescription(
+            reference: "local/macos-base:latest",
+            descriptor: .init(
+                mediaType: "application/vnd.oci.image.index.v1+json",
+                digest: "sha256:test",
+                size: 1
+            )
+        )
+
+        let configuration = try MacOSBuildEngine.StageRuntime.makeStageContainerConfiguration(
+            containerID: "macos-build-stage-test",
+            baseImage: image,
+            initProcess: process,
+            cpus: 4,
+            memory: "8g"
+        )
+
+        #expect(configuration.runtimeHandler == MacOSBuildEngine.runtimeName)
+        #expect(configuration.platform == MacOSBuildEngine.buildPlatform)
+        #expect(configuration.macosGuest?.networkBackend == .virtualizationNAT)
+        #expect(configuration.macosGuest?.guiEnabled == false)
     }
 
     @Test

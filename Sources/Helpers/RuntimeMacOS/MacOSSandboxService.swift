@@ -247,6 +247,8 @@ extension MacOSSandboxService {
         writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
         #endif
 
+        await releaseGuestNetworkAllocationsIfNeeded()
+
         closeAllSessions()
         writeContainerLog(Data(("stop: sessions closed\n").utf8))
         sandboxState = .stopped(0)
@@ -260,6 +262,7 @@ extension MacOSSandboxService {
             #if arch(arm64)
             await stopAndQuitSidecarIfPresent()
             #endif
+            await releaseGuestNetworkAllocationsIfNeeded()
             closeAllSessions()
             sandboxState = .shuttingDown
             return message.reply()
@@ -279,15 +282,16 @@ extension MacOSSandboxService {
             case .stopping: .stopping
             default: .stopped
             }
+        let networks = await currentGuestNetworkAttachments()
 
         let snapshot = SandboxSnapshot(
             status: status,
-            networks: [],
+            networks: networks,
             containers: [
                 ContainerSnapshot(
                     configuration: configuration,
                     status: status,
-                    networks: [],
+                    networks: networks,
                     startedDate: nil
                 )
             ]

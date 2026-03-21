@@ -168,4 +168,76 @@ struct UtilityTests {
             )
         }
     }
+
+    @Test("macOS guest networking override keeps internal attachments and explicit DNS")
+    func testResolveMacOSGuestNetworkingUsesOverride() throws {
+        let management = try Flags.Management.parse([])
+        let attachment = AttachmentConfiguration(
+            network: "default",
+            options: .init(hostname: "macos-guest")
+        )
+        let dns = ContainerConfiguration.DNSConfiguration(
+            nameservers: ["8.8.8.8"],
+            domain: "example.com",
+            searchDomains: ["svc.example.com"],
+            options: ["debug"]
+        )
+
+        let resolved = Utility.resolveMacOSGuestNetworking(
+            management: management,
+            override: .init(networks: [attachment], dns: dns)
+        )
+
+        #expect(resolved.networks.count == 1)
+        #expect(resolved.networks[0].network == "default")
+        #expect(resolved.networks[0].options.hostname == "macos-guest")
+
+        let resolvedDNS = try #require(resolved.dns)
+        #expect(resolvedDNS.nameservers == ["8.8.8.8"])
+        #expect(resolvedDNS.domain == "example.com")
+        #expect(resolvedDNS.searchDomains == ["svc.example.com"])
+        #expect(resolvedDNS.options == ["debug"])
+    }
+
+    @Test("macOS guest networking override falls back to management DNS flags")
+    func testResolveMacOSGuestNetworkingBuildsDNSFromManagementFlags() throws {
+        var management = try Flags.Management.parse([])
+        management.dns.nameservers = ["9.9.9.9"]
+        management.dns.domain = "example.internal"
+        management.dns.searchDomains = ["svc.example.internal"]
+        management.dns.options = ["ndots:2"]
+
+        let resolved = Utility.resolveMacOSGuestNetworking(
+            management: management,
+            override: .init(networks: [])
+        )
+
+        let resolvedDNS = try #require(resolved.dns)
+        #expect(resolvedDNS.nameservers == ["9.9.9.9"])
+        #expect(resolvedDNS.domain == "example.internal")
+        #expect(resolvedDNS.searchDomains == ["svc.example.internal"])
+        #expect(resolvedDNS.options == ["ndots:2"])
+    }
+
+    @Test("macOS guest networking override respects no-dns")
+    func testResolveMacOSGuestNetworkingRespectsNoDNS() throws {
+        var management = try Flags.Management.parse([])
+        management.dnsDisabled = true
+        let attachment = AttachmentConfiguration(
+            network: "default",
+            options: .init(hostname: "macos-guest")
+        )
+
+        let resolved = Utility.resolveMacOSGuestNetworking(
+            management: management,
+            override: .init(
+                networks: [attachment],
+                dns: .init(nameservers: ["1.1.1.1"])
+            )
+        )
+
+        #expect(resolved.networks.count == 1)
+        #expect(resolved.networks[0].options.hostname == "macos-guest")
+        #expect(resolved.dns == nil)
+    }
 }

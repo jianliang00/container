@@ -18,6 +18,25 @@ import ContainerizationExtras
 
 /// A snapshot of a network interface allocated to a sandbox.
 public struct Attachment: Codable, Sendable {
+    public struct DNSConfiguration: Codable, Sendable, Equatable {
+        public let nameservers: [String]
+        public let domain: String?
+        public let searchDomains: [String]
+        public let options: [String]
+
+        public init(
+            nameservers: [String],
+            domain: String?,
+            searchDomains: [String],
+            options: [String]
+        ) {
+            self.nameservers = nameservers
+            self.domain = domain
+            self.searchDomains = searchDomains
+            self.options = options
+        }
+    }
+
     /// The network ID associated with the attachment.
     public let network: String
     /// The hostname associated with the attachment.
@@ -31,6 +50,8 @@ public struct Attachment: Codable, Sendable {
     public let ipv6Address: CIDRv6?
     /// The MAC address associated with the attachment (optional).
     public let macAddress: MACAddress?
+    /// The DNS configuration applied to the sandbox interface, if available.
+    public let dns: DNSConfiguration?
 
     public init(
         network: String,
@@ -38,7 +59,8 @@ public struct Attachment: Codable, Sendable {
         ipv4Address: CIDRv4,
         ipv4Gateway: IPv4Address,
         ipv6Address: CIDRv6?,
-        macAddress: MACAddress?
+        macAddress: MACAddress?,
+        dns: DNSConfiguration? = nil
     ) {
         self.network = network
         self.hostname = hostname
@@ -46,5 +68,20 @@ public struct Attachment: Codable, Sendable {
         self.ipv4Gateway = ipv4Gateway
         self.ipv6Address = ipv6Address
         self.macAddress = macAddress
+        self.dns = dns
+    }
+}
+
+extension Attachment {
+    public func withDNS(_ dns: DNSConfiguration?) -> Attachment {
+        Attachment(
+            network: network,
+            hostname: hostname,
+            ipv4Address: ipv4Address,
+            ipv4Gateway: ipv4Gateway,
+            ipv6Address: ipv6Address,
+            macAddress: macAddress,
+            dns: dns
+        )
     }
 }

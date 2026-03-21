@@ -143,6 +143,8 @@ After shutdown, return to the host and run:
 "$CONTAINER_BIN" run --os darwin --rm "$BASE_REF" /bin/ls /
 ```
 
+If only the guest-agent binary changed and the installed path plus LaunchDaemon layout are still compatible, you can also use the lightweight refresh flow under [`docs/examples/macos-base-agent-refresh`](docs/examples/macos-base-agent-refresh/README.md). That example rebuilds the base image on top of the existing tag by replacing `/usr/local/bin/container-macos-guest-agent` during `container build`, without going through the full seed + in-guest reinstall loop.
+
 ### 2.3 Auto-Inject the Latest Guest Agent from the Current Repository
 
 If you just changed `container-macos-guest-agent` or anything under `scripts/macos-guest-agent/*` and do not want to prepare `$SEED_DIR` manually, let `start-vm --auto-seed` create a temporary injection directory during startup.

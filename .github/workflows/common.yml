@@ -22,9 +22,8 @@ on:
 jobs:
   buildAndTest:
     name: Build and test the project
-    if: github.repository == 'apple/container'
-    timeout-minutes: 75
-    runs-on: [self-hosted, macos, tahoe, ARM64]
+    timeout-minutes: 60
+    runs-on: macos-26
     permissions:
       contents: read
       packages: read
@@ -35,6 +34,11 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - name: Resolve Xcode developer directory
+        run: |
+          echo "DEVELOPER_DIR=$(/usr/bin/xcode-select -p)" >> "$GITHUB_ENV"
+          /usr/bin/xcodebuild -version
 
       - name: Check formatting
         env:
@@ -72,16 +76,6 @@ jobs:
           make container dsym docs
           tar cfz _site.tgz _site
 
-      - name: Validate coverage inputs
-        if: ${{ inputs.coverage }}
-        env:
-          PR_NUMBER: ${{ inputs.pr_number }}
-        run: |
-          if [ -z "${PR_NUMBER}" ]; then
-            echo "::error::pr_number input is required when coverage is true"
-            exit 1
-          fi
-
       - name: Create package
         run: |
           mkdir -p outputs
@@ -98,78 +92,7 @@ jobs:
           echo NO_PROXY=${NO_PROXY}
           export no_proxy="${no_proxy},192.168.0.0/16,fe80::/10"
           echo no_proxy=${no_proxy}
-          echo "APP_ROOT=${APP_ROOT}" >> $GITHUB_ENV
-          echo "LOG_ROOT=${LOG_ROOT}" >> $GITHUB_ENV
-
-      - name: Test the container project
-        if: ${{ !inputs.coverage }}
-        run: make APP_ROOT="${APP_ROOT}" LOG_ROOT="${LOG_ROOT}" test install-kernel integration
-
-      - name: Test the container project with coverage
-        if: ${{ inputs.coverage }}
-        run: make APP_ROOT="${APP_ROOT}" LOG_ROOT="${LOG_ROOT}" install-kernel coverage
-
-      - name: Extract coverage percentages
-        if: ${{ inputs.coverage }}
-        env:
-          PR_NUMBER: ${{ inputs.pr_number }}
-        run: |
-          mkdir -p pr-coverage
-          jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/unit/coverage-summary.json > pr-coverage/unit-line-coverage.txt
-          jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/integration/coverage-summary.json > pr-coverage/integration-line-coverage.txt
-          jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/combined/coverage-summary.json > pr-coverage/combined-line-coverage.txt
-          echo "${PR_NUMBER}" > pr-coverage/pr-number.txt
-          echo "Coverage data:"
-          cat pr-coverage/*.txt
-
-      - name: Upload coverage data
-        if: ${{ inputs.coverage }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pr-coverage-${{ inputs.pr_number }}
-          path: pr-coverage/
-          retention-days: 1
-          if-no-files-found: warn
-
-      - name: Upload coverage HTML reports
-        if: ${{ inputs.coverage }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-html-reports
-          path: |
-            coverage-reports/unit/html/
-            coverage-reports/integration/html/
-            coverage-reports/combined/html/
-          retention-days: 14
-          if-no-files-found: ignore
-
-      - name: Archive test logs
-        if: always()
-        run: |
-          if [ -d "${APP_ROOT}/containers" ] && [ -n "${LOG_ROOT}" ]; then
-            rsync -a --include='*/' --include='*.log' --exclude='*' \
-              "${APP_ROOT}/containers/" \
-              "${LOG_ROOT}/containers/"
-          fi
-          if [ -n "${LOG_ROOT}" ] && [ -d "${LOG_ROOT}" ] ; then
-            echo "Collecting logs from ${LOG_ROOT}..."
-            tar czf container-logs.tar.gz -C "$(dirname "${LOG_ROOT}")" "$(basename "${LOG_ROOT}")"
-            echo "Log archive created: container-logs.tar.gz"
-          fi
-          if [ -n "${APP_ROOT}" ] ; then
-            rm -rf "${APP_ROOT}"
-            echo "Removed data directory ${APP_ROOT}"
-          fi
-          rm -rf coverage-reports pr-coverage
-
-      - name: Upload logs if present
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: container-test-logs
-          path: container-logs.tar.gz
-          retention-days: 14
-          if-no-files-found: ignore
+          make APP_ROOT="${APP_ROOT}" test install-kernel integration
 
       - name: Save documentation artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,212 +1,121 @@
 # macOS Guest Core TODO
 
-This document is distilled from [macos-guest-k8s-cri-cni-roadmap.md](./macos-guest-k8s-cri-cni-roadmap.md), but keeps only the work items that belong to `container core` in this repository.
+Implementation plan for macOS guest support in `container core`.
 
-The goal is not to implement Kubernetes integration directly in this repository. The goal is to make the macOS guest runtime, networking, image injection, and control APIs stable enough for future external integration layers to consume.
+Related design docs:
 
-## 1. Scope Boundaries
+- [`macos-guest-core-design.md`](./macos-guest-core-design.md)
+- [`macos-guest-networking-design.md`](./macos-guest-networking-design.md)
+- [`macos-guest-networkpolicy-design.md`](./macos-guest-networkpolicy-design.md)
 
-### 1.1 In Scope for This Project
-
-- macOS VM lifecycle
-- sidecar, guest-agent, and guest network manager
-- sandbox and workload resource model
-- network attachment plus IP, MAC, and DNS state management
-- file injection, workload payload injection, logs, exec, attach, and port-forward
-- stable `Runtime Control API` and `Network Control API` for external integration layers
-
-### 1.2 Out of Scope for This Project
-
-- CRI protobuf definitions and gRPC server
-- CNI config schema, CNI Result objects, and `ADD`/`DEL`/`CHECK` idempotency logic
-- kubelet-specific state machines, `RuntimeClass`, and Pod UID or metadata assembly
-- CNI binary install paths, kubelet config paths, and single-node kubelet integration
-- Kubernetes compatibility testing and release cadence
-
-### 1.3 Design Constraints
-
-- `container core` must not depend back on Kubernetes types or semantics.
-- Default installation artifacts must not include a CRI shim or CNI plugin.
-- The CLI should not grow kubelet-specific commands; prefer internal control APIs instead.
-- External object models should use neutral naming such as `Sandbox` and `Workload`. Mapping those objects to Kubernetes `PodSandbox` belongs in the integration layer.
-
-## 2. Current Baseline
-
-### Existing Capabilities
-
-- `container run --os darwin` can already boot a macOS VM and execute guest processes.
-- The helper + GUI sidecar + guest-agent architecture is in place and stable.
-- The guest control path uses vsock and does not depend on guest IP networking.
-- Guest file transfer already exists.
-- `MacOSSandboxService` already supports multiple process sessions inside a single sandbox.
-
-### Current Gaps
-
-- The darwin runtime still uses NAT unconditionally, with `VZNATNetworkDeviceAttachment` hard-coded in the sidecar.
-- `--network`, `--publish`, and `--publish-socket` are explicitly disabled on the darwin path.
-- `snapshot.networks` remains empty after macOS runtime creation, so real network state is not reported back.
-- The guest has no dedicated networking component.
-- The resource model is still "one container equals one VM", not "one sandbox hosts multiple workloads".
-- There is no dual `sandbox image` and `workload image` model yet.
-- There is no stable runtime or network control API for external consumers.
-
-## 3. P0: Freeze the Architecture and Build PoCs
-
-### Required Work
-
-- [ ] Validate ownership constraints between `VZVmnetNetworkDeviceAttachment` and the current helper and sidecar layering.
-- [ ] Compare and freeze one of the following implementation paths:
-  - the sidecar creates and attaches the vmnet network directly
-  - a network helper creates the network and serializes it to the sidecar
-  - network creation moves into the sidecar, while centralized IPAM and control-plane logic stay outside
-- [ ] Build a guest-side static networking PoC and confirm that IPv4, prefix, gateway, and DNS can be configured reliably.
-- [ ] Freeze the boundary between `sandbox image` and `workload image`.
-- [ ] Freeze the internal `Sandbox` and `Workload` object model and lifecycle in core.
-- [ ] Draft a minimal `Runtime Control API` and `Network Control API` without CRI- or CNI-specific types.
-
-### Suggested Deliverables
-
-- [ ] `docs/macos-runtime-control-api.md`
-- [ ] `docs/macos-network-control-api.md`
-- [ ] `docs/macos-guest-sandbox-runtime-design.md`
-- [x] `docs/macos-guest-networking-design.md`
-- [ ] `docs/macos-guest-workload-image-design.md`
-
-### Exit Criteria
-
-- [ ] It is clear who creates, owns, and restores vmnet networks.
-- [ ] A complete static guest networking flow can be applied reliably.
-- [ ] VM base and workload payload are clearly separated.
-- [ ] A neutral set of control API drafts can be handed to future integration layers.
-
-## 4. P1: Network Foundation MVP
-
-### Goal
-
-Give the macOS sandbox stable, queryable, reclaimable network state without introducing Kubernetes or CNI details in this phase.
+## 1. P1: Sandbox Networking
 
 ### TODO
 
-- [x] Introduce a `NetworkBackend` abstraction in the macOS runtime and replace hard-coded NAT in the sidecar.
-- [x] Support two backends in the first phase:
-  - `virtualizationNAT` for the compatibility path
-  - `vmnetShared` as the new network foundation MVP
-- [x] Restore internal network configuration input on the darwin path, at least for:
-  - `ContainerConfiguration.networks`
-  - `ContainerConfiguration.dns`
-  - `SandboxSnapshot.networks`
-- [x] Include network configuration in sidecar bootstrap input.
-- [x] Introduce a dedicated `guest network manager` instead of embedding network setup into the generic exec path.
-- [x] Complete interface matching, IP/prefix/gateway configuration, DNS writes, and result reporting during sandbox startup.
-  - DNS `options` still warn and remain unsupported in the guest manager.
-- [x] Persist and report network state on the host, including at least:
-  - sandbox IP
-  - gateway
-  - DNS
-  - MAC
-  - network ID
-- [ ] Provide a standalone `Network Control API` covering at least:
+- [x] Add darwin network backend selection.
+  - `virtualizationNAT`
+  - `vmnetShared`
+- [x] Add guest network bring-up during sandbox startup.
+  - guest network manager
+  - interface matching
+  - IPv4, prefix, gateway, and DNS setup
+  - host-side state reporting for IP, gateway, DNS, MAC, and network ID
+- [ ] Replace serialized `vmnet` handoff with persisted sandbox network leases.
+  - persist backend, `networkID`, MAC, IPv4/prefix, gateway, and DNS projection
+  - pass attachment specifications into sidecar bootstrap
+  - create `VZVmnetNetworkDeviceAttachment` inside the sidecar from the persisted lease
+- [ ] Expose the network control API.
   - `PrepareSandboxNetwork`
   - `InspectSandboxNetwork`
   - `ReleaseSandboxNetwork`
-- [ ] Define restart recovery and resource cleanup semantics for sidecar, apiserver, and helper restarts.
-- [ ] Reconcile guest-visible resolver presentation with host-side DNS projection.
-  - Current validation shows the guest may surface a link-local IPv6 resolver while host snapshots project the IPv4 gateway fallback.
-
-### Notes
-
-- The first phase can expose only internal APIs. A general CLI `--network` flow for `run --os darwin` is not required immediately.
-- The darwin CLI still keeps `--network` disabled in phase 1; internal callers must inject guest attachments through configuration APIs instead.
-- The initial target is single-node, single-NIC, single-network, IPv4-first.
+- [ ] Add restart recovery and explicit network cleanup.
+  - recover sidecar attachment state from the persisted lease
+  - recover helper or apiserver runtime state from persisted lease plus sandbox snapshot
+  - make cleanup explicit through `ReleaseSandboxNetwork`
+- [ ] Finish network correctness work.
+  - reconcile guest-visible resolver state with host-side DNS projection
+  - validate same-node and external connectivity end to end
+- [ ] Re-enable limited darwin CLI networking.
+  - support only `--network <id>[,mac=...]`
+  - support only basic DNS parameters backed by `ContainerConfiguration.dns`
+  - keep `--publish` and `--publish-socket` out of scope
 
 ### Exit Criteria
 
-- [ ] A new sandbox gets a stable IPv4 address after startup.
-- [ ] The sandbox can access external networks.
-- [ ] Two sandboxes on the same node can reach each other.
-- [ ] State inspection returns real network information.
+- [ ] Single-NIC, single-network, IPv4-first sandbox startup is reliable.
+- [ ] External and same-node connectivity work with real reported network state.
+- [ ] Network lifecycle can be prepared, inspected, released, and recovered without manual cleanup.
+- [ ] The darwin `--network` flow is a thin wrapper over the internal network control path.
 
-## 5. P2: Sandbox and Workload Runtime Model
-
-### Goal
-
-Refactor the current "container equals VM" implementation into a neutral runtime model with one sandbox VM and multiple workloads.
+## 2. P2: Sandbox and Workload Runtime
 
 ### TODO
 
-- [ ] Add internal resource types:
+- [ ] Add first-class sandbox and workload resources.
   - `SandboxConfiguration`
   - `SandboxSnapshot`
   - `WorkloadConfiguration`
   - `WorkloadSnapshot`
-- [ ] Separate VM lifecycle from workload lifecycle.
-- [ ] Reuse the existing multi-session base in `MacOSSandboxService`, and add:
-  - sandbox-level namespaces
-  - workload ID to session ID mapping
-  - wait, cleanup, and error propagation
-- [ ] Support multiple independent workloads inside one sandbox.
-- [ ] Add sandbox-level metadata, directory layout, and cleanup flow.
-- [ ] Add sandbox-level volume and file injection primitives:
+- [ ] Split sandbox lifecycle from workload lifecycle.
+  - `CreateSandbox`
+  - `StartSandbox`
+  - `CreateWorkload`
+  - `StartWorkload`
+  - stopping a sandbox stops all bound workloads
+- [ ] Run multiple workloads inside one sandbox.
+  - reuse the multi-session base in `MacOSSandboxService`
+  - add workload-to-session mapping
+  - add wait, cleanup, and error propagation
+- [ ] Add sandbox-scoped state and filesystem primitives.
+  - sandbox metadata and directory layout
   - temporary directories
   - host path mappings
   - generic read-only file injection
-- [ ] Stop and clean up all workloads when the sandbox stops.
-- [ ] Make workload state, exit code, and log path independently queryable.
-- [ ] Remove assumptions in code and logs that "container" always implies exactly one VM.
-
-### Boundary Notes
-
-- This phase implements a neutral runtime model. It should not hard-code CRI method names such as `RunPodSandbox` or `CreateContainer`.
-- The integration layer can map Kubernetes objects onto the core `Sandbox` and `Workload` abstractions.
+- [ ] Make workload state independently queryable.
+  - status
+  - exit code
+  - log path
 
 ### Exit Criteria
 
 - [ ] Two workloads can run reliably inside the same sandbox.
-- [ ] Stopping a sandbox consistently cleans up all attached workloads.
-- [ ] Workload state can be queried independently.
+- [ ] Stopping a sandbox consistently stops and cleans up all attached workloads.
+- [ ] Workload state is queryable independently from sandbox state.
 
-## 6. P3: Workload Image and Injection Model
-
-### Goal
-
-Define how workloads run inside an already started macOS sandbox, including the image model and guest-side file layout.
+## 3. P3: Workload Image and Injection
 
 ### TODO
 
-- [ ] Keep the existing darwin base image as the `sandbox image`, responsible only for booting the VM.
-- [ ] Define a `workload image` or artifact format that describes at least:
+- [ ] Add explicit image role metadata.
+  - `sandbox image`
+  - `workload image`
+- [ ] Keep sandbox image and workload image responsibilities separate.
+  - sandbox image boots the VM
+  - workload image carries payload and execution metadata
+- [ ] Define the workload artifact format.
   - file tree payload
-  - `entrypoint` and `cmd`
+  - `entrypoint`
+  - `cmd`
   - default environment variables
   - user
   - working directory
-- [ ] Define the guest-side workload directory layout, for example:
+- [ ] Implement guest-side workload layout and payload injection.
+  - reuse the existing file transfer path
   - `/var/lib/container/workloads/<id>/rootfs`
   - `/var/lib/container/workloads/<id>/meta.json`
-- [ ] Reuse the existing file transfer path for workload payload injection.
-- [ ] Define layout and cleanup semantics when multiple workloads share the same sandbox image.
-- [ ] Clarify how builder and image store will later distinguish sandbox images from workload images, without introducing CRI `ImageService` in this phase.
-
-### Deferred Items
-
-- APFS snapshots
-- `chroot` or jail-style isolation
-- stronger in-guest seatbelt or fine-grained isolation
+  - define sharing and cleanup semantics when multiple workloads use one sandbox image
+- [ ] Distinguish sandbox images from workload images in builder and image store.
 
 ### Exit Criteria
 
 - [ ] One sandbox image can host multiple workload images.
-- [ ] The injection, startup, and cleanup flow for workloads is stable and reproducible.
+- [ ] Workload injection, startup, and cleanup are stable and reproducible.
 
-## 7. P4: Core Control Surface and API Consolidation
-
-### Goal
-
-Turn existing execution, logging, and stream capabilities into stable core control interfaces that future external adapters can reuse.
+## 4. P4: Core Control Surface
 
 ### TODO
 
-- [ ] Provide a stable `Runtime Control API` with at least:
+- [ ] Publish the runtime control API.
   - `CreateSandbox`
   - `StartSandbox`
   - `StopSandbox`
@@ -221,43 +130,27 @@ Turn existing execution, logging, and stream capabilities into stable core contr
   - `StreamExec`
   - `StreamAttach`
   - `StreamPortForward`
-- [ ] Expose stable logging interfaces:
-  - separate stdout and stderr logs per workload
-  - sandbox-level event log
-  - log path or log-reading interfaces
-- [ ] Make `PortForward` a core capability, preferably reusing the sidecar or vsock channel instead of depending on `HostPort`.
-- [ ] Decouple the API from CLI argument parsing, on-disk state layout, and private sidecar protocol details.
-- [ ] Add tests for state transitions, idempotency, failure recovery, and error propagation.
+- [ ] Make inspect operations return stable snapshots.
+- [ ] Publish logging and event interfaces.
+  - per-workload stdout and stderr
+  - sandbox event log
+  - log path or log-reading APIs
+- [ ] Implement `PortForward` over the sidecar or vsock path.
+- [ ] Keep CLI parsing, on-disk layout, and sidecar protocol details out of the control API.
+- [ ] Add state transition, idempotency, recovery, and error propagation tests.
 
 ### Exit Criteria
 
-- [ ] External integration layers can rely only on control APIs and do not need to call the CLI or read internal state files.
-- [ ] `exec`, `attach`, `logs`, and `port-forward` all have stable core-side contracts.
+- [ ] External integrations can use only the control APIs and do not need to call the CLI or read internal state files.
+- [ ] `exec`, `attach`, `logs`, and `port-forward` have stable core-side contracts.
 
-## 8. Later Enhancements (Not Blocking the MVP)
+## 5. Later Enhancements
 
-- [ ] crash recovery and state restoration
-- [ ] metrics, tracing, and health checking
 - [ ] `HostPort`
 - [ ] multiple network attachments
 - [ ] IPv6
-- [ ] stronger in-guest isolation
-
-## 9. Recommended Execution Order
-
-1. Complete P0 to freeze ownership, networking, image model, and control API boundaries.
-2. Complete P1 to establish the network foundation and state reporting.
-3. Complete P2 to split sandbox and workload resource models.
-4. Complete P3 to stabilize the workload image and injection path.
-5. Complete P4 last to consolidate runtime and network control APIs into a stable external contract.
-
-## 10. Contract Reminder for External Integration Layers
-
-The following work is intentionally left to an external Kubernetes integration layer outside this repository:
-
-- CRI runtime service and image service
-- CNI plugin and IPAM idempotency logic
-- kubelet integration, `RuntimeClass`, and Pod metadata translation
-- Kubernetes semantic translation for `kubectl exec`, `kubectl logs`, and `kubectl port-forward`
-
-This repository only needs to guarantee one thing: those external components can drive macOS sandboxes and workloads through stable core APIs, without reaching into `container` implementation details.
+- [ ] crash recovery beyond the initial restart and cleanup guarantees above
+- [ ] metrics, tracing, and health checking
+- [ ] APFS snapshots
+- [ ] `chroot` or jail-style isolation
+- [ ] stronger in-guest seatbelt or fine-grained isolation

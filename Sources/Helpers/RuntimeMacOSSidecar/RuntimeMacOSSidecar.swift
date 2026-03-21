@@ -17,6 +17,7 @@
 import AppKit
 import ArgumentParser
 import ContainerLog
+import ContainerNetworkServiceClient
 import ContainerResource
 import ContainerVersion
 import ContainerizationError
@@ -132,6 +133,8 @@ struct SidecarGuestAgentFrame: Codable {
         case signal
         case resize
         case close
+        case networkConfigure
+        case networkResult
         case fsBegin
         case fsChunk
         case fsEnd
@@ -270,6 +273,14 @@ struct SidecarGuestAgentFrame: Codable {
         .init(type: .stdin, id: id, data: data)
     }
 
+    static func networkConfigure(_ payload: MacOSGuestNetworkConfigurationRequest) throws -> Self {
+        .init(type: .networkConfigure, data: try JSONEncoder().encode(payload))
+    }
+
+    static func networkResult(_ payload: MacOSGuestNetworkConfigurationResult) throws -> Self {
+        .init(type: .networkResult, data: try JSONEncoder().encode(payload))
+    }
+
     static func fsBegin(_ payload: MacOSSidecarFSBeginRequestPayload) -> Self {
         .init(
             type: .fsBegin,
@@ -357,6 +368,8 @@ actor MacOSSidecarService {
     private var vmDelegate: VMDelegate?
     private var vmWindow: UnsafeSendableBox<NSWindow>?
     private var vmWindowView: UnsafeSendableBox<VZVirtualMachineView>?
+    private var networkAllocations: [MacOSGuestNetworkAllocation] = []
+    private var ownedVMNetNetworks: [ManagedVMNetNetwork] = []
     private var state: State = .created
 
     init(rootURL: URL, log: Logging.Logger) {
@@ -380,47 +393,49 @@ actor MacOSSidecarService {
                 "memory": "\(config.resources.memoryInBytes)",
                 "gui_enabled": "\(guiEnabled)",
             ])
-        let vmConfiguration = try makeVirtualMachineConfiguration(containerConfig: config)
-        self.vmConfiguration = vmConfiguration
 
-        log.info("bootstrapStart: creating VZVirtualMachine")
-        let created = try await createVirtualMachineOnMain(configuration: vmConfiguration)
-        let vm = created.vm
-        self.vmDelegate = created.delegate
-        self.vm = vm
-        if guiEnabled {
-            try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
-        }
-        log.info("bootstrapStart: starting vm", metadata: ["gui_enabled": "\(guiEnabled)"])
-        let agentPort = config.macosGuest?.agentPort ?? 27000
-        var didStartVM = false
         do {
+            let vmConfiguration = try await makeVirtualMachineConfiguration(containerConfig: config)
+            self.vmConfiguration = vmConfiguration
+            log.info("bootstrapStart: creating VZVirtualMachine")
+            let created = try await createVirtualMachineOnMain(configuration: vmConfiguration)
+            let vm = created.vm
+            self.vmDelegate = created.delegate
+            self.vm = vm
+            if guiEnabled {
+                try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
+            }
+            log.info("bootstrapStart: starting vm", metadata: ["gui_enabled": "\(guiEnabled)"])
+            let agentPort = config.macosGuest?.agentPort ?? 27000
             try await startVirtualMachine(vm)
-            didStartVM = true
             try await validateSocketDeviceAvailable(on: vm)
             try await waitForGuestAgentDuringBootstrap(port: agentPort)
+            try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
+            state = .running
+            log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
         } catch {
-            if didStartVM {
+            if let vm, vm.state != .stopped {
                 try? await stopVirtualMachine(vm)
             }
             await closeGUIWindowOnMain()
+            await releasePreparedNetworkResources()
             self.vm = nil
             self.vmConfiguration = nil
             self.vmDelegate = nil
             self.state = .created
             throw error
         }
-        state = .running
-        log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
     }
 
     func stopVM() async throws {
         guard let vm else {
+            await releasePreparedNetworkResources()
             state = .stopped
             return
         }
         try await stopVirtualMachine(vm)
         await closeGUIWindowOnMain()
+        await releasePreparedNetworkResources()
         self.vm = nil
         self.vmConfiguration = nil
         self.vmDelegate = nil
@@ -524,6 +539,70 @@ actor MacOSSidecarService {
         }
     }
 
+    private func configureGuestNetworkingIfNeeded(
+        containerConfig: ContainerConfiguration,
+        agentPort: UInt32
+    ) async throws {
+        guard let request = try MacOSGuestNetworkBootstrap.makeRequest(
+            containerConfig: containerConfig,
+            allocations: networkAllocations
+        ) else {
+            return
+        }
+
+        let fd = try await connectVsock(port: agentPort)
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+
+        try waitForGuestAgentReadyWithTimeout(
+            fd: fd,
+            timeoutSeconds: Self.bootstrapGuestAgentReadyTimeoutSeconds
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.networkConfigure(request), fd: fd)
+
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .networkResult:
+                let result = try decodeGuestNetworkConfigurationResult(frame)
+                log.info(
+                    "guest network configuration applied",
+                    metadata: [
+                        "interfaces": "\(result.interfaces.count)",
+                        "dns_applied": "\(result.dnsApplied)",
+                    ]
+                )
+                for warning in result.warnings {
+                    log.warning("guest network configuration warning", metadata: ["warning": "\(warning)"])
+                }
+                return
+            case .error:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest network configuration failed: \(frame.message ?? "unknown error")"
+                )
+            case .exit:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest network configuration stream exited unexpectedly (code=\(frame.exitCode ?? 1))"
+                )
+            case .ready, .ack, .stdout, .stderr, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd:
+                continue
+            }
+        }
+    }
+
+    private func decodeGuestNetworkConfigurationResult(
+        _ frame: SidecarGuestAgentFrame
+    ) throws -> MacOSGuestNetworkConfigurationResult {
+        guard let data = frame.data else {
+            throw ContainerizationError(.invalidState, message: "guest network configuration result missing payload")
+        }
+        return try JSONDecoder().decode(MacOSGuestNetworkConfigurationResult.self, from: data)
+    }
+
     func prepareForQuit() async {
         do {
             try await stopVM()
@@ -543,7 +622,7 @@ actor MacOSSidecarService {
         return try JSONDecoder().decode(ContainerConfiguration.self, from: data)
     }
 
-    private func makeVirtualMachineConfiguration(containerConfig: ContainerConfiguration) throws -> VZVirtualMachineConfiguration {
+    private func makeVirtualMachineConfiguration(containerConfig: ContainerConfiguration) async throws -> VZVirtualMachineConfiguration {
         let hardwareData = try Data(contentsOf: hardwareModelPath())
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareData) else {
             throw ContainerizationError(.invalidState, message: "invalid hardware model data")
@@ -571,7 +650,12 @@ actor MacOSSidecarService {
                 attachment: try VZDiskImageStorageDeviceAttachment(url: diskImagePath(), readOnly: false)
             )
         ]
-        vmConfiguration.networkDevices = [createNATDevice()]
+        let networkBackend = MacOSNetworkBackendFactory.backend(for: containerConfig)
+        log.info("resolved macOS guest network backend", metadata: ["backend": "\(networkBackend.backendID.rawValue)"])
+        let preparedNetwork = try await networkBackend.prepareNetwork(containerConfig: containerConfig, log: log)
+        networkAllocations = preparedNetwork.allocations
+        ownedVMNetNetworks = preparedNetwork.ownedNetworks
+        vmConfiguration.networkDevices = preparedNetwork.devices
         vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         vmConfiguration.directorySharingDevices = try createDirectorySharingDevices(containerConfig: containerConfig)
         vmConfiguration.graphicsDevices = [createGraphicsDevice()]
@@ -583,10 +667,33 @@ actor MacOSSidecarService {
         return vmConfiguration
     }
 
-    private func createNATDevice() -> VZVirtioNetworkDeviceConfiguration {
-        let device = VZVirtioNetworkDeviceConfiguration()
-        device.attachment = VZNATNetworkDeviceAttachment()
-        return device
+    private func releasePreparedNetworkResources() async {
+        let allocations = networkAllocations
+        networkAllocations = []
+        ownedVMNetNetworks = []
+
+        for allocation in allocations {
+            let client = NetworkClient(id: allocation.network)
+            do {
+                try await client.deallocate(hostname: allocation.hostname)
+                log.info(
+                    "released macOS guest network allocation",
+                    metadata: [
+                        "network": "\(allocation.network)",
+                        "hostname": "\(allocation.hostname)",
+                    ]
+                )
+            } catch {
+                log.warning(
+                    "failed to release macOS guest network allocation",
+                    metadata: [
+                        "network": "\(allocation.network)",
+                        "hostname": "\(allocation.hostname)",
+                        "error": "\(error)",
+                    ]
+                )
+            }
+        }
     }
 
     private func createDirectorySharingDevices(
@@ -830,7 +937,7 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
-            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
                 continue
             }
         }
@@ -1425,7 +1532,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     pendingExitCode = frame.exitCode ?? 1
                 case .ready:
                     continue
-                case .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+                case .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
                     continue
                 }
             }
@@ -1490,9 +1597,9 @@ final class SidecarControlServer: @unchecked Sendable {
                     .internalError,
                     message: "guest-agent filesystem stream exited for transaction \(expectedID) (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .stdout, .stderr:
+            case .ready, .stdout, .stderr, .networkResult:
                 continue
-            case .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd:
                 continue
             }
         }
@@ -1536,7 +1643,7 @@ final class SidecarControlServer: @unchecked Sendable {
                         throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
                     case .exit:
                         throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
-                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .fsBegin, .fsChunk, .fsEnd:
+                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
                         continue
                     }
                 }

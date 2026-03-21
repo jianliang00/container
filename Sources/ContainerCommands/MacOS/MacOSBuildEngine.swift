@@ -2148,11 +2148,13 @@ extension MacOSBuildEngine {
                 user: .id(uid: 0, gid: 0)
             )
 
-            var configuration = ContainerConfiguration(id: containerID, image: baseImage.description, process: initProcess)
-            configuration.platform = MacOSBuildEngine.buildPlatform
-            configuration.runtimeHandler = MacOSBuildEngine.runtimeName
-            configuration.macosGuest = .init(snapshotEnabled: false, guiEnabled: false, agentPort: MacOSBuildEngine.defaultAgentPort)
-            configuration.resources = try Parser.resources(cpus: cpus, memory: memory)
+            var configuration = try makeStageContainerConfiguration(
+                containerID: containerID,
+                baseImage: baseImage.description,
+                initProcess: initProcess,
+                cpus: cpus,
+                memory: memory
+            )
             configuration.resources.memoryInBytes = max(configuration.resources.memoryInBytes, 8192.mib())
 
             try await containerClient.create(
@@ -2173,6 +2175,26 @@ extension MacOSBuildEngine {
                 try? await containerClient.delete(id: containerID, force: true)
                 throw error
             }
+        }
+
+        static func makeStageContainerConfiguration(
+            containerID: String,
+            baseImage: ImageDescription,
+            initProcess: ProcessConfiguration,
+            cpus: Int64,
+            memory: String
+        ) throws -> ContainerConfiguration {
+            var configuration = ContainerConfiguration(id: containerID, image: baseImage, process: initProcess)
+            configuration.platform = MacOSBuildEngine.buildPlatform
+            configuration.runtimeHandler = MacOSBuildEngine.runtimeName
+            configuration.macosGuest = .init(
+                snapshotEnabled: false,
+                guiEnabled: false,
+                agentPort: MacOSBuildEngine.defaultAgentPort,
+                networkBackend: .virtualizationNAT
+            )
+            configuration.resources = try Parser.resources(cpus: cpus, memory: memory)
+            return configuration
         }
 
         func run(

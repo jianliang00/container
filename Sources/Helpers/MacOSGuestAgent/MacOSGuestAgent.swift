@@ -221,14 +221,36 @@ final class AgentConnection: @unchecked Sendable {
             }
         case .close:
             session?.closeStdin()
+        case .networkConfigure:
+            try configureNetwork(frame: frame)
         case .fsBegin:
             try beginFileTransaction(frame: frame)
         case .fsChunk:
             try appendFileTransaction(frame: frame)
         case .fsEnd:
             try finishFileTransaction(frame: frame)
-        case .stdout, .stderr, .exit, .error, .ready, .ack:
+        case .stdout, .stderr, .exit, .error, .ready, .ack, .networkResult:
             break
+        }
+    }
+
+    private func configureNetwork(frame: GuestAgentFrame) throws {
+        guard let data = frame.data else {
+            throw NSError(
+                domain: "container.macos.guest-agent.network",
+                code: Int(EINVAL),
+                userInfo: [NSLocalizedDescriptionKey: "missing guest network configuration payload"]
+            )
+        }
+
+        let request = try JSONDecoder().decode(MacOSGuestNetworkConfigurationRequest.self, from: data)
+        do {
+            let result = try GuestNetworkConfigurator().apply(request)
+            try send(frame: .networkResult(result))
+        } catch {
+            let message = "failed to configure guest network: \(describeError(error))"
+            logAgentError(message)
+            try send(frame: .error(message))
         }
     }
 
@@ -1273,6 +1295,8 @@ struct GuestAgentFrame: Codable {
         case signal
         case resize
         case close
+        case networkConfigure
+        case networkResult
         case fsBegin
         case fsChunk
         case fsEnd
@@ -1392,6 +1416,10 @@ struct GuestAgentFrame: Codable {
 
     static func ack(id: String) -> Self {
         .init(type: .ack, id: id)
+    }
+
+    static func networkResult(_ payload: MacOSGuestNetworkConfigurationResult) throws -> Self {
+        .init(type: .networkResult, data: try JSONEncoder().encode(payload))
     }
 }
 

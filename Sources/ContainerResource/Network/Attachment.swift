@@ -18,6 +18,25 @@ import ContainerizationExtras
 
 /// A snapshot of a network interface for a sandbox.
 public struct Attachment: Codable, Sendable {
+    public struct DNSConfiguration: Codable, Sendable, Equatable {
+        public let nameservers: [String]
+        public let domain: String?
+        public let searchDomains: [String]
+        public let options: [String]
+
+        public init(
+            nameservers: [String],
+            domain: String?,
+            searchDomains: [String],
+            options: [String]
+        ) {
+            self.nameservers = nameservers
+            self.domain = domain
+            self.searchDomains = searchDomains
+            self.options = options
+        }
+    }
+
     /// The network ID associated with the attachment.
     public let network: String
     /// The hostname associated with the attachment.
@@ -31,10 +50,8 @@ public struct Attachment: Codable, Sendable {
     public let ipv6Address: CIDRv6?
     /// The MAC address associated with the attachment (optional).
     public let macAddress: MACAddress?
-    /// The MTU for the network interface.
-    public let mtu: UInt32?
-    /// The network plugin variant, used by the runtime to select an interface strategy.
-    public let variant: String?
+    /// The DNS configuration applied to the sandbox interface, if available.
+    public let dns: DNSConfiguration?
 
     public init(
         network: String,
@@ -43,8 +60,7 @@ public struct Attachment: Codable, Sendable {
         ipv4Gateway: IPv4Address,
         ipv6Address: CIDRv6?,
         macAddress: MACAddress?,
-        mtu: UInt32? = nil,
-        variant: String? = nil
+        dns: DNSConfiguration? = nil
     ) {
         self.network = network
         self.hostname = hostname
@@ -52,58 +68,20 @@ public struct Attachment: Codable, Sendable {
         self.ipv4Gateway = ipv4Gateway
         self.ipv6Address = ipv6Address
         self.macAddress = macAddress
-        self.mtu = mtu
-        self.variant = variant
+        self.dns = dns
     }
+}
 
-    enum CodingKeys: String, CodingKey {
-        case network
-        case hostname
-        case ipv4Address
-        case ipv4Gateway
-        case ipv6Address
-        case macAddress
-        case mtu
-        case variant
-        // TODO: retain for deserialization compatibility for now, remove later
-        case address
-        case gateway
-    }
-
-    /// Create a configuration from the supplied Decoder, initializing missing
-    /// values where possible to reasonable defaults.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-
-        network = try container.decode(String.self, forKey: .network)
-        hostname = try container.decode(String.self, forKey: .hostname)
-        if let address = try? container.decode(CIDRv4.self, forKey: .ipv4Address) {
-            ipv4Address = address
-        } else {
-            ipv4Address = try container.decode(CIDRv4.self, forKey: .address)
-        }
-        if let gateway = try? container.decode(IPv4Address.self, forKey: .ipv4Gateway) {
-            ipv4Gateway = gateway
-        } else {
-            ipv4Gateway = try container.decode(IPv4Address.self, forKey: .gateway)
-        }
-        ipv6Address = try container.decodeIfPresent(CIDRv6.self, forKey: .ipv6Address)
-        macAddress = try container.decodeIfPresent(MACAddress.self, forKey: .macAddress)
-        mtu = try container.decodeIfPresent(UInt32.self, forKey: .mtu)
-        variant = try container.decodeIfPresent(String.self, forKey: .variant)
-    }
-
-    /// Encode the configuration to the supplied Encoder.
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-
-        try container.encode(network, forKey: .network)
-        try container.encode(hostname, forKey: .hostname)
-        try container.encode(ipv4Address, forKey: .ipv4Address)
-        try container.encode(ipv4Gateway, forKey: .ipv4Gateway)
-        try container.encodeIfPresent(ipv6Address, forKey: .ipv6Address)
-        try container.encodeIfPresent(macAddress, forKey: .macAddress)
-        try container.encodeIfPresent(mtu, forKey: .mtu)
-        try container.encodeIfPresent(variant, forKey: .variant)
+extension Attachment {
+    public func withDNS(_ dns: DNSConfiguration?) -> Attachment {
+        Attachment(
+            network: network,
+            hostname: hostname,
+            ipv4Address: ipv4Address,
+            ipv4Gateway: ipv4Gateway,
+            ipv6Address: ipv6Address,
+            macAddress: macAddress,
+            dns: dns
+        )
     }
 }

@@ -399,6 +399,7 @@ let package = Package(
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerImagesServiceClient",
+                "ContainerNetworkServiceClient",
                 "ContainerLog",
                 "ContainerResource",
                 "ContainerSandboxServiceClient",
@@ -414,6 +415,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
+                "ContainerNetworkServiceClient",
                 "ContainerLog",
                 "ContainerResource",
                 "RuntimeMacOSSidecarShared",
@@ -464,6 +466,7 @@ let package = Package(
         .testTarget(
             name: "RuntimeMacOSSidecarTests",
             dependencies: [
+                "ContainerResource",
                 "RuntimeMacOSSidecarShared",
                 .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.macOS])),
                 .target(name: "container-runtime-macos-sidecar", condition: .when(platforms: [.macOS])),

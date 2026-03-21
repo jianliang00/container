@@ -54,11 +54,7 @@ extension MacOSSandboxService {
 
         writeContainerLog(
             Data(
-                (
-                    "preparing macOS guest mounts: " +
-                        shares.map { "\($0.source)->\($0.guestPath) [real=\($0.guestRealPath)]" }.joined(separator: ", ") +
-                        "\n"
-                ).utf8
+                ("preparing macOS guest mounts: " + shares.map { "\($0.source)->\($0.guestPath) [real=\($0.guestRealPath)]" }.joined(separator: ", ") + "\n").utf8
             )
         )
 
@@ -72,9 +68,7 @@ extension MacOSSandboxService {
             let status = try await waitForProcess(processID, timeout: 30)
             guard status.exitCode == 0 else {
                 let detail =
-                    sessions[processID]?.lastAgentError ??
-                    sessions[processID]?.lastStderr ??
-                    "bootstrap script exited with status \(status.exitCode)"
+                    sessions[processID]?.lastAgentError ?? sessions[processID]?.lastStderr ?? "bootstrap script exited with status \(status.exitCode)"
                 throw ContainerizationError(
                     .internalError,
                     message: """

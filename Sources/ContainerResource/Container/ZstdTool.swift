@@ -51,7 +51,8 @@ public enum ZstdTool {
         var candidates: [String] = []
         if let pathValue = env["PATH"], !pathValue.isEmpty {
             candidates.append(
-                contentsOf: pathValue
+                contentsOf:
+                    pathValue
                     .split(separator: ":")
                     .map(String.init)
                     .filter { !$0.isEmpty }

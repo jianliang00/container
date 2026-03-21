@@ -1,80 +1,94 @@
 # macOS Guest Networking Design
 
-This document records the current networking boundary for the macOS guest runtime in `container core`.
+Network model for macOS guest sandboxes in `container core`.
 
-## Goals
+## 1. Backend
 
-- remove the hard-coded `VZNATNetworkDeviceAttachment` assumption from the sidecar
-- establish a stable backend selection point for future `vmnetShared` work
-- keep the current `container run --os darwin` path on the compatibility backend until the new data plane exists
-
-## Current Backend Model
-
-The macOS sidecar now resolves networking through `ContainerConfiguration.macosGuest.networkBackend`.
+The runtime selects the backend through `ContainerConfiguration.macosGuest.networkBackend`.
 
 Supported values:
 
 - `virtualizationNAT`
-  - compatibility backend
+  - default backend
   - implemented with `VZNATNetworkDeviceAttachment`
-  - remains the default for backward compatibility
+  - used for backward compatibility and darwin image-build workflows
 - `vmnetShared`
+  - runtime backend for host-visible sandbox networking
   - implemented with `VZVmnetNetworkDeviceAttachment`
-  - selected explicitly in config
-  - allocates endpoint identity through `container-network-vmnet`
-  - deserializes the vmnet network reference inside the sidecar process before attaching it to the VM
-  - pushes static guest networking to a dedicated guest-agent network configurator during bootstrap
-  - reports network ID, IP, gateway, MAC, and projected DNS back through sandbox snapshots on the host
 
-## Why This Boundary Exists
+If `networkBackend` is absent, it defaults to `virtualizationNAT`.
 
-This keeps backend selection inside the macOS runtime layer, where VM network devices are actually created, while avoiding Kubernetes- or CNI-specific concepts in `container core`.
+If `vmnetShared` is selected and no explicit `ContainerConfiguration.networks` are provided, the runtime uses the builtin `default` network.
 
-The design intent is:
+## 2. Guest Bring-Up
 
-- `container core` owns backend selection, VM attachment, and network state plumbing
-- external integrations decide when to request `vmnetShared`
-- the CLI does not grow kubelet- or CNI-specific network controls in this phase
-- internal callers can still provide `ContainerConfiguration.networks` and `ContainerConfiguration.dns` on the darwin path
+Guest networking is applied by a dedicated guest network manager. It:
 
-## Configuration Shape
+- matches the NIC by MAC
+- configures IPv4, prefix, and gateway
+- writes DNS settings
+- returns the applied interface name and current IP
 
-The backend is carried in `macosGuest`:
+Network setup does not run through the generic exec path.
 
-```json
-{
-  "macosGuest": {
-    "snapshotEnabled": false,
-    "guiEnabled": false,
-    "agentPort": 27000,
-    "networkBackend": "virtualizationNAT"
-  }
-}
-```
+## 3. Lease Model
 
-If `networkBackend` is absent, decoding defaults to `virtualizationNAT` so older bundles remain compatible.
+Network state is owned by host control-plane code in helper or apiserver-managed components.
 
-When `vmnetShared` is selected and no explicit `ContainerConfiguration.networks` are supplied, the runtime falls back to the builtin `default` network.
+The persisted lease stores:
 
-## Current Limitations
+- `networkID`
+- backend
+- MAC
+- IPv4 and prefix
+- gateway
+- DNS projection
 
-- the current `vmnetShared` path still depends on host-side allocation from `container-network-vmnet`
-- guest-side static IPv4, route, and DNS bootstrap now run through a dedicated guest-agent network configurator
-- DNS `options` are not yet applied inside the guest; the configurator returns a warning instead
-- the current backend integration is still the serialization-based PoC; long-term ownership and recovery semantics still need to be frozen
+The sidecar reads that lease and creates VM-local `VZ*NetworkDeviceAttachment` instances during bootstrap or recovery.
 
-## Build And Base Image Boundary
+The guest network manager applies the same lease inside the guest.
 
-Base-image bootstrap and `container build --platform darwin/arm64` should stay on the compatibility backend:
+The sidecar is not durable network state. Do not use serialized `vmnet` attachment objects as the long-term data model.
 
-- `virtualizationNAT` remains the expected backend for image preparation, agent installation, and Dockerfile build stages
-- `vmnetShared` is reserved for the runtime path that needs stable host-visible network state
-- do not switch build-stage VMs to `vmnetShared` yet, because those workflows may need networking before the guest has installed or started the agent-side control path
+Host-visible sandbox snapshots report at least:
 
-## Next Steps
+- IP
+- gateway
+- DNS
+- MAC
+- network ID
 
-The next implementation steps should be:
+## 4. Network Control API
 
-1. freeze restart and recovery semantics for sidecar-owned vs helper-owned vmnet resources
-2. add a standalone network control API for prepare, inspect, and release flows
-3. validate cross-sandbox and external connectivity end-to-end
+- `PrepareSandboxNetwork`
+- `InspectSandboxNetwork`
+- `ReleaseSandboxNetwork`
+
+`PrepareSandboxNetwork` allocates or restores the persisted lease and returns the attachment specification plus host-visible network state.
+
+`InspectSandboxNetwork` reads the persisted lease and current reported state.
+
+`ReleaseSandboxNetwork` removes the lease and related host-side allocations.
+
+## 5. Recovery
+
+- sidecar restart recreates local attachments from the persisted lease
+- helper or apiserver restart rebuilds runtime state from the persisted lease and sandbox snapshot
+- cleanup happens through `ReleaseSandboxNetwork`, not through sidecar teardown
+
+## 6. CLI and Build Boundary
+
+The darwin CLI network surface is:
+
+- `--network <id>[,mac=...]`
+- basic DNS parameters backed by `ContainerConfiguration.dns`
+
+The darwin path does not support:
+
+- `--publish`
+- `--publish-socket`
+- multi-network semantics in the first iteration
+
+`PortForward` remains a separate runtime capability.
+
+`container build --platform darwin/arm64` stays on `virtualizationNAT`. `vmnetShared` is reserved for sandbox runtime paths that need stable host-visible network state.

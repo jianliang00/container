@@ -14,9 +14,8 @@ on:
 jobs:
   buildAndTest:
     name: Build and test the project
-    if: github.repository == 'apple/container'
     timeout-minutes: 60
-    runs-on: [self-hosted, macos, tahoe, ARM64]
+    runs-on: macos-26
     permissions:
       contents: read
       packages: read
@@ -25,6 +24,11 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+
+      - name: Resolve Xcode developer directory
+        run: |
+          echo "DEVELOPER_DIR=$(/usr/bin/xcode-select -p)" >> "$GITHUB_ENV"
+          /usr/bin/xcodebuild -version
 
       - name: Check formatting
         run: |
@@ -45,8 +49,6 @@ jobs:
             git diff --name-only -- .
             false
           fi
-        env:
-          DEVELOPER_DIR: "/Applications/Xcode-latest.app/Contents/Developer"
 
       - name: Set build configuration
         run: |
@@ -59,8 +61,6 @@ jobs:
         run: |
           make container dsym docs
           tar cfz _site.tgz _site
-        env:
-          DEVELOPER_DIR: "/Applications/Xcode-latest.app/Contents/Developer"
 
       - name: Create package
         run: |
@@ -78,8 +78,6 @@ jobs:
           export no_proxy="${no_proxy},192.168.0.0/16,fe80::/10"
           echo no_proxy=${no_proxy}
           make APP_ROOT="${APP_ROOT}" test install-kernel integration
-        env:
-          DEVELOPER_DIR: "/Applications/Xcode-latest.app/Contents/Developer"
 
       - name: Save documentation artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

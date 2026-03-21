@@ -30,7 +30,7 @@ jobs:
             echo -e "$unsigned_commits"
             echo ""
             echo "Please sign your commits. See:"
-            echo  "  - https://github.com/apple/containerization/blob/main/CONTRIBUTING.md#pull-requests"
+            echo  "  - https://github.com/${{ github.repository }}/blob/${{ github.event.repository.default_branch }}/CONTRIBUTING.md#pull-requests"
             echo  "  - https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits"
             exit 1
           fi

@@ -36,6 +36,24 @@ public struct Utility {
     static let defaultMacOSGuestAgentPort: UInt32 = 27000
     static let defaultContainerOS = "linux"
 
+    private static let infraImages = [
+        DefaultsStore.get(key: .defaultBuilderImage),
+        DefaultsStore.get(key: .defaultInitImage),
+    ]
+
+    public struct MacOSGuestNetworkingOverride: Sendable {
+        public let networks: [AttachmentConfiguration]
+        public let dns: ContainerConfiguration.DNSConfiguration?
+
+        public init(
+            networks: [AttachmentConfiguration] = [],
+            dns: ContainerConfiguration.DNSConfiguration? = nil
+        ) {
+            self.networks = networks
+            self.dns = dns
+        }
+    }
+
     public static func createContainerID(name: String?) -> String {
         guard let name else {
             return UUID().uuidString.lowercased()
@@ -85,7 +103,7 @@ public struct Utility {
         resource: Flags.Resource,
         registry: Flags.Registry,
         imageFetch: Flags.ImageFetch,
-        containerSystemConfig: ContainerSystemConfig,
+        macOSGuestNetworking: MacOSGuestNetworkingOverride? = nil,
         progressUpdate: @escaping ProgressUpdateHandler,
         log: Logger
     ) async throws -> (ContainerConfiguration, Kernel?, String?) {
@@ -133,7 +151,10 @@ public struct Utility {
                 throw ContainerizationError(.unsupported, message: "--init-image is not supported for --os darwin")
             }
             if !management.networks.isEmpty {
-                throw ContainerizationError(.unsupported, message: "--network is not supported for --os darwin; guest networking uses Virtualization NAT")
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "--network is not yet supported for --os darwin; macOS guest network attachments remain an internal API"
+                )
             }
             if !management.publishPorts.isEmpty {
                 throw ContainerizationError(.unsupported, message: "--publish is not supported for --os darwin")
@@ -282,9 +303,13 @@ public struct Utility {
         }
 
         config.virtualization = management.virtualization
+        let resolvedMacOSGuestNetworking =
+            isMacOSRuntime
+            ? resolveMacOSGuestNetworking(management: management, override: macOSGuestNetworking)
+            : nil
 
         if isMacOSRuntime {
-            config.networks = []
+            config.networks = resolvedMacOSGuestNetworking?.networks ?? []
         } else {
             // Parse network specifications with properties
             let parsedNetworks = try management.networks.map { try Parser.network($0) }
@@ -309,7 +334,9 @@ public struct Utility {
             }
         }
 
-        if isMacOSRuntime || management.dnsDisabled {
+        if isMacOSRuntime {
+            config.dns = resolvedMacOSGuestNetworking?.dns
+        } else if management.dnsDisabled {
             config.dns = nil
         } else {
             let domain = management.dns.domain ?? containerSystemConfig.dns.domain
@@ -368,6 +395,34 @@ public struct Utility {
         }
 
         return (config, kernel, management.initImage)
+    }
+
+    static func resolveMacOSGuestNetworking(
+        management: Flags.Management,
+        override: MacOSGuestNetworkingOverride?
+    ) -> (networks: [AttachmentConfiguration], dns: ContainerConfiguration.DNSConfiguration?) {
+        guard let override else {
+            return ([], nil)
+        }
+
+        guard !management.dnsDisabled else {
+            return (override.networks, nil)
+        }
+
+        if let dns = override.dns {
+            return (override.networks, dns)
+        }
+
+        let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
+        return (
+            override.networks,
+            .init(
+                nameservers: management.dns.nameservers,
+                domain: domain,
+                searchDomains: management.dns.searchDomains,
+                options: management.dns.options
+            )
+        )
     }
 
     static func resolveRuntimeHandler(

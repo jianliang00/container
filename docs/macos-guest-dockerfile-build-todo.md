@@ -476,6 +476,7 @@ These are not missing features. They are engineering follow-up tasks on top of a
   - [ ] replace repeated `/usr/bin/tar -rf` with a single tar writer or streaming writer
   - [ ] turn `Disk.img -> tar -> zstd -> sha256/size` into a single-pass streaming pipeline
   - [ ] avoid extra cross-volume copies between staging tar and final path for `type=tar`
+  - [ ] add progress reporting for the post-build packaging/compression phase so long chunking work does not look stalled
 - [x] formal darwin semantics for `type=local`
 - [ ] extend `fs` metadata operations
   - `chmod`

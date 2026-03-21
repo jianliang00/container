@@ -97,6 +97,8 @@ The first phase should avoid hand-writing a full Dockerfile parser or front-end.
 3. In phase 1, commit only once at the end of the stage and use that as the stage output. Fine-grained instruction checkpoints are out of scope.
 4. In phase 2, reuse stage outputs for multi-stage `FROM` and `COPY --from`.
 
+For networking, these temporary build VMs stay on the compatibility backend (`virtualizationNAT`) in phase 1. They do not opt into `vmnetShared` until guest-side static networking exists independently of the runtime guest-agent path.
+
 ## 4. Instruction Semantics and Support Matrix
 
 | Instruction | Phase 1 | Handling |

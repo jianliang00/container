@@ -33,7 +33,7 @@ public struct DiskLayout: Codable, Sendable {
     /// Per-chunk metadata.
     public let chunks: [ChunkInfo]
 
-    public static let defaultChunkSize: Int64 = 1_073_741_824 // 1 GiB
+    public static let defaultChunkSize: Int64 = 1_073_741_824  // 1 GiB
 
     public struct Compression: Codable, Sendable {
         public let type: String

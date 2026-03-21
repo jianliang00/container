@@ -262,8 +262,7 @@ struct MacOSDiskChunkerTests {
 
         #expect(try Data(contentsOf: rebuiltURL) == Data(contentsOf: childDiskURL))
         #expect(
-            Set(try FileManager.default.contentsOfDirectory(atPath: childBlobsDir.path)) ==
-                Set(childResults.map { $0.blobURL.lastPathComponent })
+            Set(try FileManager.default.contentsOfDirectory(atPath: childBlobsDir.path)) == Set(childResults.map { $0.blobURL.lastPathComponent })
         )
     }
 

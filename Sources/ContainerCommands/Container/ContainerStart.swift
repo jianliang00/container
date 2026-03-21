@@ -94,7 +94,8 @@ extension Application {
 
                 let process = try await client.bootstrap(id: container.id, stdio: io.stdio, dynamicEnv: env)
                 progress.finish()
-                let startupMessage = container.configuration.macosGuest == nil
+                let startupMessage =
+                    container.configuration.macosGuest == nil
                     ? nil
                     : "Waiting for macOS guest..."
 

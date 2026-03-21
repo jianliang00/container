@@ -368,7 +368,7 @@ actor MacOSSidecarService {
     private var vmDelegate: VMDelegate?
     private var vmWindow: UnsafeSendableBox<NSWindow>?
     private var vmWindowView: UnsafeSendableBox<VZVirtualMachineView>?
-    private var networkAllocations: [MacOSGuestNetworkAllocation] = []
+    private var networkLease: MacOSGuestNetworkLease?
     private var ownedVMNetNetworks: [ManagedVMNetNetwork] = []
     private var state: State = .created
 
@@ -545,7 +545,7 @@ actor MacOSSidecarService {
     ) async throws {
         guard let request = try MacOSGuestNetworkBootstrap.makeRequest(
             containerConfig: containerConfig,
-            allocations: networkAllocations
+            lease: networkLease
         ) else {
             return
         }
@@ -652,9 +652,19 @@ actor MacOSSidecarService {
         ]
         let networkBackend = MacOSNetworkBackendFactory.backend(for: containerConfig)
         log.info("resolved macOS guest network backend", metadata: ["backend": "\(networkBackend.backendID.rawValue)"])
-        let preparedNetwork = try await networkBackend.prepareNetwork(containerConfig: containerConfig, log: log)
-        networkAllocations = preparedNetwork.allocations
+        let existingLease = try MacOSGuestNetworkLeaseStore.load(from: rootURL)
+        let preparedNetwork = try await networkBackend.prepareNetwork(
+            containerConfig: containerConfig,
+            existingLease: existingLease,
+            log: log
+        )
+        networkLease = preparedNetwork.lease
         ownedVMNetNetworks = preparedNetwork.ownedNetworks
+        if let lease = preparedNetwork.lease {
+            try MacOSGuestNetworkLeaseStore.save(lease, in: rootURL)
+        } else {
+            try MacOSGuestNetworkLeaseStore.remove(from: rootURL)
+        }
         vmConfiguration.networkDevices = preparedNetwork.devices
         vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         vmConfiguration.directorySharingDevices = try createDirectorySharingDevices(containerConfig: containerConfig)
@@ -668,31 +678,42 @@ actor MacOSSidecarService {
     }
 
     private func releasePreparedNetworkResources() async {
-        let allocations = networkAllocations
-        networkAllocations = []
+        let lease = networkLease ?? (try? MacOSGuestNetworkLeaseStore.load(from: rootURL)) ?? nil
+        networkLease = nil
         ownedVMNetNetworks = []
+        guard let lease else {
+            return
+        }
 
-        for allocation in allocations {
-            let client = NetworkClient(id: allocation.network)
+        var releaseFailed = false
+
+        for leasedInterface in lease.interfaces {
+            let attachment = leasedInterface.attachment
+            let client = NetworkClient(id: attachment.network)
             do {
-                try await client.deallocate(hostname: allocation.hostname)
+                try await client.deallocate(hostname: attachment.hostname)
                 log.info(
                     "released macOS guest network allocation",
                     metadata: [
-                        "network": "\(allocation.network)",
-                        "hostname": "\(allocation.hostname)",
+                        "network": "\(attachment.network)",
+                        "hostname": "\(attachment.hostname)",
                     ]
                 )
             } catch {
+                releaseFailed = true
                 log.warning(
                     "failed to release macOS guest network allocation",
                     metadata: [
-                        "network": "\(allocation.network)",
-                        "hostname": "\(allocation.hostname)",
+                        "network": "\(attachment.network)",
+                        "hostname": "\(attachment.hostname)",
                         "error": "\(error)",
                     ]
                 )
             }
+        }
+
+        if !releaseFailed {
+            try? MacOSGuestNetworkLeaseStore.remove(from: rootURL)
         }
     }
 

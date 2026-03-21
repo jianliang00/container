@@ -33,11 +33,20 @@ struct MacOSGuestNetworkBootstrapTests {
             searchDomains: ["svc.cluster.local"],
             options: ["ndots:5"]
         )
-        let allocation = try makeAllocation(hostname: "guest-1")
+        let lease = try makeLease(
+            backend: .vmnetShared,
+            hostname: "guest-1",
+            dns: .init(
+                nameservers: ["9.9.9.9"],
+                domain: "cluster.local",
+                searchDomains: ["svc.cluster.local"],
+                options: ["ndots:5"]
+            )
+        )
 
         let builtRequest = try MacOSGuestNetworkBootstrap.makeRequest(
             containerConfig: config,
-            allocations: [allocation]
+            lease: lease
         )
         let request = try #require(builtRequest)
 
@@ -59,11 +68,20 @@ struct MacOSGuestNetworkBootstrapTests {
     func vmnetSharedUsesGatewayAsDefaultNameserverWhenDNSNameserversAreEmpty() throws {
         var config = try makeConfiguration(backend: .vmnetShared)
         config.dns = .init(nameservers: [], domain: nil, searchDomains: [], options: [])
-        let allocation = try makeAllocation(hostname: "guest-1")
+        let lease = try makeLease(
+            backend: .vmnetShared,
+            hostname: "guest-1",
+            dns: .init(
+                nameservers: ["192.168.64.1"],
+                domain: nil,
+                searchDomains: [],
+                options: []
+            )
+        )
 
         let builtRequest = try MacOSGuestNetworkBootstrap.makeRequest(
             containerConfig: config,
-            allocations: [allocation]
+            lease: lease
         )
         let request = try #require(builtRequest)
 
@@ -73,11 +91,11 @@ struct MacOSGuestNetworkBootstrapTests {
     @Test
     func virtualizationNATSkipsGuestNetworkBootstrap() throws {
         let config = try makeConfiguration(backend: .virtualizationNAT)
-        let allocation = try makeAllocation(hostname: "guest-1")
+        let lease = try makeLease(backend: .vmnetShared, hostname: "guest-1")
 
         let request = try MacOSGuestNetworkBootstrap.makeRequest(
             containerConfig: config,
-            allocations: [allocation]
+            lease: lease
         )
 
         #expect(request == nil)
@@ -115,19 +133,27 @@ private func makeConfiguration(
     return config
 }
 
-private func makeAllocation(hostname: String) throws -> MacOSGuestNetworkAllocation {
+private func makeLease(
+    backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend,
+    hostname: String,
+    dns: Attachment.DNSConfiguration? = nil
+) throws -> MacOSGuestNetworkLease {
     let attachment = Attachment(
         network: "default",
         hostname: hostname,
         ipv4Address: try CIDRv4("192.168.64.2/24"),
         ipv4Gateway: try IPv4Address("192.168.64.1"),
         ipv6Address: nil,
-        macAddress: try MACAddress("02:42:ac:11:00:02")
+        macAddress: try MACAddress("02:42:ac:11:00:02"),
+        dns: dns
     )
-    return MacOSGuestNetworkAllocation(
-        network: "default",
-        hostname: hostname,
-        attachment: attachment
+    return MacOSGuestNetworkLease(
+        interfaces: [
+            .init(
+                backend: backend,
+                attachment: attachment
+            )
+        ]
     )
 }
 #endif

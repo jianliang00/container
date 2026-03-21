@@ -22,68 +22,52 @@ import RuntimeMacOSSidecarShared
 enum MacOSGuestNetworkBootstrap {
     static func makeRequest(
         containerConfig: ContainerConfiguration,
-        allocations: [MacOSGuestNetworkAllocation]
+        lease: MacOSGuestNetworkLease?
     ) throws -> MacOSGuestNetworkConfigurationRequest? {
         guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
             return nil
         }
-        guard !allocations.isEmpty else {
+        guard let lease, !lease.interfaces.isEmpty else {
             return nil
         }
 
-        let interfaces = try allocations.map { allocation in
-            guard let macAddress = allocation.attachment.macAddress?.description else {
+        let interfaces = try lease.interfaces.map { leasedInterface in
+            let attachment = leasedInterface.attachment
+            guard let macAddress = attachment.macAddress?.description else {
                 throw ContainerizationError(
                     .invalidState,
-                    message: "guest network bootstrap requires a MAC address for network \(allocation.network)"
+                    message: "guest network bootstrap requires a MAC address for network \(attachment.network)"
                 )
             }
             return MacOSGuestNetworkInterfaceConfiguration(
-                networkID: allocation.network,
-                hostname: allocation.hostname,
+                networkID: attachment.network,
+                hostname: attachment.hostname,
                 macAddress: macAddress,
-                ipv4Address: allocation.attachment.ipv4Address.address.description,
-                ipv4PrefixLength: allocation.attachment.ipv4Address.prefix.length,
-                ipv4Gateway: allocation.attachment.ipv4Gateway.description
+                ipv4Address: attachment.ipv4Address.address.description,
+                ipv4PrefixLength: attachment.ipv4Address.prefix.length,
+                ipv4Gateway: attachment.ipv4Gateway.description
             )
         }
 
         return MacOSGuestNetworkConfigurationRequest(
             interfaces: interfaces,
             primaryInterfaceIndex: 0,
-            dns: makeDNSConfiguration(containerConfig: containerConfig, allocations: allocations)
+            dns: makeDNSConfiguration(lease: lease)
         )
     }
 
     private static func makeDNSConfiguration(
-        containerConfig: ContainerConfiguration,
-        allocations: [MacOSGuestNetworkAllocation]
+        lease: MacOSGuestNetworkLease
     ) -> MacOSGuestDNSConfiguration? {
-        guard let dns = containerConfig.dns else {
+        guard let dns = lease.attachments.first?.dns else {
             return nil
         }
 
-        let nameservers: [String]
-        if dns.nameservers.isEmpty {
-            nameservers = orderedUniqueValues(allocations.map { $0.attachment.ipv4Gateway.description })
-        } else {
-            nameservers = dns.nameservers
-        }
-
         return MacOSGuestDNSConfiguration(
-            nameservers: nameservers,
+            nameservers: dns.nameservers,
             domain: dns.domain,
             searchDomains: dns.searchDomains,
             options: dns.options
         )
-    }
-
-    private static func orderedUniqueValues(_ values: [String]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for value in values where seen.insert(value).inserted {
-            result.append(value)
-        }
-        return result
     }
 }

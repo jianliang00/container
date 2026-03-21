@@ -25,14 +25,8 @@ import vmnet
 
 struct PreparedMacOSNetwork {
     let devices: [VZNetworkDeviceConfiguration]
-    let allocations: [MacOSGuestNetworkAllocation]
+    let lease: MacOSGuestNetworkLease?
     let ownedNetworks: [ManagedVMNetNetwork]
-}
-
-struct MacOSGuestNetworkAllocation: Sendable {
-    let network: String
-    let hostname: String
-    let attachment: Attachment
 }
 
 final class ManagedVMNetNetwork: @unchecked Sendable {
@@ -54,6 +48,7 @@ protocol MacOSNetworkBackend {
 
     func prepareNetwork(
         containerConfig: ContainerConfiguration,
+        existingLease: MacOSGuestNetworkLease?,
         log: Logger
     ) async throws -> PreparedMacOSNetwork
 }
@@ -74,13 +69,14 @@ struct VirtualizationNATNetworkBackend: MacOSNetworkBackend {
 
     func prepareNetwork(
         containerConfig: ContainerConfiguration,
+        existingLease: MacOSGuestNetworkLease?,
         log: Logger
     ) async throws -> PreparedMacOSNetwork {
         let device = VZVirtioNetworkDeviceConfiguration()
         device.attachment = VZNATNetworkDeviceAttachment()
         return PreparedMacOSNetwork(
             devices: [device],
-            allocations: [],
+            lease: nil,
             ownedNetworks: []
         )
     }
@@ -91,6 +87,7 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
 
     func prepareNetwork(
         containerConfig: ContainerConfiguration,
+        existingLease: MacOSGuestNetworkLease?,
         log: Logger
     ) async throws -> PreparedMacOSNetwork {
         guard #available(macOS 26, *) else {
@@ -100,13 +97,160 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
             )
         }
 
-        var allocations: [MacOSGuestNetworkAllocation] = []
+        if let existingLease,
+            let recovered = try await recoverPreparedNetwork(
+                containerConfig: containerConfig,
+                lease: existingLease,
+                log: log
+            )
+        {
+            return recovered
+        }
+
+        return try await allocatePreparedNetwork(
+            containerConfig: containerConfig,
+            log: log
+        )
+    }
+
+    @available(macOS 26, *)
+    private func recoverPreparedNetwork(
+        containerConfig: ContainerConfiguration,
+        lease: MacOSGuestNetworkLease,
+        log: Logger
+    ) async throws -> PreparedMacOSNetwork? {
+        let requests = containerConfig.macOSGuestNetworkRequests()
+        guard lease.interfaces.count == requests.count else {
+            log.info(
+                "skipping macOS guest network lease recovery due to interface count mismatch",
+                metadata: [
+                    "lease_interfaces": "\(lease.interfaces.count)",
+                    "requested_interfaces": "\(requests.count)",
+                ]
+            )
+            return nil
+        }
+
+        var leaseByKey: [LeaseKey: MacOSGuestNetworkLease.Interface] = [:]
+        for leasedInterface in lease.interfaces {
+            let key = LeaseKey(
+                network: leasedInterface.attachment.network,
+                hostname: leasedInterface.attachment.hostname
+            )
+            guard leaseByKey[key] == nil else {
+                log.warning(
+                    "skipping macOS guest network lease recovery due to duplicate interface entry",
+                    metadata: [
+                        "network": "\(leasedInterface.attachment.network)",
+                        "hostname": "\(leasedInterface.attachment.hostname)",
+                    ]
+                )
+                return nil
+            }
+            leaseByKey[key] = leasedInterface
+        }
+
+        var liveAttachments: [Attachment] = []
         var ownedNetworks: [ManagedVMNetNetwork] = []
         var preparedDevices: [VZNetworkDeviceConfiguration] = []
         var networkRefs: [String: ManagedVMNetNetwork] = [:]
 
         do {
-            let requests = containerConfig.macOSGuestNetworkRequests()
+            for request in requests {
+                let key = LeaseKey(network: request.network, hostname: request.hostname)
+                guard let leasedInterface = leaseByKey[key] else {
+                    log.info(
+                        "skipping macOS guest network lease recovery due to missing requested interface",
+                        metadata: [
+                            "network": "\(request.network)",
+                            "hostname": "\(request.hostname)",
+                        ]
+                    )
+                    return nil
+                }
+                guard leasedInterface.backend == backendID else {
+                    log.info(
+                        "skipping macOS guest network lease recovery due to backend mismatch",
+                        metadata: [
+                            "network": "\(request.network)",
+                            "hostname": "\(request.hostname)",
+                            "lease_backend": "\(leasedInterface.backend.rawValue)",
+                            "expected_backend": "\(backendID.rawValue)",
+                        ]
+                    )
+                    return nil
+                }
+                if let requestedMAC = request.macAddress,
+                    leasedInterface.attachment.macAddress != requestedMAC
+                {
+                    log.info(
+                        "skipping macOS guest network lease recovery due to MAC mismatch",
+                        metadata: [
+                            "network": "\(request.network)",
+                            "hostname": "\(request.hostname)",
+                            "lease_mac": "\(leasedInterface.attachment.macAddress?.description ?? "-")",
+                            "requested_mac": "\(requestedMAC.description)",
+                        ]
+                    )
+                    return nil
+                }
+
+                let client = NetworkClient(id: request.network)
+                let (attachment, additionalData) = try await client.allocate(
+                    hostname: leasedInterface.attachment.hostname,
+                    macAddress: leasedInterface.attachment.macAddress
+                )
+
+                let managedNetwork = try resolveManagedNetwork(
+                    networkID: request.network,
+                    additionalData: additionalData,
+                    networkRefs: &networkRefs,
+                    ownedNetworks: &ownedNetworks,
+                    log: log
+                )
+
+                liveAttachments.append(attachment)
+                preparedDevices.append(
+                    try createDeviceConfiguration(
+                        attachment: attachment,
+                        network: managedNetwork.reference
+                    )
+                )
+            }
+
+            log.info(
+                "recovered macOS guest network state from persisted lease",
+                metadata: ["interfaces": "\(liveAttachments.count)"]
+            )
+            return PreparedMacOSNetwork(
+                devices: preparedDevices,
+                lease: makeLease(
+                    containerConfig: containerConfig,
+                    attachments: liveAttachments
+                ),
+                ownedNetworks: ownedNetworks
+            )
+        } catch {
+            log.warning(
+                "failed to recover macOS guest network state from persisted lease",
+                metadata: ["error": "\(error)"]
+            )
+            return nil
+        }
+    }
+
+    @available(macOS 26, *)
+    private func allocatePreparedNetwork(
+        containerConfig: ContainerConfiguration,
+        log: Logger
+    ) async throws -> PreparedMacOSNetwork {
+        let requests = containerConfig.macOSGuestNetworkRequests()
+        var liveAttachments: [Attachment] = []
+        var ownedNetworks: [ManagedVMNetNetwork] = []
+        var preparedDevices: [VZNetworkDeviceConfiguration] = []
+        var networkRefs: [String: ManagedVMNetNetwork] = [:]
+
+        do {
             for request in requests {
                 let client = NetworkClient(id: request.network)
                 let (attachment, additionalData) = try await client.allocate(
@@ -114,51 +258,77 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                     macAddress: request.macAddress
                 )
 
-                let allocation = MacOSGuestNetworkAllocation(
-                    network: request.network,
-                    hostname: request.hostname,
-                    attachment: attachment
+                let managedNetwork = try resolveManagedNetwork(
+                    networkID: request.network,
+                    additionalData: additionalData,
+                    networkRefs: &networkRefs,
+                    ownedNetworks: &ownedNetworks,
+                    log: log
                 )
-                allocations.append(allocation)
 
-                let managedNetwork: ManagedVMNetNetwork
-                if let existing = networkRefs[request.network] {
-                    managedNetwork = existing
-                } else {
-                    guard let additionalData else {
-                        throw ContainerizationError(
-                            .unsupported,
-                            message: "network \(request.network) does not expose a serialized vmnet network reference"
-                        )
-                    }
-                    let created = try createManagedNetwork(
-                        networkID: request.network,
-                        additionalData: additionalData,
-                        log: log
+                liveAttachments.append(attachment)
+                preparedDevices.append(
+                    try createDeviceConfiguration(
+                        attachment: attachment,
+                        network: managedNetwork.reference
                     )
-                    networkRefs[request.network] = created
-                    ownedNetworks.append(created)
-                    managedNetwork = created
-                }
-
-                preparedDevices.append(try createDeviceConfiguration(
-                    attachment: attachment,
-                    network: managedNetwork.reference
-                ))
+                )
             }
 
             return PreparedMacOSNetwork(
                 devices: preparedDevices,
-                allocations: allocations,
+                lease: makeLease(
+                    containerConfig: containerConfig,
+                    attachments: liveAttachments
+                ),
                 ownedNetworks: ownedNetworks
             )
         } catch {
-            for allocation in allocations {
-                let client = NetworkClient(id: allocation.network)
-                try? await client.deallocate(hostname: allocation.hostname)
+            for attachment in liveAttachments {
+                let client = NetworkClient(id: attachment.network)
+                try? await client.deallocate(hostname: attachment.hostname)
             }
             throw error
         }
+    }
+
+    @available(macOS 26, *)
+    private func resolveManagedNetwork(
+        networkID: String,
+        additionalData: XPCMessage?,
+        networkRefs: inout [String: ManagedVMNetNetwork],
+        ownedNetworks: inout [ManagedVMNetNetwork],
+        log: Logger
+    ) throws -> ManagedVMNetNetwork {
+        if let existing = networkRefs[networkID] {
+            return existing
+        }
+        guard let additionalData else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "network \(networkID) does not expose a serialized vmnet network reference"
+            )
+        }
+        let created = try createManagedNetwork(
+            networkID: networkID,
+            additionalData: additionalData,
+            log: log
+        )
+        networkRefs[networkID] = created
+        ownedNetworks.append(created)
+        return created
+    }
+
+    private func makeLease(
+        containerConfig: ContainerConfiguration,
+        attachments: [Attachment]
+    ) -> MacOSGuestNetworkLease {
+        let projectedAttachments = containerConfig.macOSGuestReportedNetworkAttachments(attachments)
+        return MacOSGuestNetworkLease(
+            interfaces: projectedAttachments.map {
+                .init(backend: backendID, attachment: $0)
+            }
+        )
     }
 
     @available(macOS 26, *)
@@ -195,5 +365,10 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
             device.macAddress = vzMACAddress
         }
         return device
+    }
+
+    private struct LeaseKey: Hashable {
+        let network: String
+        let hostname: String
     }
 }

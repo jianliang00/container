@@ -463,6 +463,10 @@ These are not missing features. They are engineering follow-up tasks on top of a
 - [ ] continue expanding automated tests for guest-agent and protocol failure paths
   - disconnect, EOF, request matching, and session cleanup are already covered in sidecar/shared/client tests
   - next focus: bad frames in guest-agent, SIGPIPE, TTY close, EOF, and disconnect handling
+- [ ] investigate intermittent darwin build hang after the guest `RUN` step completes
+  - observed locally on 2026-03-21 while building from `ghcr.io/jianliang00/macos-base:26.3`
+  - the stage container stopped, `container-runtime-macos-sidecar` logged `sidecar control reader failed: unexpected EOF`, and the host `container build` process remained stuck instead of surfacing success or failure
+  - check whether this is a post-build packaging stall, a missed sidecar EOF/error propagation path, or a cleanup ordering race in the darwin build engine
 - [ ] `ADD URL`
   - host download
   - checksum and policy

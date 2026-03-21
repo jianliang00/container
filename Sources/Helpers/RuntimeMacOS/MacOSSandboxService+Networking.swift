@@ -19,12 +19,21 @@ import ContainerResource
 import Foundation
 
 extension MacOSSandboxService {
+    private struct GuestNetworkReleaseTarget {
+        let network: String
+        let hostname: String
+    }
+
     func currentGuestNetworkAttachments() async -> [Attachment] {
         guard
             let configuration,
             configuration.macosGuest?.networkBackend == .vmnetShared
         else {
             return []
+        }
+
+        if let lease = try? MacOSGuestNetworkLeaseStore.load(from: root) {
+            return lease.attachments
         }
 
         var attachments: [Attachment] = []
@@ -54,22 +63,40 @@ extension MacOSSandboxService {
             return
         }
 
-        for request in configuration.macOSGuestNetworkRequests() {
-            let client = NetworkClient(id: request.network)
+        let leases = (try? MacOSGuestNetworkLeaseStore.load(from: root)) ?? nil
+        let releaseTargets: [GuestNetworkReleaseTarget]
+        if let leases {
+            releaseTargets = leases.attachments.map {
+                GuestNetworkReleaseTarget(network: $0.network, hostname: $0.hostname)
+            }
+        } else {
+            releaseTargets = configuration.macOSGuestNetworkRequests().map {
+                GuestNetworkReleaseTarget(network: $0.network, hostname: $0.hostname)
+            }
+        }
+
+        var releaseFailed = false
+        for target in releaseTargets {
+            let client = NetworkClient(id: target.network)
             do {
-                try await client.deallocate(hostname: request.hostname)
+                try await client.deallocate(hostname: target.hostname)
                 writeContainerLog(
                     Data(
-                        ("released guest network allocation network=\(request.network) hostname=\(request.hostname)\n").utf8
+                        ("released guest network allocation network=\(target.network) hostname=\(target.hostname)\n").utf8
                     )
                 )
             } catch {
+                releaseFailed = true
                 writeContainerLog(
                     Data(
-                        ("failed to release guest network allocation network=\(request.network) hostname=\(request.hostname): \(error)\n").utf8
+                        ("failed to release guest network allocation network=\(target.network) hostname=\(target.hostname): \(error)\n").utf8
                     )
                 )
             }
+        }
+
+        if !releaseFailed {
+            try? MacOSGuestNetworkLeaseStore.remove(from: root)
         }
     }
 }

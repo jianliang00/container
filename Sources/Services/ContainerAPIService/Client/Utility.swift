@@ -146,12 +146,6 @@ public struct Utility {
             if management.initImage != nil {
                 throw ContainerizationError(.unsupported, message: "--init-image is not supported for --os darwin")
             }
-            if !management.networks.isEmpty {
-                throw ContainerizationError(
-                    .unsupported,
-                    message: "--network is not yet supported for --os darwin; macOS guest network attachments remain an internal API"
-                )
-            }
             if !management.publishPorts.isEmpty {
                 throw ContainerizationError(.unsupported, message: "--publish is not supported for --os darwin")
             }
@@ -293,7 +287,11 @@ public struct Utility {
         config.virtualization = management.virtualization
         let resolvedMacOSGuestNetworking =
             isMacOSRuntime
-            ? resolveMacOSGuestNetworking(management: management, override: macOSGuestNetworking)
+            ? try resolveMacOSGuestNetworking(
+                containerID: id,
+                management: management,
+                override: macOSGuestNetworking
+            )
             : nil
 
         if isMacOSRuntime {
@@ -372,7 +370,8 @@ public struct Utility {
             config.macosGuest = .init(
                 snapshotEnabled: false,
                 guiEnabled: management.gui,
-                agentPort: defaultMacOSGuestAgentPort
+                agentPort: defaultMacOSGuestAgentPort,
+                networkBackend: resolvedMacOSGuestNetworking == nil ? .virtualizationNAT : .vmnetShared
             )
         }
 
@@ -380,24 +379,69 @@ public struct Utility {
     }
 
     static func resolveMacOSGuestNetworking(
+        containerID: String,
         management: Flags.Management,
         override: MacOSGuestNetworkingOverride?
-    ) -> (networks: [AttachmentConfiguration], dns: ContainerConfiguration.DNSConfiguration?) {
-        guard let override else {
-            return ([], nil)
+    ) throws -> (networks: [AttachmentConfiguration], dns: ContainerConfiguration.DNSConfiguration?)? {
+        if let override {
+            guard !management.dnsDisabled else {
+                return (override.networks, nil)
+            }
+
+            if let dns = override.dns {
+                return (override.networks, dns)
+            }
+
+            let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
+            return (
+                override.networks,
+                .init(
+                    nameservers: management.dns.nameservers,
+                    domain: domain,
+                    searchDomains: management.dns.searchDomains,
+                    options: management.dns.options
+                )
+            )
         }
+
+        let hasExplicitDNS =
+            !management.dns.nameservers.isEmpty
+            || management.dns.domain != nil
+            || !management.dns.searchDomains.isEmpty
+            || !management.dns.options.isEmpty
+
+        guard !management.networks.isEmpty || hasExplicitDNS else {
+            return nil
+        }
+
+        guard management.networks.count <= 1 else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "--os darwin currently supports at most one --network attachment"
+            )
+        }
+
+        let parsedNetworks = try management.networks.map { try Parser.network($0) }
+        if parsedNetworks.contains(where: { $0.name == ClientNetwork.noNetworkName }) {
+            throw ContainerizationError(
+                .unsupported,
+                message: "--network \(ClientNetwork.noNetworkName) is not supported for --os darwin"
+            )
+        }
+
+        let attachments = try getAttachmentConfigurations(
+            containerId: containerID,
+            builtinNetworkId: ClientNetwork.defaultNetworkName,
+            networks: parsedNetworks
+        )
 
         guard !management.dnsDisabled else {
-            return (override.networks, nil)
-        }
-
-        if let dns = override.dns {
-            return (override.networks, dns)
+            return (attachments, nil)
         }
 
         let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
         return (
-            override.networks,
+            attachments,
             .init(
                 nameservers: management.dns.nameservers,
                 domain: domain,

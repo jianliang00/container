@@ -31,11 +31,12 @@ struct MacOSNetworkBackendTests {
         let backend = MacOSNetworkBackendFactory.backend(for: config)
         let prepared = try await backend.prepareNetwork(
             containerConfig: config,
+            existingLease: nil,
             log: Logger(label: "RuntimeMacOSSidecarTests")
         )
 
         #expect(backend.backendID == .virtualizationNAT)
-        #expect(prepared.allocations.isEmpty)
+        #expect(prepared.lease == nil)
         #expect(prepared.ownedNetworks.isEmpty)
         #expect(prepared.devices.count == 1)
 

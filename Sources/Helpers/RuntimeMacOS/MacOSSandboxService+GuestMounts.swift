@@ -49,7 +49,8 @@ extension MacOSSandboxService {
                 terminal: false,
                 user: .id(uid: 0, gid: 0)
             ),
-            stdio: [nil, nil, nil]
+            stdio: [nil, nil, nil],
+            includeInSnapshots: false
         )
 
         writeContainerLog(

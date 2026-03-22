@@ -336,21 +336,34 @@ struct MacOSBuildEngine {
                     .appendingPathComponent("containers")
                     .appendingPathComponent(runtime.containerID)
                 let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
+                let packagingProgress: MacOSImagePackager.ProgressHandler? = input.quiet ? nil : { @Sendable message in
+                    writeStderrLine(message)
+                }
                 if export.type == "local" {
+                    if !input.quiet {
+                        writeStderrLine("Exporting local macOS image directory")
+                    }
                     let exportStartedAt = Date()
                     try exportLocalImageDirectory(from: bundleURL, to: archiveURL)
+                    if !input.quiet {
+                        writeStderrLine("Finished local macOS image export")
+                    }
                     MacOSExportProfiler.log(
                         "build.localExport: \(MacOSExportProfiler.format(Date().timeIntervalSince(exportStartedAt)))"
                     )
                 } else {
                     let parentDiskSource = try await baseImage.macOSChunkedDiskSource(for: buildPlatform)
+                    if !input.quiet {
+                        writeStderrLine("Exporting macOS OCI image")
+                    }
                     let packageStartedAt = Date()
                     try MacOSImagePackager.package(
                         imageDirectory: bundleURL,
                         outputTar: archiveURL,
                         reference: input.tags.first,
                         imageConfig: state.finalImage(labelOverrides: cliLabels),
-                        parentDiskSource: parentDiskSource
+                        parentDiskSource: parentDiskSource,
+                        progress: packagingProgress
                     )
                     MacOSExportProfiler.log(
                         "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"

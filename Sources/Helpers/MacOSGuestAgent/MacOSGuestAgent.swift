@@ -263,14 +263,16 @@ final class AgentConnection: @unchecked Sendable {
             return
         }
 
-        if let identity = try GuestAgentExecIdentity.resolve(from: frame) {
+        let terminal = frame.terminal == true
+        let explicitIdentity = try GuestAgentExecIdentity.resolve(from: frame)
+        if terminal || explicitIdentity != nil {
             let session = try SpawnedProcessSession.spawn(
                 executable: executable,
                 arguments: frame.arguments ?? [],
                 environment: frame.environment ?? [],
                 workingDirectory: frame.workingDirectory,
-                terminal: frame.terminal == true,
-                identity: identity,
+                terminal: terminal,
+                identity: explicitIdentity ?? .currentProcess(),
                 connection: self
             )
             self.session = session
@@ -286,7 +288,7 @@ final class AgentConnection: @unchecked Sendable {
             process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
         }
 
-        if frame.terminal == true {
+        if terminal {
             var master: Int32 = 0
             var slave: Int32 = 0
             guard openpty(&master, &slave, nil, nil, nil) == 0 else {
@@ -575,6 +577,10 @@ struct GuestAgentExecIdentity {
     let gid: gid_t
     let supplementalGroups: [gid_t]
 
+    static func currentProcess() -> Self {
+        .init(uid: geteuid(), gid: getegid(), supplementalGroups: [])
+    }
+
     static func resolve(from frame: GuestAgentFrame) throws -> Self? {
         let supplementalGroups = frame.supplementalGroups ?? []
         if let user = frame.user, !user.isEmpty {
@@ -837,6 +843,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
 
     func closeStdin() {
         if terminal {
+            sendTerminalEOF(masterHandle)
             return
         }
         try? stdinHandle?.close()
@@ -1109,6 +1116,9 @@ private func runChild(
         _ = Darwin.close(stderrFD)
     }
 
+    let currentUID = geteuid()
+    let currentGID = getegid()
+
     if !identity.supplementalGroups.isEmpty {
         var groups = identity.supplementalGroups
         let result = groups.withUnsafeMutableBufferPointer { buffer in
@@ -1118,10 +1128,10 @@ private func runChild(
             fail(Int32(errno))
         }
     }
-    if setgid(identity.gid) != 0 {
+    if identity.gid != currentGID, setgid(identity.gid) != 0 {
         fail(Int32(errno))
     }
-    if setuid(identity.uid) != 0 {
+    if identity.uid != currentUID, setuid(identity.uid) != 0 {
         fail(Int32(errno))
     }
 
@@ -1194,7 +1204,7 @@ private final class ProcessSession: GuestAgentProcessSession, @unchecked Sendabl
 
     func closeStdin() {
         if terminal {
-            // No-op for pty stdin close in this MVP.
+            sendTerminalEOF(masterHandle)
         } else {
             try? stdinPipe?.fileHandleForWriting.close()
         }
@@ -1433,6 +1443,16 @@ private func environmentDictionary(from envList: [String]) -> [String: String] {
         result[String(parts[0])] = String(parts[1])
     }
     return result
+}
+
+private func sendTerminalEOF(_ masterHandle: FileHandle?) {
+    guard let masterHandle else {
+        return
+    }
+
+    // PTY stdin/stdout/stderr share the same master FD. Inject the terminal EOF
+    // control character so host-side stdin close does not tear down output.
+    try? masterHandle.write(contentsOf: Data([0x04]))
 }
 
 private func configureGuestAgentSignals() {

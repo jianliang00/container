@@ -26,7 +26,7 @@ import Testing
 struct MacOSGuestNetworkBootstrapTests {
     @Test
     func vmnetSharedBuildsGuestNetworkRequest() throws {
-        var config = try makeConfiguration(backend: .vmnetShared)
+        var config = makeConfiguration(backend: .vmnetShared)
         config.dns = .init(
             nameservers: ["9.9.9.9"],
             domain: "cluster.local",
@@ -66,7 +66,7 @@ struct MacOSGuestNetworkBootstrapTests {
 
     @Test
     func vmnetSharedUsesGatewayAsDefaultNameserverWhenDNSNameserversAreEmpty() throws {
-        var config = try makeConfiguration(backend: .vmnetShared)
+        var config = makeConfiguration(backend: .vmnetShared)
         config.dns = .init(nameservers: [], domain: nil, searchDomains: [], options: [])
         let lease = try makeLease(
             backend: .vmnetShared,
@@ -90,7 +90,7 @@ struct MacOSGuestNetworkBootstrapTests {
 
     @Test
     func virtualizationNATSkipsGuestNetworkBootstrap() throws {
-        let config = try makeConfiguration(backend: .virtualizationNAT)
+        let config = makeConfiguration(backend: .virtualizationNAT)
         let lease = try makeLease(backend: .vmnetShared, hostname: "guest-1")
 
         let request = try MacOSGuestNetworkBootstrap.makeRequest(
@@ -104,7 +104,7 @@ struct MacOSGuestNetworkBootstrapTests {
 
 private func makeConfiguration(
     backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend
-) throws -> ContainerConfiguration {
+) -> ContainerConfiguration {
     let image = ImageDescription(
         reference: "example/macos:latest",
         descriptor: .init(
@@ -136,9 +136,9 @@ private func makeConfiguration(
 private func makeLease(
     backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend,
     hostname: String,
-    dns: Attachment.DNSConfiguration? = nil
+    dns: ContainerResource.Attachment.DNSConfiguration? = nil
 ) throws -> MacOSGuestNetworkLease {
-    let attachment = Attachment(
+    let attachment = ContainerResource.Attachment(
         network: "default",
         hostname: hostname,
         ipv4Address: try CIDRv4("192.168.64.2/24"),

@@ -47,4 +47,10 @@ public enum SandboxRoutes: String {
     case shutdown = "com.apple.container.sandbox/shutdown"
     /// Get statistics for the sandbox.
     case statistics = "com.apple.container.sandbox/statistics"
+    /// Prepare sandbox networking and persist the lease-backed state.
+    case prepareNetwork = "com.apple.container.sandbox/prepareNetwork"
+    /// Inspect sandbox networking from persisted or live state.
+    case inspectNetwork = "com.apple.container.sandbox/inspectNetwork"
+    /// Release sandbox networking and remove persisted lease state.
+    case releaseNetwork = "com.apple.container.sandbox/releaseNetwork"
 }

@@ -98,7 +98,8 @@ struct ContainerConfigurationMacOSTests {
         config.macosGuest = .init(snapshotEnabled: true, guiEnabled: false, agentPort: 27000)
 
         let encoded = try JSONEncoder().encode(config)
-        var container = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let jsonObject = try JSONSerialization.jsonObject(with: encoded)
+        var container = try #require(jsonObject as? [String: Any])
         var macosGuest = try #require(container["macosGuest"] as? [String: Any])
         macosGuest.removeValue(forKey: "networkBackend")
         container["macosGuest"] = macosGuest

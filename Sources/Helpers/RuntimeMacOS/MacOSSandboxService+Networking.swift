@@ -16,6 +16,9 @@
 
 import ContainerNetworkServiceClient
 import ContainerResource
+import ContainerSandboxServiceClient
+import ContainerXPC
+import ContainerizationError
 import Foundation
 
 extension MacOSSandboxService {
@@ -24,20 +27,89 @@ extension MacOSSandboxService {
         let hostname: String
     }
 
-    func currentGuestNetworkAttachments() async -> [Attachment] {
-        guard
-            let configuration,
-            configuration.macosGuest?.networkBackend == .vmnetShared
-        else {
-            return []
+    @Sendable
+    func prepareSandboxNetwork(_ message: XPCMessage) async throws -> XPCMessage {
+        let config = try loadContainerConfigurationForNetworkControl()
+        let networkState = try await prepareSandboxNetworkState(containerConfig: config)
+        let reply = message.reply()
+        try reply.setSandboxNetworkState(networkState)
+        return reply
+    }
+
+    @Sendable
+    func inspectSandboxNetwork(_ message: XPCMessage) async throws -> XPCMessage {
+        let config = try loadContainerConfigurationForNetworkControl()
+        let networkState = await inspectSandboxNetworkState(containerConfig: config)
+        let reply = message.reply()
+        try reply.setSandboxNetworkState(networkState)
+        return reply
+    }
+
+    @Sendable
+    func releaseSandboxNetwork(_ message: XPCMessage) async throws -> XPCMessage {
+        let config = try loadContainerConfigurationForNetworkControl()
+        try await releaseSandboxNetworkState(containerConfig: config)
+        return message.reply()
+    }
+
+    func prepareSandboxNetworkState(
+        containerConfig: ContainerConfiguration
+    ) async throws -> SandboxNetworkState {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
+            try? MacOSGuestNetworkLeaseStore.remove(from: root)
+            return SandboxNetworkState(attachments: [])
         }
 
-        if let lease = try? MacOSGuestNetworkLeaseStore.load(from: root) {
-            return lease.attachments
+        if let lease = try MacOSGuestNetworkLeaseStore.load(from: root) {
+            writeContainerLog(Data(("reused persisted guest network lease interfaces=\(lease.interfaces.count)\n").utf8))
+            return SandboxNetworkState(attachments: lease.attachments)
         }
 
         var attachments: [Attachment] = []
-        for request in configuration.macOSGuestNetworkRequests() {
+        do {
+            for request in containerConfig.macOSGuestNetworkRequests() {
+                let client = NetworkClient(id: request.network)
+                let (attachment, _) = try await client.allocate(
+                    hostname: request.hostname,
+                    macAddress: request.macAddress
+                )
+                attachments.append(attachment)
+            }
+
+            let projectedAttachments = containerConfig.macOSGuestReportedNetworkAttachments(attachments)
+            let lease = MacOSGuestNetworkLease(
+                interfaces: projectedAttachments.map {
+                    .init(backend: .vmnetShared, attachment: $0)
+                }
+            )
+            try MacOSGuestNetworkLeaseStore.save(lease, in: root)
+            writeContainerLog(Data(("prepared persisted guest network lease interfaces=\(projectedAttachments.count)\n").utf8))
+            return SandboxNetworkState(attachments: projectedAttachments)
+        } catch {
+            for attachment in attachments {
+                let client = NetworkClient(id: attachment.network)
+                try? await client.deallocate(hostname: attachment.hostname)
+            }
+            try? MacOSGuestNetworkLeaseStore.remove(from: root)
+            throw error
+        }
+    }
+
+    func inspectSandboxNetworkState(
+        containerConfig: ContainerConfiguration
+    ) async -> SandboxNetworkState {
+        guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
+            return SandboxNetworkState(attachments: [])
+        }
+
+        if let lease = try? MacOSGuestNetworkLeaseStore.load(from: root) {
+            return SandboxNetworkState(attachments: lease.attachments)
+        }
+
+        var attachments: [Attachment] = []
+        for request in containerConfig.macOSGuestNetworkRequests() {
             let client = NetworkClient(id: request.network)
             do {
                 guard let attachment = try await client.lookup(hostname: request.hostname) else {
@@ -52,25 +124,25 @@ extension MacOSSandboxService {
                 )
             }
         }
-        return configuration.macOSGuestReportedNetworkAttachments(attachments)
+        return SandboxNetworkState(attachments: containerConfig.macOSGuestReportedNetworkAttachments(attachments))
     }
 
-    func releaseGuestNetworkAllocationsIfNeeded() async {
-        guard
-            let configuration,
-            configuration.macosGuest?.networkBackend == .vmnetShared
-        else {
+    func releaseSandboxNetworkState(
+        containerConfig: ContainerConfiguration
+    ) async throws {
+        guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
+            try? MacOSGuestNetworkLeaseStore.remove(from: root)
             return
         }
 
-        let leases = (try? MacOSGuestNetworkLeaseStore.load(from: root)) ?? nil
+        let lease = try MacOSGuestNetworkLeaseStore.load(from: root)
         let releaseTargets: [GuestNetworkReleaseTarget]
-        if let leases {
-            releaseTargets = leases.attachments.map {
+        if let lease {
+            releaseTargets = lease.attachments.map {
                 GuestNetworkReleaseTarget(network: $0.network, hostname: $0.hostname)
             }
         } else {
-            releaseTargets = configuration.macOSGuestNetworkRequests().map {
+            releaseTargets = containerConfig.macOSGuestNetworkRequests().map {
                 GuestNetworkReleaseTarget(network: $0.network, hostname: $0.hostname)
             }
         }
@@ -96,7 +168,50 @@ extension MacOSSandboxService {
         }
 
         if !releaseFailed {
-            try? MacOSGuestNetworkLeaseStore.remove(from: root)
+            try MacOSGuestNetworkLeaseStore.remove(from: root)
+            return
         }
+
+        throw ContainerizationError(
+            .internalError,
+            message: "failed to release one or more guest network allocations"
+        )
+    }
+
+    func releaseSandboxNetworkStateIfNeeded() async {
+        let config: ContainerConfiguration
+        do {
+            config = try loadContainerConfigurationForNetworkControl()
+        } catch {
+            writeContainerLog(Data(("failed to load container configuration for guest network release: \(error)\n").utf8))
+            return
+        }
+
+        do {
+            try await releaseSandboxNetworkState(containerConfig: config)
+        } catch {
+            writeContainerLog(Data(("failed to release guest network state: \(error)\n").utf8))
+        }
+    }
+
+    private func loadContainerConfigurationForNetworkControl() throws -> ContainerConfiguration {
+        if let configuration {
+            return configuration
+        }
+
+        let configURL = root.appendingPathComponent("config.json")
+        if FileManager.default.fileExists(atPath: configURL.path) {
+            let data = try Data(contentsOf: configURL)
+            let config = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+            self.configuration = config
+            return config
+        }
+
+        let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: root)
+        guard let config = runtimeConfig.containerConfiguration else {
+            throw ContainerizationError(.invalidState, message: "runtime configuration missing container configuration")
+        }
+        self.configuration = config
+        return config
     }
 }

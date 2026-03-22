@@ -22,6 +22,27 @@ import Logging
 public struct ProcessIO: Sendable {
     package typealias StartupNoticeWriter = @Sendable (String) -> Void
 
+    private final class StartupNoticeState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didEmit = false
+
+        func emitIfNeeded(_ body: () -> Void) {
+            let shouldEmit = lock.withLock { () -> Bool in
+                guard !didEmit else {
+                    return false
+                }
+                didEmit = true
+                return true
+            }
+
+            guard shouldEmit else {
+                return
+            }
+
+            body()
+        }
+    }
+
     let stdin: Pipe?
     let stdout: Pipe?
     let stderr: Pipe?
@@ -308,27 +329,64 @@ public struct ProcessIO: Sendable {
         startupDelayNanoseconds: UInt64 = 2_000_000_000,
         startupWriter: @escaping StartupNoticeWriter = Self.writeStandardErrorLine
     ) async throws {
+        let startupNoticeState = StartupNoticeState()
+        let startUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         let noticeTask = Self.makeStartupNoticeTask(
             startupMessage: startupMessage,
             startupDelayNanoseconds: startupDelayNanoseconds,
-            startupWriter: startupWriter
+            startupWriter: startupWriter,
+            startupNoticeState: startupNoticeState
         )
 
         do {
             try await process.start()
+            Self.emitStartupNoticeIfOverdue(
+                startupMessage: startupMessage,
+                startupDelayNanoseconds: startupDelayNanoseconds,
+                startupWriter: startupWriter,
+                startupNoticeState: startupNoticeState,
+                elapsedNanoseconds: DispatchTime.now().uptimeNanoseconds &- startUptimeNanoseconds
+            )
             noticeTask?.cancel()
             _ = await noticeTask?.result
         } catch {
+            Self.emitStartupNoticeIfOverdue(
+                startupMessage: startupMessage,
+                startupDelayNanoseconds: startupDelayNanoseconds,
+                startupWriter: startupWriter,
+                startupNoticeState: startupNoticeState,
+                elapsedNanoseconds: DispatchTime.now().uptimeNanoseconds &- startUptimeNanoseconds
+            )
             noticeTask?.cancel()
             _ = await noticeTask?.result
             throw error
         }
     }
 
+    private static func emitStartupNoticeIfOverdue(
+        startupMessage: String?,
+        startupDelayNanoseconds: UInt64,
+        startupWriter: @escaping StartupNoticeWriter,
+        startupNoticeState: StartupNoticeState,
+        elapsedNanoseconds: UInt64
+    ) {
+        guard let startupMessage, !startupMessage.isEmpty else {
+            return
+        }
+        guard elapsedNanoseconds >= startupDelayNanoseconds else {
+            return
+        }
+
+        startupNoticeState.emitIfNeeded {
+            startupWriter(startupMessage)
+        }
+    }
+
     private static func makeStartupNoticeTask(
         startupMessage: String?,
         startupDelayNanoseconds: UInt64,
-        startupWriter: @escaping StartupNoticeWriter
+        startupWriter: @escaping StartupNoticeWriter,
+        startupNoticeState: StartupNoticeState
     ) -> Task<Void, Never>? {
         guard let startupMessage, !startupMessage.isEmpty else {
             return nil
@@ -340,7 +398,9 @@ public struct ProcessIO: Sendable {
                 guard !Task.isCancelled else {
                     return
                 }
-                startupWriter(startupMessage)
+                startupNoticeState.emitIfNeeded {
+                    startupWriter(startupMessage)
+                }
             } catch is CancellationError {
             } catch {
                 return

@@ -14,38 +14,13 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-public enum SandboxKeys: String {
-    /// ID key.
-    case id
-    /// Vsock port number key.
-    case port
-    /// Exit code for a process
-    case exitCode
-    /// Exit timestamp for a process
-    case exitedAt
-    /// FD to a container resource key.
-    case fd
-    /// Options for stopping a container key.
-    case stopOptions
-    /// An endpoint to talk to a sandbox service.
-    case sandboxServiceEndpoint
+import ContainerResource
+import Foundation
 
-    /// Process request keys.
-    case signal
-    case snapshot
-    case stdin
-    case stdout
-    case stderr
-    case width
-    case height
-    case processConfig
+public struct SandboxNetworkState: Codable, Sendable, Equatable {
+    public let attachments: [Attachment]
 
-    /// Filesystem request payload.
-    case fsPayload
-
-    /// Container statistics
-    case statistics
-
-    /// Sandbox network state payload.
-    case networkState
+    public init(attachments: [Attachment]) {
+        self.attachments = attachments
+    }
 }

@@ -206,11 +206,12 @@ struct UtilityTests {
             options: ["debug"]
         )
 
-        let resolved = try #require(Utility.resolveMacOSGuestNetworking(
+        let maybeResolved = try Utility.resolveMacOSGuestNetworking(
             containerID: "macos-guest",
             management: management,
             override: .init(networks: [attachment], dns: dns)
-        ))
+        )
+        let resolved = try #require(maybeResolved)
 
         #expect(resolved.networks.count == 1)
         #expect(resolved.networks[0].network == "default")
@@ -231,11 +232,12 @@ struct UtilityTests {
         management.dns.searchDomains = ["svc.example.internal"]
         management.dns.options = ["ndots:2"]
 
-        let resolved = try #require(Utility.resolveMacOSGuestNetworking(
+        let maybeResolved = try Utility.resolveMacOSGuestNetworking(
             containerID: "macos-guest",
             management: management,
             override: .init(networks: [])
-        ))
+        )
+        let resolved = try #require(maybeResolved)
 
         let resolvedDNS = try #require(resolved.dns)
         #expect(resolvedDNS.nameservers == ["9.9.9.9"])
@@ -253,14 +255,15 @@ struct UtilityTests {
             options: .init(hostname: "macos-guest")
         )
 
-        let resolved = try #require(Utility.resolveMacOSGuestNetworking(
+        let maybeResolved = try Utility.resolveMacOSGuestNetworking(
             containerID: "macos-guest",
             management: management,
             override: .init(
                 networks: [attachment],
                 dns: .init(nameservers: ["1.1.1.1"])
             )
-        ))
+        )
+        let resolved = try #require(maybeResolved)
 
         #expect(resolved.networks.count == 1)
         #expect(resolved.networks[0].options.hostname == "macos-guest")
@@ -285,13 +288,12 @@ struct UtilityTests {
         var management = try Flags.Management.parse([])
         management.networks = ["backend,mac=02:42:ac:11:00:02"]
 
-        let resolved = try #require(
-            Utility.resolveMacOSGuestNetworking(
-                containerID: "macos-guest",
-                management: management,
-                override: nil
-            )
+        let maybeResolved = try Utility.resolveMacOSGuestNetworking(
+            containerID: "macos-guest",
+            management: management,
+            override: nil
         )
+        let resolved = try #require(maybeResolved)
 
         #expect(resolved.networks.count == 1)
         #expect(resolved.networks[0].network == "backend")
@@ -306,13 +308,12 @@ struct UtilityTests {
         var management = try Flags.Management.parse([])
         management.dns.nameservers = ["9.9.9.9"]
 
-        let resolved = try #require(
-            Utility.resolveMacOSGuestNetworking(
-                containerID: "macos-guest",
-                management: management,
-                override: nil
-            )
+        let maybeResolved = try Utility.resolveMacOSGuestNetworking(
+            containerID: "macos-guest",
+            management: management,
+            override: nil
         )
+        let resolved = try #require(maybeResolved)
 
         #expect(resolved.networks.count == 1)
         #expect(resolved.networks[0].network == ClientNetwork.defaultNetworkName)

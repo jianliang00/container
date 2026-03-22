@@ -342,6 +342,49 @@ extension RuntimeClient {
 
         return try JSONDecoder().decode(ContainerStats.self, from: data)
     }
+
+    public func prepareSandboxNetwork() async throws -> SandboxNetworkState {
+        let request = XPCMessage(route: SandboxRoutes.prepareNetwork.rawValue)
+        let response: XPCMessage
+        do {
+            response = try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to prepare sandbox network for container \(self.id)",
+                cause: error
+            )
+        }
+        return try response.sandboxNetworkState()
+    }
+
+    public func inspectSandboxNetwork() async throws -> SandboxNetworkState {
+        let request = XPCMessage(route: SandboxRoutes.inspectNetwork.rawValue)
+        let response: XPCMessage
+        do {
+            response = try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to inspect sandbox network for container \(self.id)",
+                cause: error
+            )
+        }
+        return try response.sandboxNetworkState()
+    }
+
+    public func releaseSandboxNetwork() async throws {
+        let request = XPCMessage(route: SandboxRoutes.releaseNetwork.rawValue)
+        do {
+            _ = try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to release sandbox network for container \(self.id)",
+                cause: error
+            )
+        }
+    }
 }
 
 extension XPCMessage {
@@ -367,10 +410,14 @@ extension XPCMessage {
         return try JSONDecoder().decode(SandboxSnapshot.self, from: data)
     }
 
-    public func networkBootstrapInfos() throws -> [NetworkBootstrapInfo] {
-        guard let data = self.dataNoCopy(key: RuntimeKeys.networkBootstrapInfos.rawValue) else {
-            throw ContainerizationError(.invalidArgument, message: "missing networkBootstrapInfos in bootstrap message")
+    func sandboxNetworkState() throws -> SandboxNetworkState {
+        let data = self.dataNoCopy(key: SandboxKeys.networkState.rawValue)
+        guard let data else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "no sandbox network state data returned"
+            )
         }
-        return try JSONDecoder().decode([NetworkBootstrapInfo].self, from: data)
+        return try JSONDecoder().decode(SandboxNetworkState.self, from: data)
     }
 }

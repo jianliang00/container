@@ -17,7 +17,6 @@
 import AppKit
 import ArgumentParser
 import ContainerLog
-import ContainerNetworkServiceClient
 import ContainerResource
 import ContainerVersion
 import ContainerizationError
@@ -418,7 +417,7 @@ actor MacOSSidecarService {
                 try? await stopVirtualMachine(vm)
             }
             await closeGUIWindowOnMain()
-            await releasePreparedNetworkResources()
+            discardPreparedNetworkResources()
             self.vm = nil
             self.vmConfiguration = nil
             self.vmDelegate = nil
@@ -429,13 +428,13 @@ actor MacOSSidecarService {
 
     func stopVM() async throws {
         guard let vm else {
-            await releasePreparedNetworkResources()
+            discardPreparedNetworkResources()
             state = .stopped
             return
         }
         try await stopVirtualMachine(vm)
         await closeGUIWindowOnMain()
-        await releasePreparedNetworkResources()
+        discardPreparedNetworkResources()
         self.vm = nil
         self.vmConfiguration = nil
         self.vmDelegate = nil
@@ -609,6 +608,7 @@ actor MacOSSidecarService {
         } catch {
             log.error("failed to stop vm during quit", metadata: ["error": "\(error)"])
         }
+        discardPreparedNetworkResources()
     }
 
     private func configPath() -> URL { rootURL.appendingPathComponent("config.json") }
@@ -677,44 +677,14 @@ actor MacOSSidecarService {
         return vmConfiguration
     }
 
-    private func releasePreparedNetworkResources() async {
+    private func discardPreparedNetworkResources() {
         let lease = networkLease ?? (try? MacOSGuestNetworkLeaseStore.load(from: rootURL)) ?? nil
         networkLease = nil
         ownedVMNetNetworks = []
         guard let lease else {
             return
         }
-
-        var releaseFailed = false
-
-        for leasedInterface in lease.interfaces {
-            let attachment = leasedInterface.attachment
-            let client = NetworkClient(id: attachment.network)
-            do {
-                try await client.deallocate(hostname: attachment.hostname)
-                log.info(
-                    "released macOS guest network allocation",
-                    metadata: [
-                        "network": "\(attachment.network)",
-                        "hostname": "\(attachment.hostname)",
-                    ]
-                )
-            } catch {
-                releaseFailed = true
-                log.warning(
-                    "failed to release macOS guest network allocation",
-                    metadata: [
-                        "network": "\(attachment.network)",
-                        "hostname": "\(attachment.hostname)",
-                        "error": "\(error)",
-                    ]
-                )
-            }
-        }
-
-        if !releaseFailed {
-            try? MacOSGuestNetworkLeaseStore.remove(from: rootURL)
-        }
+        log.info("discarded prepared macOS guest network resources", metadata: ["interfaces": "\(lease.interfaces.count)"])
     }
 
     private func createDirectorySharingDevices(

@@ -19,11 +19,29 @@ import ContainerResource
 import Containerization
 import ContainerizationOS
 import Darwin
+import Dispatch
 import Foundation
 import Synchronization
 import Testing
 
 class CLITest {
+    private final class PipeCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buffer = Data()
+
+        func store(_ data: Data) {
+            lock.lock()
+            buffer = data
+            lock.unlock()
+        }
+
+        func load() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return buffer
+        }
+    }
+
     private struct SystemRecoveryState {
         var attempted = false
         var ready = false
@@ -186,15 +204,31 @@ class CLITest {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
-        let outputData: Data
-        let errorData: Data
+        let outputCapture = PipeCapture()
+        let errorCapture = PipeCapture()
+        let outputReaders = DispatchGroup()
         var timedOut = false
         do {
             try process.run()
-            if let data = stdin {
-                inputPipe.fileHandleForWriting.write(data)
+
+            outputReaders.enter()
+            Thread.detachNewThread {
+                outputCapture.store(outputPipe.fileHandleForReading.readDataToEndOfFile())
+                outputReaders.leave()
             }
-            inputPipe.fileHandleForWriting.closeFile()
+
+            outputReaders.enter()
+            Thread.detachNewThread {
+                errorCapture.store(errorPipe.fileHandleForReading.readDataToEndOfFile())
+                outputReaders.leave()
+            }
+
+            Thread.detachNewThread {
+                if let data = stdin {
+                    inputPipe.fileHandleForWriting.write(data)
+                }
+                inputPipe.fileHandleForWriting.closeFile()
+            }
 
             let timeout = commandTimeout(for: arguments)
             let deadline = Date().addingTimeInterval(timeout)
@@ -215,12 +249,13 @@ class CLITest {
             }
 
             process.waitUntilExit()
-            outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            outputReaders.wait()
         } catch {
             throw CLIError.executionFailed("Failed to run CLI: \(error)")
         }
 
+        let outputData = outputCapture.load()
+        let errorData = errorCapture.load()
         let output = String(data: outputData, encoding: .utf8) ?? ""
         var error = String(data: errorData, encoding: .utf8) ?? ""
         var status = process.terminationStatus
@@ -275,6 +310,16 @@ class CLITest {
         }
         if arguments.starts(with: ["system", "start"]) {
             return 20
+        }
+        if arguments.first == "exec" {
+            // `container exec` commands used in the test suite should return
+            // quickly; shorter timeouts let us retry transient stalls sooner.
+            return 30
+        }
+        if arguments.starts(with: ["image", "save"]) || arguments.starts(with: ["image", "load"]) {
+            // Streaming multi-image archives through stdio can take noticeably longer
+            // than the default command timeout on loaded development machines.
+            return 300
         }
         if arguments.first == "build",
             let platformIndex = arguments.firstIndex(of: "--platform"),
@@ -427,7 +472,8 @@ class CLITest {
         image: String? = nil,
         args: [String]? = nil,
         containerArgs: [String]? = nil,
-        autoRemove: Bool = true
+        autoRemove: Bool = true,
+        waitForRunning: Bool = true
     ) throws {
         var runArgs = [
             "run"
@@ -462,6 +508,9 @@ class CLITest {
         if status != 0 {
             throw CLIError.executionFailed("command failed: \(error)")
         }
+        if waitForRunning {
+            try waitForContainerRunning(name)
+        }
     }
 
     func doExec(name: String, cmd: [String], detach: Bool = false) throws -> String {
@@ -474,11 +523,20 @@ class CLITest {
         }
         execArgs.append(name)
         execArgs.append(contentsOf: cmd)
-        let (_, resp, error, status) = try run(arguments: execArgs)
-        if status != 0 {
-            throw CLIError.executionFailed("command failed: \(error)")
+        var lastError = ""
+        for attempt in 0..<3 {
+            let (_, resp, error, status) = try run(arguments: execArgs)
+            if status == 0 {
+                return resp
+            }
+
+            lastError = error
+            guard attempt < 2, shouldRetryExec(name: name, detach: detach, status: status, error: error) else {
+                throw CLIError.executionFailed("command failed: \(error)")
+            }
+            sleep(UInt32(attempt + 1))
         }
-        return resp
+        throw CLIError.executionFailed("command failed: \(lastError)")
     }
 
     func doStop(name: String, signal: String = "SIGKILL") throws {
@@ -530,13 +588,16 @@ class CLITest {
         }
     }
 
-    func doStart(name: String) throws {
+    func doStart(name: String, waitForRunning: Bool = true) throws {
         let (_, _, error, status) = try run(arguments: [
             "start",
             name,
         ])
         if status != 0 {
             throw CLIError.executionFailed("command failed: \(error)")
+        }
+        if waitForRunning {
+            try waitForContainerRunning(name)
         }
     }
 
@@ -811,5 +872,22 @@ class CLITest {
         return ProcessInfo.processInfo.environment
             .filter { (key, val) in proxyVars.contains(key) }
             .flatMap { (key, val) in ["-e", "\(key)=\(val)"] }
+    }
+
+    private func shouldRetryExec(name: String, detach: Bool, status: Int32, error: String) -> Bool {
+        guard !detach, status != 0 else {
+            return false
+        }
+        guard error.contains("command timed out for test: container exec")
+            || error.contains("Connection was shutdown by the user")
+            || error.contains("Connection invalid")
+            || error.contains("failed to send signal")
+        else {
+            return false
+        }
+        guard let containerStatus = try? getContainerStatus(name) else {
+            return false
+        }
+        return containerStatus == "running"
     }
 }

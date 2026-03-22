@@ -21,36 +21,6 @@ import Testing
 @Suite(.serialized, .enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLIAnonymousVolumes: CLITest {
 
-    override init() throws {
-        try super.init()
-        // Clean up any leftover resources from previous test runs
-        cleanUpAllTestResources()
-    }
-
-    private func cleanUpAllTestResources() {
-        // Clean up test containers (force remove)
-        if let (_, output, _, status) = try? run(arguments: ["ls", "-a"]), status == 0 {
-            let containers = output.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { $0.lowercased().starts(with: "test") }
-
-            for container in containers {
-                let _ = (try? run(arguments: ["delete", "--force", container]))
-            }
-        }
-
-        // Clean up test volumes (both anonymous and named)
-        if let (_, output, _, status) = try? run(arguments: ["volume", "list", "--quiet"]), status == 0 {
-            let volumes = output.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { isValidUUID($0) || $0.lowercased().starts(with: "test") }
-
-            for volume in volumes {
-                doVolumeDeleteIfExists(name: volume)
-            }
-        }
-    }
-
     private func getTestName() -> String {
         Test.current!.name.trimmingCharacters(in: ["(", ")"]).lowercased()
     }
@@ -63,6 +33,46 @@ class TestCLIAnonymousVolumes: CLITest {
         return output.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { isValidUUID($0) }
+    }
+
+    func snapshotAnonymousVolumes() throws -> Set<String> {
+        Set(try getAnonymousVolumeNames())
+    }
+
+    func anonymousVolumesCreated(since baseline: Set<String>) throws -> [String] {
+        Array(try snapshotAnonymousVolumes().subtracting(baseline)).sorted()
+    }
+
+    func cleanUpAnonymousVolumes(createdSince baseline: Set<String>) {
+        guard let volumes = try? anonymousVolumesCreated(since: baseline) else {
+            return
+        }
+        volumes.forEach { doVolumeDeleteIfExists(name: $0) }
+    }
+
+    func anonymousVolumesAttached(to containerName: String) throws -> [String] {
+        try inspectContainer(containerName).configuration.mounts
+            .compactMap(\.volumeName)
+            .filter(isValidUUID)
+            .sorted()
+    }
+
+    func containerExists(_ name: String) throws -> Bool {
+        let (_, output, error, status) = try run(arguments: ["ls", "-a"])
+        guard status == 0 else {
+            throw CLIError.executionFailed("container list failed: \(error)")
+        }
+        return output.components(separatedBy: .newlines).contains(name)
+    }
+
+    func waitForContainerRemoval(_ name: String, attempts: Int = 30) async throws {
+        for _ in 0..<attempts {
+            if try !containerExists(name) {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        throw CLIError.executionFailed("timed out waiting for container \(name) to be removed")
     }
 
     func volumeExists(name: String) throws -> Bool {
@@ -102,58 +112,59 @@ class TestCLIAnonymousVolumes: CLITest {
     @Test func testAnonymousVolumeCreationAndPersistence() async throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
+        var attachedVolumes: [String] = []
+
+        doRemoveIfExists(name: containerName, force: true)
 
         defer {
             doRemoveIfExists(name: containerName, force: true)
-            // Clean up anonymous volumes
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            attachedVolumes.forEach { doVolumeDeleteIfExists(name: $0) }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
-        // Get count of anonymous volumes before
-        let beforeCount = try getAnonymousVolumeNames().count
-
-        // Run container with --rm and anonymous volume
+        // Run a short-lived detached container so we can inspect the mounted
+        // anonymous volume before auto-remove kicks in.
         let (_, _, _, status) = try run(arguments: [
             "run",
+            "-d",
             "--rm",
             "--name",
             containerName,
             "-v",
             "/data",
             alpine,
-            "echo",
-            "test",
+            "sleep",
+            "2",
         ])
 
         #expect(status == 0, "container run should succeed")
+        attachedVolumes = try anonymousVolumesAttached(to: containerName)
+        #expect(attachedVolumes.count == 1, "anonymous volume should be attached")
 
-        // Give time for container removal to complete
-        try await Task.sleep(for: .seconds(1))
-
-        // Verify container was removed
-        let (_, lsOutput, _, _) = try run(arguments: ["ls", "-a"])
-        let containers = lsOutput.components(separatedBy: .newlines)
-            .filter { $0.contains(containerName) }
-        #expect(containers.isEmpty, "container should be removed with --rm")
+        try await waitForContainerRemoval(containerName)
+        #expect(try !containerExists(containerName), "container should be removed with --rm")
 
         // Verify anonymous volume persists (no auto-cleanup)
-        let afterCount = try getAnonymousVolumeNames().count
-        #expect(afterCount == beforeCount + 1, "anonymous volume should persist even with --rm")
+        for volumeName in attachedVolumes {
+            #expect(try volumeExists(name: volumeName), "anonymous volume \(volumeName) should persist even with --rm")
+        }
     }
 
     @Test func testAnonymousVolumePersistenceWithoutRm() throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let containerName2 = "\(testName)_c2"
         let testData = "persistent-data"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
+
+        doRemoveIfExists(name: containerName, force: true)
+        doRemoveIfExists(name: containerName2, force: true)
 
         defer {
             doRemoveIfExists(name: containerName, force: true)
-            // Clean up any anonymous volumes
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            doRemoveIfExists(name: containerName2, force: true)
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
         // Run container WITHOUT --rm
@@ -164,7 +175,7 @@ class TestCLIAnonymousVolumes: CLITest {
         _ = try doExec(name: containerName, cmd: ["sh", "-c", "echo '\(testData)' > /data/test.txt"])
 
         // Get the anonymous volume ID
-        let volumeNames = try getAnonymousVolumeNames()
+        let volumeNames = try anonymousVolumesAttached(to: containerName)
         #expect(volumeNames.count == 1, "should have exactly one anonymous volume")
         let volumeID = volumeNames[0]
 
@@ -177,7 +188,6 @@ class TestCLIAnonymousVolumes: CLITest {
         #expect(exists, "anonymous volume should persist without --rm")
 
         // Mount same volume in new container and verify data
-        let containerName2 = "\(testName)_c2"
         try doLongRun(name: containerName2, args: ["-v", "\(volumeID):/data"], autoRemove: false)
         try waitForContainerRunning(containerName2)
 
@@ -194,20 +204,21 @@ class TestCLIAnonymousVolumes: CLITest {
     @Test func testMultipleAnonymousVolumes() async throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
+        var attachedVolumes: [String] = []
+
+        doRemoveIfExists(name: containerName, force: true)
 
         defer {
             doRemoveIfExists(name: containerName, force: true)
-            // Clean up anonymous volumes
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            attachedVolumes.forEach { doVolumeDeleteIfExists(name: $0) }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
-        let beforeCount = try getAnonymousVolumeNames().count
-
-        // Run with multiple anonymous volumes
+        // Run with multiple anonymous volumes long enough to inspect them.
         let (_, _, _, status) = try run(arguments: [
             "run",
+            "-d",
             "--rm",
             "--name",
             containerName,
@@ -215,64 +226,64 @@ class TestCLIAnonymousVolumes: CLITest {
             "-v", "/data2",
             "-v", "/data3",
             alpine,
-            "sh", "-c", "ls -d /data*",
+            "sleep", "2",
         ])
 
         #expect(status == 0, "container run should succeed")
+        attachedVolumes = try anonymousVolumesAttached(to: containerName)
+        #expect(attachedVolumes.count == 3, "all 3 anonymous volumes should be attached")
 
-        // Give time for container removal
-        try await Task.sleep(for: .seconds(1))
-
-        // All 3 volumes should persist (no auto-cleanup)
-        let afterCount = try getAnonymousVolumeNames().count
-        #expect(afterCount == beforeCount + 3, "all 3 anonymous volumes should persist")
+        try await waitForContainerRemoval(containerName)
+        for volumeName in attachedVolumes {
+            #expect(try volumeExists(name: volumeName), "anonymous volume \(volumeName) should persist")
+        }
     }
 
     @Test func testAnonymousMountSyntax() async throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
+        var attachedVolumes: [String] = []
+
+        doRemoveIfExists(name: containerName, force: true)
 
         defer {
             doRemoveIfExists(name: containerName, force: true)
-            // Clean up anonymous volumes
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            attachedVolumes.forEach { doVolumeDeleteIfExists(name: $0) }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
-        let beforeCount = try getAnonymousVolumeNames().count
-
-        // Use --mount syntax
+        // Use --mount syntax with a detached container so we can inspect the mount.
         let (_, _, _, status) = try run(arguments: [
             "run",
+            "-d",
             "--rm",
             "--name",
             containerName,
             "--mount", "type=volume,dst=/mydata",
             alpine,
-            "ls", "-la", "/mydata",
+            "sleep", "2",
         ])
 
         #expect(status == 0, "container run with --mount should succeed")
+        attachedVolumes = try anonymousVolumesAttached(to: containerName)
+        #expect(attachedVolumes.count == 1, "anonymous volume should be attached")
 
-        // Give time for container removal
-        try await Task.sleep(for: .seconds(1))
-
-        // Anonymous volume should persist (no auto-cleanup)
-        let afterCount = try getAnonymousVolumeNames().count
-        #expect(afterCount == beforeCount + 1, "anonymous volume should persist")
+        try await waitForContainerRemoval(containerName)
+        for volumeName in attachedVolumes {
+            #expect(try volumeExists(name: volumeName), "anonymous volume \(volumeName) should persist")
+        }
     }
 
     @Test func testAnonymousVolumeUUIDFormat() throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
 
         defer {
             try? doStop(name: containerName)
             doRemoveIfExists(name: containerName, force: true)
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
         // Create container with anonymous volume
@@ -280,7 +291,7 @@ class TestCLIAnonymousVolumes: CLITest {
         try waitForContainerRunning(containerName)
 
         // Get the anonymous volume name
-        let volumeNames = try getAnonymousVolumeNames()
+        let volumeNames = try anonymousVolumesAttached(to: containerName)
         #expect(volumeNames.count == 1, "should have exactly one anonymous volume")
 
         let volumeName = volumeNames[0]
@@ -295,13 +306,12 @@ class TestCLIAnonymousVolumes: CLITest {
     @Test func testAnonymousVolumeMetadata() throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
 
         defer {
             try? doStop(name: containerName)
             doRemoveIfExists(name: containerName, force: true)
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
         // Create container with anonymous volume
@@ -309,7 +319,7 @@ class TestCLIAnonymousVolumes: CLITest {
         try waitForContainerRunning(containerName)
 
         // Get the anonymous volume
-        let volumeNames = try getAnonymousVolumeNames()
+        let volumeNames = try anonymousVolumesAttached(to: containerName)
         #expect(volumeNames.count == 1, "should have exactly one anonymous volume")
         let volumeName = volumeNames[0]
 
@@ -333,14 +343,13 @@ class TestCLIAnonymousVolumes: CLITest {
         let testName = getTestName()
         let namedVolumeName = "\(testName)_namedvol"
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
 
         defer {
             try? doStop(name: containerName)
             doRemoveIfExists(name: containerName, force: true)
             doVolumeDeleteIfExists(name: namedVolumeName)
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
         // Create named volume
@@ -365,60 +374,67 @@ class TestCLIAnonymousVolumes: CLITest {
         let testName = getTestName()
         let namedVolumeName = "\(testName)_namedvol"
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
+        var attachedVolumes: [String] = []
+
+        doRemoveIfExists(name: containerName, force: true)
+        doVolumeDeleteIfExists(name: namedVolumeName)
 
         defer {
             doRemoveIfExists(name: containerName, force: true)
             doVolumeDeleteIfExists(name: namedVolumeName)
-            // Clean up anonymous volumes
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            attachedVolumes.forEach { doVolumeDeleteIfExists(name: $0) }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
         // Create named volume
         try doVolumeCreate(name: namedVolumeName)
 
-        let beforeAnonCount = try getAnonymousVolumeNames().count
-
         // Run with both named and anonymous volumes, with --rm
         let (_, _, _, status) = try run(arguments: [
             "run",
+            "-d",
             "--rm",
             "--name",
             containerName,
             "-v", "\(namedVolumeName):/named",
             "-v", "/anon",
             alpine,
-            "sh", "-c", "ls -d /*",
+            "sleep", "2",
         ])
 
         #expect(status == 0, "container run should succeed")
+        attachedVolumes = try anonymousVolumesAttached(to: containerName)
+        #expect(attachedVolumes.count == 1, "anonymous volume should be attached")
 
-        // Give time for container removal
-        try await Task.sleep(for: .seconds(1))
+        try await waitForContainerRemoval(containerName)
 
         // Named volume should still exist
         let namedExists = try volumeExists(name: namedVolumeName)
         #expect(namedExists, "named volume should persist")
 
-        let afterAnonCount = try getAnonymousVolumeNames().count
-        #expect(afterAnonCount == beforeAnonCount + 1, "anonymous volume should persist")
+        for volumeName in attachedVolumes {
+            #expect(try volumeExists(name: volumeName), "anonymous volume \(volumeName) should persist")
+        }
     }
 
     @Test func testAnonymousVolumeManualDeletion() throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
 
         defer {
             doRemoveIfExists(name: containerName, force: true)
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
 
         // Create container WITHOUT --rm
         try doLongRun(name: containerName, args: ["-v", "/data"], autoRemove: false)
         try waitForContainerRunning(containerName)
 
-        // Get volume ID
-        let volumeNames = try getAnonymousVolumeNames()
+        // Read the mounted anonymous volume from the container configuration so
+        // concurrent suites do not interfere with global volume snapshots.
+        let volumeNames = try anonymousVolumesAttached(to: containerName)
         #expect(volumeNames.count == 1, "should have one anonymous volume")
         let volumeID = volumeNames[0]
 
@@ -438,16 +454,16 @@ class TestCLIAnonymousVolumes: CLITest {
     @Test func testAnonymousVolumeDetachedMode() async throws {
         let testName = getTestName()
         let containerName = "\(testName)_c1"
+        let baselineAnonymousVolumes = try snapshotAnonymousVolumes()
+        var attachedVolumes: [String] = []
+
+        doRemoveIfExists(name: containerName, force: true)
 
         defer {
             doRemoveIfExists(name: containerName, force: true)
-            // Clean up anonymous volumes
-            if let volumes = try? getAnonymousVolumeNames() {
-                volumes.forEach { doVolumeDeleteIfExists(name: $0) }
-            }
+            attachedVolumes.forEach { doVolumeDeleteIfExists(name: $0) }
+            cleanUpAnonymousVolumes(createdSince: baselineAnonymousVolumes)
         }
-
-        let beforeCount = try getAnonymousVolumeNames().count
 
         // Run in detached mode with --rm
         let (_, _, _, status) = try run(arguments: [
@@ -462,17 +478,13 @@ class TestCLIAnonymousVolumes: CLITest {
         ])
 
         #expect(status == 0, "detached container run should succeed")
+        attachedVolumes = try anonymousVolumesAttached(to: containerName)
+        #expect(attachedVolumes.count == 1, "anonymous volume should be attached")
 
-        // Wait for container to exit
-        try await Task.sleep(for: .seconds(3))
-
-        // Container should be removed
-        let (_, lsOutput, _, _) = try run(arguments: ["ls", "-a"])
-        let containers = lsOutput.components(separatedBy: .newlines)
-            .filter { $0.contains(containerName) }
-        #expect(containers.isEmpty, "container should be auto-removed")
-
-        let afterCount = try getAnonymousVolumeNames().count
-        #expect(afterCount == beforeCount + 1, "anonymous volume should persist")
+        try await waitForContainerRemoval(containerName)
+        #expect(try !containerExists(containerName), "container should be auto-removed")
+        for volumeName in attachedVolumes {
+            #expect(try volumeExists(name: volumeName), "anonymous volume \(volumeName) should persist")
+        }
     }
 }

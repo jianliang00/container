@@ -44,7 +44,7 @@ struct ProcessIOStartupNoticeTests {
         try await ProcessIO.startProcess(
             process: process,
             startupMessage: "Waiting for macOS guest...",
-            startupDelayNanoseconds: 2_000_000_000,
+            startupDelayNanoseconds: 300_000_000_000,
             startupWriter: { recorder.record($0) }
         )
 

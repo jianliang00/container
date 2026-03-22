@@ -103,6 +103,28 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(FileManager.default.fileExists(atPath: try #require(snapshot.stdoutLogPath)))
         #expect(FileManager.default.fileExists(atPath: try #require(snapshot.stderrLogPath)))
     }
+
+    @Test
+    func internalSessionsAreExcludedFromWorkloadSnapshots() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "visible-workload",
+            config: baseProcessConfiguration()
+        )
+        await service.testingAddSession(
+            id: "__guest-agent-log__",
+            config: baseProcessConfiguration(),
+            includeInSnapshots: false
+        )
+
+        let snapshots = await service.testingWorkloadSnapshots()
+
+        #expect(snapshots.map(\.id) == ["visible-workload"])
+        #expect(await service.testingVisibleSessionCount() == 1)
+    }
 }
 
 private func makeSandboxService(root: URL) -> MacOSSandboxService {

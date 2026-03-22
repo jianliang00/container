@@ -50,6 +50,7 @@ final class SidecarEventPump: @unchecked Sendable {
 
 public actor MacOSSandboxService {
     private static let defaultAgentPort: UInt32 = 27000
+    private static let guestAgentLogGuestPath = "/var/log/container-macos-guest-agent.log"
 
     private enum State: Equatable {
         case created
@@ -60,7 +61,7 @@ public actor MacOSSandboxService {
         case shuttingDown
     }
 
-    private struct WorkloadLogFiles {
+    struct WorkloadLogFiles {
         let stdoutURL: URL
         let stderrURL: URL
         let stdoutHandle: FileHandle
@@ -71,6 +72,7 @@ public actor MacOSSandboxService {
         let processID: String
         let config: ProcessConfiguration
         let stdio: [FileHandle?]
+        let includeInSnapshots: Bool
         let stdoutLogURL: URL
         let stderrLogURL: URL
         var stdoutLogHandle: FileHandle?
@@ -97,6 +99,7 @@ public actor MacOSSandboxService {
     var sessions: [String: Session] = [:]
     private var waiters: [String: [CheckedContinuation<ExitStatus, Never>]] = [:]
     var guestMountsPrepared = false
+    private var guestAgentLogCaptureProcessID: String?
 
     var logHandle: FileHandle?
     private var bootLogHandle: FileHandle?
@@ -148,6 +151,7 @@ extension MacOSSandboxService {
             _ = try await prepareSandboxNetworkState(containerConfig: config)
             #if arch(arm64)
             try await startOrRestoreVirtualMachine(config: config)
+            await startGuestAgentLogCaptureIfPossible(containerConfig: config)
             #else
             throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
             #endif
@@ -355,7 +359,7 @@ extension MacOSSandboxService {
             networkTxBytes: nil,
             blockReadBytes: nil,
             blockWriteBytes: nil,
-            numProcesses: UInt64(sessions.count)
+            numProcesses: UInt64(visibleSessionCount())
         )
         let data = try JSONEncoder().encode(stats)
         let reply = message.reply()
@@ -399,6 +403,14 @@ extension MacOSSandboxService {
         root.appendingPathComponent("vminitd.log")
     }
 
+    private func guestAgentHostLogPath() -> URL {
+        root.appendingPathComponent("guest-agent.log")
+    }
+
+    private func guestAgentHostStderrLogPath() -> URL {
+        root.appendingPathComponent("guest-agent.stderr.log")
+    }
+
     private func workloadsDirectory() -> URL {
         root.appendingPathComponent("workloads")
     }
@@ -429,6 +441,10 @@ extension MacOSSandboxService {
     private func openWorkloadLogFiles(processID: String) throws -> WorkloadLogFiles {
         let stdoutURL = workloadStdoutLogPath(for: processID)
         let stderrURL = workloadStderrLogPath(for: processID)
+        return try openLogFiles(stdoutURL: stdoutURL, stderrURL: stderrURL)
+    }
+
+    private func openLogFiles(stdoutURL: URL, stderrURL: URL) throws -> WorkloadLogFiles {
         return WorkloadLogFiles(
             stdoutURL: stdoutURL,
             stderrURL: stderrURL,
@@ -597,16 +613,28 @@ extension MacOSSandboxService {
 // MARK: - Process/session plumbing
 
 extension MacOSSandboxService {
+    private func visibleSessionCount() -> Int {
+        sessions.values.filter(\.includeInSnapshots).count
+    }
+
     func makeSession(
         processID: String,
         config: ProcessConfiguration,
-        stdio: [FileHandle?]
+        stdio: [FileHandle?],
+        includeInSnapshots: Bool = true,
+        logFiles: WorkloadLogFiles? = nil
     ) throws -> Session {
-        let logs = try openWorkloadLogFiles(processID: processID)
+        let logs: WorkloadLogFiles
+        if let logFiles {
+            logs = logFiles
+        } else {
+            logs = try openWorkloadLogFiles(processID: processID)
+        }
         return Session(
             processID: processID,
             config: config,
             stdio: stdio,
+            includeInSnapshots: includeInSnapshots,
             stdoutLogURL: logs.stdoutURL,
             stderrLogURL: logs.stderrURL,
             stdoutLogHandle: logs.stdoutHandle,
@@ -618,13 +646,66 @@ extension MacOSSandboxService {
         guard let session = sessions[processID] else {
             throw ContainerizationError(.notFound, message: "process \(processID) not found")
         }
+        guard session.includeInSnapshots else {
+            throw ContainerizationError(.notFound, message: "process \(processID) not found")
+        }
         return workloadSnapshot(for: session)
     }
 
     private func workloadSnapshots() -> [WorkloadSnapshot] {
         sessions.values
+            .filter(\.includeInSnapshots)
             .sorted { $0.processID < $1.processID }
             .map(workloadSnapshot(for:))
+    }
+
+    private func startGuestAgentLogCaptureIfPossible(
+        containerConfig: ContainerConfiguration
+    ) async {
+        guard guestAgentLogCaptureProcessID == nil else {
+            return
+        }
+
+        let processID = "__guest-agent-log__"
+        do {
+            let logFiles = try openLogFiles(
+                stdoutURL: guestAgentHostLogPath(),
+                stderrURL: guestAgentHostStderrLogPath()
+            )
+            var session = try makeSession(
+                processID: processID,
+                config: ProcessConfiguration(
+                    executable: "/usr/bin/tail",
+                    arguments: ["-n", "+1", "-F", Self.guestAgentLogGuestPath],
+                    environment: [],
+                    workingDirectory: "/",
+                    terminal: false,
+                    user: .id(uid: 0, gid: 0)
+                ),
+                stdio: [nil, nil, nil],
+                includeInSnapshots: false,
+                logFiles: logFiles
+            )
+            sessions[processID] = session
+            guestAgentLogCaptureProcessID = processID
+            try await startSessionViaSidecarProcessStream(&session, containerConfig: containerConfig)
+            writeContainerLog(
+                Data(
+                    ("started guest-agent host log capture path=\(guestAgentHostLogPath().path)\n").utf8
+                )
+            )
+        } catch {
+            if let session = sessions.removeValue(forKey: processID) {
+                try? session.stdoutLogHandle?.close()
+                try? session.stderrLogHandle?.close()
+            }
+            guestAgentLogCaptureProcessID = nil
+            writeContainerLog(
+                Data(
+                    ("failed to start guest-agent host log capture: \(error)\n").utf8
+                )
+            )
+        }
     }
 
     private func workloadSnapshot(for session: Session) -> WorkloadSnapshot {
@@ -772,6 +853,7 @@ extension MacOSSandboxService {
             try? session.stderrLogHandle?.close()
         }
         sessions.removeAll()
+        guestAgentLogCaptureProcessID = nil
     }
 
     #if arch(arm64)
@@ -826,7 +908,8 @@ extension MacOSSandboxService {
                 .internalError,
                 message: """
                     failed to start process via macOS sidecar guest agent on vsock port \(agentPort): \(detail)
-                    check guest log: /var/log/container-macos-guest-agent.log
+                    check host guest-agent log mirror: \(guestAgentHostLogPath().path)
+                    check guest log: \(Self.guestAgentLogGuestPath)
                     """
             )
         }
@@ -933,6 +1016,9 @@ extension MacOSSandboxService {
             try? session.stdoutLogHandle?.close()
             try? session.stderrLogHandle?.close()
             sessions[processID] = session
+            if processID == guestAgentLogCaptureProcessID {
+                guestAgentLogCaptureProcessID = nil
+            }
             completeProcess(id: processID, status: status)
             if processID == configuration?.id {
                 sandboxState = .stopped(status.exitCode)
@@ -997,9 +1083,15 @@ extension MacOSSandboxService {
         id: String,
         config: ProcessConfiguration,
         started: Bool = false,
-        exitCode: Int32? = nil
+        exitCode: Int32? = nil,
+        includeInSnapshots: Bool = true
     ) {
-        var session = try! makeSession(processID: id, config: config, stdio: [nil, nil, nil])
+        var session = try! makeSession(
+            processID: id,
+            config: config,
+            stdio: [nil, nil, nil],
+            includeInSnapshots: includeInSnapshots
+        )
         session.started = started
         session.startedAt = started ? Date() : nil
         if let exitCode {
@@ -1024,5 +1116,17 @@ extension MacOSSandboxService {
 
     func testingInspectWorkload(_ id: String) throws -> WorkloadSnapshot {
         try workloadSnapshot(processID: id)
+    }
+
+    func testingWorkloadSnapshots() -> [WorkloadSnapshot] {
+        workloadSnapshots()
+    }
+
+    func testingVisibleSessionCount() -> Int {
+        visibleSessionCount()
+    }
+
+    func testingGuestAgentHostLogPath() -> String {
+        guestAgentHostLogPath().path
     }
 }

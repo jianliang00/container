@@ -80,6 +80,7 @@ extension RuntimeMacOSHelper {
                         SandboxRoutes.bootstrap.rawValue: service.bootstrap,
                         SandboxRoutes.createProcess.rawValue: service.createProcess,
                         SandboxRoutes.state.rawValue: service.state,
+                        SandboxRoutes.inspectWorkload.rawValue: service.inspectWorkload,
                         SandboxRoutes.stop.rawValue: service.stop,
                         SandboxRoutes.kill.rawValue: service.kill,
                         SandboxRoutes.resize.rawValue: service.resize,

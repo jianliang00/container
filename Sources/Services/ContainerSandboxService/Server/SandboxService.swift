@@ -386,6 +386,7 @@ public actor SandboxService {
         var status: RuntimeStatus = .unknown
         var networks: [Attachment] = []
         var cs: ContainerSnapshot?
+        var workloads: [WorkloadSnapshot] = []
 
         switch state {
         case .created, .stopped(_), .booted, .shuttingDown:
@@ -404,14 +405,27 @@ public actor SandboxService {
             )
         }
 
+        workloads = try workloadSnapshots()
+
         let reply = message.reply()
         try reply.setState(
             .init(
                 status: status,
                 networks: networks,
-                containers: cs != nil ? [cs!] : []
+                containers: cs != nil ? [cs!] : [],
+                workloads: workloads
             )
         )
+        return reply
+    }
+
+    @Sendable
+    public func inspectWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        self.log.info("`inspectWorkload` xpc handler")
+        let id = try message.id()
+        let snapshot = try workloadSnapshot(id: id)
+        let reply = message.reply()
+        try reply.setWorkloadSnapshot(snapshot)
         return reply
     }
 
@@ -691,6 +705,7 @@ public actor SandboxService {
         try self.setUnderlyingProcess(id, process)
 
         try await process.start()
+        try self.setProcessState(id: id, state: .running)
 
         let waitFunc: ExitMonitor.WaitHandler = {
             let code = try await process.wait()
@@ -1262,6 +1277,60 @@ extension SandboxService {
             throw ContainerizationError(.invalidArgument, message: "process \(id) already exists")
         }
         self.processes[id] = ProcessInfo(config: config, process: nil, state: .created, io: io)
+    }
+
+    private func workloadSnapshots() throws -> [WorkloadSnapshot] {
+        var snapshots: [WorkloadSnapshot] = []
+        if let container {
+            snapshots.append(workloadSnapshot(containerInfo: container))
+        }
+        snapshots.append(contentsOf: try processes.keys.sorted().map { try workloadSnapshot(id: $0) })
+        return snapshots
+    }
+
+    private func workloadSnapshot(id: String) throws -> WorkloadSnapshot {
+        if let container, id == container.container.id {
+            return workloadSnapshot(containerInfo: container)
+        }
+        guard let processInfo = processes[id] else {
+            throw ContainerizationError(.notFound, message: "process with id \(id)")
+        }
+
+        let status = workloadRuntimeStatus(from: processInfo.state)
+        let exitCode = workloadExitCode(from: processInfo.state)
+        return WorkloadSnapshot(
+            configuration: .init(id: id, processConfiguration: processInfo.config),
+            status: status,
+            exitCode: exitCode
+        )
+    }
+
+    private func workloadSnapshot(containerInfo: ContainerInfo) -> WorkloadSnapshot {
+        WorkloadSnapshot(
+            configuration: .init(id: containerInfo.container.id, processConfiguration: containerInfo.config.initProcess),
+            status: workloadRuntimeStatus(from: state),
+            exitCode: workloadExitCode(from: state),
+            stdoutLogPath: containerInfo.bundle.containerLog.path,
+            stderrLogPath: containerInfo.bundle.containerLog.path
+        )
+    }
+
+    private func workloadRuntimeStatus(from state: State) -> RuntimeStatus {
+        switch state {
+        case .running:
+            .running
+        case .stopping:
+            .stopping
+        case .created, .booted, .stopped(_), .shuttingDown:
+            .stopped
+        }
+    }
+
+    private func workloadExitCode(from state: State) -> Int32? {
+        guard case .stopped(let code) = state else {
+            return nil
+        }
+        return code
     }
 
     private struct ProcessInfo {

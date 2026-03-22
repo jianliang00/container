@@ -92,6 +92,7 @@ extension RuntimeLinuxHelper {
                         SandboxRoutes.bootstrap.rawValue: server.bootstrap,
                         SandboxRoutes.createProcess.rawValue: server.createProcess,
                         SandboxRoutes.state.rawValue: server.state,
+                        SandboxRoutes.inspectWorkload.rawValue: server.inspectWorkload,
                         SandboxRoutes.stop.rawValue: server.stop,
                         SandboxRoutes.kill.rawValue: server.kill,
                         SandboxRoutes.resize.rawValue: server.resize,

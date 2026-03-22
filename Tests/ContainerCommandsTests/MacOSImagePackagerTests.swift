@@ -98,6 +98,47 @@ struct MacOSImagePackagerTests {
         #expect(leftoverLayouts.isEmpty)
         #expect(!FileManager.default.fileExists(atPath: outputTar.path))
     }
+
+    @Test
+    func packageReportsProgressAcrossChunkingAndTarCreation() throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let imageDirectory = tempDirectory.appendingPathComponent("image")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+
+        try createSparseDisk(
+            at: imageDirectory.appendingPathComponent(MacOSImagePackager.diskImageFilename),
+            logicalSize: 4096,
+            writes: [(offset: 0, data: Data("seed".utf8))]
+        )
+        try Data("aux".utf8).write(
+            to: imageDirectory.appendingPathComponent(MacOSImagePackager.auxiliaryStorageFilename)
+        )
+        try Data("hardware".utf8).write(
+            to: imageDirectory.appendingPathComponent(MacOSImagePackager.hardwareModelFilename)
+        )
+
+        let outputTar = tempDirectory.appendingPathComponent("out.tar")
+        let recorder = LockedMessages()
+        try withBuiltinZstdOnly {
+            try MacOSImagePackager.package(
+                imageDirectory: imageDirectory,
+                outputTar: outputTar,
+                reference: "local/test:latest",
+                progress: { recorder.append($0) }
+            )
+        }
+
+        let messages = recorder.values()
+        #expect(messages.contains("Packaging macOS image bundle"))
+        #expect(messages.contains(where: { $0.contains("Chunking macOS disk image") }))
+        #expect(messages.contains(where: { $0.contains("Chunked 1/1 disk chunk") }))
+        #expect(messages.contains("Writing OCI tar metadata"))
+        #expect(messages.contains(where: { $0.contains("Appending ") && $0.contains("OCI blob") }))
+        #expect(messages.contains("Finished macOS image packaging"))
+        #expect(FileManager.default.fileExists(atPath: outputTar.path))
+    }
 }
 
 private func makeTemporaryDirectory() throws -> URL {
@@ -148,4 +189,21 @@ private func withBuiltinZstdOnly<T>(_ body: () throws -> T) throws -> T {
     }
     setenv("PATH", "", 1)
     return try body()
+}
+
+private final class LockedMessages: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+
+    func append(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        messages.append(message)
+    }
+
+    func values() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
+    }
 }

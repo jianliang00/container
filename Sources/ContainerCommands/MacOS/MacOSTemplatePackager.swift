@@ -23,6 +23,7 @@ enum MacOSImagePackager {
     static let diskImageFilename = "Disk.img"
     static let auxiliaryStorageFilename = "AuxiliaryStorage"
     static let hardwareModelFilename = "HardwareModel.bin"
+    typealias ProgressHandler = @Sendable (String) -> Void
 
     struct ImagePaths {
         let root: URL
@@ -51,21 +52,25 @@ enum MacOSImagePackager {
         reference: String?,
         imageConfig: ContainerizationOCI.Image? = nil,
         parentDiskSource: MacOSChunkedDiskSource? = nil,
-        temporaryRootDirectory: URL? = nil
+        temporaryRootDirectory: URL? = nil,
+        progress: ProgressHandler? = nil
     ) throws {
         let packageStartedAt = Date()
+        progress?("Packaging macOS image bundle")
         let image = try validateImageDirectory(imageDirectory)
         let layout = try createLayoutDirectory(
             from: image,
             reference: reference,
             imageConfig: imageConfig,
             parentDiskSource: parentDiskSource,
-            temporaryRootDirectory: temporaryRootDirectory
+            temporaryRootDirectory: temporaryRootDirectory,
+            progress: progress
         )
         defer {
             try? FileManager.default.removeItem(at: layout.layoutDirectory)
         }
-        try createTar(fromLayout: layout.layoutDirectory, outputTar: outputTar)
+        try createTar(fromLayout: layout.layoutDirectory, outputTar: outputTar, progress: progress)
+        progress?("Finished macOS image packaging")
         MacOSExportProfiler.log(
             "package.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt))) "
                 + "(chunks=\(layout.chunkResults.count), reused=\(layout.chunkResults.filter(\.reusedFromParent).count), rebuilt=\(layout.chunkResults.filter { !$0.reusedFromParent }.count))"
@@ -77,7 +82,8 @@ enum MacOSImagePackager {
         reference: String?,
         imageConfig: ContainerizationOCI.Image?,
         parentDiskSource: MacOSChunkedDiskSource?,
-        temporaryRootDirectory: URL?
+        temporaryRootDirectory: URL?,
+        progress: ProgressHandler?
     ) throws -> LayoutDirectoryResult {
         let layoutStartedAt = Date()
         let fm = FileManager.default
@@ -119,14 +125,26 @@ enum MacOSImagePackager {
         // v1 chunked disk format
         let logicalSize = try MacOSDiskChunker.logicalFileSize(image.diskImage)
         let chunkingStartedAt = Date()
+        let expectedChunkCount = Int((logicalSize + DiskLayout.defaultChunkSize - 1) / DiskLayout.defaultChunkSize)
+        progress?("Chunking macOS disk image (\(expectedChunkCount) chunk(s))")
         let chunkResults = try MacOSDiskChunker.chunkDiskImage(
             diskImage: image.diskImage,
             blobsDir: blobsDir,
-            parentDiskSource: parentDiskSource
+            parentDiskSource: parentDiskSource,
+            progress: { update in
+                guard shouldReportChunkProgress(update) else {
+                    return
+                }
+                progress?(
+                    "Chunked \(update.completedChunks)/\(update.totalChunks) disk chunk(s) "
+                        + "(reused=\(update.reusedChunks), rebuilt=\(update.rebuiltChunks))"
+                )
+            }
         )
         let reusedChunkCount = chunkResults.filter(\.reusedFromParent).count
         let fastReusedChunkCount = chunkResults.filter(\.reusedWithoutRawDigest).count
         let rebuiltChunkCount = chunkResults.count - reusedChunkCount
+        progress?("Finished disk chunking (reused=\(reusedChunkCount), rebuilt=\(rebuiltChunkCount))")
         MacOSExportProfiler.log(
             "chunkDiskImage: \(MacOSExportProfiler.format(Date().timeIntervalSince(chunkingStartedAt))) "
                 + "(chunks=\(chunkResults.count), reused=\(reusedChunkCount), fastReused=\(fastReusedChunkCount), rebuilt=\(rebuiltChunkCount), uniqueBlobs=\(Set(chunkResults.map(\.blobDigest)).count))"
@@ -212,7 +230,7 @@ enum MacOSImagePackager {
         return LayoutDirectoryResult(layoutDirectory: layoutDir, chunkResults: chunkResults)
     }
 
-    private static func createTar(fromLayout layoutDir: URL, outputTar: URL) throws {
+    private static func createTar(fromLayout layoutDir: URL, outputTar: URL, progress: ProgressHandler?) throws {
         let totalStartedAt = Date()
         let fm = FileManager.default
         try fm.createDirectory(at: outputTar.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -228,6 +246,7 @@ enum MacOSImagePackager {
         // First write the small metadata files (oci-layout, index.json)
         let smallFiles = ["oci-layout", "index.json"]
         let metadataTarStartedAt = Date()
+        progress?("Writing OCI tar metadata")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
         process.arguments = ["-cf", outputTar.path, "-C", layoutDir.path] + smallFiles
@@ -247,7 +266,8 @@ enum MacOSImagePackager {
         let blobsDir = layoutDir.appendingPathComponent("blobs/sha256")
         let blobFiles = try fm.contentsOfDirectory(atPath: blobsDir.path)
         let blobAppendStartedAt = Date()
-        for blob in blobFiles {
+        progress?("Appending \(blobFiles.count) OCI blob(s) to tar")
+        for (index, blob) in blobFiles.enumerated() {
             let appendProcess = Process()
             appendProcess.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
             appendProcess.arguments = ["-rf", outputTar.path, "-C", layoutDir.path, "blobs/sha256/\(blob)"]
@@ -261,13 +281,40 @@ enum MacOSImagePackager {
             }
             // Delete the blob to free disk space immediately
             try? fm.removeItem(at: blobsDir.appendingPathComponent(blob))
+            let completedBlobCount = index + 1
+            if shouldReportBlobAppendProgress(completed: completedBlobCount, total: blobFiles.count) {
+                progress?("Appended \(completedBlobCount)/\(blobFiles.count) OCI blob(s) to tar")
+            }
         }
+        progress?("Finished OCI tar export")
         MacOSExportProfiler.log(
             "createTar.appendBlobs: \(MacOSExportProfiler.format(Date().timeIntervalSince(blobAppendStartedAt))) " + "(blobFiles=\(blobFiles.count))"
         )
         MacOSExportProfiler.log(
             "createTar.total: \(MacOSExportProfiler.format(Date().timeIntervalSince(totalStartedAt)))"
         )
+    }
+
+    private static func shouldReportChunkProgress(_ progress: MacOSDiskChunker.Progress) -> Bool {
+        shouldReportProgressStep(completed: progress.completedChunks, total: progress.totalChunks)
+    }
+
+    private static func shouldReportBlobAppendProgress(completed: Int, total: Int) -> Bool {
+        shouldReportProgressStep(completed: completed, total: total)
+    }
+
+    private static func shouldReportProgressStep(completed: Int, total: Int) -> Bool {
+        guard total > 0 else {
+            return false
+        }
+        if total <= 8 {
+            return true
+        }
+        if completed == 1 || completed == total {
+            return true
+        }
+        let interval = max(1, total / 8)
+        return completed % interval == 0
     }
 
     private static func addFileBlob(source: URL, blobsDir: URL, mediaType: String) throws -> OCIDescriptor {

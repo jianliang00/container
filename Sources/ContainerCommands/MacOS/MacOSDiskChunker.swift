@@ -45,6 +45,13 @@ enum MacOSDiskChunker {
     static let tarEntryName = "disk.chunk"
     private static let maximumAutomaticParallelChunks = 4
 
+    struct Progress: Equatable {
+        let totalChunks: Int
+        let completedChunks: Int
+        let reusedChunks: Int
+        let rebuiltChunks: Int
+    }
+
     /// Split a disk image into 1 GiB chunks, generating sparse tar+zstd blobs.
     /// Returns chunk results and writes blobs to blobsDir.
     static func chunkDiskImage(
@@ -52,7 +59,8 @@ enum MacOSDiskChunker {
         blobsDir: URL,
         chunkSize: Int64 = DiskLayout.defaultChunkSize,
         parentDiskSource: MacOSChunkedDiskSource? = nil,
-        maxConcurrentChunks: Int? = nil
+        maxConcurrentChunks: Int? = nil,
+        progress: (@Sendable (Progress) -> Void)? = nil
     ) throws -> [ChunkResult] {
         let fileSize = try Self.logicalFileSize(diskImage)
         let chunkCount = Int((fileSize + chunkSize - 1) / chunkSize)
@@ -71,6 +79,10 @@ enum MacOSDiskChunker {
             ChunkWorkState(
                 nextIndex: 0,
                 firstError: nil,
+                totalChunks: chunkCount,
+                completedChunks: 0,
+                reusedChunks: 0,
+                rebuiltChunks: 0,
                 results: Array(repeating: nil, count: chunkCount)
             )
         )
@@ -95,7 +107,22 @@ enum MacOSDiskChunker {
                         blobsDir: blobsDir,
                         parentReuseContext: parentReuseContext
                     )
-                    state.withLock { $0.results[chunkIndex] = result }
+                    let snapshot = state.withLock { current -> Progress in
+                        current.results[chunkIndex] = result
+                        current.completedChunks += 1
+                        if result.reusedFromParent {
+                            current.reusedChunks += 1
+                        } else {
+                            current.rebuiltChunks += 1
+                        }
+                        return .init(
+                            totalChunks: current.totalChunks,
+                            completedChunks: current.completedChunks,
+                            reusedChunks: current.reusedChunks,
+                            rebuiltChunks: current.rebuiltChunks
+                        )
+                    }
+                    progress?(snapshot)
                 } catch {
                     state.withLock { current in
                         if current.firstError == nil {
@@ -757,6 +784,10 @@ enum MacOSDiskChunker {
 private struct ChunkWorkState {
     var nextIndex: Int
     var firstError: (any Error)?
+    let totalChunks: Int
+    var completedChunks: Int
+    var reusedChunks: Int
+    var rebuiltChunks: Int
     var results: [ChunkResult?]
 }
 

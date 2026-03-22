@@ -107,9 +107,9 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
             return recovered
         }
 
-        return try await allocatePreparedNetwork(
-            containerConfig: containerConfig,
-            log: log
+        throw ContainerizationError(
+            .invalidState,
+            message: "vmnetShared requires a prepared persisted sandbox network lease before sidecar bootstrap"
         )
     }
 
@@ -236,59 +236,6 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                 metadata: ["error": "\(error)"]
             )
             return nil
-        }
-    }
-
-    @available(macOS 26, *)
-    private func allocatePreparedNetwork(
-        containerConfig: ContainerConfiguration,
-        log: Logger
-    ) async throws -> PreparedMacOSNetwork {
-        let requests = containerConfig.macOSGuestNetworkRequests()
-        var liveAttachments: [Attachment] = []
-        var ownedNetworks: [ManagedVMNetNetwork] = []
-        var preparedDevices: [VZNetworkDeviceConfiguration] = []
-        var networkRefs: [String: ManagedVMNetNetwork] = [:]
-
-        do {
-            for request in requests {
-                let client = NetworkClient(id: request.network)
-                let (attachment, additionalData) = try await client.allocate(
-                    hostname: request.hostname,
-                    macAddress: request.macAddress
-                )
-
-                let managedNetwork = try resolveManagedNetwork(
-                    networkID: request.network,
-                    additionalData: additionalData,
-                    networkRefs: &networkRefs,
-                    ownedNetworks: &ownedNetworks,
-                    log: log
-                )
-
-                liveAttachments.append(attachment)
-                preparedDevices.append(
-                    try createDeviceConfiguration(
-                        attachment: attachment,
-                        network: managedNetwork.reference
-                    )
-                )
-            }
-
-            return PreparedMacOSNetwork(
-                devices: preparedDevices,
-                lease: makeLease(
-                    containerConfig: containerConfig,
-                    attachments: liveAttachments
-                ),
-                ownedNetworks: ownedNetworks
-            )
-        } catch {
-            for attachment in liveAttachments {
-                let client = NetworkClient(id: attachment.network)
-                try? await client.deallocate(hostname: attachment.hostname)
-            }
-            throw error
         }
     }
 

@@ -23,13 +23,13 @@ import Testing
 struct ProcessIOStartupNoticeTests {
     @Test("Slow process start emits a delayed startup notice")
     func slowProcessStartEmitsStartupNotice() async throws {
-        let process = DelayedStartProcess(startDelayNanoseconds: 150_000_000)
+        let process = DelayedStartProcess(startDelayNanoseconds: 500_000_000)
         let recorder = StartupNoticeRecorder()
 
         try await ProcessIO.startProcess(
             process: process,
             startupMessage: "Waiting for macOS guest...",
-            startupDelayNanoseconds: 20_000_000,
+            startupDelayNanoseconds: 50_000_000,
             startupWriter: { recorder.record($0) }
         )
 
@@ -44,7 +44,7 @@ struct ProcessIOStartupNoticeTests {
         try await ProcessIO.startProcess(
             process: process,
             startupMessage: "Waiting for macOS guest...",
-            startupDelayNanoseconds: 100_000_000,
+            startupDelayNanoseconds: 2_000_000_000,
             startupWriter: { recorder.record($0) }
         )
 

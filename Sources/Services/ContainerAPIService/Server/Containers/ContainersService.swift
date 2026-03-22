@@ -75,6 +75,9 @@ public actor ContainersService {
         self.log = log
         self.runtimePlugins = pluginLoader.findPlugins().filter { $0.hasType(.runtime) }
         self.containers = try Self.loadAtBoot(root: containerRoot, loader: pluginLoader, log: log)
+        Task {
+            await self.recoverSandboxStatesAtBoot()
+        }
     }
 
     static func loadAtBoot(root: URL, loader: PluginLoader, log: Logger) throws -> [String: ContainerState] {
@@ -381,10 +384,7 @@ public actor ContainersService {
             try await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
                 if state.client == nil {
-                    try await self.exitMonitor.registerProcess(
-                        id: id,
-                        onExit: self.handleContainerExit
-                    )
+                    try await self.registerContainerExitCallback(id: id)
                     state.client = sandboxClient
                 }
                 state.bootstrapTask = nil
@@ -450,8 +450,6 @@ public actor ContainersService {
                 return .run(task: task, client: client, isInit: isInit)
             }
 
-            let log = self.log
-            let exitMonitor = self.exitMonitor
             let task = Task {
                 try await client.startProcess(processID)
 
@@ -459,14 +457,7 @@ public actor ContainersService {
                     return StartProcessResult.exec
                 }
 
-                let waitFunc: ExitMonitor.WaitHandler = {
-                    log.info("registering container \(id) with exit monitor")
-                    let code = try await client.wait(id)
-                    log.info("container \(id) finished in exit monitor, exit code \(code)")
-
-                    return code
-                }
-                try await exitMonitor.track(id: id, waitingOn: waitFunc)
+                try await self.trackContainerExit(id: id, client: client)
 
                 let sandboxSnapshot = try await client.state()
                 return .initProcessStarted(networks: sandboxSnapshot.networks)
@@ -793,6 +784,135 @@ public actor ContainersService {
             args: args,
             instanceId: configuration.id
         )
+    }
+
+    private func recoverSandboxStatesAtBoot() async {
+        let containerIDs = Array(self.containers.keys).sorted()
+        guard !containerIDs.isEmpty else {
+            return
+        }
+
+        for id in containerIDs {
+            await self.recoverSandboxStateAtBoot(id: id)
+        }
+    }
+
+    private func recoverSandboxStateAtBoot(id: String) async {
+        let runtimeName: String
+        let fullServiceLabel: String
+
+        do {
+            let state = try self._getContainerState(id: id)
+            guard state.client == nil, state.bootstrapTask == nil else {
+                return
+            }
+            runtimeName = state.snapshot.configuration.runtimeHandler
+            fullServiceLabel = Self.fullLaunchdServiceLabel(
+                runtimeName: runtimeName,
+                instanceId: id
+            )
+
+            guard try ServiceManager.isRegistered(fullServiceLabel: fullServiceLabel) else {
+                return
+            }
+        } catch {
+            self.log.warning(
+                "failed to determine boot recovery eligibility",
+                metadata: [
+                    "id": "\(id)",
+                    "error": "\(error)",
+                ]
+            )
+            return
+        }
+
+        do {
+            let client = try await SandboxClient.create(id: id, runtime: runtimeName)
+            let sandboxSnapshot = try await client.state()
+            let shouldTrackExit = try await self.lock.withLock { context -> Bool in
+                var state = try await self.getContainerState(id: id, context: context)
+                guard state.client == nil, state.bootstrapTask == nil else {
+                    return false
+                }
+
+                state = Self.makeBootRecoveredState(
+                    existing: state,
+                    sandboxSnapshot: sandboxSnapshot,
+                    client: client
+                )
+                await self.setContainerState(id, state, context: context)
+                return sandboxSnapshot.status == .running
+            }
+
+            self.log.info(
+                "recovered sandbox state at boot",
+                metadata: [
+                    "id": "\(id)",
+                    "status": "\(sandboxSnapshot.status.rawValue)",
+                    "networks": "\(sandboxSnapshot.networks.count)",
+                ]
+            )
+
+            guard shouldTrackExit else {
+                return
+            }
+
+            do {
+                try await self.registerContainerExitCallback(id: id)
+                try await self.trackContainerExit(id: id, client: client)
+            } catch {
+                self.log.warning(
+                    "failed to start exit tracking for recovered sandbox",
+                    metadata: [
+                        "id": "\(id)",
+                        "error": "\(error)",
+                    ]
+                )
+            }
+        } catch {
+            self.log.warning(
+                "failed to recover sandbox state at boot",
+                metadata: [
+                    "id": "\(id)",
+                    "runtime": "\(runtimeName)",
+                    "error": "\(error)",
+                ]
+            )
+        }
+    }
+
+    private func registerContainerExitCallback(id: String) async throws {
+        try await self.exitMonitor.registerProcess(
+            id: id,
+            onExit: self.handleContainerExit
+        )
+    }
+
+    private func trackContainerExit(id: String, client: SandboxClient) async throws {
+        let log = self.log
+        let waitFunc: ExitMonitor.WaitHandler = {
+            log.info("registering container \(id) with exit monitor")
+            let code = try await client.wait(id)
+            log.info("container \(id) finished in exit monitor, exit code \(code)")
+            return code
+        }
+        try await self.exitMonitor.track(id: id, waitingOn: waitFunc)
+    }
+
+    static func makeBootRecoveredState(
+        existing: ContainerState,
+        sandboxSnapshot: SandboxSnapshot,
+        client: SandboxClient
+    ) -> ContainerState {
+        var recovered = existing
+        recovered.snapshot.status = sandboxSnapshot.status
+        recovered.snapshot.networks = sandboxSnapshot.networks
+        if sandboxSnapshot.status != .running {
+            recovered.snapshot.startedDate = nil
+        }
+        recovered.client = client
+        recovered.bootstrapTask = nil
+        return recovered
     }
 
     private func setContainerState(_ id: String, _ state: ContainerState, context: AsyncLock.Context) async {

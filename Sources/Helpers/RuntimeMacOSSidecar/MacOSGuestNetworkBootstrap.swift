@@ -67,7 +67,7 @@ enum MacOSGuestNetworkBootstrap {
             nameservers: dns.nameservers,
             domain: dns.domain,
             searchDomains: dns.searchDomains,
-            options: dns.options
+            options: []
         )
     }
 }

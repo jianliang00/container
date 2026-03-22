@@ -26,7 +26,7 @@ Guest networking is applied by a dedicated guest network manager. It:
 
 - matches the NIC by MAC
 - configures IPv4, prefix, and gateway
-- writes DNS settings
+- writes guest-supported DNS settings (`nameservers`, `domain`, and `searchDomains`)
 - returns the applied interface name and current IP
 
 Network setup does not run through the generic exec path.
@@ -43,6 +43,8 @@ The persisted lease stores:
 - IPv4 and prefix
 - gateway
 - DNS projection
+  - limited to guest-visible resolver state
+  - excludes generic resolver `options`
 
 The sidecar reads that lease and creates VM-local `VZ*NetworkDeviceAttachment` instances during bootstrap or recovery.
 
@@ -82,9 +84,13 @@ The darwin CLI network surface is:
 
 - `--network <id>[,mac=...]`
 - basic DNS parameters backed by `ContainerConfiguration.dns`
+  - `--dns`
+  - `--dns-domain`
+  - `--dns-search`
 
 The darwin path does not support:
 
+- `--dns-option`
 - `--publish`
 - `--publish-socket`
 - multi-network semantics in the first iteration

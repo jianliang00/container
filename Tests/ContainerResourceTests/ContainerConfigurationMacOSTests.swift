@@ -236,7 +236,7 @@ struct ContainerConfigurationMacOSTests {
     }
 
     @Test
-    func macOSGuestReportedNetworkAttachmentsIncludeConfiguredDNS() throws {
+    func macOSGuestReportedNetworkAttachmentsSanitizeConfiguredDNSOptions() throws {
         let imageJSON = """
             {
               "reference": "example/macos:latest",
@@ -278,7 +278,7 @@ struct ContainerConfigurationMacOSTests {
             nameservers: ["9.9.9.9"],
             domain: "example.internal",
             searchDomains: ["svc.example.internal"],
-            options: ["ndots:2"]
+            options: []
         ))
     }
 

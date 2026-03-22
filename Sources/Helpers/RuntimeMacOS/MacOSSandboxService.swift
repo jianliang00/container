@@ -60,12 +60,24 @@ public actor MacOSSandboxService {
         case shuttingDown
     }
 
+    private struct WorkloadLogFiles {
+        let stdoutURL: URL
+        let stderrURL: URL
+        let stdoutHandle: FileHandle
+        let stderrHandle: FileHandle
+    }
+
     struct Session {
         let processID: String
         let config: ProcessConfiguration
         let stdio: [FileHandle?]
+        let stdoutLogURL: URL
+        let stderrLogURL: URL
+        var stdoutLogHandle: FileHandle?
+        var stderrLogHandle: FileHandle?
         var stdinClosed: Bool = false
         var started: Bool = false
+        var startedAt: Date?
         var exitStatus: ExitStatus?
         var lastAgentError: String?
         var lastStderr: String?
@@ -125,7 +137,7 @@ extension MacOSSandboxService {
         try openLogs()
         try writeBootLog("bootstrapping container \(config.id)")
 
-        let initSession = Session(
+        let initSession = try makeSession(
             processID: config.id,
             config: config.initProcess,
             stdio: message.stdio()
@@ -159,7 +171,7 @@ extension MacOSSandboxService {
             throw ContainerizationError(.exists, message: "process \(id) already exists")
         }
 
-        sessions[id] = Session(processID: id, config: processConfig, stdio: message.stdio())
+        sessions[id] = try makeSession(processID: id, config: processConfig, stdio: message.stdio())
         return message.reply()
     }
 
@@ -189,9 +201,11 @@ extension MacOSSandboxService {
         // overwriting it with the older local copy.
         if var current = sessions[processID] {
             current.started = true
+            current.startedAt = current.startedAt ?? session.startedAt ?? Date()
             sessions[processID] = current
         } else {
             session.started = true
+            session.startedAt = session.startedAt ?? Date()
             sessions[processID] = session
         }
 
@@ -298,12 +312,22 @@ extension MacOSSandboxService {
                     configuration: configuration,
                     status: status,
                     networks: networks,
-                    startedDate: nil
+                    startedDate: sessions[configuration.id]?.startedAt
                 )
-            ]
+            ],
+            workloads: workloadSnapshots()
         )
         let reply = message.reply()
         try reply.setState(snapshot)
+        return reply
+    }
+
+    @Sendable
+    public func inspectWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        let processID = try message.id()
+        let snapshot = try workloadSnapshot(processID: processID)
+        let reply = message.reply()
+        try reply.setWorkloadSnapshot(snapshot)
         return reply
     }
 
@@ -373,6 +397,44 @@ extension MacOSSandboxService {
 
     private func bootLogPath() -> URL {
         root.appendingPathComponent("vminitd.log")
+    }
+
+    private func workloadsDirectory() -> URL {
+        root.appendingPathComponent("workloads")
+    }
+
+    private func workloadDirectory(for processID: String) -> URL {
+        workloadsDirectory().appendingPathComponent(processID)
+    }
+
+    private func workloadStdoutLogPath(for processID: String) -> URL {
+        workloadDirectory(for: processID).appendingPathComponent("stdout.log")
+    }
+
+    private func workloadStderrLogPath(for processID: String) -> URL {
+        workloadDirectory(for: processID).appendingPathComponent("stderr.log")
+    }
+
+    private func openAppendLogHandle(at url: URL) throws -> FileHandle {
+        let fm = FileManager.default
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: url.path) {
+            _ = fm.createFile(atPath: url.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        return handle
+    }
+
+    private func openWorkloadLogFiles(processID: String) throws -> WorkloadLogFiles {
+        let stdoutURL = workloadStdoutLogPath(for: processID)
+        let stderrURL = workloadStderrLogPath(for: processID)
+        return WorkloadLogFiles(
+            stdoutURL: stdoutURL,
+            stderrURL: stderrURL,
+            stdoutHandle: try openAppendLogHandle(at: stdoutURL),
+            stderrHandle: try openAppendLogHandle(at: stderrURL)
+        )
     }
 
     private func openLogs() throws {
@@ -535,6 +597,57 @@ extension MacOSSandboxService {
 // MARK: - Process/session plumbing
 
 extension MacOSSandboxService {
+    func makeSession(
+        processID: String,
+        config: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) throws -> Session {
+        let logs = try openWorkloadLogFiles(processID: processID)
+        return Session(
+            processID: processID,
+            config: config,
+            stdio: stdio,
+            stdoutLogURL: logs.stdoutURL,
+            stderrLogURL: logs.stderrURL,
+            stdoutLogHandle: logs.stdoutHandle,
+            stderrLogHandle: logs.stderrHandle
+        )
+    }
+
+    private func workloadSnapshot(processID: String) throws -> WorkloadSnapshot {
+        guard let session = sessions[processID] else {
+            throw ContainerizationError(.notFound, message: "process \(processID) not found")
+        }
+        return workloadSnapshot(for: session)
+    }
+
+    private func workloadSnapshots() -> [WorkloadSnapshot] {
+        sessions.values
+            .sorted { $0.processID < $1.processID }
+            .map(workloadSnapshot(for:))
+    }
+
+    private func workloadSnapshot(for session: Session) -> WorkloadSnapshot {
+        let status: RuntimeStatus
+        if session.exitStatus != nil {
+            status = .stopped
+        } else if session.started {
+            status = .running
+        } else {
+            status = .stopped
+        }
+
+        return WorkloadSnapshot(
+            configuration: .init(id: session.processID, processConfiguration: session.config),
+            status: status,
+            exitCode: session.exitStatus?.exitCode,
+            startedDate: session.startedAt,
+            exitedAt: session.exitStatus?.exitedAt,
+            stdoutLogPath: session.stdoutLogURL.path,
+            stderrLogPath: session.stderrLogURL.path
+        )
+    }
+
     private func waitWithoutTimeout(_ id: String) async throws -> ExitStatus {
         if let status = sessions[id]?.exitStatus {
             writeContainerLog(Data(("waitWithoutTimeout immediate hit for \(id) code=\(status.exitCode)\n").utf8))
@@ -655,6 +768,8 @@ extension MacOSSandboxService {
             session.stdio[0]?.readabilityHandler = nil
             try? session.stdio[1]?.close()
             try? session.stdio[2]?.close()
+            try? session.stdoutLogHandle?.close()
+            try? session.stderrLogHandle?.close()
         }
         sessions.removeAll()
     }
@@ -692,6 +807,7 @@ extension MacOSSandboxService {
         do {
             try await startProcessViaSidecarWithRetries(port: agentPort, processID: processID, request: request)
             session.started = true
+            session.startedAt = session.startedAt ?? Date()
             if let stdin = session.stdio[0] {
                 let service = self
                 stdin.readabilityHandler = { handle in
@@ -780,6 +896,7 @@ extension MacOSSandboxService {
                 if let stdout = session.stdio[1] {
                     try? stdout.write(contentsOf: data)
                 }
+                try? session.stdoutLogHandle?.write(contentsOf: data)
                 writeContainerLog(data)
             }
         case .processStderr:
@@ -789,6 +906,7 @@ extension MacOSSandboxService {
                 } else if let stdout = session.stdio[1] {
                     try? stdout.write(contentsOf: data)
                 }
+                try? session.stderrLogHandle?.write(contentsOf: data)
                 writeContainerLog(data)
                 if let text = String(data: data, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -812,6 +930,8 @@ extension MacOSSandboxService {
             session.stdio[0]?.readabilityHandler = nil
             try? session.stdio[1]?.close()
             try? session.stdio[2]?.close()
+            try? session.stdoutLogHandle?.close()
+            try? session.stderrLogHandle?.close()
             sessions[processID] = session
             completeProcess(id: processID, status: status)
             if processID == configuration?.id {
@@ -873,8 +993,21 @@ extension XPCMessage {
 
 extension MacOSSandboxService {
     // These hooks are used by release-mode test builds in CI.
-    func testingAddSession(id: String, config: ProcessConfiguration) {
-        sessions[id] = Session(processID: id, config: config, stdio: [nil, nil, nil])
+    func testingAddSession(
+        id: String,
+        config: ProcessConfiguration,
+        started: Bool = false,
+        exitCode: Int32? = nil
+    ) {
+        var session = try! makeSession(processID: id, config: config, stdio: [nil, nil, nil])
+        session.started = started
+        session.startedAt = started ? Date() : nil
+        if let exitCode {
+            session.exitStatus = ExitStatus(exitCode: exitCode, exitedAt: Date())
+            try? session.stdoutLogHandle?.close()
+            try? session.stderrLogHandle?.close()
+        }
+        sessions[id] = session
     }
 
     func testingWaitForProcess(_ id: String, timeout: Int32 = 0) async throws -> ExitStatus {
@@ -887,5 +1020,9 @@ extension MacOSSandboxService {
 
     func testingWaiterCount(for id: String) -> Int {
         waiters[id]?.count ?? 0
+    }
+
+    func testingInspectWorkload(_ id: String) throws -> WorkloadSnapshot {
+        try workloadSnapshot(processID: id)
     }
 }

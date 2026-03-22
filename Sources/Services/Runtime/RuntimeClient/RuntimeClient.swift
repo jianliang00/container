@@ -131,6 +131,23 @@ extension RuntimeClient {
         return try response.sandboxSnapshot()
     }
 
+    public func inspectWorkload(_ id: String) async throws -> WorkloadSnapshot {
+        let request = XPCMessage(route: SandboxRoutes.inspectWorkload.rawValue)
+        request.set(key: SandboxKeys.id.rawValue, value: id)
+
+        let response: XPCMessage
+        do {
+            response = try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to inspect workload \(id) in container \(self.id)",
+                cause: error
+            )
+        }
+        return try response.workloadSnapshot()
+    }
+
     public func createProcess(_ id: String, config: ProcessConfiguration, stdio: [FileHandle?]) async throws {
         let request = XPCMessage(route: RuntimeRoutes.createProcess.rawValue)
         request.set(key: RuntimeKeys.id.rawValue, value: id)
@@ -419,5 +436,21 @@ extension XPCMessage {
             )
         }
         return try JSONDecoder().decode(SandboxNetworkState.self, from: data)
+    }
+
+    public func setWorkloadSnapshot(_ snapshot: WorkloadSnapshot) throws {
+        let data = try JSONEncoder().encode(snapshot)
+        self.set(key: SandboxKeys.workloadSnapshot.rawValue, value: data)
+    }
+
+    func workloadSnapshot() throws -> WorkloadSnapshot {
+        let data = self.dataNoCopy(key: SandboxKeys.workloadSnapshot.rawValue)
+        guard let data else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "no workload snapshot data returned"
+            )
+        }
+        return try JSONDecoder().decode(WorkloadSnapshot.self, from: data)
     }
 }

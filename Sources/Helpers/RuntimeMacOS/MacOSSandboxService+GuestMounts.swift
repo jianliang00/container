@@ -39,7 +39,7 @@ extension MacOSSandboxService {
         }
 
         let processID = "mount-setup-\(UUID().uuidString)"
-        var session = Session(
+        var session = try makeSession(
             processID: processID,
             config: ProcessConfiguration(
                 executable: "/bin/sh",
@@ -92,6 +92,8 @@ extension MacOSSandboxService {
         session.stdio[0]?.readabilityHandler = nil
         try? session.stdio[1]?.close()
         try? session.stdio[2]?.close()
+        try? session.stdoutLogHandle?.close()
+        try? session.stderrLogHandle?.close()
     }
 
     private static func guestMountBootstrapScript(shares: [MacOSGuestMountMapping.HostPathShare]) -> String {

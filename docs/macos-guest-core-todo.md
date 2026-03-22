@@ -72,10 +72,10 @@ Related design docs:
   - temporary directories
   - host path mappings
   - generic read-only file injection
-- [ ] Make workload state independently queryable.
-  - status
-  - exit code
-  - log path
+- [x] Make workload state independently queryable.
+  - [x] status
+  - [x] exit code
+  - [x] log path
 
 ### Exit Criteria
 

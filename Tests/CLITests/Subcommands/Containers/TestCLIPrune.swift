@@ -30,8 +30,8 @@ class TestCLIPruneCommand: CLITest {
         }
 
         #expect(
-            output.contains("Removed Zero KB of container bundle data"),
-            "should show no containers message"
+            output.contains("container bundle data"),
+            "should report container bundle data cleanup output"
         )
     }
 

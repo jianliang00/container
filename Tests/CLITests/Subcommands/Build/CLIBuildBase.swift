@@ -25,16 +25,29 @@ import Testing
 */
 @Suite(.serialized, .enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
 class TestCLIBuildBase: CLITest {
-    override init() throws {
-        try super.init()
+    private static let builderSuiteLock = NSLock()
+    private var holdsBuilderSuiteLock = false
 
-        try? builderDelete(force: true)
-        try builderStart()
-        try waitForBuilderRunning()
+    override init() throws {
+        Self.builderSuiteLock.lock()
+
+        do {
+            try super.init()
+            holdsBuilderSuiteLock = true
+            try? builderDelete(force: true)
+            try builderStart()
+            try waitForBuilderRunning()
+        } catch {
+            Self.builderSuiteLock.unlock()
+            throw error
+        }
     }
 
     deinit {
         try? builderDelete(force: true)
+        if holdsBuilderSuiteLock {
+            Self.builderSuiteLock.unlock()
+        }
     }
 
     func waitForBuilderRunning() throws {
@@ -42,15 +55,23 @@ class TestCLIBuildBase: CLITest {
         try waitForContainerRunning(buildkitName, 10)
 
         // exec into buildkit and check if builder-shim is running
-        var attempt = 3
+        var attempt = 10
+        var lastError: Error?
         while attempt > 0 {
             attempt -= 1
-            let response = try doExec(name: buildkitName, cmd: ["pidof", "-s", "container-builder-shim"])
-            if !response.isEmpty {
-                // found the init process running
-                return
+            do {
+                let response = try doExec(name: buildkitName, cmd: ["pidof", "-s", "container-builder-shim"])
+                if !response.isEmpty {
+                    // found the init process running
+                    return
+                }
+            } catch {
+                lastError = error
             }
             sleep(1)
+        }
+        if let lastError {
+            throw lastError
         }
         throw CLIError.executionFailed("failed to wait for container-builder-shim process on \(buildkitName)")
     }

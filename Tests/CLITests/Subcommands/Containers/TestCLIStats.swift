@@ -28,10 +28,11 @@ class TestCLIStatsCommand: CLITest {
     @Test func testStatsNoStreamJSONFormat() throws {
         let name = getTestName()
         #expect(throws: Never.self, "expected stats command to succeed") {
-            try doLongRun(name: name)
+            try? doRemove(name: name, force: true)
+            try doLongRun(name: name, autoRemove: false)
             defer {
                 try? doStop(name: name)
-                try? doRemove(name: name)
+                try? doRemove(name: name, force: true)
             }
             try waitForContainerRunning(name)
 
@@ -59,10 +60,11 @@ class TestCLIStatsCommand: CLITest {
     @Test func testStatsIdleCPUPercentage() throws {
         let name = getTestName()
         #expect(throws: Never.self, "expected stats to show low CPU for idle container") {
-            try doLongRun(name: name, containerArgs: ["sleep", "3600"])
+            try? doRemove(name: name, force: true)
+            try doLongRun(name: name, containerArgs: ["sleep", "3600"], autoRemove: false)
             defer {
                 try? doStop(name: name)
-                try? doRemove(name: name)
+                try? doRemove(name: name, force: true)
             }
             try waitForContainerRunning(name)
 
@@ -103,10 +105,11 @@ class TestCLIStatsCommand: CLITest {
         let name = getTestName()
         #expect(throws: Never.self, "expected stats to show high CPU for busy container") {
             // Run a container with a busy loop
-            try doLongRun(name: name, containerArgs: ["sh", "-c", "while true; do :; done"])
+            try? doRemove(name: name, force: true)
+            try doLongRun(name: name, containerArgs: ["sh", "-c", "while true; do :; done"], autoRemove: false)
             defer {
                 try? doStop(name: name)
-                try? doRemove(name: name)
+                try? doRemove(name: name, force: true)
             }
             try waitForContainerRunning(name)
 

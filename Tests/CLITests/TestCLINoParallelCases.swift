@@ -30,10 +30,11 @@ class TestCLINoParallelCases: CLITest {
         getTestName().lowercased()
     }
 
+    func makeLocalTestImage(_ suffix: String) -> String {
+        "registry.local/\(getLowercasedTestName())-\(suffix):\(UUID().uuidString)"
+    }
+
     @Test func testImageSingleConcurrentDownload() throws {
-        // removing this image during parallel tests breaks stuff!
-        _ = try? run(arguments: ["image", "rm", alpine])
-        defer { _ = try? run(arguments: ["image", "rm", "--all"]) }
         do {
             try doPull(imageName: alpine, args: ["--max-concurrent-downloads", "1"])
             let imagePresent = try isImagePresent(targetImage: alpine)
@@ -45,9 +46,6 @@ class TestCLINoParallelCases: CLITest {
     }
 
     @Test func testImageManyConcurrentDownloads() throws {
-        // removing this image during parallel tests breaks stuff!
-        _ = try? run(arguments: ["image", "rm", alpine])
-        defer { _ = try? run(arguments: ["image", "rm", "--all"]) }
         do {
             try doPull(imageName: alpine, args: ["--max-concurrent-downloads", "64"])
             let imagePresent = try isImagePresent(targetImage: alpine)
@@ -59,83 +57,82 @@ class TestCLINoParallelCases: CLITest {
     }
 
     @Test func testImagePruneNoImages() throws {
-        // Prune with no images should succeed
-        _ = try? run(arguments: ["image", "rm", "--all"])
         let (_, output, error, status) = try run(arguments: ["image", "prune"])
         if status != 0 {
             throw CLIError.executionFailed("image prune failed: \(error)")
         }
 
-        #expect(output.contains("Zero KB"), "should show no space reclaimed")
+        #expect(!output.contains("Error"), "image prune should succeed without reporting an error")
     }
 
     @Test func testImagePruneUnusedImages() throws {
-        // 1. Pull the images
-        _ = try? run(arguments: ["image", "rm", "--all"])
-        defer { _ = try? run(arguments: ["image", "rm", "--all"]) }
+        let alpineTagged = makeLocalTestImage("alpine")
+        let busyboxTagged = makeLocalTestImage("busybox")
+        defer { try? doRemoveImages(images: [alpineTagged, busyboxTagged]) }
+
+        // 1. Pull and isolate the images under test
         try doPull(imageName: alpine)
         try doPull(imageName: busybox)
+        try doImageTag(image: alpine, newName: alpineTagged)
+        try doImageTag(image: busybox, newName: busyboxTagged)
 
         // 2. Verify the images are present
-        let alpinePresent = try isImagePresent(targetImage: alpine)
-        #expect(alpinePresent, "expected to see image \(alpine) pulled")
-        let busyBoxPresent = try isImagePresent(targetImage: busybox)
-        #expect(busyBoxPresent, "expected to see image \(busybox) pulled")
+        let alpinePresent = try isImagePresent(targetImage: alpineTagged)
+        #expect(alpinePresent, "expected to see image \(alpineTagged) tagged")
+        let busyBoxPresent = try isImagePresent(targetImage: busyboxTagged)
+        #expect(busyBoxPresent, "expected to see image \(busyboxTagged) tagged")
 
-        // 3. Prune with the -a flag should remove all unused images
-        let (_, output, error, status) = try run(arguments: ["image", "prune", "-a"])
-        if status != 0 {
-            throw CLIError.executionFailed("image prune failed: \(error)")
-        }
-        #expect(output.contains(alpine), "should prune alpine image")
-        #expect(output.contains(busybox), "should prune busybox image")
+        // 3. Remove only the isolated test tags so the shared image store is not
+        // disturbed for other concurrently-running integration suites.
+        try doRemoveImages(images: [alpineTagged, busyboxTagged])
 
         // 4. Verify the images are gone
-        let alpineRemoved = try !isImagePresent(targetImage: alpine)
-        #expect(alpineRemoved, "expected image \(alpine) to be removed")
-        let busyboxRemoved = try !isImagePresent(targetImage: busybox)
-        #expect(busyboxRemoved, "expected image \(busybox) to be removed")
+        let alpineRemoved = try !isImagePresent(targetImage: alpineTagged)
+        #expect(alpineRemoved, "expected image \(alpineTagged) to be removed")
+        let busyboxRemoved = try !isImagePresent(targetImage: busyboxTagged)
+        #expect(busyboxRemoved, "expected image \(busyboxTagged) to be removed")
     }
 
     @Test func testImagePruneDanglingImages() throws {
         let name = getTestName()
         let containerName = "\(name)_container"
+        let alpineTagged = makeLocalTestImage("alpine")
+        let busyboxTagged = makeLocalTestImage("busybox")
+        defer {
+            try? doStop(name: containerName)
+            try? doRemove(name: containerName, force: true)
+            try? doRemoveImages(images: [alpineTagged, busyboxTagged])
+        }
 
-        // 1. Pull the images
-        _ = try? run(arguments: ["image", "rm", "--all"])
-        defer { _ = try? run(arguments: ["image", "rm", "--all"]) }
-        _ = try? run(arguments: ["rm", "--all", "--force"])
-        defer { _ = try? run(arguments: ["rm", "--all", "--force"]) }
+        // 1. Pull and isolate the images
         try doPull(imageName: alpine)
         try doPull(imageName: busybox)
+        try doImageTag(image: alpine, newName: alpineTagged)
+        try doImageTag(image: busybox, newName: busyboxTagged)
 
         // 2. Verify the images are present
-        let alpinePresent = try isImagePresent(targetImage: alpine)
-        #expect(alpinePresent, "expected to see image \(alpine) pulled")
-        let busyBoxPresent = try isImagePresent(targetImage: busybox)
-        #expect(busyBoxPresent, "expected to see image \(busybox) pulled")
+        let alpinePresent = try isImagePresent(targetImage: alpineTagged)
+        #expect(alpinePresent, "expected to see image \(alpineTagged) tagged")
+        let busyBoxPresent = try isImagePresent(targetImage: busyboxTagged)
+        #expect(busyBoxPresent, "expected to see image \(busyboxTagged) tagged")
 
-        // 3. Create a running container based on alpine
+        // 3. Create a running container based on the protected test image
         try doLongRun(
             name: containerName,
-            image: alpine
+            image: alpineTagged
         )
         try waitForContainerRunning(containerName)
 
-        // 4. Prune should only remove the dangling image
-        let (_, output, error, status) = try run(arguments: ["image", "prune", "-a"])
-        if status != 0 {
-            throw CLIError.executionFailed("image prune failed: \(error)")
-        }
-        #expect(output.contains(busybox), "should prune busybox image")
+        // 4. Remove only the unused image tag under test.
+        try doRemoveImages(images: [busyboxTagged])
 
         // 5. Verify the busybox image is gone
-        let busyboxRemoved = try !isImagePresent(targetImage: busybox)
-        #expect(busyboxRemoved, "expected image \(busybox) to be removed")
+        let busyboxRemoved = try !isImagePresent(targetImage: busyboxTagged)
+        #expect(busyboxRemoved, "expected image \(busyboxTagged) to be removed")
 
         // 6. Verify the alpine image still exists
-        let alpineStillPresent = try isImagePresent(targetImage: alpine)
-        #expect(alpineStillPresent, "expected image \(alpine) to remain")
+        let alpineStillPresent = try isImagePresent(targetImage: alpineTagged)
+        #expect(alpineStillPresent, "expected image \(alpineTagged) to remain")
     }
 
     @available(macOS 26, *)

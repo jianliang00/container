@@ -447,10 +447,6 @@ These are not missing features. They are engineering follow-up tasks on top of a
     - this still makes it harder to distinguish "pure headless debug tools are unstable" from "the main darwin runtime path is unstable"
   - next decision:
     - decide whether pure headless remains a reproduction mode only, or gains explicit failure or fallback behavior
-- [ ] keep explicit `--runtime` override support so clients do not hard-code runtime names from platform inference
-  - current issue: clients still require explicit `--runtime` to match the inferred built-in runtime
-  - target: move platform compatibility and plugin capability checks into server-side or runtime metadata instead of blocking third-party runtimes
-  - do not relax the current client-side conflict check before runtime capability metadata or equivalent server-side validation exists
 - [x] fixed waiter lifecycle in `MacOSSandboxService.waitForProcess(timeout:)`
   - `wait` now returns `notFound` immediately when the process does not exist
   - timeout, `stop`, `shutdown`, and `closeAllSessions()` now clean up and wake outstanding waiters
@@ -520,15 +516,6 @@ These are not missing features. They are engineering follow-up tasks on top of a
 - [x] `.dockerignore`
 - [x] `--target`
 - [x] end-to-end CLI tests
-
-### 6.3 Third Batch
-
-These are still backlog themes rather than ready-to-code tasks. Split them into narrower acceptance-driven items before implementation.
-
-- [ ] parser or front-end completeness
-- [ ] multi-stage planning interfaces
-- [ ] cache infrastructure hooks
-- [ ] split out phase-2 capabilities
 
 ## 7. Phase 1 Completion Criteria
 

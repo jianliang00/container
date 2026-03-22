@@ -101,6 +101,10 @@ Key paths:
   `/usr/local/libexec/container/macos-vm-manager/bin/container-macos-vm-manager`
 - guest-agent log inside the guest:
   `/var/log/container-macos-guest-agent.log`
+- mirrored guest-agent log on the host inside the container root:
+  `<container-root>/guest-agent.log`
+- mirrored guest-agent log follower stderr on the host:
+  `<container-root>/guest-agent.stderr.log`
 - helper log on the host inside the container root:
   `<container-root>/stdio.log`
 
@@ -326,6 +330,12 @@ sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 80
 sudo tail -n 120 /var/log/container-macos-guest-agent.log
 ```
 
+After a sandbox boots successfully through `container-runtime-macos`, the helper also starts a host-side mirror of the guest-agent log at:
+
+- `<container-root>/guest-agent.log`
+
+That mirror is best-effort. If bootstrap fails before the helper can start the background log follower, fall back to the in-guest path.
+
 ### 6.3 Run the Agent in the Foreground
 
 This is the strongest isolation technique for debugging `ready` frame and daemon startup issues:
@@ -495,6 +505,19 @@ The container root is typically:
 - `~/Library/Application Support/com.apple.container/containers/<container-id>/`
 
 ### 9.4 guest Logs
+
+Check the host-side mirror first:
+
+```bash
+d=$(ls -td "$HOME/Library/Application Support/com.apple.container/containers"/* | head -n 1)
+echo "$d"
+tail -n 200 "$d/guest-agent.log"
+tail -n 200 "$d/guest-agent.stderr.log"
+```
+
+The mirror is populated by a background `tail -F` process started by the helper after the VM boots and the guest-agent is reachable. It is the fastest way to inspect guest-agent output from the host without logging into the guest.
+
+If the mirror is missing, empty, or bootstrap failed before the helper reached the log-follow step, inspect the canonical in-guest log directly:
 
 ```bash
 sudo launchctl print system/com.apple.container.macos.guest-agent | head -n 80

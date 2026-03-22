@@ -61,7 +61,7 @@ struct MacOSGuestNetworkBootstrapTests {
         #expect(request.dns?.nameservers == ["9.9.9.9"])
         #expect(request.dns?.domain == "cluster.local")
         #expect(request.dns?.searchDomains == ["svc.cluster.local"])
-        #expect(request.dns?.options == ["ndots:5"])
+        #expect(request.dns?.options == [])
     }
 
     @Test

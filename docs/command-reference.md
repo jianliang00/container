@@ -47,7 +47,7 @@ container run [<options>] <image> [<arguments> ...]
 *   `-d, --detach`: Run the container and detach from the process
 *   `--dns <ip>`: DNS nameserver IP address
 *   `--dns-domain <domain>`: Default DNS domain
-*   `--dns-option <option>`: DNS options
+*   `--dns-option <option>`: DNS options (`--os darwin` is not supported)
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
 *   `--init-image <image>`: Use a custom init image instead of the default. This allows customizing boot-time behavior before the OCI container starts, such as running VM-level daemons, configuring eBPF filters, or debugging the init process.
@@ -274,7 +274,7 @@ container create [<options>] <image> [<arguments> ...]
 *   `-d, --detach`: Run the container and detach from the process
 *   `--dns <ip>`: DNS nameserver IP address
 *   `--dns-domain <domain>`: Default DNS domain
-*   `--dns-option <option>`: DNS options
+*   `--dns-option <option>`: DNS options (`--os darwin` is not supported)
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
 *   `--init-image <image>`: Use a custom init image instead of the default. This allows customizing boot-time behavior before the OCI container starts, such as running VM-level daemons, configuring eBPF filters, or debugging the init process.

@@ -77,6 +77,32 @@ struct MacOSSandboxServiceWaiterTests {
 
         #expect(await service.testingWaiterCount(for: "exec-timeout") == 0)
     }
+
+    @Test
+    func workloadSnapshotReportsStatusExitCodeAndLogPaths() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-finished",
+            config: baseProcessConfiguration(),
+            started: true,
+            exitCode: 17
+        )
+
+        let snapshot = try await service.testingInspectWorkload("exec-finished")
+
+        #expect(snapshot.id == "exec-finished")
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.exitCode == 17)
+        #expect(snapshot.startedDate != nil)
+        #expect(snapshot.exitedAt != nil)
+        #expect(snapshot.stdoutLogPath == tempRoot.appendingPathComponent("workloads/exec-finished/stdout.log").path)
+        #expect(snapshot.stderrLogPath == tempRoot.appendingPathComponent("workloads/exec-finished/stderr.log").path)
+        #expect(FileManager.default.fileExists(atPath: try #require(snapshot.stdoutLogPath)))
+        #expect(FileManager.default.fileExists(atPath: try #require(snapshot.stderrLogPath)))
+    }
 }
 
 private func makeSandboxService(root: URL) -> MacOSSandboxService {

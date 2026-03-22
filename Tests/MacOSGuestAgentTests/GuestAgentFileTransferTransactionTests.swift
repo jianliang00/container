@@ -382,6 +382,111 @@ struct GuestAgentFileTransferTransactionTests {
     }
 
     @Test
+    func ttyCloseDeliversEOFToDefaultTTYExec() throws {
+        let (serverFD, clientSocket) = try socketPair()
+        let connection = AgentConnection(fd: serverFD)
+        var clientFD = clientSocket
+        defer { closeIfValid(&clientFD) }
+
+        let runner = ConnectionRunner(connection: connection)
+        runner.start()
+
+        let ready = try readAgentFrame(from: clientFD)
+        #expect(ready.type == .ready)
+
+        try writeAgentFrame(
+            .init(
+                type: .exec,
+                id: "tty-close-default",
+                executable: "/bin/cat",
+                terminal: true
+            ),
+            to: clientFD
+        )
+        try writeAgentFrame(
+            .init(type: .close, id: "tty-close-default"),
+            to: clientFD
+        )
+
+        let frames = try readFramesUntilExit(from: clientFD)
+        #expect(frames.contains(where: { $0.type == .exit && $0.exitCode == 0 }))
+        #expect(frames.contains(where: { $0.type == .error }) == false)
+
+        closeIfValid(&clientFD)
+
+        #expect(runner.wait(timeoutSeconds: 2))
+        #expect(runner.error == nil)
+    }
+
+    @Test
+    func ttyCloseDeliversEOFToSpawnedProcessSession() throws {
+        let (serverFD, clientSocket) = try socketPair()
+        let connection = AgentConnection(fd: serverFD)
+        var clientFD = clientSocket
+        defer { closeIfValid(&clientFD) }
+
+        let runner = ConnectionRunner(connection: connection)
+        runner.start()
+
+        let ready = try readAgentFrame(from: clientFD)
+        #expect(ready.type == .ready)
+
+        try writeAgentFrame(
+            .init(
+                type: .exec,
+                id: "tty-close-spawned",
+                executable: "/bin/cat",
+                terminal: true,
+                uid: getuid(),
+                gid: getgid()
+            ),
+            to: clientFD
+        )
+        try writeAgentFrame(
+            .init(type: .close, id: "tty-close-spawned"),
+            to: clientFD
+        )
+
+        let frames = try readFramesUntilExit(from: clientFD)
+        #expect(frames.contains(where: { $0.type == .exit && $0.exitCode == 0 }))
+        #expect(frames.contains(where: { $0.type == .error }) == false)
+
+        closeIfValid(&clientFD)
+
+        #expect(runner.wait(timeoutSeconds: 2))
+        #expect(runner.error == nil)
+    }
+
+    @Test
+    func malformedJSONFrameReturnsErrorAndExit() throws {
+        let (serverFD, clientSocket) = try socketPair()
+        let connection = AgentConnection(fd: serverFD)
+        var clientFD = clientSocket
+        defer { closeIfValid(&clientFD) }
+
+        let runner = ConnectionRunner(connection: connection)
+        runner.start()
+
+        let ready = try readAgentFrame(from: clientFD)
+        #expect(ready.type == .ready)
+
+        try writeRawFrame(Data("{".utf8), to: clientFD)
+
+        let errorFrame = try readAgentFrame(from: clientFD)
+        #expect(errorFrame.type == .error)
+        #expect(errorFrame.message?.contains("failed to consume frame") == true)
+
+        let exitFrame = try readAgentFrame(from: clientFD)
+        #expect(exitFrame.type == .exit)
+        #expect(exitFrame.exitCode == 1)
+
+        closeIfValid(&clientFD)
+
+        #expect(runner.wait(timeoutSeconds: 2))
+        #expect(runner.error == nil)
+    }
+
+    @Test
     func oversizedFrameReturnsErrorAndExit() throws {
         let (serverFD, clientSocket) = try socketPair()
         let connection = AgentConnection(fd: serverFD)
@@ -472,6 +577,11 @@ private func writeRawFrameHeader(payloadLength: Int, to fd: Int32) throws {
     try writeAll(header, to: fd)
 }
 
+private func writeRawFrame(_ payload: Data, to fd: Int32) throws {
+    try writeRawFrameHeader(payloadLength: payload.count, to: fd)
+    try writeAll(payload, to: fd)
+}
+
 private func writeAll(_ data: Data, to fd: Int32) throws {
     try data.withUnsafeBytes { rawBuffer in
         guard let baseAddress = rawBuffer.baseAddress else {
@@ -487,6 +597,23 @@ private func writeAll(_ data: Data, to fd: Int32) throws {
             offset += bytesWritten
         }
     }
+}
+
+private func readFramesUntilExit(from fd: Int32, maxFrames: Int = 16) throws -> [GuestAgentFrame] {
+    var frames: [GuestAgentFrame] = []
+    for _ in 0..<maxFrames {
+        let frame = try readAgentFrame(from: fd)
+        frames.append(frame)
+        if frame.type == .exit {
+            return frames
+        }
+    }
+
+    throw NSError(
+        domain: "MacOSGuestAgentTests",
+        code: Int(ETIMEDOUT),
+        userInfo: [NSLocalizedDescriptionKey: "did not receive exit frame within \(maxFrames) frames"]
+    )
 }
 
 private func closeIfValid(_ fd: inout Int32) {

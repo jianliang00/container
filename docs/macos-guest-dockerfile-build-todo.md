@@ -404,6 +404,10 @@ These are not missing features. They are engineering follow-up tasks on top of a
 - [x] added sidecar transaction cleanup tests
   - `RuntimeMacOSSidecarTests` now covers owner client disconnect and chunk-ack failures
 - [x] added temporary-file cleanup tests when the guest connection closes
+- [x] added guest-agent malformed-frame coverage
+  - invalid JSON frames now return `error + exit` and are covered in `MacOSGuestAgentTests`
+- [x] added guest-agent TTY stdin-close EOF coverage
+  - both the default TTY exec path and explicit-identity TTY exec path are covered in `MacOSGuestAgentTests`
 
 ### 4.3 `zstd` Dependency Cleanup
 
@@ -457,12 +461,14 @@ These are not missing features. They are engineering follow-up tasks on top of a
   - shared, guest-agent, and VM-manager debugger paths now all use unaligned-safe frame length reads
   - guest-agent now reuses the shared `maxFrameSize` limit
   - oversized frame tests have been added
-- [ ] implement TTY `stdin close` semantics
-  - host EOF should trigger `process.close`, and the guest PTY path still needs to propagate real EOF or close semantics
-  - add `-it` EOF regression tests so interactive commands do not hang after input ends
+- [x] implement TTY `stdin close` semantics
+  - host EOF continues to trigger `process.close`
+  - the guest PTY path now propagates terminal EOF semantics on close without tearing down stdout or stderr early
+  - guest-agent tests now cover the default TTY exec path and explicit-identity TTY exec path so interactive commands do not hang after input ends
 - [ ] continue expanding automated tests for guest-agent and protocol failure paths
   - disconnect, EOF, request matching, and session cleanup are already covered in sidecar/shared/client tests
-  - next focus: bad frames in guest-agent, SIGPIPE, TTY close, EOF, and disconnect handling
+  - newly covered in guest-agent tests: malformed frames and TTY close / EOF handling
+  - next focus: SIGPIPE and any remaining disconnect races outside the current guest-agent and sidecar coverage
 - [ ] investigate intermittent darwin build hang after the guest `RUN` step completes
   - observed locally on 2026-03-21 while building from `ghcr.io/jianliang00/macos-base:26.3`
   - the stage container stopped, `container-runtime-macos-sidecar` logged `sidecar control reader failed: unexpected EOF`, and the host `container build` process remained stuck instead of surfacing success or failure

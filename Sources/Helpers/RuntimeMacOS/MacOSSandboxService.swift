@@ -132,11 +132,17 @@ extension MacOSSandboxService {
         )
         sessions[config.id] = initSession
 
-        #if arch(arm64)
-        try await startOrRestoreVirtualMachine(config: config)
-        #else
-        throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
-        #endif
+        do {
+            _ = try await prepareSandboxNetworkState(containerConfig: config)
+            #if arch(arm64)
+            try await startOrRestoreVirtualMachine(config: config)
+            #else
+            throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
+            #endif
+        } catch {
+            await releaseSandboxNetworkStateIfNeeded()
+            throw error
+        }
 
         sandboxState = .booted
         return message.reply()
@@ -247,7 +253,7 @@ extension MacOSSandboxService {
         writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
         #endif
 
-        await releaseGuestNetworkAllocationsIfNeeded()
+        await releaseSandboxNetworkStateIfNeeded()
 
         closeAllSessions()
         writeContainerLog(Data(("stop: sessions closed\n").utf8))
@@ -262,7 +268,7 @@ extension MacOSSandboxService {
             #if arch(arm64)
             await stopAndQuitSidecarIfPresent()
             #endif
-            await releaseGuestNetworkAllocationsIfNeeded()
+            await releaseSandboxNetworkStateIfNeeded()
             closeAllSessions()
             sandboxState = .shuttingDown
             return message.reply()
@@ -282,7 +288,7 @@ extension MacOSSandboxService {
             case .stopping: .stopping
             default: .stopped
             }
-        let networks = await currentGuestNetworkAttachments()
+        let networks = await inspectSandboxNetworkState(containerConfig: configuration).attachments
 
         let snapshot = SandboxSnapshot(
             status: status,
@@ -829,6 +835,11 @@ extension XPCMessage {
     fileprivate func setState(_ state: SandboxSnapshot) throws {
         let data = try JSONEncoder().encode(state)
         self.set(key: SandboxKeys.snapshot.rawValue, value: data)
+    }
+
+    func setSandboxNetworkState(_ state: SandboxNetworkState) throws {
+        let data = try JSONEncoder().encode(state)
+        self.set(key: SandboxKeys.networkState.rawValue, value: data)
     }
 
     fileprivate func stdio() -> [FileHandle?] {

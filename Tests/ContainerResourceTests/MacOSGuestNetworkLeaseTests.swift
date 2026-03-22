@@ -27,7 +27,7 @@ struct MacOSGuestNetworkLeaseTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let attachment = Attachment(
+        let attachment = ContainerResource.Attachment(
             network: "default",
             hostname: "guest-1",
             ipv4Address: try CIDRv4("192.168.64.2/24"),
@@ -51,7 +51,8 @@ struct MacOSGuestNetworkLeaseTests {
         )
 
         try MacOSGuestNetworkLeaseStore.save(lease, in: root)
-        let loaded = try #require(MacOSGuestNetworkLeaseStore.load(from: root))
+        let maybeLoaded = try MacOSGuestNetworkLeaseStore.load(from: root)
+        let loaded = try #require(maybeLoaded)
 
         #expect(loaded == lease)
         #expect(loaded.attachments == [attachment])

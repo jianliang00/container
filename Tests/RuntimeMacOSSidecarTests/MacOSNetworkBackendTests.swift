@@ -52,6 +52,20 @@ struct MacOSNetworkBackendTests {
 
         #expect(backend.backendID == .vmnetShared)
     }
+
+    @Test
+    func vmnetSharedBackendRequiresPreparedLease() async throws {
+        let config = try makeContainerConfiguration(networkBackend: "vmnetShared")
+        let backend = MacOSNetworkBackendFactory.backend(for: config)
+
+        await #expect(throws: Error.self) {
+            _ = try await backend.prepareNetwork(
+                containerConfig: config,
+                existingLease: nil,
+                log: Logger(label: "RuntimeMacOSSidecarTests")
+            )
+        }
+    }
 }
 
 private func makeContainerConfiguration(networkBackend: String) throws -> ContainerConfiguration {

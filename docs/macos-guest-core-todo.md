@@ -20,19 +20,19 @@ Related design docs:
   - interface matching
   - IPv4, prefix, gateway, and DNS setup
   - host-side state reporting for IP, gateway, DNS, MAC, and network ID
-- [ ] Replace serialized `vmnet` handoff with persisted sandbox network leases.
+- [x] Replace serialized `vmnet` handoff with persisted sandbox network leases.
   - [x] persist backend, `networkID`, MAC, IPv4/prefix, gateway, and DNS projection
-  - [ ] pass attachment specifications into sidecar bootstrap
-  - [ ] create `VZVmnetNetworkDeviceAttachment` inside the sidecar from persisted lease-backed attachment state
-- [ ] Expose the network control API.
+  - [x] pass attachment specifications into sidecar bootstrap
+  - [x] create `VZVmnetNetworkDeviceAttachment` inside the sidecar from persisted lease-backed attachment state
+- [x] Expose the network control API.
   - `PrepareSandboxNetwork`
   - `InspectSandboxNetwork`
   - `ReleaseSandboxNetwork`
-- [ ] Add restart recovery and explicit network cleanup.
+- [x] Add restart recovery and explicit network cleanup.
   - [x] recover sidecar attachment state from the persisted lease
   - [x] recover helper runtime inspect and cleanup state from the persisted lease
-  - [ ] recover apiserver runtime state from persisted lease plus sandbox snapshot
-  - [ ] make cleanup explicit through `ReleaseSandboxNetwork`
+  - [x] recover apiserver runtime state from persisted lease plus sandbox snapshot
+  - [x] make cleanup explicit through `ReleaseSandboxNetwork`
 - [ ] Finish network correctness work.
   - reconcile guest-visible resolver state with host-side DNS projection
   - validate same-node and external connectivity end to end

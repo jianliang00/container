@@ -407,9 +407,10 @@ public struct Utility {
             }
 
             if let dns = override.dns {
-                return (override.networks, dns)
+                return (override.networks, sanitizeMacOSGuestDNS(dns))
             }
 
+            try validateMacOSGuestDNSOptions(management.dns.options)
             let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
             return (
                 override.networks,
@@ -417,7 +418,7 @@ public struct Utility {
                     nameservers: management.dns.nameservers,
                     domain: domain,
                     searchDomains: management.dns.searchDomains,
-                    options: management.dns.options
+                    options: []
                 )
             )
         }
@@ -457,6 +458,7 @@ public struct Utility {
             return (attachments, nil)
         }
 
+        try validateMacOSGuestDNSOptions(management.dns.options)
         let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
         return (
             attachments,
@@ -464,8 +466,28 @@ public struct Utility {
                 nameservers: management.dns.nameservers,
                 domain: domain,
                 searchDomains: management.dns.searchDomains,
-                options: management.dns.options
+                options: []
             )
+        )
+    }
+
+    private static func validateMacOSGuestDNSOptions(_ options: [String]) throws {
+        guard options.isEmpty else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "--dns-option is not supported for --os darwin"
+            )
+        }
+    }
+
+    private static func sanitizeMacOSGuestDNS(
+        _ dns: ContainerConfiguration.DNSConfiguration
+    ) -> ContainerConfiguration.DNSConfiguration {
+        .init(
+            nameservers: dns.nameservers,
+            domain: dns.domain,
+            searchDomains: dns.searchDomains,
+            options: []
         )
     }
 

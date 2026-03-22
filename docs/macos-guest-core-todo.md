@@ -34,8 +34,8 @@ Related design docs:
   - [x] recover apiserver runtime state from persisted lease plus sandbox snapshot
   - [x] make cleanup explicit through `ReleaseSandboxNetwork`
 - [ ] Finish network correctness work.
-  - reconcile guest-visible resolver state with host-side DNS projection
-  - validate same-node and external connectivity end to end
+  - [x] reconcile guest-visible resolver state with host-side DNS projection
+  - [ ] validate same-node and external connectivity end to end
 - [x] Re-enable limited darwin CLI networking.
   - [x] support only `--network <id>[,mac=...]`
   - [x] support only basic DNS parameters backed by `ContainerConfiguration.dns`

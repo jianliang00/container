@@ -76,7 +76,7 @@ extension ContainerConfiguration {
             nameservers: nameservers,
             domain: dns.domain,
             searchDomains: dns.searchDomains,
-            options: dns.options
+            options: []
         )
     }
 

@@ -50,7 +50,7 @@ container run [<options>] <image> [<arguments> ...]
 *   `-d, --detach`: Run the container and detach from the process
 *   `--dns <ip>`: DNS nameserver IP address
 *   `--dns-domain <domain>`: Default DNS domain
-*   `--dns-option <option>`: DNS options
+*   `--dns-option <option>`: DNS options (`--os darwin` is not supported)
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
 *   `--init`: Run an init process inside the container that forwards signals and reaps processes
@@ -295,7 +295,7 @@ container create [<options>] <image> [<arguments> ...]
 *   `-d, --detach`: Run the container and detach from the process
 *   `--dns <ip>`: DNS nameserver IP address
 *   `--dns-domain <domain>`: Default DNS domain
-*   `--dns-option <option>`: DNS options
+*   `--dns-option <option>`: DNS options (`--os darwin` is not supported)
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
 *   `--init`: Run an init process inside the container that forwards signals and reaps processes

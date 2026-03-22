@@ -267,6 +267,46 @@ struct MacOSSidecarClientTests {
     }
 
     @Test
+    func pendingRequestFailsWhenSidecarClosesControlConnection() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+
+            let begin = try readRequest(from: clientFD)
+            #expect(begin.method == .fsBegin)
+            _ = Darwin.shutdown(clientFD, SHUT_RDWR)
+        }
+
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+        try client.bootstrapStart(socketConnectRetries: 3)
+
+        do {
+            try client.fsBegin(
+                port: 27000,
+                request: .init(
+                    txID: "tx-eof",
+                    op: .writeFile,
+                    path: "/tmp/eof.txt",
+                    inlineData: Data("payload".utf8),
+                    autoCommit: true
+                )
+            )
+            Issue.record("expected fsBegin to fail when the sidecar closes the control socket")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .internalError)
+            #expect(error.message.contains("sidecar control connection closed"))
+        }
+
+        try server.waitForCompletion()
+    }
+
+    @Test
     func sidecarEventPumpPreservesEventOrder() async {
         let pump = SidecarEventPump()
         let recorder = EventRecorder()

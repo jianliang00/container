@@ -143,6 +143,46 @@ struct MacOSDiskChunkerTests {
     }
 
     @Test
+    func chunkerReportsMonotonicCompletionProgress() throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let diskURL = tempDirectory.appendingPathComponent("Disk.img")
+        let blobsDir = tempDirectory.appendingPathComponent("blobs")
+        try FileManager.default.createDirectory(at: blobsDir, withIntermediateDirectories: true)
+
+        let chunkSize: Int64 = 256 * 1024
+        let logicalSize = chunkSize * 3
+        try createSparseDisk(
+            at: diskURL,
+            logicalSize: logicalSize,
+            writes: [
+                (offset: 4_096, data: Data("chunk-0".utf8)),
+                (offset: chunkSize + 8_192, data: Data("chunk-1".utf8)),
+                (offset: (chunkSize * 2) + 16_384, data: Data("chunk-2".utf8)),
+            ]
+        )
+
+        let updates = LockedProgressUpdates()
+        let results = try withBuiltinZstdOnly {
+            try MacOSDiskChunker.chunkDiskImage(
+                diskImage: diskURL,
+                blobsDir: blobsDir,
+                chunkSize: chunkSize,
+                maxConcurrentChunks: 2,
+                progress: { updates.append($0) }
+            )
+        }
+
+        #expect(results.count == 3)
+        let snapshots = updates.values().sorted { $0.completedChunks < $1.completedChunks }
+        #expect(snapshots.map(\.completedChunks) == [1, 2, 3])
+        #expect(snapshots.allSatisfy { $0.totalChunks == 3 })
+        #expect(snapshots.map(\.rebuiltChunks) == [1, 2, 3])
+        #expect(snapshots.allSatisfy { $0.reusedChunks == 0 })
+    }
+
+    @Test
     func chunkerReusesMatchingParentChunkBlobs() throws {
         let tempDirectory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
@@ -411,4 +451,21 @@ private func withBuiltinZstdOnly<T>(_ body: () throws -> T) throws -> T {
     }
     setenv("PATH", "", 1)
     return try body()
+}
+
+private final class LockedProgressUpdates: @unchecked Sendable {
+    private let lock = NSLock()
+    private var updates: [MacOSDiskChunker.Progress] = []
+
+    func append(_ update: MacOSDiskChunker.Progress) {
+        lock.lock()
+        defer { lock.unlock() }
+        updates.append(update)
+    }
+
+    func values() -> [MacOSDiskChunker.Progress] {
+        lock.lock()
+        defer { lock.unlock() }
+        return updates
+    }
 }

@@ -450,6 +450,7 @@ These are not missing features. They are engineering follow-up tasks on top of a
 - [ ] keep explicit `--runtime` override support so clients do not hard-code runtime names from platform inference
   - current issue: clients still require explicit `--runtime` to match the inferred built-in runtime
   - target: move platform compatibility and plugin capability checks into server-side or runtime metadata instead of blocking third-party runtimes
+  - do not relax the current client-side conflict check before runtime capability metadata or equivalent server-side validation exists
 - [x] fixed waiter lifecycle in `MacOSSandboxService.waitForProcess(timeout:)`
   - `wait` now returns `notFound` immediately when the process does not exist
   - timeout, `stop`, `shutdown`, and `closeAllSessions()` now clean up and wake outstanding waiters
@@ -468,14 +469,17 @@ These are not missing features. They are engineering follow-up tasks on top of a
 - [ ] continue expanding automated tests for guest-agent and protocol failure paths
   - disconnect, EOF, request matching, and session cleanup are already covered in sidecar/shared/client tests
   - newly covered in guest-agent tests: malformed frames and TTY close / EOF handling
+  - newly covered in sidecar client tests: pending request failure when the control connection closes before the response arrives
   - next focus: SIGPIPE and any remaining disconnect races outside the current guest-agent and sidecar coverage
 - [ ] investigate intermittent darwin build hang after the guest `RUN` step completes
   - observed locally on 2026-03-21 while building from `ghcr.io/jianliang00/macos-base:26.3`
   - the stage container stopped, `container-runtime-macos-sidecar` logged `sidecar control reader failed: unexpected EOF`, and the host `container build` process remained stuck instead of surfacing success or failure
+  - darwin build export now emits explicit packaging and chunk/tar progress so a long post-build package step is distinguishable from a real hang
   - check whether this is a post-build packaging stall, a missed sidecar EOF/error propagation path, or a cleanup ordering race in the darwin build engine
 - [ ] `ADD URL`
   - host download
   - checksum and policy
+  - blocked on defining checksum and policy semantics first; do not implement as an unchecked best-effort download
 - [x] multi-stage `COPY --from`
   - current scope: supports copying files, directories, and symlinks from earlier stages by alias or index
   - current limitation: still does not support `FROM <previous-stage>` or wildcard sources in `COPY --from`
@@ -486,7 +490,7 @@ These are not missing features. They are engineering follow-up tasks on top of a
   - [ ] replace repeated `/usr/bin/tar -rf` with a single tar writer or streaming writer
   - [ ] turn `Disk.img -> tar -> zstd -> sha256/size` into a single-pass streaming pipeline
   - [ ] avoid extra cross-volume copies between staging tar and final path for `type=tar`
-  - [ ] add progress reporting for the post-build packaging/compression phase so long chunking work does not look stalled
+  - [x] add progress reporting for the post-build packaging/compression phase so long chunking work does not look stalled
 - [x] formal darwin semantics for `type=local`
 - [ ] extend `fs` metadata operations
   - `chmod`
@@ -518,6 +522,8 @@ These are not missing features. They are engineering follow-up tasks on top of a
 - [x] end-to-end CLI tests
 
 ### 6.3 Third Batch
+
+These are still backlog themes rather than ready-to-code tasks. Split them into narrower acceptance-driven items before implementation.
 
 - [ ] parser or front-end completeness
 - [ ] multi-stage planning interfaces

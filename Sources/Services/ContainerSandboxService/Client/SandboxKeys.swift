@@ -48,4 +48,6 @@ public enum SandboxKeys: String {
 
     /// Sandbox network state payload.
     case networkState
+    /// Workload snapshot payload.
+    case workloadSnapshot
 }

@@ -27,6 +27,8 @@ public enum SandboxRoutes: String {
     case stop = "com.apple.container.sandbox/stop"
     /// Return the current state of the sandbox.
     case state = "com.apple.container.sandbox/state"
+    /// Inspect workload state inside the sandbox.
+    case inspectWorkload = "com.apple.container.sandbox/inspectWorkload"
     /// Kill a process in the sandbox.
     case kill = "com.apple.container.sandbox/kill"
     /// Resize the pty of a process in the sandbox.

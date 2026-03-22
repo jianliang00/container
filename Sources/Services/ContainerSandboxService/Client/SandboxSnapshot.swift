@@ -24,14 +24,41 @@ public struct SandboxSnapshot: Codable, Sendable {
     public var networks: [Attachment]
     /// Containers placed in the sandbox.
     public var containers: [ContainerSnapshot]
+    /// Workloads running inside the sandbox.
+    public var workloads: [WorkloadSnapshot]
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case networks
+        case containers
+        case workloads
+    }
 
     public init(
         status: RuntimeStatus,
         networks: [Attachment],
-        containers: [ContainerSnapshot]
+        containers: [ContainerSnapshot],
+        workloads: [WorkloadSnapshot] = []
     ) {
         self.status = status
         self.networks = networks
         self.containers = containers
+        self.workloads = workloads
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(RuntimeStatus.self, forKey: .status)
+        networks = try container.decode([Attachment].self, forKey: .networks)
+        containers = try container.decode([ContainerSnapshot].self, forKey: .containers)
+        workloads = try container.decodeIfPresent([WorkloadSnapshot].self, forKey: .workloads) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(status, forKey: .status)
+        try container.encode(networks, forKey: .networks)
+        try container.encode(containers, forKey: .containers)
+        try container.encode(workloads, forKey: .workloads)
     }
 }

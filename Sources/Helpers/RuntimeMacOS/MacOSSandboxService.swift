@@ -445,7 +445,7 @@ extension MacOSSandboxService {
     }
 
     private func openLogFiles(stdoutURL: URL, stderrURL: URL) throws -> WorkloadLogFiles {
-        return WorkloadLogFiles(
+        WorkloadLogFiles(
             stdoutURL: stdoutURL,
             stderrURL: stderrURL,
             stdoutHandle: try openAppendLogHandle(at: stdoutURL),

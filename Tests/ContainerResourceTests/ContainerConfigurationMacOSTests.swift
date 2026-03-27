@@ -146,13 +146,14 @@ struct ContainerConfigurationMacOSTests {
 
         let requests = config.macOSGuestNetworkRequests()
 
-        #expect(requests == [
-            MacOSGuestNetworkRequest(
-                network: MacOSGuestNetworkRequest.defaultNetworkID,
-                hostname: "macos-test",
-                macAddress: nil
-            )
-        ])
+        #expect(
+            requests == [
+                MacOSGuestNetworkRequest(
+                    network: MacOSGuestNetworkRequest.defaultNetworkID,
+                    hostname: "macos-test",
+                    macAddress: nil
+                )
+            ])
     }
 
     @Test
@@ -192,13 +193,14 @@ struct ContainerConfigurationMacOSTests {
 
         let requests = config.macOSGuestNetworkRequests()
 
-        #expect(requests == [
-            MacOSGuestNetworkRequest(
-                network: "sandbox-net",
-                hostname: "sandbox-host",
-                macAddress: macAddress
-            )
-        ])
+        #expect(
+            requests == [
+                MacOSGuestNetworkRequest(
+                    network: "sandbox-net",
+                    hostname: "sandbox-host",
+                    macAddress: macAddress
+                )
+            ])
     }
 
     @Test
@@ -274,12 +276,14 @@ struct ContainerConfigurationMacOSTests {
         ])
 
         let dns = try #require(reported.first?.dns)
-        #expect(dns == .init(
-            nameservers: ["9.9.9.9"],
-            domain: "example.internal",
-            searchDomains: ["svc.example.internal"],
-            options: []
-        ))
+        #expect(
+            dns
+                == .init(
+                    nameservers: ["9.9.9.9"],
+                    domain: "example.internal",
+                    searchDomains: ["svc.example.internal"],
+                    options: []
+                ))
     }
 
     @Test

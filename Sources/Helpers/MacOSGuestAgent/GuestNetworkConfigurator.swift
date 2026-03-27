@@ -74,14 +74,16 @@ struct GuestNetworkConfigurator {
         interfaceName: String,
         interface: MacOSGuestNetworkInterfaceConfiguration
     ) throws {
-        _ = try run("/sbin/ifconfig", [
-            interfaceName,
-            "inet",
-            interface.ipv4Address,
-            "netmask",
-            Self.ipv4NetmaskString(prefixLength: interface.ipv4PrefixLength),
-            "up",
-        ])
+        _ = try run(
+            "/sbin/ifconfig",
+            [
+                interfaceName,
+                "inet",
+                interface.ipv4Address,
+                "netmask",
+                Self.ipv4NetmaskString(prefixLength: interface.ipv4PrefixLength),
+                "up",
+            ])
     }
 
     private func configureDefaultRoute(gateway: String) throws {
@@ -184,7 +186,8 @@ struct GuestNetworkConfigurator {
             }
 
             let deviceSuffix = line[deviceRange.upperBound...]
-            let device = deviceSuffix
+            let device =
+                deviceSuffix
                 .replacingOccurrences(of: ")", with: "")
                 .trimmingCharacters(in: .whitespaces)
             guard let currentService, !device.isEmpty else {

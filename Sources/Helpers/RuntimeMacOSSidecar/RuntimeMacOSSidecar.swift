@@ -542,10 +542,12 @@ actor MacOSSidecarService {
         containerConfig: ContainerConfiguration,
         agentPort: UInt32
     ) async throws {
-        guard let request = try MacOSGuestNetworkBootstrap.makeRequest(
-            containerConfig: containerConfig,
-            lease: networkLease
-        ) else {
+        guard
+            let request = try MacOSGuestNetworkBootstrap.makeRequest(
+                containerConfig: containerConfig,
+                lease: networkLease
+            )
+        else {
             return
         }
 

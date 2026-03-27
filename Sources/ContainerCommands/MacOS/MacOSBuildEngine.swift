@@ -336,9 +336,12 @@ struct MacOSBuildEngine {
                     .appendingPathComponent("containers")
                     .appendingPathComponent(runtime.containerID)
                 let archiveURL = outputArchiveURL(for: export, appRoot: input.appRoot, buildID: input.buildID)
-                let packagingProgress: MacOSImagePackager.ProgressHandler? = input.quiet ? nil : { @Sendable message in
-                    writeStderrLine(message)
-                }
+                let packagingProgress: MacOSImagePackager.ProgressHandler? =
+                    input.quiet
+                    ? nil
+                    : { @Sendable message in
+                        writeStderrLine(message)
+                    }
                 if export.type == "local" {
                     if !input.quiet {
                         writeStderrLine("Exporting local macOS image directory")

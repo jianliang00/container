@@ -878,10 +878,11 @@ class CLITest {
         guard !detach, status != 0 else {
             return false
         }
-        guard error.contains("command timed out for test: container exec")
-            || error.contains("Connection was shutdown by the user")
-            || error.contains("Connection invalid")
-            || error.contains("failed to send signal")
+        guard
+            error.contains("command timed out for test: container exec")
+                || error.contains("Connection was shutdown by the user")
+                || error.contains("Connection invalid")
+                || error.contains("failed to send signal")
         else {
             return false
         }

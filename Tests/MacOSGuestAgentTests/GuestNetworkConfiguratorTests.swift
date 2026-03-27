@@ -25,13 +25,13 @@ struct GuestNetworkConfiguratorTests {
     @Test
     func parsesIfconfigOutputByMACAddress() throws {
         let output = """
-        en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
-        \toptions=6463<RXCSUM,TXCSUM,TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>
-        \tether 02:42:ac:11:00:02
-        \tinet6 fe80::1%en0 prefixlen 64 secured scopeid 0x4
-        bridge100: flags=41<UP,RUNNING> mtu 1500
-        \tether 12:34:56:78:9a:bc
-        """
+            en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+            \toptions=6463<RXCSUM,TXCSUM,TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>
+            \tether 02:42:ac:11:00:02
+            \tinet6 fe80::1%en0 prefixlen 64 secured scopeid 0x4
+            bridge100: flags=41<UP,RUNNING> mtu 1500
+            \tether 12:34:56:78:9a:bc
+            """
 
         let mapping = try GuestNetworkConfigurator.parseInterfaceNamesByMAC(from: output)
 
@@ -42,13 +42,13 @@ struct GuestNetworkConfiguratorTests {
     @Test
     func parsesNetworkServiceOrderByDevice() throws {
         let output = """
-        An asterisk (*) denotes that a network service is disabled.
-        (1) Wi-Fi
-        (Hardware Port: Wi-Fi, Device: en0)
+            An asterisk (*) denotes that a network service is disabled.
+            (1) Wi-Fi
+            (Hardware Port: Wi-Fi, Device: en0)
 
-        (2) USB LAN
-        (Hardware Port: USB 10/100/1000 LAN, Device: en7)
-        """
+            (2) USB LAN
+            (Hardware Port: USB 10/100/1000 LAN, Device: en7)
+            """
 
         let mapping = try GuestNetworkConfigurator.parseNetworkServicesByDevice(from: output)
 
@@ -84,18 +84,18 @@ struct GuestNetworkConfiguratorTests {
             case ("/sbin/ifconfig", ["-a"]):
                 return .init(
                     stdout: """
-                    en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
-                    \tether 02:42:ac:11:00:02
-                    """,
+                        en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
+                        \tether 02:42:ac:11:00:02
+                        """,
                     stderr: "",
                     exitCode: 0
                 )
             case ("/usr/sbin/networksetup", ["-listnetworkserviceorder"]):
                 return .init(
                     stdout: """
-                    (1) Ethernet
-                    (Hardware Port: Ethernet, Device: en0)
-                    """,
+                        (1) Ethernet
+                        (Hardware Port: Ethernet, Device: en0)
+                        """,
                     stderr: "",
                     exitCode: 0
                 )

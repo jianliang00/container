@@ -20,8 +20,8 @@ import ContainerXPC
 import ContainerizationError
 import Foundation
 import Logging
-import vmnet
 @preconcurrency import Virtualization
+import vmnet
 
 struct PreparedMacOSNetwork {
     let devices: [VZNetworkDeviceConfiguration]

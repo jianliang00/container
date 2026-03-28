@@ -111,6 +111,7 @@ public actor MacOSSandboxService {
     private var workloadSessions: [String: String] = [:]
     private var waiters: [String: [CheckedContinuation<ExitStatus, Never>]] = [:]
     var guestMountsPrepared = false
+    var readOnlyInjectionsPrepared = false
     private var guestAgentLogCaptureProcessID: String?
 
     var logHandle: FileHandle?
@@ -443,6 +444,7 @@ extension MacOSSandboxService {
 
         #if arch(arm64)
         try await prepareGuestMountsIfNeeded(containerConfig: configuration)
+        try await prepareReadOnlyInjectionsIfNeeded()
         try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
         writeContainerLog(Data(("startWorkload using sidecar process stream path for \(workloadID) session=\(sessionID)\n").utf8))
         #else
@@ -550,6 +552,11 @@ extension MacOSSandboxService {
     private func persistSandboxMetadata(for configuration: ContainerConfiguration) throws {
         try layout.prepareBaseDirectories()
         try persistJSON(SandboxConfiguration(containerConfiguration: configuration), to: sandboxConfigurationPath())
+        if configuration.readOnlyFiles.isEmpty {
+            try MacOSReadOnlyFileInjectionStore.stage([], in: layout)
+        } else if !FileManager.default.fileExists(atPath: layout.readonlyInjectionManifestURL.path) {
+            try MacOSReadOnlyFileInjectionStore.stage(configuration.readOnlyFiles, in: layout)
+        }
         try persistWorkloadConfiguration(.init(id: configuration.id, processConfiguration: configuration.initProcess))
     }
 

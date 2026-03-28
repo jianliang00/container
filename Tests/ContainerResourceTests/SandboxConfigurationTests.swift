@@ -30,6 +30,7 @@ struct SandboxConfigurationTests {
             options: .init(hostname: "sandbox-host", macAddress: try MACAddress("02:42:ac:11:00:02"))
         )
         container.mounts = [.virtiofs(source: "/tmp/shared", destination: "/shared", options: [])]
+        container.readOnlyFiles = [.init(source: "/tmp/config.json", destination: "/etc/config.json", mode: 0o444)]
         container.publishedPorts = [
             .init(
                 hostAddress: try IPAddress("127.0.0.1"),
@@ -60,6 +61,7 @@ struct SandboxConfigurationTests {
         #expect(sandbox.mounts.count == 1)
         #expect(sandbox.mounts[0].source == "/tmp/shared")
         #expect(sandbox.mounts[0].destination == "/shared")
+        #expect(sandbox.readOnlyFiles == [.init(source: "/tmp/config.json", destination: "/etc/config.json", mode: 0o444)])
         #expect(sandbox.publishedPorts.count == 1)
         #expect(sandbox.publishedPorts[0].hostPort == 8080)
         #expect(sandbox.publishedPorts[0].containerPort == 80)
@@ -84,6 +86,7 @@ struct SandboxConfigurationTests {
         try layout.prepareBaseDirectories()
 
         #expect(layout.sandboxConfigurationURL == root.appendingPathComponent("sandbox.json"))
+        #expect(layout.readonlyInjectionManifestURL == root.appendingPathComponent("readonly/manifest.json"))
         #expect(layout.workloadConfigurationURL(id: "exec-1") == root.appendingPathComponent("workloads/exec-1/config.json"))
         #expect(layout.workloadStdoutLogURL(id: "exec-1") == root.appendingPathComponent("workloads/exec-1/stdout.log"))
         #expect(FileManager.default.fileExists(atPath: layout.temporaryDirectoryURL.path))

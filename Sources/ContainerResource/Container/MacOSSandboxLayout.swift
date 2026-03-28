@@ -76,6 +76,10 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
         root.appendingPathComponent("readonly")
     }
 
+    public var readonlyInjectionManifestURL: URL {
+        readonlyInjectionDirectoryURL.appendingPathComponent("manifest.json")
+    }
+
     public var workloadsDirectoryURL: URL {
         root.appendingPathComponent("workloads")
     }

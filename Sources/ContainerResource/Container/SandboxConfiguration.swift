@@ -24,6 +24,8 @@ public struct SandboxConfiguration: Sendable, Codable {
     public var image: ImageDescription
     /// External mounts made available at sandbox scope.
     public var mounts: [Filesystem] = []
+    /// Read-only files injected into the guest at sandbox scope.
+    public var readOnlyFiles: [ReadOnlyFileInjection] = []
     /// Ports published from the sandbox to the host.
     public var publishedPorts: [PublishPort] = []
     /// Sockets published from the sandbox to the host.
@@ -57,6 +59,7 @@ public struct SandboxConfiguration: Sendable, Codable {
         id: String,
         image: ImageDescription,
         mounts: [Filesystem] = [],
+        readOnlyFiles: [ReadOnlyFileInjection] = [],
         publishedPorts: [PublishPort] = [],
         publishedSockets: [PublishSocket] = [],
         labels: [String: String] = [:],
@@ -75,6 +78,7 @@ public struct SandboxConfiguration: Sendable, Codable {
         self.id = id
         self.image = image
         self.mounts = mounts
+        self.readOnlyFiles = readOnlyFiles
         self.publishedPorts = publishedPorts
         self.publishedSockets = publishedSockets
         self.labels = labels
@@ -96,6 +100,7 @@ public struct SandboxConfiguration: Sendable, Codable {
             id: containerConfiguration.id,
             image: containerConfiguration.image,
             mounts: containerConfiguration.mounts,
+            readOnlyFiles: containerConfiguration.readOnlyFiles,
             publishedPorts: containerConfiguration.publishedPorts,
             publishedSockets: containerConfiguration.publishedSockets,
             labels: containerConfiguration.labels,

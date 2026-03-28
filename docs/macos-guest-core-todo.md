@@ -68,11 +68,11 @@ Related design docs:
   - [x] add workload-to-session mapping
   - [x] add wait, cleanup, and error propagation
   - [x] add regression coverage for independent workload state and cleanup
-- [ ] Add sandbox-scoped state and filesystem primitives.
+- [x] Add sandbox-scoped state and filesystem primitives.
   - [x] sandbox metadata and directory layout
   - [x] temporary directories
-  - host path mappings
-  - generic read-only file injection
+  - [x] host path mappings
+  - [x] generic read-only file injection
 - [x] Make workload state independently queryable.
   - [x] status
   - [x] exit code

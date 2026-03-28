@@ -1666,16 +1666,14 @@ extension MacOSBuildEngine {
         }
 
         func createDirectory(at path: String, mode: UInt32? = nil) async throws {
-            let normalized = normalizeAbsolutePath(path)
-            let request = MacOSSidecarFSBeginRequestPayload(
-                txID: UUID().uuidString,
-                op: .mkdir,
-                path: normalized,
-                mode: mode,
-                mtime: currentUnixTimestamp(),
-                autoCommit: true
+            let sandboxClient = self.sandboxClient
+            try await MacOSSidecarFileTransfer.createDirectory(
+                at: normalizeAbsolutePath(path),
+                options: .init(mode: mode, mtime: currentUnixTimestamp()),
+                begin: { payload in
+                    try await sandboxClient.fsBegin(payload)
+                }
             )
-            try await sandboxClient.fsBegin(request)
         }
 
         func copy(sources rawSources: [String], destination rawDestination: String, kind: CopyKind) async throws {
@@ -1916,57 +1914,23 @@ extension MacOSBuildEngine {
 
         private func sendFile(at url: URL, to path: String) async throws {
             let attributes = metadata(for: url)
-            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value ?? 0
-            let normalizedPath = normalizeAbsolutePath(path)
-
-            if fileSize <= UInt64(MacOSBuildEngine.inlineDataLimit) {
-                let data = try Data(contentsOf: url)
-                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-                let request = MacOSSidecarFSBeginRequestPayload(
-                    txID: UUID().uuidString,
-                    op: .writeFile,
-                    path: normalizedPath,
-                    digest: "sha256:\(digest)",
-                    mode: attributes.mode,
-                    mtime: attributes.mtime,
-                    overwrite: true,
-                    inlineData: data,
-                    autoCommit: true
-                )
-                try await sandboxClient.fsBegin(request)
-                return
-            }
-
-            let txID = UUID().uuidString
-            let beginRequest = MacOSSidecarFSBeginRequestPayload(
-                txID: txID,
-                op: .writeFile,
-                path: normalizedPath,
-                mode: attributes.mode,
-                mtime: attributes.mtime,
-                overwrite: true,
-                autoCommit: false
-            )
-            do {
-                try await sandboxClient.fsBegin(beginRequest)
-
-                let handle = try FileHandle(forReadingFrom: url)
-                defer { try? handle.close() }
-
-                var hasher = SHA256()
-                var offset: UInt64 = 0
-                while let data = try handle.read(upToCount: MacOSBuildEngine.chunkSize), !data.isEmpty {
-                    hasher.update(data: data)
-                    try await sandboxClient.fsChunk(.init(txID: txID, offset: offset, data: data))
-                    offset += UInt64(data.count)
+            let sandboxClient = self.sandboxClient
+            try await MacOSSidecarFileTransfer.writeFile(
+                from: url,
+                to: normalizeAbsolutePath(path),
+                options: .init(mode: attributes.mode, mtime: attributes.mtime, overwrite: true),
+                inlineDataLimit: MacOSBuildEngine.inlineDataLimit,
+                chunkSize: MacOSBuildEngine.chunkSize,
+                begin: { payload in
+                    try await sandboxClient.fsBegin(payload)
+                },
+                chunk: { payload in
+                    try await sandboxClient.fsChunk(payload)
+                },
+                end: { payload in
+                    try await sandboxClient.fsEnd(payload)
                 }
-
-                let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-                try await sandboxClient.fsEnd(.init(txID: txID, action: .commit, digest: "sha256:\(digest)"))
-            } catch {
-                try? await sandboxClient.fsEnd(.init(txID: txID, action: .abort))
-                throw error
-            }
+            )
         }
 
         static func symlinkTarget(at url: URL, sourceDescription: String) throws -> String {
@@ -1984,16 +1948,15 @@ extension MacOSBuildEngine {
         private func sendSymlink(at url: URL, sourceDescription: String, to path: String) async throws {
             let target = try Self.symlinkTarget(at: url, sourceDescription: sourceDescription)
             let attributes = metadata(for: url)
-            let request = MacOSSidecarFSBeginRequestPayload(
-                txID: UUID().uuidString,
-                op: .symlink,
-                path: normalizeAbsolutePath(path),
-                mtime: attributes.mtime,
-                linkTarget: target,
-                overwrite: true,
-                autoCommit: true
+            let sandboxClient = self.sandboxClient
+            try await MacOSSidecarFileTransfer.createSymbolicLink(
+                at: normalizeAbsolutePath(path),
+                target: target,
+                options: .init(mtime: attributes.mtime, overwrite: true),
+                begin: { payload in
+                    try await sandboxClient.fsBegin(payload)
+                }
             )
-            try await sandboxClient.fsBegin(request)
         }
 
         private func stageSourceResolutionEntries(for sources: [CachedStageSourceEntry]) -> [ContextEntry] {

@@ -261,8 +261,13 @@ struct MacOSSandboxServiceWaiterTests {
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
         let service = makeSandboxService(root: tempRoot)
-        let containerConfiguration = try baseContainerConfiguration()
+        var containerConfiguration = try baseContainerConfiguration()
         let layout = MacOSSandboxLayout(root: tempRoot)
+
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let readonlySource = tempRoot.appendingPathComponent("config.env")
+        try Data("FOO=bar\n".utf8).write(to: readonlySource)
+        containerConfiguration.readOnlyFiles = [.init(source: readonlySource.path, destination: "/etc/container.env")]
 
         try await service.testingPersistSandboxMetadata(containerConfiguration)
 
@@ -270,11 +275,15 @@ struct MacOSSandboxServiceWaiterTests {
         let workloadData = try Data(contentsOf: layout.workloadConfigurationURL(id: containerConfiguration.id))
         let sandbox = try JSONDecoder().decode(SandboxConfiguration.self, from: sandboxData)
         let workload = try JSONDecoder().decode(WorkloadConfiguration.self, from: workloadData)
+        let readonlyEntries = try MacOSReadOnlyFileInjectionStore.load(from: layout)
 
         #expect(sandbox.id == containerConfiguration.id)
         #expect(sandbox.image.reference == containerConfiguration.image.reference)
+        #expect(sandbox.readOnlyFiles == [.init(source: readonlySource.path, destination: "/etc/container.env")])
         #expect(workload.id == containerConfiguration.id)
         #expect(workload.processConfiguration.executable == containerConfiguration.initProcess.executable)
+        #expect(readonlyEntries.count == 1)
+        #expect(readonlyEntries[0].destination == "/etc/container.env")
     }
 
     @Test

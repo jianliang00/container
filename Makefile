@@ -15,11 +15,9 @@
 # Version and build configuration variables
 BUILD_CONFIGURATION ?= debug
 WARNINGS_AS_ERRORS ?= true
-SWIFT_CONFIGURATION := $(if $(filter-out false,$(WARNINGS_AS_ERRORS)),-Xswiftc -warnings-as-errors) -Xswiftc -enable-testing
-# Code-coverage instrumentation, layered onto the shared build stages. Empty for
-# ordinary builds; the coverage-* targets opt in via a target-specific value so
-# only those goals compile instrumented binaries.
-COVERAGE_FLAG ?=
+CONTAINER_SKIP_VIRTUALIZATION_TESTS ?= 0
+SWIFT_CONFIGURATION := $(if $(filter-out false,$(WARNINGS_AS_ERRORS)),-Xswiftc -warnings-as-errors)
+SKIP_VIRTUALIZATION_TESTS := $(filter 1 true TRUE yes YES,$(CONTAINER_SKIP_VIRTUALIZATION_TESTS))
 export RELEASE_VERSION ?= $(shell git describe --tags --always)
 export GIT_COMMIT := $(shell git rev-parse HEAD)
 
@@ -194,10 +192,12 @@ test: build-tests
 
 .PHONY: install-kernel
 install-kernel:
-	@echo Stopping system before installing kernel
+ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
+	@echo Skipping kernel installation because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
+else
 	@bin/container system stop || true
-	@echo Starting system to install kernel
-	@bin/container --debug system start --timeout 60 --enable-kernel-install $(SYSTEM_START_OPTS)
+	@bin/container system start --timeout 60 --enable-kernel-install $(SYSTEM_START_OPTS)
+endif
 
 
 # Coverage report generation helpers
@@ -314,54 +314,41 @@ define RUN_INTEGRATION
 endef
 
 .PHONY: integration
-integration: init-block
-	$(RUN_INTEGRATION)
-
-.PHONY: coverage-integration
-coverage-integration: INTEGRATION_SWIFT_EXTRA = --skip-build --enable-code-coverage
-coverage-integration: INTEGRATION_POST_TEST = cp $(COV_DATA_DIR)/*.profraw $(COVERAGE_OUTPUT_DIR)/integration/ || true ;
-# Continuous mode (%c) mmaps the profraw and syncs counters live. The XPC helper
-# services are torn down by `launchctl bootout` (SIGTERM/SIGKILL) rather than
-# exiting cleanly, so a non-continuous profile (written by an atexit handler that
-# never runs on SIGKILL) would lose the helpers' counters. %p-%m keeps each
-# process/module profile in its own file so they don't collide.
-coverage-integration: INTEGRATION_PROFILE_ENV = LLVM_PROFILE_FILE=$(COVERAGE_OUTPUT_DIR)/integration/%p-%m%c.profraw
-coverage-integration: coverage-all
-	@mkdir -p $(COVERAGE_OUTPUT_DIR)/integration
-	@rm -f $(COVERAGE_OUTPUT_DIR)/integration/*.profraw
-	$(RUN_INTEGRATION)
-	@echo Merging integration coverage profdata...
-	@xcrun llvm-profdata merge -sparse $(COVERAGE_OUTPUT_DIR)/integration/*.profraw -o $(COVERAGE_OUTPUT_DIR)/integration/default.profdata
-	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/integration/default.profdata,integration,$(COV_OBJECT_FLAGS))
-
-empty :=
-space := $(empty) $(empty)
-
-# Opt the coverage targets in to instrumentation. The value propagates to the
-# shared build-tests target so compilation is instrumented when necessary.
-coverage coverage-all coverage-unit coverage-integration: COVERAGE_FLAG = --enable-code-coverage -Xswiftc -DCONTAINER_COVERAGE
-
-.PHONY: coverage
-# Merge the per-tier profdata from coverage-unit and coverage-integration into a
-# combined report. Each prerequisite target produces its own tier report first.
-coverage: coverage-unit coverage-integration
-	@echo Merging combined coverage profdata...
-	@mkdir -p $(COVERAGE_OUTPUT_DIR)/combined
-	@xcrun llvm-profdata merge -sparse \
-		$(COVERAGE_OUTPUT_DIR)/unit/default.profdata \
-		$(COVERAGE_OUTPUT_DIR)/integration/default.profdata \
-		-o $(COVERAGE_OUTPUT_DIR)/combined/default.profdata
-	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/combined/default.profdata,combined,$(COV_OBJECT_FLAGS))
-
-.PHONY: coverage-unit
-coverage-unit: build-tests
-	@echo Running unit test coverage...
-	@rm -f $(COV_DATA_DIR)/*.profraw
-	@mkdir -p $(COVERAGE_OUTPUT_DIR)/unit
-	@$(SWIFT) test --skip-build --enable-code-coverage -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests
-	@echo Merging unit coverage profdata...
-	@xcrun llvm-profdata merge -sparse $(COV_DATA_DIR)/*.profraw -o $(COVERAGE_OUTPUT_DIR)/unit/default.profdata
-	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/unit/default.profdata,unit)
+integration:
+ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
+	@echo Skipping CLI integration tests because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
+else
+	@"$(MAKE)" init-block
+	@echo Ensuring apiserver stopped before the CLI integration tests...
+	@bin/container system stop && sleep 3 && scripts/ensure-container-stopped.sh
+	@echo Running the integration tests...
+	@bin/container system start --timeout 60 $(SYSTEM_START_OPTS) && \
+	echo "Starting CLI integration tests" && \
+	{ \
+		exit_code=0; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLINetwork || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunLifecycle || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIExecCommand || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLICreateCommand || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunCommand1 || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunCommand2 || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunCommand3 || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIPruneCommand || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRegistry || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIStatsCommand || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIImagesCommand || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunBase || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunInitImage || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIBuildBase || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIVolumes || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIKernelSet || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIAnonymousVolumes || exit_code=1 ; \
+		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLINoParallelCases || exit_code=1 ; \
+		echo Ensuring apiserver stopped after the CLI integration tests ; \
+		scripts/ensure-container-stopped.sh ; \
+		exit $${exit_code} ; \
+	}
+endif
 
 .PHONY: fmt
 fmt: swift-fmt update-licenses

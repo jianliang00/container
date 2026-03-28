@@ -10,14 +10,10 @@ on:
         type: boolean
         description: "Publish this build for release"
         default: false
-      coverage:
+      skip_virtualization_tests:
         type: boolean
-        description: "Run tests with code coverage enabled"
+        description: "Skip tests that require guest VM virtualization"
         default: false
-      pr_number:
-        type: string
-        description: "PR number for coverage artifact naming (required when coverage is true)"
-        default: ""
 
 jobs:
   buildAndTest:
@@ -82,7 +78,10 @@ jobs:
           mv "bin/${BUILD_CONFIGURATION}/container-installer-unsigned.pkg" outputs
           mv "bin/${BUILD_CONFIGURATION}/bundle/container-dSYM.zip" outputs
 
-      - name: Set up test environment
+      - name: Test the container project
+        env:
+          CONTAINER_SKIP_VIRTUALIZATION_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
+          CONTAINER_FORCE_DISABLE_CLI_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
         run: |
           APP_ROOT=$(mktemp -d -p "${RUNNER_TEMP}")
           LOG_ROOT="${APP_ROOT}/logs"

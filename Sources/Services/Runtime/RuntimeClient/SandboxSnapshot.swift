@@ -57,7 +57,8 @@ public struct SandboxSnapshot: Codable, Sendable {
         networks = try container.decode([Attachment].self, forKey: .networks)
         containers = try container.decode([ContainerSnapshot].self, forKey: .containers)
         workloads = try container.decodeIfPresent([WorkloadSnapshot].self, forKey: .workloads) ?? []
-        configuration = try container.decodeIfPresent(SandboxConfiguration.self, forKey: .configuration)
+        configuration =
+            try container.decodeIfPresent(SandboxConfiguration.self, forKey: .configuration)
             ?? containers.first.map { SandboxConfiguration(containerConfiguration: $0.configuration) }
     }
 

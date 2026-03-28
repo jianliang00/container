@@ -42,6 +42,8 @@ Since `container` consumes and produces standard OCI images, you can easily buil
 
 You use the `container` command line interface (CLI) to start and manage your containers, build container images, and transfer images from and to OCI container registries. The CLI uses a client library that communicates with `container-apiserver` and its helpers.
 
+For the planned SwiftPM embedding surfaces for external Swift projects, including the client facade and optional service bootstrap layer, see [SwiftPM Embedding Design: `ContainerKit`](swiftpm-containerkit-design.md).
+
 The `container-apiserver` is a launch agent that launches when you run the `container system start` command, and terminates when you run `container system stop`. It provides the client APIs for managing container and network resources.
 
 When `container-apiserver` starts, it launches an XPC helper `container-core-images` that exposes an API for image management and manages the local content store, and another XPC helper `container-network-vmnet` for the virtual network. For each container that you create, `container-apiserver` launches a container runtime helper `container-runtime-linux` that exposes the management API for that specific container.

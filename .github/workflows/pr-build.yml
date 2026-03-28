@@ -42,6 +42,7 @@ jobs:
     uses: ./.github/workflows/common.yml
     with:
       release: false
+      skip_virtualization_tests: true
     secrets: inherit
     permissions:
       contents: read

@@ -20,6 +20,8 @@ jobs:
     name: Build application website
     needs: checkBranch
     uses: ./.github/workflows/common.yml
+    with:
+      skip_virtualization_tests: true
     secrets: inherit
     permissions:
       contents: read

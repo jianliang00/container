@@ -15,7 +15,9 @@
 # Version and build configuration variables
 BUILD_CONFIGURATION ?= debug
 WARNINGS_AS_ERRORS ?= true
+CONTAINER_SKIP_VIRTUALIZATION_TESTS ?= 0
 SWIFT_CONFIGURATION := $(if $(filter-out false,$(WARNINGS_AS_ERRORS)),-Xswiftc -warnings-as-errors)
+SKIP_VIRTUALIZATION_TESTS := $(filter 1 true TRUE yes YES,$(CONTAINER_SKIP_VIRTUALIZATION_TESTS))
 export RELEASE_VERSION ?= $(shell git describe --tags --always)
 export GIT_COMMIT := $(shell git rev-parse HEAD)
 
@@ -168,8 +170,12 @@ test:
 
 .PHONY: install-kernel
 install-kernel:
+ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
+	@echo Skipping kernel installation because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
+else
 	@bin/container system stop || true
 	@bin/container system start --timeout 60 --enable-kernel-install $(SYSTEM_START_OPTS)
+endif
 
 .PHONY: coverage
 coverage: init-block
@@ -196,7 +202,11 @@ coverage: init-block
 	}
 
 .PHONY: integration
-integration: init-block
+integration:
+ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
+	@echo Skipping CLI integration tests because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
+else
+	@"$(MAKE)" init-block
 	@echo Ensuring apiserver stopped before the CLI integration tests...
 	@bin/container system stop && sleep 3 && scripts/ensure-container-stopped.sh
 	@echo Running the integration tests...
@@ -226,6 +236,7 @@ integration: init-block
 		scripts/ensure-container-stopped.sh ; \
 		exit $${exit_code} ; \
 	}
+endif
 
 .PHONY: fmt
 fmt: swift-fmt update-licenses

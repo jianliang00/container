@@ -33,9 +33,9 @@ Related design docs:
   - [x] recover helper runtime inspect and cleanup state from the persisted lease
   - [x] recover apiserver runtime state from persisted lease plus sandbox snapshot
   - [x] make cleanup explicit through `ReleaseSandboxNetwork`
-- [ ] Finish network correctness work.
+- [x] Finish network correctness work.
   - [x] reconcile guest-visible resolver state with host-side DNS projection
-  - [ ] validate same-node and external connectivity end to end
+  - [x] validate same-node and external connectivity end to end
 - [x] Re-enable limited darwin CLI networking.
   - [x] support only `--network <id>[,mac=...]`
   - [x] support only basic DNS parameters backed by `ContainerConfiguration.dns`
@@ -44,7 +44,7 @@ Related design docs:
 ### Exit Criteria
 
 - [ ] Single-NIC, single-network, IPv4-first sandbox startup is reliable.
-- [ ] External and same-node connectivity work with real reported network state.
+- [x] External and same-node connectivity work with real reported network state.
 - [ ] Network lifecycle can be prepared, inspected, released, and recovered without manual cleanup.
 - [ ] The darwin `--network` flow is a thin wrapper over the internal network control path.
 

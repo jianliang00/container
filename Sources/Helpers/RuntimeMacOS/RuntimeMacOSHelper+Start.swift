@@ -77,7 +77,11 @@ extension RuntimeMacOSHelper {
                 let mainServer = XPCServer(
                     connection: anonymousConnection,
                     routes: [
+                        SandboxRoutes.createSandbox.rawValue: service.createSandbox,
+                        SandboxRoutes.startSandbox.rawValue: service.startSandbox,
                         SandboxRoutes.bootstrap.rawValue: service.bootstrap,
+                        SandboxRoutes.createWorkload.rawValue: service.createWorkload,
+                        SandboxRoutes.startWorkload.rawValue: service.startWorkload,
                         SandboxRoutes.createProcess.rawValue: service.createProcess,
                         SandboxRoutes.state.rawValue: service.state,
                         SandboxRoutes.inspectWorkload.rawValue: service.inspectWorkload,

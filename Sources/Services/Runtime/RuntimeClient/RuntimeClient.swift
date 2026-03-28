@@ -76,13 +76,52 @@ public struct RuntimeClient: Sendable {
 }
 
 // Runtime Methods
-extension RuntimeClient {
-    public func bootstrap(
-        stdio: [FileHandle?],
-        networkBootstrapInfos: [NetworkBootstrapInfo],
-        dynamicEnv: [String: String] = [:]
-    ) async throws {
-        let request = XPCMessage(route: RuntimeRoutes.bootstrap.rawValue)
+extension SandboxClient {
+    public func createSandbox() async throws {
+        let request = XPCMessage(route: SandboxRoutes.createSandbox.rawValue)
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to create sandbox \(self.id)",
+                cause: error
+            )
+        }
+    }
+
+    public func startSandbox(stdio: [FileHandle?]) async throws {
+        let request = XPCMessage(route: SandboxRoutes.startSandbox.rawValue)
+
+        for (i, h) in stdio.enumerated() {
+            let key: SandboxKeys = try {
+                switch i {
+                case 0: .stdin
+                case 1: .stdout
+                case 2: .stderr
+                default:
+                    throw ContainerizationError(.invalidArgument, message: "invalid fd \(i)")
+                }
+            }()
+
+            if let h {
+                request.set(key: key.rawValue, value: h)
+            }
+        }
+
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to start sandbox \(self.id)",
+                cause: error
+            )
+        }
+    }
+
+    public func bootstrap(stdio: [FileHandle?]) async throws {
+        let request = XPCMessage(route: SandboxRoutes.bootstrap.rawValue)
 
         for (i, h) in stdio.enumerated() {
             let key: RuntimeKeys = try {
@@ -148,6 +187,39 @@ extension RuntimeClient {
         return try response.workloadSnapshot()
     }
 
+    public func createWorkload(_ id: String, config: ProcessConfiguration, stdio: [FileHandle?]) async throws {
+        let request = XPCMessage(route: SandboxRoutes.createWorkload.rawValue)
+        request.set(key: SandboxKeys.id.rawValue, value: id)
+        let data = try JSONEncoder().encode(config)
+        request.set(key: SandboxKeys.processConfig.rawValue, value: data)
+
+        for (i, h) in stdio.enumerated() {
+            let key: SandboxKeys = try {
+                switch i {
+                case 0: .stdin
+                case 1: .stdout
+                case 2: .stderr
+                default:
+                    throw ContainerizationError(.invalidArgument, message: "invalid fd \(i)")
+                }
+            }()
+
+            if let h {
+                request.set(key: key.rawValue, value: h)
+            }
+        }
+
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to create workload \(id) in container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
     public func createProcess(_ id: String, config: ProcessConfiguration, stdio: [FileHandle?]) async throws {
         let request = XPCMessage(route: RuntimeRoutes.createProcess.rawValue)
         request.set(key: RuntimeKeys.id.rawValue, value: id)
@@ -176,6 +248,20 @@ extension RuntimeClient {
             throw ContainerizationError(
                 .internalError,
                 message: "failed to create process \(id) in container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
+    public func startWorkload(_ id: String) async throws {
+        let request = XPCMessage(route: SandboxRoutes.startWorkload.rawValue)
+        request.set(key: SandboxKeys.id.rawValue, value: id)
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to start workload \(id) in container \(self.id)",
                 cause: error
             )
         }

@@ -58,6 +58,10 @@ struct MacOSSandboxServiceWaiterTests {
         let status = try await waitTask.value
         #expect(status.exitCode == 255)
         #expect(await service.testingWaiterCount(for: "exec-1") == 0)
+
+        let snapshot = try await service.testingInspectWorkload("exec-1")
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.exitCode == 255)
     }
 
     @Test
@@ -125,6 +129,181 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(snapshots.map(\.id) == ["visible-workload"])
         #expect(await service.testingVisibleSessionCount() == 1)
     }
+
+    @Test
+    func workloadInspectUsesExternalIDWhenMappedToInternalSession() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "visible-workload",
+            config: baseProcessConfiguration(),
+            started: true,
+            sessionID: "__workload__internal"
+        )
+
+        let snapshot = try await service.testingInspectWorkload("visible-workload")
+
+        #expect(await service.testingSessionID(for: "visible-workload") == "__workload__internal")
+        #expect(snapshot.id == "visible-workload")
+        #expect(snapshot.configuration.processConfiguration.executable == "/bin/sh")
+        #expect(snapshot.stdoutLogPath == tempRoot.appendingPathComponent("workloads/visible-workload/stdout.log").path)
+    }
+
+    @Test
+    func multipleVisibleWorkloadsKeepIndependentState() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-a",
+            config: makeProcessConfiguration(
+                executable: "/bin/echo",
+                arguments: ["alpha"]
+            ),
+            started: true,
+            sessionID: "__workload__exec-a"
+        )
+        await service.testingAddSession(
+            id: "exec-b",
+            config: makeProcessConfiguration(
+                executable: "/usr/bin/env",
+                arguments: ["printf", "beta"]
+            ),
+            started: true,
+            sessionID: "__workload__exec-b"
+        )
+
+        let snapshots = await service.testingWorkloadSnapshots()
+        let snapshotsByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.id, $0) })
+
+        #expect(snapshots.map(\.id) == ["exec-a", "exec-b"])
+        #expect(await service.testingVisibleSessionCount() == 2)
+        #expect(await service.testingSessionID(for: "exec-a") == "__workload__exec-a")
+        #expect(await service.testingSessionID(for: "exec-b") == "__workload__exec-b")
+
+        let execA = try #require(snapshotsByID["exec-a"])
+        let execB = try #require(snapshotsByID["exec-b"])
+
+        #expect(execA.status == .running)
+        #expect(execA.configuration.processConfiguration.executable == "/bin/echo")
+        #expect(execA.configuration.processConfiguration.arguments == ["alpha"])
+        #expect(execB.status == .running)
+        #expect(execB.configuration.processConfiguration.executable == "/usr/bin/env")
+        #expect(execB.configuration.processConfiguration.arguments == ["printf", "beta"])
+    }
+
+    @Test
+    func closingSandboxSessionsStopsAllVisibleWorkloadsAndPreservesRecordedExitCodes() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-running-a",
+            config: makeProcessConfiguration(executable: "/bin/sleep", arguments: ["10"]),
+            started: true,
+            sessionID: "__workload__exec-running-a"
+        )
+        await service.testingAddSession(
+            id: "exec-running-b",
+            config: makeProcessConfiguration(executable: "/bin/sleep", arguments: ["20"]),
+            started: true,
+            sessionID: "__workload__exec-running-b"
+        )
+        await service.testingAddSession(
+            id: "exec-finished",
+            config: makeProcessConfiguration(executable: "/bin/echo", arguments: ["done"]),
+            started: true,
+            exitCode: 17,
+            sessionID: "__workload__exec-finished"
+        )
+
+        let waitTaskA = Task {
+            try await service.testingWaitForProcess("exec-running-a")
+        }
+        let waitTaskB = Task {
+            try await service.testingWaitForProcess("exec-running-b")
+        }
+        try await waitUntilWaiterRegistered(service: service, id: "exec-running-a")
+        try await waitUntilWaiterRegistered(service: service, id: "exec-running-b")
+
+        await service.testingCloseAllSessions()
+
+        let statusA = try await waitTaskA.value
+        let statusB = try await waitTaskB.value
+
+        #expect(statusA.exitCode == 255)
+        #expect(statusB.exitCode == 255)
+        #expect(await service.testingWaiterCount(for: "exec-running-a") == 0)
+        #expect(await service.testingWaiterCount(for: "exec-running-b") == 0)
+        #expect(await service.testingSessionID(for: "exec-running-a") == nil)
+        #expect(await service.testingSessionID(for: "exec-running-b") == nil)
+        #expect(await service.testingSessionID(for: "exec-finished") == nil)
+
+        let runningA = try await service.testingInspectWorkload("exec-running-a")
+        let runningB = try await service.testingInspectWorkload("exec-running-b")
+        let finished = try await service.testingInspectWorkload("exec-finished")
+
+        #expect(runningA.status == .stopped)
+        #expect(runningA.exitCode == 255)
+        #expect(runningB.status == .stopped)
+        #expect(runningB.exitCode == 255)
+        #expect(finished.status == .stopped)
+        #expect(finished.exitCode == 17)
+    }
+
+    @Test
+    func persistSandboxMetadataWritesSandboxAndInitWorkloadConfiguration() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        let containerConfiguration = try baseContainerConfiguration()
+        let layout = MacOSSandboxLayout(root: tempRoot)
+
+        try await service.testingPersistSandboxMetadata(containerConfiguration)
+
+        let sandboxData = try Data(contentsOf: layout.sandboxConfigurationURL)
+        let workloadData = try Data(contentsOf: layout.workloadConfigurationURL(id: containerConfiguration.id))
+        let sandbox = try JSONDecoder().decode(SandboxConfiguration.self, from: sandboxData)
+        let workload = try JSONDecoder().decode(WorkloadConfiguration.self, from: workloadData)
+
+        #expect(sandbox.id == containerConfiguration.id)
+        #expect(sandbox.image.reference == containerConfiguration.image.reference)
+        #expect(workload.id == containerConfiguration.id)
+        #expect(workload.processConfiguration.executable == containerConfiguration.initProcess.executable)
+    }
+
+    @Test
+    func persistedWorkloadConfigurationOverridesSessionFallbackInSnapshot() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        let sessionConfig = baseProcessConfiguration()
+        let persistedConfig = ProcessConfiguration(
+            executable: "/usr/bin/env",
+            arguments: ["printf", "hello"],
+            environment: ["FOO=bar"],
+            workingDirectory: "/tmp",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+
+        try await service.testingPersistWorkloadConfiguration(
+            .init(id: "exec-with-meta", processConfiguration: persistedConfig)
+        )
+        await service.testingAddSession(id: "exec-with-meta", config: sessionConfig)
+
+        let snapshot = try await service.testingInspectWorkload("exec-with-meta")
+
+        #expect(snapshot.configuration.processConfiguration.executable == "/usr/bin/env")
+        #expect(snapshot.configuration.processConfiguration.workingDirectory == "/tmp")
+        #expect(snapshot.configuration.processConfiguration.environment == ["FOO=bar"])
+    }
 }
 
 private func makeSandboxService(root: URL) -> MacOSSandboxService {
@@ -140,14 +319,46 @@ private func makeTemporaryRoot() -> URL {
 }
 
 private func baseProcessConfiguration() -> ProcessConfiguration {
+    makeProcessConfiguration(executable: "/bin/sh")
+}
+
+private func makeProcessConfiguration(
+    executable: String,
+    arguments: [String] = [],
+    environment: [String] = [],
+    workingDirectory: String = "/",
+    terminal: Bool = false
+) -> ProcessConfiguration {
     ProcessConfiguration(
-        executable: "/bin/sh",
-        arguments: [],
-        environment: [],
-        workingDirectory: "/",
-        terminal: false,
+        executable: executable,
+        arguments: arguments,
+        environment: environment,
+        workingDirectory: workingDirectory,
+        terminal: terminal,
         user: .id(uid: 0, gid: 0)
     )
+}
+
+private func baseContainerConfiguration() throws -> ContainerConfiguration {
+    let imageJSON = """
+        {
+          "reference": "example/macos:latest",
+          "descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:test",
+            "size": 1
+          }
+        }
+        """
+    let image = try JSONDecoder().decode(ImageDescription.self, from: Data(imageJSON.utf8))
+    var configuration = ContainerConfiguration(
+        id: "sandbox-under-test",
+        image: image,
+        process: baseProcessConfiguration()
+    )
+    configuration.runtimeHandler = "container-runtime-macos"
+    configuration.platform = .init(arch: "arm64", os: "darwin")
+    return configuration
 }
 
 private func waitUntilWaiterRegistered(

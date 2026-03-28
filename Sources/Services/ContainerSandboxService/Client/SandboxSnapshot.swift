@@ -18,6 +18,8 @@ import ContainerResource
 
 /// A snapshot of a sandbox and its resources.
 public struct SandboxSnapshot: Codable, Sendable {
+    /// Static sandbox configuration, if available.
+    public var configuration: SandboxConfiguration?
     /// The runtime status of the sandbox.
     public var status: RuntimeStatus
     /// Network attachments for the sandbox.
@@ -28,6 +30,7 @@ public struct SandboxSnapshot: Codable, Sendable {
     public var workloads: [WorkloadSnapshot]
 
     enum CodingKeys: String, CodingKey {
+        case configuration
         case status
         case networks
         case containers
@@ -35,11 +38,13 @@ public struct SandboxSnapshot: Codable, Sendable {
     }
 
     public init(
+        configuration: SandboxConfiguration? = nil,
         status: RuntimeStatus,
         networks: [Attachment],
         containers: [ContainerSnapshot],
         workloads: [WorkloadSnapshot] = []
     ) {
+        self.configuration = configuration
         self.status = status
         self.networks = networks
         self.containers = containers
@@ -52,10 +57,13 @@ public struct SandboxSnapshot: Codable, Sendable {
         networks = try container.decode([Attachment].self, forKey: .networks)
         containers = try container.decode([ContainerSnapshot].self, forKey: .containers)
         workloads = try container.decodeIfPresent([WorkloadSnapshot].self, forKey: .workloads) ?? []
+        configuration = try container.decodeIfPresent(SandboxConfiguration.self, forKey: .configuration)
+            ?? containers.first.map { SandboxConfiguration(containerConfiguration: $0.configuration) }
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(configuration, forKey: .configuration)
         try container.encode(status, forKey: .status)
         try container.encode(networks, forKey: .networks)
         try container.encode(containers, forKey: .containers)

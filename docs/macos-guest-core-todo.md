@@ -52,24 +52,25 @@ Related design docs:
 
 ### TODO
 
-- [ ] Add first-class sandbox and workload resources.
-  - `SandboxConfiguration`
-  - `SandboxSnapshot`
-  - `WorkloadConfiguration`
-  - `WorkloadSnapshot`
-- [ ] Split sandbox lifecycle from workload lifecycle.
-  - `CreateSandbox`
-  - `StartSandbox`
-  - `CreateWorkload`
-  - `StartWorkload`
-  - stopping a sandbox stops all bound workloads
-- [ ] Run multiple workloads inside one sandbox.
+- [x] Add first-class sandbox and workload resources.
+  - [x] `SandboxConfiguration`
+  - [x] `SandboxSnapshot`
+  - [x] `WorkloadConfiguration`
+  - [x] `WorkloadSnapshot`
+- [x] Split sandbox lifecycle from workload lifecycle.
+  - [x] `CreateSandbox`
+  - [x] `StartSandbox`
+  - [x] `CreateWorkload`
+  - [x] `StartWorkload`
+  - [x] stopping a sandbox stops all bound workloads
+- [x] Run multiple workloads inside one sandbox.
   - reuse the multi-session base in `MacOSSandboxService`
-  - add workload-to-session mapping
-  - add wait, cleanup, and error propagation
+  - [x] add workload-to-session mapping
+  - [x] add wait, cleanup, and error propagation
+  - [x] add regression coverage for independent workload state and cleanup
 - [ ] Add sandbox-scoped state and filesystem primitives.
-  - sandbox metadata and directory layout
-  - temporary directories
+  - [x] sandbox metadata and directory layout
+  - [x] temporary directories
   - host path mappings
   - generic read-only file injection
 - [x] Make workload state independently queryable.
@@ -81,7 +82,7 @@ Related design docs:
 
 - [ ] Two workloads can run reliably inside the same sandbox.
 - [ ] Stopping a sandbox consistently stops and cleans up all attached workloads.
-- [ ] Workload state is queryable independently from sandbox state.
+- [x] Workload state is queryable independently from sandbox state.
 
 ## 3. P3: Workload Image and Injection
 

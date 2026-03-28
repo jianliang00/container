@@ -85,6 +85,16 @@ public actor MacOSSandboxService {
         var lastStderr: String?
     }
 
+    struct WorkloadRecord {
+        let id: String
+        var configuration: WorkloadConfiguration
+        var sessionID: String?
+        var startedAt: Date?
+        var exitStatus: ExitStatus?
+        var stdoutLogPath: String
+        var stderrLogPath: String
+    }
+
     struct SidecarHandle {
         let launchLabel: String
         let client: MacOSSidecarClient
@@ -97,6 +107,8 @@ public actor MacOSSandboxService {
     private var sandboxState: State = .created
     var configuration: ContainerConfiguration?
     var sessions: [String: Session] = [:]
+    private var workloads: [String: WorkloadRecord] = [:]
+    private var workloadSessions: [String: String] = [:]
     private var waiters: [String: [CheckedContinuation<ExitStatus, Never>]] = [:]
     var guestMountsPrepared = false
     private var guestAgentLogCaptureProcessID: String?
@@ -111,6 +123,10 @@ public actor MacOSSandboxService {
         self.root = root
         self.connection = connection
         self.log = log
+    }
+
+    private var layout: MacOSSandboxLayout {
+        MacOSSandboxLayout(root: root)
     }
 }
 
@@ -129,102 +145,62 @@ extension MacOSSandboxService {
     }
 
     @Sendable
+    public func createSandbox(_ message: XPCMessage) async throws -> XPCMessage {
+        _ = try await prepareSandboxIfNeeded()
+        return message.reply()
+    }
+
+    @Sendable
+    public func startSandbox(_ message: XPCMessage) async throws -> XPCMessage {
+        try await startSandboxIfNeeded(stdio: message.stdio())
+        return message.reply()
+    }
+
+    @Sendable
     public func bootstrap(_ message: XPCMessage) async throws -> XPCMessage {
         guard case .created = sandboxState else {
             throw ContainerizationError(.invalidState, message: "container expected to be in created state, got: \(sandboxState)")
         }
+        _ = try await prepareSandboxIfNeeded()
+        try await startSandboxIfNeeded(stdio: message.stdio())
+        return message.reply()
+    }
 
-        let config = try await createBundleIfNeeded()
-        self.configuration = config
-
-        try openLogs()
-        try writeBootLog("bootstrapping container \(config.id)")
-
-        let initSession = try makeSession(
-            processID: config.id,
-            config: config.initProcess,
+    @Sendable
+    public func createWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        let id = try message.id()
+        let processConfig = try message.processConfig()
+        try createWorkloadIfNeeded(
+            workloadID: id,
+            processConfiguration: processConfig,
             stdio: message.stdio()
         )
-        sessions[config.id] = initSession
+        return message.reply()
+    }
 
-        do {
-            _ = try await prepareSandboxNetworkState(containerConfig: config)
-            #if arch(arm64)
-            try await startOrRestoreVirtualMachine(config: config)
-            await startGuestAgentLogCaptureIfPossible(containerConfig: config)
-            #else
-            throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
-            #endif
-        } catch {
-            await releaseSandboxNetworkStateIfNeeded()
-            throw error
-        }
-
-        sandboxState = .booted
+    @Sendable
+    public func startWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        let workloadID = try message.id()
+        try await startWorkloadIfNeeded(workloadID: workloadID)
         return message.reply()
     }
 
     @Sendable
     public func createProcess(_ message: XPCMessage) async throws -> XPCMessage {
-        let id = try message.id()
-        guard let _ = configuration else {
-            throw ContainerizationError(.invalidState, message: "container not bootstrapped")
-        }
-        let processConfig = try message.processConfig()
-        guard sessions[id] == nil else {
-            throw ContainerizationError(.exists, message: "process \(id) already exists")
-        }
-
-        sessions[id] = try makeSession(processID: id, config: processConfig, stdio: message.stdio())
-        return message.reply()
+        return try await createWorkload(message)
     }
 
     @Sendable
     public func startProcess(_ message: XPCMessage) async throws -> XPCMessage {
-        let processID = try message.id()
-        guard var session = sessions[processID] else {
-            throw ContainerizationError(.notFound, message: "process \(processID) not found")
-        }
-        if session.started {
-            return message.reply()
-        }
-        guard let configuration else {
-            throw ContainerizationError(.invalidState, message: "container not bootstrapped")
-        }
-
-        #if arch(arm64)
-        try await prepareGuestMountsIfNeeded(containerConfig: configuration)
-        try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
-        writeContainerLog(Data(("startProcess using sidecar process stream path for \(processID)\n").utf8))
-        #else
-        throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
-        #endif
-
-        // Sidecar events can arrive (including an immediate exit for short-lived commands)
-        // before we return here. Merge with the latest dictionary state instead of blindly
-        // overwriting it with the older local copy.
-        if var current = sessions[processID] {
-            current.started = true
-            current.startedAt = current.startedAt ?? session.startedAt ?? Date()
-            sessions[processID] = current
-        } else {
-            session.started = true
-            session.startedAt = session.startedAt ?? Date()
-            sessions[processID] = session
-        }
-
-        if processID == configuration.id {
-            sandboxState = .running
-        }
-        return message.reply()
+        return try await startWorkload(message)
     }
 
     @Sendable
     public func wait(_ message: XPCMessage) async throws -> XPCMessage {
-        let id = try message.id()
-        writeContainerLog(Data(("wait requested for \(id)\n").utf8))
-        let status = try await waitForProcess(id)
-        writeContainerLog(Data(("wait completed for \(id) code=\(status.exitCode)\n").utf8))
+        let workloadID = try message.id()
+        writeContainerLog(Data(("wait requested for workload \(workloadID)\n").utf8))
+        let status = try await waitForWorkload(workloadID)
+        writeContainerLog(Data(("wait completed for workload \(workloadID) code=\(status.exitCode)\n").utf8))
         let reply = message.reply()
         reply.set(key: SandboxKeys.exitCode.rawValue, value: Int64(status.exitCode))
         reply.set(key: SandboxKeys.exitedAt.rawValue, value: status.exitedAt)
@@ -233,18 +209,18 @@ extension MacOSSandboxService {
 
     @Sendable
     public func kill(_ message: XPCMessage) async throws -> XPCMessage {
-        let processID = try message.id()
+        let workloadID = try message.id()
         let signal = Int32(message.int64(key: SandboxKeys.signal.rawValue))
-        try sendSignalToProcess(processID: processID, signal: signal)
+        try sendSignalToWorkload(workloadID: workloadID, signal: signal)
         return message.reply()
     }
 
     @Sendable
     public func resize(_ message: XPCMessage) async throws -> XPCMessage {
-        let processID = try message.id()
+        let workloadID = try message.id()
         let width = UInt16(message.uint64(key: SandboxKeys.width.rawValue))
         let height = UInt16(message.uint64(key: SandboxKeys.height.rawValue))
-        try sendResizeToProcess(processID: processID, width: width, height: height)
+        try sendResizeToWorkload(workloadID: workloadID, width: width, height: height)
         return message.reply()
     }
 
@@ -254,14 +230,18 @@ extension MacOSSandboxService {
         sandboxState = .stopping
         writeContainerLog(Data(("stop requested signal=\(stopOptions.signal) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
 
-        if let id = configuration?.id, let current = sessions[id], current.started {
+        if let workloadID = configuration?.id,
+            let sessionID = try? sessionID(forWorkload: workloadID),
+            let current = sessions[sessionID],
+            current.started
+        {
             if current.exitStatus == nil {
-                writeContainerLog(Data(("stop: init process \(id) still running; sending signal \(stopOptions.signal)\n").utf8))
-                try? sendSignalToProcess(processID: id, signal: Int32(stopOptions.signal))
-                _ = try? await waitForProcess(id, timeout: stopOptions.timeoutInSeconds)
-                writeContainerLog(Data(("stop: wait for init process \(id) finished\n").utf8))
+                writeContainerLog(Data(("stop: init workload \(workloadID) still running; sending signal \(stopOptions.signal)\n").utf8))
+                try? sendSignalToSession(processID: sessionID, signal: Int32(stopOptions.signal))
+                _ = try? await waitForSession(sessionID, timeout: stopOptions.timeoutInSeconds)
+                writeContainerLog(Data(("stop: wait for init workload \(workloadID) finished\n").utf8))
             } else {
-                writeContainerLog(Data(("stop: init process \(id) already exited; skipping signal/wait\n").utf8))
+                writeContainerLog(Data(("stop: init workload \(workloadID) already exited; skipping signal/wait\n").utf8))
             }
         }
 
@@ -309,6 +289,7 @@ extension MacOSSandboxService {
         let networks = await inspectSandboxNetworkState(containerConfig: configuration).attachments
 
         let snapshot = SandboxSnapshot(
+            configuration: sandboxConfigurationSnapshot(),
             status: status,
             networks: networks,
             containers: [
@@ -316,7 +297,7 @@ extension MacOSSandboxService {
                     configuration: configuration,
                     status: status,
                     networks: networks,
-                    startedDate: sessions[configuration.id]?.startedAt
+                    startedDate: workloads[configuration.id]?.startedAt
                 )
             ],
             workloads: workloadSnapshots()
@@ -359,7 +340,7 @@ extension MacOSSandboxService {
             networkTxBytes: nil,
             blockReadBytes: nil,
             blockWriteBytes: nil,
-            numProcesses: UInt64(visibleSessionCount())
+            numProcesses: UInt64(runningWorkloadCount())
         )
         let data = try JSONEncoder().encode(stats)
         let reply = message.reply()
@@ -371,60 +352,248 @@ extension MacOSSandboxService {
 // MARK: - Bundle and VM setup
 
 extension MacOSSandboxService {
+    private func prepareSandboxIfNeeded() async throws -> ContainerConfiguration {
+        if let configuration {
+            try restorePersistedWorkloadsIfNeeded(containerConfig: configuration)
+            return configuration
+        }
+
+        let config = try await createBundleIfNeeded()
+        self.configuration = config
+        try persistSandboxMetadata(for: config)
+        try restorePersistedWorkloadsIfNeeded(containerConfig: config)
+        return config
+    }
+
+    private func startSandboxIfNeeded(stdio: [FileHandle?]) async throws {
+        if case .booted = sandboxState {
+            return
+        }
+        if case .running = sandboxState {
+            return
+        }
+        guard case .created = sandboxState else {
+            throw ContainerizationError(.invalidState, message: "cannot start sandbox from state \(sandboxState)")
+        }
+
+        let config = try await prepareSandboxIfNeeded()
+        try openLogsIfNeeded()
+        try writeBootLog("bootstrapping container \(config.id)")
+        _ = try ensureWorkloadSessionIfNeeded(workloadID: config.id, stdio: stdio)
+
+        do {
+            _ = try await prepareSandboxNetworkState(containerConfig: config)
+            #if arch(arm64)
+            try await startOrRestoreVirtualMachine(config: config)
+            await startGuestAgentLogCaptureIfPossible(containerConfig: config)
+            #else
+            throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
+            #endif
+        } catch {
+            await releaseSandboxNetworkStateIfNeeded()
+            discardWorkloadSession(workloadID: config.id)
+            throw error
+        }
+
+        sandboxState = .booted
+    }
+
+    private func createWorkloadIfNeeded(
+        workloadID: String,
+        processConfiguration: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) throws {
+        guard let _ = configuration else {
+            throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        guard sandboxState == .booted || sandboxState == .running else {
+            throw ContainerizationError(.invalidState, message: "sandbox not started")
+        }
+        guard workloads[workloadID] == nil else {
+            throw ContainerizationError(.exists, message: "workload \(workloadID) already exists")
+        }
+
+        let workloadConfiguration = WorkloadConfiguration(id: workloadID, processConfiguration: processConfiguration)
+        try persistWorkloadConfiguration(workloadConfiguration)
+        do {
+            upsertWorkloadRecord(configuration: workloadConfiguration)
+            _ = try ensureWorkloadSessionIfNeeded(workloadID: workloadID, stdio: stdio)
+        } catch {
+            workloads.removeValue(forKey: workloadID)
+            try? FileManager.default.removeItem(at: workloadConfigurationPath(for: workloadID))
+            throw error
+        }
+    }
+
+    private func startWorkloadIfNeeded(workloadID: String) async throws {
+        guard let configuration else {
+            throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        guard sandboxState == .booted || sandboxState == .running else {
+            throw ContainerizationError(.invalidState, message: "sandbox not started")
+        }
+
+        let sessionID = try sessionID(forWorkload: workloadID)
+        guard var session = sessions[sessionID] else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        if session.started {
+            return
+        }
+
+        #if arch(arm64)
+        try await prepareGuestMountsIfNeeded(containerConfig: configuration)
+        try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
+        writeContainerLog(Data(("startWorkload using sidecar process stream path for \(workloadID) session=\(sessionID)\n").utf8))
+        #else
+        throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
+        #endif
+
+        let startedAt = session.startedAt ?? Date()
+        if var current = sessions[sessionID] {
+            current.started = true
+            current.startedAt = current.startedAt ?? startedAt
+            sessions[sessionID] = current
+        } else {
+            session.started = true
+            session.startedAt = startedAt
+            sessions[sessionID] = session
+        }
+        markWorkloadStarted(workloadID: workloadID, startedAt: startedAt)
+
+        if workloadID == configuration.id {
+            sandboxState = .running
+        }
+    }
+
     private func runtimeConfigurationPath() -> URL {
-        root.appendingPathComponent("runtime-configuration.json")
+        layout.runtimeConfigurationURL
     }
 
     private func optionsPath() -> URL {
-        root.appendingPathComponent("options.json")
+        layout.optionsURL
     }
 
     private func configPath() -> URL {
-        root.appendingPathComponent("config.json")
+        layout.containerConfigurationURL
     }
 
     private func diskImagePath() -> URL {
-        root.appendingPathComponent("Disk.img")
+        layout.diskImageURL
     }
 
     private func auxiliaryStoragePath() -> URL {
-        root.appendingPathComponent("AuxiliaryStorage")
+        layout.auxiliaryStorageURL
     }
 
     private func hardwareModelPath() -> URL {
-        root.appendingPathComponent("HardwareModel.bin")
+        layout.hardwareModelURL
     }
 
     private func stdioLogPath() -> URL {
-        root.appendingPathComponent("stdio.log")
+        layout.stdioLogURL
     }
 
     private func bootLogPath() -> URL {
-        root.appendingPathComponent("vminitd.log")
+        layout.bootLogURL
     }
 
     private func guestAgentHostLogPath() -> URL {
-        root.appendingPathComponent("guest-agent.log")
+        layout.guestAgentHostLogURL
     }
 
     private func guestAgentHostStderrLogPath() -> URL {
-        root.appendingPathComponent("guest-agent.stderr.log")
+        layout.guestAgentHostStderrLogURL
     }
 
     private func workloadsDirectory() -> URL {
-        root.appendingPathComponent("workloads")
+        layout.workloadsDirectoryURL
     }
 
     private func workloadDirectory(for processID: String) -> URL {
-        workloadsDirectory().appendingPathComponent(processID)
+        layout.workloadDirectoryURL(id: processID)
+    }
+
+    private func sandboxConfigurationPath() -> URL {
+        layout.sandboxConfigurationURL
+    }
+
+    private func workloadConfigurationPath(for processID: String) -> URL {
+        layout.workloadConfigurationURL(id: processID)
     }
 
     private func workloadStdoutLogPath(for processID: String) -> URL {
-        workloadDirectory(for: processID).appendingPathComponent("stdout.log")
+        layout.workloadStdoutLogURL(id: processID)
     }
 
     private func workloadStderrLogPath(for processID: String) -> URL {
-        workloadDirectory(for: processID).appendingPathComponent("stderr.log")
+        layout.workloadStderrLogURL(id: processID)
+    }
+
+    private func sandboxConfigurationSnapshot() -> SandboxConfiguration? {
+        if let persisted = try? loadJSON(SandboxConfiguration.self, from: sandboxConfigurationPath()) {
+            return persisted
+        }
+        if let configuration {
+            return SandboxConfiguration(containerConfiguration: configuration)
+        }
+        return nil
+    }
+
+    private func workloadConfigurationSnapshot(for processID: String, fallback: ProcessConfiguration) -> WorkloadConfiguration {
+        if let persisted = try? loadJSON(WorkloadConfiguration.self, from: workloadConfigurationPath(for: processID)) {
+            return persisted
+        }
+        return WorkloadConfiguration(id: processID, processConfiguration: fallback)
+    }
+
+    private func persistSandboxMetadata(for configuration: ContainerConfiguration) throws {
+        try layout.prepareBaseDirectories()
+        try persistJSON(SandboxConfiguration(containerConfiguration: configuration), to: sandboxConfigurationPath())
+        try persistWorkloadConfiguration(.init(id: configuration.id, processConfiguration: configuration.initProcess))
+    }
+
+    private func persistWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
+        try layout.prepareBaseDirectories()
+        try persistJSON(configuration, to: workloadConfigurationPath(for: configuration.id))
+    }
+
+    private func persistJSON<Value: Encodable>(_ value: Value, to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(value)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func loadJSON<Value: Decodable>(_ type: Value.Type, from url: URL) throws -> Value {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    private func restorePersistedWorkloadsIfNeeded(containerConfig: ContainerConfiguration) throws {
+        let initConfiguration = WorkloadConfiguration(
+            id: containerConfig.id,
+            processConfiguration: containerConfig.initProcess
+        )
+        upsertWorkloadRecord(configuration: initConfiguration)
+
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: workloadsDirectory().path) else {
+            return
+        }
+
+        for candidate in try fm.contentsOfDirectory(
+            at: workloadsDirectory(),
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            let configURL = candidate.appendingPathComponent("config.json")
+            guard fm.fileExists(atPath: configURL.path) else {
+                continue
+            }
+            let workloadConfiguration = try loadJSON(WorkloadConfiguration.self, from: configURL)
+            upsertWorkloadRecord(configuration: workloadConfiguration)
+        }
     }
 
     private func openAppendLogHandle(at url: URL) throws -> FileHandle {
@@ -465,6 +634,13 @@ extension MacOSSandboxService {
         bootLogHandle = try FileHandle(forWritingTo: bootLogPath())
         try logHandle?.seekToEnd()
         try bootLogHandle?.seekToEnd()
+    }
+
+    private func openLogsIfNeeded() throws {
+        if logHandle != nil || bootLogHandle != nil {
+            return
+        }
+        try openLogs()
     }
 
     private func writeBootLog(_ line: String) throws {
@@ -614,7 +790,113 @@ extension MacOSSandboxService {
 
 extension MacOSSandboxService {
     private func visibleSessionCount() -> Int {
-        sessions.values.filter(\.includeInSnapshots).count
+        workloads.count
+    }
+
+    private func runningWorkloadCount() -> Int {
+        workloads.values.filter { $0.startedAt != nil && $0.exitStatus == nil }.count
+    }
+
+    private func makeWorkloadRecord(configuration: WorkloadConfiguration) -> WorkloadRecord {
+        WorkloadRecord(
+            id: configuration.id,
+            configuration: configuration,
+            sessionID: nil,
+            startedAt: nil,
+            exitStatus: nil,
+            stdoutLogPath: workloadStdoutLogPath(for: configuration.id).path,
+            stderrLogPath: workloadStderrLogPath(for: configuration.id).path
+        )
+    }
+
+    private func upsertWorkloadRecord(configuration: WorkloadConfiguration) {
+        if var existing = workloads[configuration.id] {
+            existing.configuration = configuration
+            workloads[configuration.id] = existing
+        } else {
+            workloads[configuration.id] = makeWorkloadRecord(configuration: configuration)
+        }
+    }
+
+    private func attachSession(_ sessionID: String, toWorkload workloadID: String) {
+        guard var record = workloads[workloadID] else {
+            return
+        }
+        if let previousSessionID = record.sessionID, previousSessionID != sessionID {
+            workloadSessions.removeValue(forKey: previousSessionID)
+        }
+        record.sessionID = sessionID
+        workloads[workloadID] = record
+        workloadSessions[sessionID] = workloadID
+    }
+
+    private func markWorkloadStarted(workloadID: String, startedAt: Date) {
+        guard var record = workloads[workloadID] else {
+            return
+        }
+        record.startedAt = record.startedAt ?? startedAt
+        record.exitStatus = nil
+        workloads[workloadID] = record
+    }
+
+    private func markWorkloadExited(workloadID: String, status: ExitStatus) {
+        guard var record = workloads[workloadID] else {
+            return
+        }
+        record.exitStatus = status
+        workloads[workloadID] = record
+    }
+
+    private func workloadID(forSession sessionID: String) -> String? {
+        workloadSessions[sessionID]
+    }
+
+    private func sessionID(forWorkload workloadID: String) throws -> String {
+        guard let record = workloads[workloadID] else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        guard let sessionID = record.sessionID else {
+            throw ContainerizationError(.invalidState, message: "workload \(workloadID) has no active session")
+        }
+        return sessionID
+    }
+
+    private func ensureWorkloadSessionIfNeeded(workloadID: String, stdio: [FileHandle?]) throws -> String {
+        guard let record = workloads[workloadID] else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        if let sessionID = record.sessionID {
+            return sessionID
+        }
+
+        let sessionID = "__workload__\(UUID().uuidString)"
+        let session = try makeSession(
+            processID: sessionID,
+            config: record.configuration.processConfiguration,
+            stdio: stdio,
+            workloadID: workloadID
+        )
+        sessions[sessionID] = session
+        attachSession(sessionID, toWorkload: workloadID)
+        return sessionID
+    }
+
+    private func discardWorkloadSession(workloadID: String) {
+        guard let record = workloads[workloadID], let sessionID = record.sessionID else {
+            return
+        }
+        if let session = sessions.removeValue(forKey: sessionID) {
+            session.stdio[0]?.readabilityHandler = nil
+            try? session.stdio[1]?.close()
+            try? session.stdio[2]?.close()
+            try? session.stdoutLogHandle?.close()
+            try? session.stderrLogHandle?.close()
+        }
+        workloadSessions.removeValue(forKey: sessionID)
+        if var updated = workloads[workloadID] {
+            updated.sessionID = nil
+            workloads[workloadID] = updated
+        }
     }
 
     func makeSession(
@@ -622,11 +904,14 @@ extension MacOSSandboxService {
         config: ProcessConfiguration,
         stdio: [FileHandle?],
         includeInSnapshots: Bool = true,
+        workloadID: String? = nil,
         logFiles: WorkloadLogFiles? = nil
     ) throws -> Session {
         let logs: WorkloadLogFiles
         if let logFiles {
             logs = logFiles
+        } else if let workloadID {
+            logs = try openWorkloadLogFiles(processID: workloadID)
         } else {
             logs = try openWorkloadLogFiles(processID: processID)
         }
@@ -643,19 +928,15 @@ extension MacOSSandboxService {
     }
 
     private func workloadSnapshot(processID: String) throws -> WorkloadSnapshot {
-        guard let session = sessions[processID] else {
-            throw ContainerizationError(.notFound, message: "process \(processID) not found")
+        guard let record = workloads[processID] else {
+            throw ContainerizationError(.notFound, message: "workload \(processID) not found")
         }
-        guard session.includeInSnapshots else {
-            throw ContainerizationError(.notFound, message: "process \(processID) not found")
-        }
-        return workloadSnapshot(for: session)
+        return workloadSnapshot(for: record)
     }
 
     private func workloadSnapshots() -> [WorkloadSnapshot] {
-        sessions.values
-            .filter(\.includeInSnapshots)
-            .sorted { $0.processID < $1.processID }
+        workloads.values
+            .sorted { $0.id < $1.id }
             .map(workloadSnapshot(for:))
     }
 
@@ -708,37 +989,37 @@ extension MacOSSandboxService {
         }
     }
 
-    private func workloadSnapshot(for session: Session) -> WorkloadSnapshot {
+    private func workloadSnapshot(for record: WorkloadRecord) -> WorkloadSnapshot {
         let status: RuntimeStatus
-        if session.exitStatus != nil {
+        if record.exitStatus != nil {
             status = .stopped
-        } else if session.started {
+        } else if record.startedAt != nil {
             status = .running
         } else {
             status = .stopped
         }
 
         return WorkloadSnapshot(
-            configuration: .init(id: session.processID, processConfiguration: session.config),
+            configuration: record.configuration,
             status: status,
-            exitCode: session.exitStatus?.exitCode,
-            startedDate: session.startedAt,
-            exitedAt: session.exitStatus?.exitedAt,
-            stdoutLogPath: session.stdoutLogURL.path,
-            stderrLogPath: session.stderrLogURL.path
+            exitCode: record.exitStatus?.exitCode,
+            startedDate: record.startedAt,
+            exitedAt: record.exitStatus?.exitedAt,
+            stdoutLogPath: record.stdoutLogPath,
+            stderrLogPath: record.stderrLogPath
         )
     }
 
-    private func waitWithoutTimeout(_ id: String) async throws -> ExitStatus {
-        if let status = sessions[id]?.exitStatus {
-            writeContainerLog(Data(("waitWithoutTimeout immediate hit for \(id) code=\(status.exitCode)\n").utf8))
+    private func waitWithoutTimeoutForSession(_ sessionID: String) async throws -> ExitStatus {
+        if let status = sessions[sessionID]?.exitStatus {
+            writeContainerLog(Data(("waitWithoutTimeout immediate hit for session \(sessionID) code=\(status.exitCode)\n").utf8))
             return status
         }
-        guard sessions[id] != nil else {
-            throw ContainerizationError(.notFound, message: "process \(id) not found")
+        guard sessions[sessionID] != nil else {
+            throw ContainerizationError(.notFound, message: "session \(sessionID) not found")
         }
         return await withCheckedContinuation { continuation in
-            addWaiter(id: id, continuation: continuation)
+            addWaiter(id: sessionID, continuation: continuation)
         }
     }
 
@@ -795,6 +1076,13 @@ extension MacOSSandboxService {
         }
         session.exitStatus = status
         sessions[id] = session
+        if let workloadID = workloadID(forSession: id) {
+            if var record = workloads[workloadID] {
+                record.startedAt = record.startedAt ?? session.startedAt
+                record.exitStatus = status
+                workloads[workloadID] = record
+            }
+        }
 
         let continuations = removeWaiters(for: id)
         writeContainerLog(Data(("completeProcess for \(id) code=\(status.exitCode) waiters=\(continuations.count)\n").utf8))
@@ -803,38 +1091,51 @@ extension MacOSSandboxService {
         }
     }
 
-    func waitForProcess(_ id: String, timeout: Int32 = 0) async throws -> ExitStatus {
-        if let status = sessions[id]?.exitStatus {
+    func waitForWorkload(_ workloadID: String, timeout: Int32 = 0) async throws -> ExitStatus {
+        guard let record = workloads[workloadID] else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        if let status = record.exitStatus {
             return status
         }
-        guard sessions[id] != nil else {
-            throw ContainerizationError(.notFound, message: "process \(id) not found")
+        guard let sessionID = record.sessionID else {
+            throw ContainerizationError(.invalidState, message: "workload \(workloadID) has no active session")
+        }
+        return try await waitForSession(sessionID, timeout: timeout)
+    }
+
+    func waitForSession(_ sessionID: String, timeout: Int32 = 0) async throws -> ExitStatus {
+        if let status = sessions[sessionID]?.exitStatus {
+            return status
+        }
+        guard sessions[sessionID] != nil else {
+            throw ContainerizationError(.notFound, message: "session \(sessionID) not found")
         }
 
         if timeout == 0 {
-            return try await waitWithoutTimeout(id)
+            return try await waitWithoutTimeoutForSession(sessionID)
         }
 
         return try await withThrowingTaskGroup(of: ExitStatus.self) { group in
             group.addTask {
-                try await self.waitWithoutTimeout(id)
+                try await self.waitWithoutTimeoutForSession(sessionID)
             }
             group.addTask {
                 let delay = UInt64(max(timeout, 0)) * 1_000_000_000
                 try await Task.sleep(nanoseconds: delay)
-                throw ContainerizationError(.timeout, message: "timed out waiting for process \(id)")
+                throw ContainerizationError(.timeout, message: "timed out waiting for session \(sessionID)")
             }
 
             do {
                 guard let value = try await group.next() else {
-                    throw ContainerizationError(.internalError, message: "wait cancelled for process \(id)")
+                    throw ContainerizationError(.internalError, message: "wait cancelled for session \(sessionID)")
                 }
                 group.cancelAll()
                 return value
             } catch {
                 group.cancelAll()
                 resumeWaiters(
-                    for: id,
+                    for: sessionID,
                     fallbackStatus: ExitStatus(exitCode: 255, exitedAt: Date()),
                     reason: "wait_timeout_or_cancelled"
                 )
@@ -843,9 +1144,21 @@ extension MacOSSandboxService {
         }
     }
 
+    func waitForProcess(_ id: String, timeout: Int32 = 0) async throws -> ExitStatus {
+        try await waitForSession(id, timeout: timeout)
+    }
+
     private func closeAllSessions() {
         resumeAllWaiters(reason: "sessions_closed")
-        for (_, session) in sessions {
+        let fallbackStatus = ExitStatus(exitCode: 255, exitedAt: Date())
+        for (sessionID, session) in sessions {
+            if let workloadID = workloadID(forSession: sessionID), var record = workloads[workloadID] {
+                record.startedAt = record.startedAt ?? session.startedAt
+                record.exitStatus = record.exitStatus ?? session.exitStatus ?? fallbackStatus
+                record.sessionID = nil
+                workloads[workloadID] = record
+                workloadSessions.removeValue(forKey: sessionID)
+            }
             session.stdio[0]?.readabilityHandler = nil
             try? session.stdio[1]?.close()
             try? session.stdio[2]?.close()
@@ -942,6 +1255,10 @@ extension MacOSSandboxService {
     }
 
     func sendSignalToProcess(processID: String, signal: Int32) throws {
+        try sendSignalToSession(processID: processID, signal: signal)
+    }
+
+    private func sendSignalToSession(processID: String, signal: Int32) throws {
         guard let session = sessions[processID] else {
             throw ContainerizationError(.notFound, message: "process \(processID) not found")
         }
@@ -954,7 +1271,16 @@ extension MacOSSandboxService {
         try client.processSignal(processID: processID, signal: signal)
     }
 
+    private func sendSignalToWorkload(workloadID: String, signal: Int32) throws {
+        let sessionID = try sessionID(forWorkload: workloadID)
+        try sendSignalToSession(processID: sessionID, signal: signal)
+    }
+
     private func sendResizeToProcess(processID: String, width: UInt16, height: UInt16) throws {
+        try sendResizeToSession(processID: processID, width: width, height: height)
+    }
+
+    private func sendResizeToSession(processID: String, width: UInt16, height: UInt16) throws {
         guard let session = sessions[processID] else {
             throw ContainerizationError(.notFound, message: "process \(processID) not found")
         }
@@ -965,6 +1291,11 @@ extension MacOSSandboxService {
             throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
         }
         try client.processResize(processID: processID, width: width, height: height)
+    }
+
+    private func sendResizeToWorkload(workloadID: String, width: UInt16, height: UInt16) throws {
+        let sessionID = try sessionID(forWorkload: workloadID)
+        try sendResizeToSession(processID: sessionID, width: width, height: height)
     }
 
     func handleSidecarEvent(_ event: MacOSSidecarEvent) {
@@ -1020,7 +1351,7 @@ extension MacOSSandboxService {
                 guestAgentLogCaptureProcessID = nil
             }
             completeProcess(id: processID, status: status)
-            if processID == configuration?.id {
+            if workloadID(forSession: processID) == configuration?.id {
                 sandboxState = .stopped(status.exitCode)
             }
             return
@@ -1084,13 +1415,16 @@ extension MacOSSandboxService {
         config: ProcessConfiguration,
         started: Bool = false,
         exitCode: Int32? = nil,
-        includeInSnapshots: Bool = true
+        includeInSnapshots: Bool = true,
+        sessionID: String? = nil
     ) {
+        let actualSessionID = sessionID ?? id
         var session = try! makeSession(
-            processID: id,
+            processID: actualSessionID,
             config: config,
             stdio: [nil, nil, nil],
-            includeInSnapshots: includeInSnapshots
+            includeInSnapshots: includeInSnapshots,
+            workloadID: includeInSnapshots ? id : nil
         )
         session.started = started
         session.startedAt = started ? Date() : nil
@@ -1099,11 +1433,31 @@ extension MacOSSandboxService {
             try? session.stdoutLogHandle?.close()
             try? session.stderrLogHandle?.close()
         }
-        sessions[id] = session
+        sessions[actualSessionID] = session
+        if includeInSnapshots {
+            let workloadConfiguration =
+                (try? loadJSON(WorkloadConfiguration.self, from: workloadConfigurationPath(for: id)))
+                ?? .init(id: id, processConfiguration: config)
+            upsertWorkloadRecord(configuration: workloadConfiguration)
+            attachSession(actualSessionID, toWorkload: id)
+            if started, let startedAt = session.startedAt {
+                markWorkloadStarted(workloadID: id, startedAt: startedAt)
+            }
+            if let status = session.exitStatus {
+                if var record = workloads[id] {
+                    record.startedAt = record.startedAt ?? session.startedAt
+                    record.exitStatus = status
+                    workloads[id] = record
+                }
+            }
+        }
     }
 
     func testingWaitForProcess(_ id: String, timeout: Int32 = 0) async throws -> ExitStatus {
-        try await waitForProcess(id, timeout: timeout)
+        if workloads[id] != nil {
+            return try await waitForWorkload(id, timeout: timeout)
+        }
+        return try await waitForProcess(id, timeout: timeout)
     }
 
     func testingCloseAllSessions() {
@@ -1111,7 +1465,10 @@ extension MacOSSandboxService {
     }
 
     func testingWaiterCount(for id: String) -> Int {
-        waiters[id]?.count ?? 0
+        if let sessionID = workloads[id]?.sessionID {
+            return waiters[sessionID]?.count ?? 0
+        }
+        return waiters[id]?.count ?? 0
     }
 
     func testingInspectWorkload(_ id: String) throws -> WorkloadSnapshot {
@@ -1126,7 +1483,19 @@ extension MacOSSandboxService {
         visibleSessionCount()
     }
 
+    func testingSessionID(for workloadID: String) -> String? {
+        workloads[workloadID]?.sessionID
+    }
+
     func testingGuestAgentHostLogPath() -> String {
         guestAgentHostLogPath().path
+    }
+
+    func testingPersistSandboxMetadata(_ configuration: ContainerConfiguration) throws {
+        try persistSandboxMetadata(for: configuration)
+    }
+
+    func testingPersistWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
+        try persistWorkloadConfiguration(configuration)
     }
 }

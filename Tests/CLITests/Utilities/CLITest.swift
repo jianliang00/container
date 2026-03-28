@@ -641,6 +641,23 @@ class CLITest {
         return io[0]
     }
 
+    @discardableResult
+    func waitForContainerNetworks(
+        _ name: String,
+        totalAttempts: Int64 = 120
+    ) throws -> inspectOutput {
+        var attempt: Int64 = 0
+        while attempt < totalAttempts {
+            attempt += 1
+            if let output = try? inspectContainer(name), !output.networks.isEmpty {
+                return output
+            }
+            sleep(1)
+        }
+
+        throw CLIError.invalidOutput("container \(name) did not report network attachments in time")
+    }
+
     func inspectImage(_ name: String) throws -> String {
         let response = try run(arguments: [
             "image",

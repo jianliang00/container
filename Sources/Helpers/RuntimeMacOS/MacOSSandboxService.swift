@@ -188,12 +188,12 @@ extension MacOSSandboxService {
 
     @Sendable
     public func createProcess(_ message: XPCMessage) async throws -> XPCMessage {
-        return try await createWorkload(message)
+        try await createWorkload(message)
     }
 
     @Sendable
     public func startProcess(_ message: XPCMessage) async throws -> XPCMessage {
-        return try await startWorkload(message)
+        try await startWorkload(message)
     }
 
     @Sendable

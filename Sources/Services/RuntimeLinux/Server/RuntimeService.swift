@@ -465,9 +465,8 @@ public actor RuntimeService {
     ///     that contains the state information.
     @Sendable
     public func state(_ message: XPCMessage) async throws -> XPCMessage {
-        self.log.debug("enter", metadata: ["func": "\(#function)"])
-        defer { self.log.debug("exit", metadata: ["func": "\(#function)"]) }
-
+        self.log.info("`state` xpc handler")
+        let sandboxConfiguration = container.map { SandboxConfiguration(containerConfiguration: $0.config) }
         var status: RuntimeStatus = .unknown
         var networks: [Attachment] = []
         var cs: ContainerSnapshot?
@@ -495,6 +494,7 @@ public actor RuntimeService {
         let reply = message.reply()
         try reply.setState(
             .init(
+                configuration: sandboxConfiguration,
                 status: status,
                 networks: networks,
                 containers: cs != nil ? [cs!] : [],

@@ -24,6 +24,8 @@ public struct ContainerConfiguration: Sendable, Codable {
     public var image: ImageDescription
     /// External mounts to add to the container.
     public var mounts: [Filesystem] = []
+    /// Read-only files to inject into the guest at sandbox scope.
+    public var readOnlyFiles: [ReadOnlyFileInjection] = []
     /// Ports to publish from container to host.
     public var publishedPorts: [PublishPort] = []
     /// Sockets to publish from container to host.
@@ -59,6 +61,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case id
         case image
         case mounts
+        case readOnlyFiles
         case publishedPorts
         case publishedSockets
         case labels
@@ -84,6 +87,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         id = try container.decode(String.self, forKey: .id)
         image = try container.decode(ImageDescription.self, forKey: .image)
         mounts = try container.decodeIfPresent([Filesystem].self, forKey: .mounts) ?? []
+        readOnlyFiles = try container.decodeIfPresent([ReadOnlyFileInjection].self, forKey: .readOnlyFiles) ?? []
         publishedPorts = try container.decodeIfPresent([PublishPort].self, forKey: .publishedPorts) ?? []
         publishedSockets = try container.decodeIfPresent([PublishSocket].self, forKey: .publishedSockets) ?? []
         labels = try container.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]

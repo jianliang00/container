@@ -456,13 +456,102 @@ expect_fail copy-from-unsupported \
 
 Expected result: all four commands fail, and each log contains the expected error text.
 
-## 5. Pass Criteria
+## 5. `vmnetShared` Networking Validation
+
+This section validates the host-visible macOS guest network path rather than the build-only `virtualizationNAT` compatibility path.
+
+Prerequisites:
+
+- the host is macOS 26 or newer
+- `"$BASE_REF"` is already bootable through `run --os darwin`
+- the container API service is running
+
+Use a dedicated runtime network so the reported guest state is unambiguous:
+
+```bash
+export NETWORK_NS="macos-vmnet-validate"
+export PEER_NAME="macos-linux-peer"
+export GUEST_NAME="macos-vmnet-guest"
+export SAME_NODE_PORT=18080
+export EXTERNAL_URL="${EXTERNAL_URL:-https://example.com}"
+
+"$CONTAINER_BIN" delete --force "$PEER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_BIN" delete --force "$GUEST_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_BIN" network delete "$NETWORK_NS" >/dev/null 2>&1 || true
+"$CONTAINER_BIN" network create "$NETWORK_NS"
+```
+
+Start a same-node peer on that network:
+
+```bash
+"$CONTAINER_BIN" run \
+  --rm \
+  -d \
+  --name "$PEER_NAME" \
+  --network "$NETWORK_NS" \
+  docker.io/library/python:alpine \
+  python3 -m http.server --bind 0.0.0.0 "$SAME_NODE_PORT"
+
+"$CONTAINER_BIN" inspect "$PEER_NAME" > "$WORKROOT/05-network-peer.inspect.json"
+PEER_IP="$(ruby -rjson -e 'print JSON.parse(STDIN.read)[0]["networks"][0]["ipv4Address"]["address"]' < "$WORKROOT/05-network-peer.inspect.json")"
+```
+
+Start a macOS guest on the same network and confirm that `inspect` reports the real attachment state:
+
+```bash
+"$CONTAINER_BIN" run \
+  --rm \
+  -d \
+  --os darwin \
+  --name "$GUEST_NAME" \
+  --network "$NETWORK_NS" \
+  "$BASE_REF" \
+  /usr/bin/tail -f /dev/null
+
+"$CONTAINER_BIN" inspect "$GUEST_NAME" > "$WORKROOT/05-network-guest.inspect.json"
+grep -q "\"network\":\"$NETWORK_NS\"" "$WORKROOT/05-network-guest.inspect.json"
+grep -q '"networkBackend":"vmnetShared"' "$WORKROOT/05-network-guest.inspect.json"
+```
+
+Validate same-node connectivity by using the reported peer IP directly from `inspect`:
+
+```bash
+"$CONTAINER_BIN" exec \
+  "$GUEST_NAME" \
+  /usr/bin/curl \
+  --fail \
+  --silent \
+  --show-error \
+  --max-time 10 \
+  "http://$PEER_IP:$SAME_NODE_PORT/"
+```
+
+Validate external connectivity from the same macOS guest:
+
+```bash
+"$CONTAINER_BIN" exec \
+  "$GUEST_NAME" \
+  /usr/bin/curl \
+  --fail \
+  --silent \
+  --show-error \
+  --location \
+  --max-time 20 \
+  "$EXTERNAL_URL"
+```
+
+Expected result: the guest reports a `vmnetShared` attachment for `"$NETWORK_NS"`, the guest can fetch the same-node peer by the peer IP reported from `inspect`, and the guest can also fetch `"$EXTERNAL_URL"`.
+
+If your environment requires an outbound proxy, add the same `-e HTTP_PROXY=...`, `-e HTTPS_PROXY=...`, and `-e NO_PROXY=...` flags to both the `run` and `exec` commands above.
+
+## 6. Pass Criteria
 
 Validation is sufficient when all of the following are true:
 
 - `"$BASE_REF"` runs reliably with `run --os darwin`
 - sections 4.1 through 4.6 all succeed
 - the four rejection-path checks in 4.7 fail with the expected messages
+- section 5 succeeds with reported `vmnetShared` state plus same-node and external connectivity
 
 This validation does not cover:
 
@@ -470,9 +559,13 @@ This validation does not cover:
 - multi-stage `COPY --from`
 - broader Dockerfile semantic alignment
 
-## 6. Cleanup
+## 7. Cleanup
 
 ```bash
+"$CONTAINER_BIN" delete --force "$PEER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_BIN" delete --force "$GUEST_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_BIN" network delete "$NETWORK_NS" >/dev/null 2>&1 || true
+
 "$CONTAINER_BIN" image delete --force \
   "${TEST_NS}:smoke" \
   "${TEST_NS}:copy" \
@@ -490,7 +583,7 @@ If you need to restart the service during validation:
 "$CONTAINER_BIN" system start --install-root "$REPO_ROOT" --disable-kernel-install --timeout 60
 ```
 
-## 7. Common Issues
+## 8. Common Issues
 
 - missing entitlements in `prepare-base` or `start-vm`:
   Prefer the `make release` output. If you must run binaries from `.build/release/*`, sign `container-macos-image-prepare` and `container-macos-vm-manager` with `signing/container-runtime-macos.entitlements`.
@@ -502,5 +595,7 @@ If you need to restart the service during validation:
   Check the IPSW, network access, proxy, and VPN setup first. Errors such as `Unknown option '--disk-size-gib'` usually mean an outdated binary is still in use.
 - only the guest-agent changed:
   Follow section 2.2. You do not need to run `prepare-base` again.
+- section 5 external connectivity fails but same-node connectivity succeeds:
+  Re-run the `exec /usr/bin/curl` command with the required proxy environment flags, or set `EXTERNAL_URL` to an endpoint that is reachable from your environment.
 
 For deeper debugging, go straight to [`docs/macos-guest-development-debugging.md`](docs/macos-guest-development-debugging.md).

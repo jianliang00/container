@@ -17,8 +17,16 @@
 public enum SandboxRoutes: String {
     /// Create an xpc endpoint to the sandbox instance.
     case createEndpoint = "com.apple.container.sandbox/createEndpoint"
+    /// Create sandbox resources without booting the guest.
+    case createSandbox = "com.apple.container.sandbox/createSandbox"
+    /// Start the sandbox guest runtime without starting workloads.
+    case startSandbox = "com.apple.container.sandbox/startSandbox"
     /// Bootstrap the sandbox instance and create the init process.
     case bootstrap = "com.apple.container.sandbox/bootstrap"
+    /// Create a workload in the sandbox.
+    case createWorkload = "com.apple.container.sandbox/createWorkload"
+    /// Start a workload in the sandbox.
+    case startWorkload = "com.apple.container.sandbox/startWorkload"
     /// Create a process in the sandbox.
     case createProcess = "com.apple.container.sandbox/createProcess"
     /// Start a process in the sandbox.

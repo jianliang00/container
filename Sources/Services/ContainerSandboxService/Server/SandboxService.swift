@@ -383,6 +383,7 @@ public actor SandboxService {
     @Sendable
     public func state(_ message: XPCMessage) async throws -> XPCMessage {
         self.log.info("`state` xpc handler")
+        let sandboxConfiguration = container.map { SandboxConfiguration(containerConfiguration: $0.config) }
         var status: RuntimeStatus = .unknown
         var networks: [Attachment] = []
         var cs: ContainerSnapshot?
@@ -410,6 +411,7 @@ public actor SandboxService {
         let reply = message.reply()
         try reply.setState(
             .init(
+                configuration: sandboxConfiguration,
                 status: status,
                 networks: networks,
                 containers: cs != nil ? [cs!] : [],

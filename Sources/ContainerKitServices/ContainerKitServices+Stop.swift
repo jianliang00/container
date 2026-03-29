@@ -20,46 +20,49 @@ import Foundation
 
 public extension ContainerKitServices {
     func stop() async throws {
-        let launchdDomainString = try ServiceManager.getDomainString()
+        let launchdDomainString = try dependencies.domainString()
         let fullAPIServerLabel = "\(launchdDomainString)/\(Self.apiServerServiceLabel)"
-        let isHealthy = (try? await kit.health(timeout: .seconds(5))) != nil
+        let isRegistered = try dependencies.isServiceRegistered(Self.apiServerServiceLabel)
+        let isHealthy = (try? await dependencies.healthCheck(.seconds(5))) != nil
 
         if isHealthy {
             await stopRunningContainers()
 
             for _ in 0..<Self.shutdownTimeoutSeconds {
-                let runningContainers = (try? await kit.listContainers())?.filter { $0.status.rawValue == "running" } ?? []
+                let runningContainers = (try? await dependencies.listContainers())?.filter { $0.status == .running } ?? []
                 guard !runningContainers.isEmpty else {
                     break
                 }
-                try await Task.sleep(for: .seconds(1))
+                try await dependencies.sleep(.seconds(1))
             }
-
-            try? ServiceManager.deregister(fullServiceLabel: fullAPIServerLabel)
         }
 
-        try ServiceManager.enumerate()
+        if isRegistered {
+            try? dependencies.deregisterService(fullAPIServerLabel)
+        }
+
+        try dependencies.enumerateServices()
             .filter { $0.hasPrefix("com.apple.container.") }
             .filter { $0 != Self.apiServerServiceLabel }
             .map { "\(launchdDomainString)/\($0)" }
             .forEach {
-                try? ServiceManager.deregister(fullServiceLabel: $0)
+                try? dependencies.deregisterService($0)
             }
     }
 }
 
 extension ContainerKitServices {
     func stopRunningContainers() async {
-        guard let containers = try? await kit.listContainers() else {
+        guard let containers = try? await dependencies.listContainers() else {
             return
         }
 
         await withTaskGroup(of: Void.self) { group in
-            for container in containers where container.status.rawValue == "running" {
+            for container in containers where container.status == .running {
                 group.addTask {
-                    try? await kit.stopContainer(
-                        id: container.id,
-                        options: ContainerStopOptions(
+                    try? await dependencies.stopContainer(
+                        container.id,
+                        ContainerStopOptions(
                             timeoutInSeconds: Self.stopTimeoutSeconds,
                             signal: ContainerStopOptions.default.signal
                         )

@@ -49,15 +49,17 @@ extension Application {
             )
 
             let launchdDomainString = try ServiceManager.getDomainString()
-            let fullLabel = "\(launchdDomainString)/\(prefix)apiserver"
+            let apiServerLabel = "\(prefix)apiserver"
+            let fullLabel = "\(launchdDomainString)/\(apiServerLabel)"
+            let isRegistered = try ServiceManager.isRegistered(fullServiceLabel: apiServerLabel)
 
-            var running = true
+            var running = false
             do {
                 log.info("checking if APIServer is alive")
                 _ = try await ClientHealthCheck.ping(timeout: .seconds(5))
+                running = true
             } catch {
-                log.info("APIServer health check failed, skipping bootout")
-                running = false
+                log.info("APIServer health check failed, continuing with best-effort bootout")
             }
 
             if running {
@@ -86,11 +88,14 @@ extension Application {
                         try await Task.sleep(for: .seconds(1))
                     }
 
-                    log.info("stopping service", metadata: ["label": "\(fullLabel)"])
-                    try ServiceManager.deregister(fullServiceLabel: fullLabel)
                 } catch {
                     log.warning("failed to wait for all containers", metadata: ["error": "\(error)"])
                 }
+            }
+
+            if isRegistered {
+                log.info("stopping service", metadata: ["label": "\(fullLabel)"])
+                try? ServiceManager.deregister(fullServiceLabel: fullLabel)
             }
 
             // Note: The assumption here is that we would have registered the launchd services
@@ -98,7 +103,7 @@ extension Application {
             // if somehow the launchd domain changed, XPC interactions would not be possible.
             try ServiceManager.enumerate()
                 .filter { $0.hasPrefix(prefix) }
-                .filter { $0 != fullLabel }
+                .filter { $0 != apiServerLabel }
                 .map { "\(launchdDomainString)/\($0)" }
                 .forEach {
                     log.info("stopping service", metadata: ["label": "\($0)"])

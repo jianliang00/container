@@ -22,14 +22,11 @@ public extension ContainerKitServices {
     func start(timeout: Duration = .seconds(10)) async throws {
         let plan = try registrationPlan()
 
-        try FileManager.default.createDirectory(
-            at: plan.plistURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try plan.plistData.write(to: plan.plistURL)
+        try dependencies.createDirectory(plan.plistURL.deletingLastPathComponent())
+        try dependencies.writeData(plan.plistData, plan.plistURL)
 
         do {
-            try ServiceManager.register(plistPath: plan.plistURL.path)
+            try dependencies.registerService(plan.plistURL.path)
         } catch {
             throw diagnosticsError(
                 action: "failed to register apiserver with launchd",
@@ -38,7 +35,7 @@ public extension ContainerKitServices {
         }
 
         do {
-            _ = try await kit.health(timeout: timeout)
+            _ = try await dependencies.healthCheck(timeout)
         } catch {
             throw diagnosticsError(
                 action: "failed to get a response from apiserver",
@@ -96,21 +93,21 @@ extension ContainerKitServices {
         var lines = ["apiserver launchd diagnostics:"]
 
         do {
-            let domain = try ServiceManager.getDomainString()
+            let domain = try dependencies.domainString()
             let fullLabel = "\(domain)/\(Self.apiServerServiceLabel)"
-            let isRegistered = try ServiceManager.isRegistered(fullServiceLabel: Self.apiServerServiceLabel)
+            let isRegistered = try dependencies.isServiceRegistered(Self.apiServerServiceLabel)
             lines.append("launchd domain: \(domain)")
             lines.append("service label: \(fullLabel)")
             lines.append("registered: \(isRegistered)")
 
-            let domainResult = try Self.runLaunchctl(args: ["print", fullLabel])
+            let domainResult = try dependencies.runLaunchctl(["print", fullLabel])
             let preferred: (status: Int32, output: String)
             let dumpLabel: String
             if domainResult.status == 0 {
                 preferred = domainResult
                 dumpLabel = fullLabel
             } else {
-                preferred = try Self.runLaunchctl(args: ["print", Self.apiServerServiceLabel])
+                preferred = try dependencies.runLaunchctl(["print", Self.apiServerServiceLabel])
                 dumpLabel = Self.apiServerServiceLabel
             }
 
@@ -126,25 +123,6 @@ extension ContainerKitServices {
         }
 
         return lines.joined(separator: "\n")
-    }
-
-    private static func runLaunchctl(args: [String]) throws -> (status: Int32, output: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = args
-
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-
-        try process.run()
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        return (
-            status: process.terminationStatus,
-            output: String(data: outputData, encoding: .utf8) ?? ""
-        )
     }
 
     private static func trimLaunchctlOutput(_ output: String, maxLines: Int) -> String {

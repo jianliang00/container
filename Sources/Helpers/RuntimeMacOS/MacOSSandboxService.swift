@@ -314,7 +314,7 @@ extension MacOSSandboxService {
         }
         let status: RuntimeStatus =
             switch sandboxState {
-            case .running: .running
+            case .booted, .running: .running
             case .stopping: .stopping
             default: .stopped
             }
@@ -2276,7 +2276,6 @@ extension MacOSSandboxService {
                     try? stdout.write(contentsOf: data)
                 }
                 try? session.stdoutLogHandle?.write(contentsOf: data)
-                writeContainerLog(data)
             }
         case .processStderr:
             if let data = event.data, !data.isEmpty {
@@ -2286,7 +2285,6 @@ extension MacOSSandboxService {
                     try? stdout.write(contentsOf: data)
                 }
                 try? session.stderrLogHandle?.write(contentsOf: data)
-                writeContainerLog(data)
                 if let text = String(data: data, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                     !text.isEmpty
@@ -2485,6 +2483,43 @@ extension MacOSSandboxService {
 
     func testingGuestAgentHostLogPath() -> String {
         guestAgentHostLogPath().path
+    }
+
+    func testingContainerLogPath() -> String {
+        stdioLogPath().path
+    }
+
+    func testingOpenLogs() throws {
+        try openLogsIfNeeded()
+    }
+
+    func testingStateSnapshot() async throws -> SandboxSnapshot {
+        guard let configuration else {
+            throw ContainerizationError(.invalidState, message: "container not bootstrapped")
+        }
+
+        let status: RuntimeStatus =
+            switch sandboxState {
+            case .booted, .running: .running
+            case .stopping: .stopping
+            default: .stopped
+            }
+        let networks = await inspectSandboxNetworkState(containerConfig: configuration).attachments
+
+        return SandboxSnapshot(
+            configuration: try sandboxConfigurationSnapshot(),
+            status: status,
+            networks: networks,
+            containers: [
+                ContainerSnapshot(
+                    configuration: configuration,
+                    status: status,
+                    networks: networks,
+                    startedDate: workloads[configuration.id]?.startedAt
+                )
+            ],
+            workloads: workloadSnapshots()
+        )
     }
 
     func testingPersistSandboxMetadata(_ configuration: ContainerConfiguration) throws {

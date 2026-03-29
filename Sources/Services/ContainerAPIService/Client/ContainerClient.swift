@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
 import ContainerizationError
@@ -76,6 +77,21 @@ public struct ContainerClient: Sendable {
                 cause: error
             )
         }
+    }
+
+    /// Create a new sandbox with the given configuration.
+    public func createSandbox(
+        configuration: ContainerConfiguration,
+        options: ContainerCreateOptions = .default,
+        kernel: Kernel? = nil,
+        initImage: String? = nil
+    ) async throws {
+        try await create(
+            configuration: configuration,
+            options: options,
+            kernel: kernel,
+            initImage: initImage
+        )
     }
 
     /// List containers matching the given filters.
@@ -143,6 +159,39 @@ public struct ContainerClient: Sendable {
             throw ContainerizationError(
                 .internalError,
                 message: "failed to bootstrap container",
+                cause: error
+            )
+        }
+    }
+
+    /// Start a sandbox guest without starting a workload.
+    public func startSandbox(id: String) async throws {
+        let request = XPCMessage(route: .containerStartSandbox)
+        request.set(key: .id, value: id)
+
+        do {
+            try await xpcClient.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to start sandbox",
+                cause: error
+            )
+        }
+    }
+
+    /// Inspect the current sandbox snapshot.
+    public func inspectSandbox(id: String) async throws -> SandboxSnapshot {
+        let request = XPCMessage(route: .containerState)
+        request.set(key: .id, value: id)
+
+        do {
+            let response = try await xpcSend(message: request)
+            return try response.sandboxSnapshot()
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to inspect sandbox",
                 cause: error
             )
         }
@@ -253,6 +302,116 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Create a workload inside a started sandbox.
+    public func createWorkload(
+        containerId: String,
+        configuration: WorkloadConfiguration,
+        stdio: [FileHandle?] = [nil, nil, nil]
+    ) async throws {
+        do {
+            let request = XPCMessage(route: .containerCreateWorkload)
+            request.set(key: .id, value: containerId)
+            request.set(key: .processIdentifier, value: configuration.id)
+            let data = try JSONEncoder().encode(configuration)
+            request.set(key: .workloadConfig, value: data)
+
+            for (i, h) in stdio.enumerated() {
+                let key: XPCKeys = try {
+                    switch i {
+                    case 0: .stdin
+                    case 1: .stdout
+                    case 2: .stderr
+                    default:
+                        throw ContainerizationError(.invalidArgument, message: "invalid fd \(i)")
+                    }
+                }()
+
+                if let h {
+                    request.set(key: key, value: h)
+                }
+            }
+
+            try await xpcClient.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to create workload in sandbox",
+                cause: error
+            )
+        }
+    }
+
+    /// Start a workload that was already created inside a sandbox.
+    public func startWorkload(containerId: String, workloadId: String) async throws {
+        do {
+            let request = XPCMessage(route: .containerStartWorkload)
+            request.set(key: .id, value: containerId)
+            request.set(key: .processIdentifier, value: workloadId)
+            try await xpcClient.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to start workload in sandbox",
+                cause: error
+            )
+        }
+    }
+
+    /// Stop a workload running inside a sandbox.
+    public func stopWorkload(
+        containerId: String,
+        workloadId: String,
+        options: ContainerStopOptions = .default
+    ) async throws {
+        do {
+            let request = XPCMessage(route: .containerStopWorkload)
+            request.set(key: .id, value: containerId)
+            request.set(key: .processIdentifier, value: workloadId)
+            let data = try JSONEncoder().encode(options)
+            request.set(key: .stopOptions, value: data)
+            try await xpcClient.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to stop workload in sandbox",
+                cause: error
+            )
+        }
+    }
+
+    /// Remove a stopped workload from a sandbox.
+    public func removeWorkload(containerId: String, workloadId: String) async throws {
+        do {
+            let request = XPCMessage(route: .containerRemoveWorkload)
+            request.set(key: .id, value: containerId)
+            request.set(key: .processIdentifier, value: workloadId)
+            try await xpcClient.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to remove workload from sandbox",
+                cause: error
+            )
+        }
+    }
+
+    /// Inspect a workload inside a sandbox.
+    public func inspectWorkload(containerId: String, workloadId: String) async throws -> WorkloadSnapshot {
+        do {
+            let request = XPCMessage(route: .containerInspectWorkload)
+            request.set(key: .id, value: containerId)
+            request.set(key: .processIdentifier, value: workloadId)
+            let response = try await xpcClient.send(request)
+            return try response.workloadSnapshot()
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to inspect workload in sandbox",
+                cause: error
+            )
+        }
+    }
+
     /// Get the log file handles for a container.
     public func logs(id: String) async throws -> [FileHandle] {
         do {
@@ -272,6 +431,25 @@ public struct ContainerClient: Sendable {
             throw ContainerizationError(
                 .internalError,
                 message: "failed to get logs for container \(id)",
+                cause: error
+            )
+        }
+    }
+
+    /// Return stable host log paths for a sandbox.
+    public func sandboxLogPaths(id: String) async throws -> SandboxLogPaths {
+        do {
+            let request = XPCMessage(route: .containerSandboxLogPaths)
+            request.set(key: .id, value: id)
+            let response = try await xpcClient.send(request)
+            guard let data = response.dataNoCopy(key: .sandboxLogPaths) else {
+                throw ContainerizationError(.invalidState, message: "sandbox log paths were not returned")
+            }
+            return try JSONDecoder().decode(SandboxLogPaths.self, from: data)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to inspect sandbox logs",
                 cause: error
             )
         }
@@ -323,5 +501,21 @@ public struct ContainerClient: Sendable {
                 cause: error
             )
         }
+    }
+}
+
+extension XPCMessage {
+    fileprivate func sandboxSnapshot() throws -> SandboxSnapshot {
+        guard let data = dataNoCopy(key: .snapshot) else {
+            throw ContainerizationError(.invalidState, message: "sandbox snapshot was not returned")
+        }
+        return try JSONDecoder().decode(SandboxSnapshot.self, from: data)
+    }
+
+    fileprivate func workloadSnapshot() throws -> WorkloadSnapshot {
+        guard let data = dataNoCopy(key: .workloadSnapshot) else {
+            throw ContainerizationError(.invalidState, message: "workload snapshot was not returned")
+        }
+        return try JSONDecoder().decode(WorkloadSnapshot.self, from: data)
     }
 }

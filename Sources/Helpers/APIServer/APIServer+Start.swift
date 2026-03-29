@@ -233,13 +233,21 @@ extension APIServer {
 
             routes[XPCRoute.containerList] = harness.list
             routes[XPCRoute.containerCreate] = harness.create
+            routes[XPCRoute.containerState] = harness.inspectSandbox
             routes[XPCRoute.containerDelete] = harness.delete
             routes[XPCRoute.containerLogs] = harness.logs
+            routes[XPCRoute.containerSandboxLogPaths] = harness.sandboxLogPaths
             routes[XPCRoute.containerBootstrap] = harness.bootstrap
+            routes[XPCRoute.containerStartSandbox] = harness.startSandbox
             routes[XPCRoute.containerDial] = harness.dial
             routes[XPCRoute.containerStop] = harness.stop
+            routes[XPCRoute.containerCreateWorkload] = harness.createWorkload
             routes[XPCRoute.containerStartProcess] = harness.startProcess
+            routes[XPCRoute.containerStartWorkload] = harness.startWorkload
             routes[XPCRoute.containerCreateProcess] = harness.createProcess
+            routes[XPCRoute.containerStopWorkload] = harness.stopWorkload
+            routes[XPCRoute.containerRemoveWorkload] = harness.removeWorkload
+            routes[XPCRoute.containerInspectWorkload] = harness.inspectWorkload
             routes[XPCRoute.containerResize] = harness.resize
             routes[XPCRoute.containerWait] = harness.wait
             routes[XPCRoute.containerKill] = harness.kill

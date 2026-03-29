@@ -250,6 +250,7 @@ let package = Package(
                 "ContainerPersistence",
                 "ContainerPlugin",
                 "ContainerResource",
+                "ContainerSandboxServiceClient",
                 "ContainerXPC",
                 "DNSServer",
                 "TerminalProgress",
@@ -261,6 +262,7 @@ let package = Package(
             dependencies: [
                 "ContainerAPIClient",
                 "ContainerResource",
+                "ContainerSandboxServiceClient",
             ]
         ),
         .testTarget(

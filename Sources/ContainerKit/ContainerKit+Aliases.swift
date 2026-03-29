@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerSandboxServiceClient
 import ContainerResource
 
 public typealias ContainerConfiguration = ContainerResource.ContainerConfiguration
@@ -27,6 +28,10 @@ public typealias Image = ContainerAPIClient.ClientImage
 public typealias NetworkConfiguration = ContainerResource.NetworkConfiguration
 public typealias NetworkState = ContainerResource.NetworkState
 public typealias ProcessConfiguration = ContainerResource.ProcessConfiguration
+public typealias SandboxConfiguration = ContainerResource.SandboxConfiguration
+public typealias SandboxLogPaths = ContainerResource.SandboxLogPaths
+public typealias SandboxSnapshot = ContainerSandboxServiceClient.SandboxSnapshot
 public typealias SystemHealth = ContainerAPIClient.SystemHealth
 public typealias Volume = ContainerResource.Volume
-
+public typealias WorkloadConfiguration = ContainerResource.WorkloadConfiguration
+public typealias WorkloadSnapshot = ContainerResource.WorkloadSnapshot

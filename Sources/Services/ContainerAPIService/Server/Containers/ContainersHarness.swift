@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
 import ContainerizationError
@@ -61,6 +62,28 @@ public struct ContainersHarness: Sendable {
 
         try await service.bootstrap(id: id, stdio: stdio, dynamicEnv: env)
         return message.reply()
+    }
+
+    @Sendable
+    public func startSandbox(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        try await service.startSandbox(id: id)
+        return message.reply()
+    }
+
+    @Sendable
+    public func inspectSandbox(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+
+        let snapshot = try await service.inspectSandbox(id: id)
+        let data = try JSONEncoder().encode(snapshot)
+        let reply = message.reply()
+        reply.set(key: .snapshot, value: data)
+        return reply
     }
 
     @Sendable
@@ -226,6 +249,73 @@ public struct ContainersHarness: Sendable {
     }
 
     @Sendable
+    public func createWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard let workloadID = message.string(key: .processIdentifier) else {
+            throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
+        }
+        let configuration = try message.workloadConfiguration(id: workloadID)
+        let stdio = message.stdio()
+        try await service.createWorkload(id: id, configuration: configuration, stdio: stdio)
+        return message.reply()
+    }
+
+    @Sendable
+    public func startWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard let workloadID = message.string(key: .processIdentifier) else {
+            throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
+        }
+        try await service.startWorkload(id: id, workloadID: workloadID)
+        return message.reply()
+    }
+
+    @Sendable
+    public func stopWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard let workloadID = message.string(key: .processIdentifier) else {
+            throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
+        }
+        let stopOptions = try message.stopOptions()
+        try await service.stopWorkload(id: id, workloadID: workloadID, options: stopOptions)
+        return message.reply()
+    }
+
+    @Sendable
+    public func removeWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard let workloadID = message.string(key: .processIdentifier) else {
+            throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
+        }
+        try await service.removeWorkload(id: id, workloadID: workloadID)
+        return message.reply()
+    }
+
+    @Sendable
+    public func inspectWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard let workloadID = message.string(key: .processIdentifier) else {
+            throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
+        }
+
+        let snapshot = try await service.inspectWorkload(id: id, workloadID: workloadID)
+        let data = try JSONEncoder().encode(snapshot)
+        let reply = message.reply()
+        reply.set(key: .workloadSnapshot, value: data)
+        return reply
+    }
+
+    @Sendable
     public func startProcess(_ message: XPCMessage) async throws -> XPCMessage {
         let id = message.string(key: .id)
         guard let id else {
@@ -290,57 +380,16 @@ public struct ContainersHarness: Sendable {
     }
 
     @Sendable
-    public func copyIn(_ message: XPCMessage) async throws -> XPCMessage {
+    public func sandboxLogPaths(_ message: XPCMessage) async throws -> XPCMessage {
         guard let id = message.string(key: .id) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "id cannot be empty"
-            )
-        }
-        guard let sourcePath = message.string(key: .sourcePath) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "source path cannot be empty"
-            )
-        }
-        guard let destinationPath = message.string(key: .destinationPath) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "destination path cannot be empty"
-            )
-        }
-        let mode = UInt32(message.uint64(key: .fileMode))
-        let createParents = message.bool(key: .createParents)
-
-        try await service.copyIn(id: id, source: sourcePath, destination: destinationPath, mode: mode, createParents: createParents)
-        return message.reply()
-    }
-
-    @Sendable
-    public func copyOut(_ message: XPCMessage) async throws -> XPCMessage {
-        guard let id = message.string(key: .id) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "id cannot be empty"
-            )
-        }
-        guard let sourcePath = message.string(key: .sourcePath) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "source path cannot be empty"
-            )
-        }
-        guard let destinationPath = message.string(key: .destinationPath) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "destination path cannot be empty"
-            )
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
         }
 
-        let createParents = message.bool(key: .createParents)
-
-        try await service.copyOut(id: id, source: sourcePath, destination: destinationPath, createParents: createParents)
-        return message.reply()
+        let paths = try await service.sandboxLogPaths(id: id)
+        let data = try JSONEncoder().encode(paths)
+        let reply = message.reply()
+        reply.set(key: .sandboxLogPaths, value: data)
+        return reply
     }
 
     @Sendable
@@ -379,5 +428,21 @@ public struct ContainersHarness: Sendable {
 
         try await service.exportRootfs(id: id, archive: archiveUrl)
         return message.reply()
+    }
+}
+
+extension XPCMessage {
+    fileprivate func workloadConfiguration(id fallbackID: String) throws -> WorkloadConfiguration {
+        guard let data = dataNoCopy(key: .workloadConfig) else {
+            throw ContainerizationError(.invalidArgument, message: "workload configuration cannot be empty")
+        }
+        let configuration = try JSONDecoder().decode(WorkloadConfiguration.self, from: data)
+        guard configuration.id == fallbackID else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "workload configuration id \(configuration.id) does not match requested id \(fallbackID)"
+            )
+        }
+        return configuration
     }
 }

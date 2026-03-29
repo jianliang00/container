@@ -5,6 +5,8 @@ Implementation plan for macOS guest support in `container core`.
 Related design docs:
 
 - [`macos-guest-core-design.md`](./macos-guest-core-design.md)
+- [`macos-guest-workload-image-design.md`](./macos-guest-workload-image-design.md)
+- [`macos-guest-dockerfile-build-design.md`](./macos-guest-dockerfile-build-design.md)
 - [`macos-guest-networking-design.md`](./macos-guest-networking-design.md)
 - [`macos-guest-networkpolicy-design.md`](./macos-guest-networkpolicy-design.md)
 
@@ -84,34 +86,101 @@ Related design docs:
 - [ ] Stopping a sandbox consistently stops and cleans up all attached workloads.
 - [x] Workload state is queryable independently from sandbox state.
 
-## 3. P3: Workload Image and Injection
+## 3. P3: Workload Image, Injection, and Build Split
+
+### Delivery Notes
+
+- Reuse the existing `WorkloadConfiguration` / `WorkloadSnapshot` persistence path
+  instead of introducing a parallel workload state model.
+- Reuse the existing sidecar `fs.begin` / `fs.chunk` / `fs.end` transfer path for
+  workload payload injection instead of inventing a new guest transport.
+- Keep the current whole-disk packager and `MacOSBuildEngine` as the `sandbox build`
+  path, then add `workload build` as an additive mode with an explicit payload
+  boundary.
 
 ### TODO
 
-- [ ] Add explicit image role metadata.
-  - `sandbox image`
-  - `workload image`
-- [ ] Keep sandbox image and workload image responsibilities separate.
-  - sandbox image boots the VM
-  - workload image carries payload and execution metadata
-- [ ] Define the workload artifact format.
-  - file tree payload
-  - `entrypoint`
-  - `cmd`
-  - default environment variables
-  - user
-  - working directory
-- [ ] Implement guest-side workload layout and payload injection.
-  - reuse the existing file transfer path
-  - `/var/lib/container/workloads/<id>/rootfs`
-  - `/var/lib/container/workloads/<id>/meta.json`
-  - define sharing and cleanup semantics when multiple workloads use one sandbox image
-- [ ] Distinguish sandbox images from workload images in builder and image store.
+- [ ] Lock the image-role contract and reject role mismatches early.
+  - [ ] add explicit annotations:
+    - `org.apple.container.macos.image.role=sandbox`
+    - `org.apple.container.macos.image.role=workload`
+    - `org.apple.container.macos.workload.format=v1`
+  - [ ] keep current VM bundle validation only for `sandbox image`
+  - [ ] add workload-image validation for ordinary filesystem layers plus OCI config
+  - [ ] fail fast when:
+    - a `workload image` is used to boot a sandbox
+    - a `sandbox image` is used as a workload payload
+- [ ] Extend the workload resource model to support image-backed workloads.
+  - [ ] extend `WorkloadConfiguration` to persist:
+    - workload image reference
+    - resolved workload image digest
+    - guest payload path
+    - guest metadata path
+    - injection state
+  - [ ] make `CreateWorkload` reference a workload image plus runtime overrides, not
+    only a raw process definition
+  - [ ] keep `InspectWorkload` stable across restart recovery by rebuilding state from
+    persisted workload configuration
+- [ ] Define the workload OCI artifact format on top of standard image primitives.
+  - [ ] use ordinary OCI filesystem payload layers for workload contents
+  - [ ] source default startup metadata from OCI image config:
+    - `entrypoint`
+    - `cmd`
+    - environment
+    - user
+    - working directory
+  - [ ] persist guest `meta.json` with:
+    - workload image digest
+    - effective process metadata
+    - creation timestamp
+  - [ ] add a dedicated host-side workload packager, for example
+    `MacOSWorkloadPackager`, that walks a payload root and emits OCI output
+- [ ] Implement host unpack, guest injection, and cleanup semantics.
+  - [ ] unpack workload layers on the host into a cache keyed by workload image digest
+  - [ ] inject each workload into:
+    - `/var/lib/container/workloads/<id>/rootfs`
+    - `/var/lib/container/workloads/<id>/meta.json`
+  - [ ] start workloads from persisted image metadata plus runtime overrides by
+    reusing the existing process-start path
+  - [ ] separate cleanup responsibilities:
+    - remove the guest instance directory when one workload is removed
+    - remove all guest workload directories when the sandbox is stopped
+    - keep host unpack cache separate from guest instance lifetime
+  - [ ] cover restart points before and after injection so recovery can determine
+    whether reinjection is needed
+- [ ] Split macOS build into explicit `sandbox build` and `workload build` modes.
+  - [ ] keep the current whole-disk commit flow as `sandbox build`
+  - [ ] add explicit `payloadRoot`, recommended as
+    `/var/lib/container/build/payload`
+  - [ ] route `COPY` and `ADD(local)` into `payloadRoot`
+  - [ ] track `WORKDIR` relative to `payloadRoot`
+  - [ ] persist `ENV`, `USER`, `CMD`, and `ENTRYPOINT` into workload image config
+  - [ ] keep `RUN` executing in the build sandbox so it can use machine-global tools
+  - [ ] narrow `RUN` semantics to "only writes under `payloadRoot` are committed"
+  - [ ] add explicit build-sandbox selection, such as
+    `--build-sandbox-image <sandbox-ref>`
+  - [ ] reject or clearly document unsupported workload-build cases:
+    - guest-global installers whose writes must become workload payload
+    - `pkg`-driven system installs captured as workload payload
+    - whole-guest diff capture
+- [ ] Add focused coverage for the mixed sandbox/workload flow.
+  - [ ] one sandbox image can host multiple workload images
+  - [ ] workload images can be packed, pushed, pulled, validated, unpacked, and injected
+  - [ ] workload-start defaults come from OCI config and can be overridden at runtime
+  - [ ] workload builds use machine-global tools from the sandbox image without
+    copying those tools into the workload image
+  - [ ] workload builds never depend on whole-guest diff detection
 
 ### Exit Criteria
 
-- [ ] One sandbox image can host multiple workload images.
-- [ ] Workload injection, startup, and cleanup are stable and reproducible.
+- [ ] Runtime rejects sandbox/workload role mismatches before VM boot or payload
+  injection begins.
+- [ ] One sandbox image can host multiple workload images with stable injection,
+  startup, restart recovery, and cleanup.
+- [ ] Workload images can be packed, pushed, pulled, validated, unpacked, and started
+  from OCI config defaults plus runtime overrides.
+- [ ] `workload build` commits only `payloadRoot`, while `sandbox build` remains the
+  only path that commits machine-global guest state.
 
 ## 4. P4: Core Control Surface
 

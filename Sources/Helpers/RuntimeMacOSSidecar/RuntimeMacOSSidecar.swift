@@ -150,6 +150,7 @@ struct SidecarGuestAgentFrame: Codable {
     let executable: String?
     let arguments: [String]?
     let environment: [String]?
+    let rootDirectory: String?
     let workingDirectory: String?
     let terminal: Bool?
     let user: String?
@@ -179,6 +180,7 @@ struct SidecarGuestAgentFrame: Codable {
         executable: String? = nil,
         arguments: [String]? = nil,
         environment: [String]? = nil,
+        rootDirectory: String? = nil,
         workingDirectory: String? = nil,
         terminal: Bool? = nil,
         user: String? = nil,
@@ -207,6 +209,7 @@ struct SidecarGuestAgentFrame: Codable {
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
+        self.rootDirectory = rootDirectory
         self.workingDirectory = workingDirectory
         self.terminal = terminal
         self.user = user
@@ -236,6 +239,7 @@ struct SidecarGuestAgentFrame: Codable {
         executable: String,
         arguments: [String],
         environment: [String]?,
+        rootDirectory: String?,
         workingDirectory: String?,
         terminal: Bool,
         user: String?,
@@ -249,6 +253,7 @@ struct SidecarGuestAgentFrame: Codable {
             executable: executable,
             arguments: arguments,
             environment: environment,
+            rootDirectory: rootDirectory,
             workingDirectory: workingDirectory,
             terminal: terminal,
             user: user,
@@ -1460,6 +1465,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     executable: exec.executable,
                     arguments: exec.arguments,
                     environment: env,
+                    rootDirectory: exec.rootDirectory,
                     workingDirectory: cwd,
                     terminal: exec.terminal,
                     user: exec.user,

@@ -385,6 +385,14 @@ public actor ContainersService {
                 var state = try await self.getContainerState(id: id, context: context)
                 if state.client == nil {
                     try await self.registerContainerExitCallback(id: id)
+                    try await self.trackContainerExit(id: id, client: sandboxClient)
+                    let sandboxSnapshot = try await sandboxClient.state()
+                    state.snapshot.status = sandboxSnapshot.status
+                    state.snapshot.networks = sandboxSnapshot.networks
+                    state.snapshot.startedDate =
+                        sandboxSnapshot.status == .running
+                        ? (state.snapshot.startedDate ?? Date())
+                        : nil
                     state.client = sandboxClient
                 }
                 state.bootstrapTask = nil

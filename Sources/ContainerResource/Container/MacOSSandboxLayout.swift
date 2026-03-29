@@ -18,10 +18,19 @@ import Foundation
 
 /// Filesystem layout for a macOS guest sandbox bundle.
 public struct MacOSSandboxLayout: Sendable, Equatable {
+    public static let stateDirectoryName = "state"
+    public static let stateSchemaVersion = 1
+
     public let root: URL
 
     public init(root: URL) {
         self.root = root
+    }
+
+    public var stateRootURL: URL {
+        root
+            .appendingPathComponent(Self.stateDirectoryName)
+            .appendingPathComponent("v\(Self.stateSchemaVersion)")
     }
 
     public var runtimeConfigurationURL: URL {
@@ -37,7 +46,7 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
     }
 
     public var sandboxConfigurationURL: URL {
-        root.appendingPathComponent("sandbox.json")
+        stateRootURL.appendingPathComponent("sandbox.json")
     }
 
     public var diskImageURL: URL {
@@ -69,11 +78,11 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
     }
 
     public var temporaryDirectoryURL: URL {
-        root.appendingPathComponent("tmp")
+        stateRootURL.appendingPathComponent("tmp")
     }
 
     public var readonlyInjectionDirectoryURL: URL {
-        root.appendingPathComponent("readonly")
+        stateRootURL.appendingPathComponent("readonly")
     }
 
     public var readonlyInjectionManifestURL: URL {
@@ -81,7 +90,7 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
     }
 
     public var workloadsDirectoryURL: URL {
-        root.appendingPathComponent("workloads")
+        stateRootURL.appendingPathComponent("workloads")
     }
 
     public func workloadDirectoryURL(id: String) -> URL {
@@ -102,6 +111,7 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
 
     public func prepareBaseDirectories(fileManager: FileManager = .default) throws {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: stateRootURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: temporaryDirectoryURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: readonlyInjectionDirectoryURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: workloadsDirectoryURL, withIntermediateDirectories: true)

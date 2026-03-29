@@ -39,6 +39,7 @@ public enum SandboxKeys: String {
     case width
     case height
     case processConfig
+    case workloadConfig
 
     /// Filesystem request payload.
     case fsPayload

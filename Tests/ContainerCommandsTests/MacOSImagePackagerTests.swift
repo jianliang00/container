@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationOCI
 import Foundation
 import Testing
 
@@ -139,6 +140,53 @@ struct MacOSImagePackagerTests {
         #expect(messages.contains("Finished macOS image packaging"))
         #expect(FileManager.default.fileExists(atPath: outputTar.path))
     }
+
+    @Test
+    func packageAnnotatesSandboxRoleOnManifestAndIndexDescriptor() throws {
+        let tempDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let imageDirectory = tempDirectory.appendingPathComponent("image")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+
+        try createSparseDisk(
+            at: imageDirectory.appendingPathComponent(MacOSImagePackager.diskImageFilename),
+            logicalSize: 4096,
+            writes: [(offset: 0, data: Data("seed".utf8))]
+        )
+        try Data("aux".utf8).write(
+            to: imageDirectory.appendingPathComponent(MacOSImagePackager.auxiliaryStorageFilename)
+        )
+        try Data("hardware".utf8).write(
+            to: imageDirectory.appendingPathComponent(MacOSImagePackager.hardwareModelFilename)
+        )
+
+        let outputTar = tempDirectory.appendingPathComponent("out.tar")
+        try withBuiltinZstdOnly {
+            try MacOSImagePackager.package(
+                imageDirectory: imageDirectory,
+                outputTar: outputTar,
+                reference: "local/test:latest"
+            )
+        }
+
+        let extractRoot = tempDirectory.appendingPathComponent("extracted")
+        try extractTar(outputTar, to: extractRoot)
+
+        let indexData = try Data(contentsOf: extractRoot.appendingPathComponent("index.json"))
+        let index = try JSONDecoder().decode(Index.self, from: indexData)
+        let descriptor = try #require(index.manifests.first)
+        #expect(descriptor.annotations?[MacOSImageContract.roleAnnotation] == MacOSImageRole.sandbox.rawValue)
+        #expect(descriptor.annotations?[MacOSImageContract.workloadFormatAnnotation] == nil)
+        #expect(descriptor.annotations?["org.opencontainers.image.ref.name"] == "local/test:latest")
+
+        let manifestDigest = descriptor.digest.replacingOccurrences(of: "sha256:", with: "")
+        let manifestURL = extractRoot.appendingPathComponent("blobs/sha256/\(manifestDigest)")
+        let manifestData = try Data(contentsOf: manifestURL)
+        let manifest = try JSONDecoder().decode(Manifest.self, from: manifestData)
+        #expect(manifest.annotations?[MacOSImageContract.roleAnnotation] == MacOSImageRole.sandbox.rawValue)
+        #expect(manifest.annotations?[MacOSImageContract.workloadFormatAnnotation] == nil)
+    }
 }
 
 private func makeTemporaryDirectory() throws -> URL {
@@ -189,6 +237,21 @@ private func withBuiltinZstdOnly<T>(_ body: () throws -> T) throws -> T {
     }
     setenv("PATH", "", 1)
     return try body()
+}
+
+private func extractTar(_ tarURL: URL, to destinationURL: URL) throws {
+    try FileManager.default.createDirectory(at: destinationURL, withIntermediateDirectories: true)
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+    process.arguments = ["-xf", tarURL.path, "-C", destinationURL.path]
+    let stderrPipe = Pipe()
+    process.standardError = stderrPipe
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        let errorText = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "unknown tar error"
+        throw NSError(domain: "container.macos.tests", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorText])
+    }
 }
 
 private final class LockedMessages: @unchecked Sendable {

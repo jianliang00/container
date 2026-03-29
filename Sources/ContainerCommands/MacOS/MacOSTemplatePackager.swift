@@ -50,6 +50,7 @@ enum MacOSImagePackager {
         imageDirectory: URL,
         outputTar: URL,
         reference: String?,
+        role: MacOSImageRole = .sandbox,
         imageConfig: ContainerizationOCI.Image? = nil,
         parentDiskSource: MacOSChunkedDiskSource? = nil,
         temporaryRootDirectory: URL? = nil,
@@ -61,6 +62,7 @@ enum MacOSImagePackager {
         let layout = try createLayoutDirectory(
             from: image,
             reference: reference,
+            role: role,
             imageConfig: imageConfig,
             parentDiskSource: parentDiskSource,
             temporaryRootDirectory: temporaryRootDirectory,
@@ -80,6 +82,7 @@ enum MacOSImagePackager {
     private static func createLayoutDirectory(
         from image: ImagePaths,
         reference: String?,
+        role: MacOSImageRole,
         imageConfig: ContainerizationOCI.Image?,
         parentDiskSource: MacOSChunkedDiskSource?,
         temporaryRootDirectory: URL?,
@@ -196,14 +199,22 @@ enum MacOSImagePackager {
         var layers: [OCIDescriptor] = [hardware, auxiliary, diskLayoutDescriptor]
         layers.append(contentsOf: chunkDescriptors)
 
+        let roleAnnotations = MacOSImageContract.annotations(for: role)
+
         let manifestValue = OCIManifest(
             schemaVersion: 2,
             mediaType: "application/vnd.oci.image.manifest.v1+json",
             config: config,
-            layers: layers
+            layers: layers,
+            annotations: roleAnnotations
         )
         let manifestData = try JSONEncoder().encode(manifestValue)
         let manifest = try writeJSONBlob(manifestData, blobsDir: blobsDir, mediaType: manifestValue.mediaType)
+
+        var descriptorAnnotations = roleAnnotations
+        if let reference {
+            descriptorAnnotations["org.opencontainers.image.ref.name"] = reference
+        }
 
         let index = OCIIndex(
             schemaVersion: 2,
@@ -214,7 +225,7 @@ enum MacOSImagePackager {
                     digest: manifest.digest,
                     size: manifest.size,
                     platform: .init(architecture: "arm64", os: "darwin"),
-                    annotations: reference.map { ["org.opencontainers.image.ref.name": $0] }
+                    annotations: descriptorAnnotations
                 )
             ]
         )
@@ -378,6 +389,7 @@ private struct OCIManifest: Codable {
     let mediaType: String
     let config: OCIDescriptor
     let layers: [OCIDescriptor]
+    let annotations: [String: String]?
 }
 
 private struct OCIIndex: Codable {

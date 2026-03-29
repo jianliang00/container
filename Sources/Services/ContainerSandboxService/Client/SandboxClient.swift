@@ -182,10 +182,17 @@ extension SandboxClient {
     }
 
     public func createWorkload(_ id: String, config: ProcessConfiguration, stdio: [FileHandle?]) async throws {
+        try await createWorkload(
+            WorkloadConfiguration(id: id, processConfiguration: config),
+            stdio: stdio
+        )
+    }
+
+    public func createWorkload(_ configuration: WorkloadConfiguration, stdio: [FileHandle?]) async throws {
         let request = XPCMessage(route: SandboxRoutes.createWorkload.rawValue)
-        request.set(key: SandboxKeys.id.rawValue, value: id)
-        let data = try JSONEncoder().encode(config)
-        request.set(key: SandboxKeys.processConfig.rawValue, value: data)
+        request.set(key: SandboxKeys.id.rawValue, value: configuration.id)
+        let data = try JSONEncoder().encode(configuration)
+        request.set(key: SandboxKeys.workloadConfig.rawValue, value: data)
 
         for (i, h) in stdio.enumerated() {
             let key: SandboxKeys = try {
@@ -208,7 +215,7 @@ extension SandboxClient {
         } catch {
             throw ContainerizationError(
                 .internalError,
-                message: "failed to create workload \(id) in container \(self.id)",
+                message: "failed to create workload \(configuration.id) in container \(self.id)",
                 cause: error
             )
         }

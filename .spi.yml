@@ -5,6 +5,8 @@ builder:
       documentation_targets:
         - ContainerAPIService
         - ContainerAPIClient
+        - ContainerKit
+        - ContainerKitServices
         - ContainerSandboxService
         - ContainerSandboxServiceClient
         - ContainerNetworkService

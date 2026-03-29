@@ -165,14 +165,15 @@ into an executable checklist. It assumes the current tree does not yet contain
 
 ### Refactoring Support Work
 
-- [ ] Identify any logic in the current CLI-only files that must move into a
-      reusable library location:
+- [x] Audit the current CLI-only lifecycle files for reusable logic and keep
+      `ContainerKitServices` behavior aligned with them:
       - `Sources/ContainerCommands/System/SystemStart.swift`
       - `Sources/ContainerCommands/System/SystemStop.swift`
       - `Sources/ContainerCommands/System/SystemStatus.swift`
-- [ ] If code extraction is needed, move only non-CLI lifecycle helpers into a
-      reusable place. Do not make `ContainerKitServices` depend on
-      `ContainerCommands`.
+- [x] Keep CLI-only concerns in `ContainerCommands` unless extraction is
+      clearly needed. Do not make `ContainerKitServices` depend on
+      `ContainerCommands` just to share prompts, provisioning, or other
+      command-only behavior.
 - [x] Keep `ContainerKit` itself free of launchd/bootstrap concerns after the
       refactor.
 
@@ -219,7 +220,7 @@ into an executable checklist. It assumes the current tree does not yet contain
       `Package.swift`.
 - [x] Add compile-focused tests for the public aliases.
 - [x] Add compile-focused tests for the intended facade call signatures.
-- [ ] Add focused tests for service-layer behavior:
+- [x] Add focused tests for service-layer behavior:
       - plist generation
       - registration and deregistration flow
       - health check success and failure handling

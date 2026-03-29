@@ -20,12 +20,12 @@ import Foundation
 
 public extension ContainerKitServices {
     func status() async throws -> ServiceStatus {
-        let isRegistered = try ServiceManager.isRegistered(fullServiceLabel: Self.apiServerServiceLabel)
+        let isRegistered = try dependencies.isServiceRegistered(Self.apiServerServiceLabel)
         guard isRegistered else {
             return ServiceStatus(isRegistered: false, health: nil)
         }
 
-        let health = try? await kit.health(timeout: .seconds(10))
+        let health = try? await dependencies.healthCheck(.seconds(10))
         return ServiceStatus(isRegistered: true, health: health)
     }
 

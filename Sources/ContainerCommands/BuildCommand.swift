@@ -26,6 +26,8 @@ import Foundation
 import NIO
 import TerminalProgress
 
+extension MacOSBuildMode: ExpressibleByArgument {}
+
 extension Application {
     public struct BuildCommand: AsyncLoggableCommand {
         public init() {}
@@ -108,6 +110,12 @@ extension Application {
         @Option(name: .long, help: ArgumentHelp("Progress type (format: auto|plain|tty)", valueName: "type"))
         var progress: ProgressType = .auto
 
+        @Option(name: .customLong("macos-build-mode"), help: ArgumentHelp("macOS build mode (sandbox|workload)", valueName: "mode"))
+        var macOSBuildMode: MacOSBuildMode = .sandbox
+
+        @Option(name: .customLong("build-sandbox-image"), help: ArgumentHelp("Sandbox image to use as the build environment for macOS workload builds", valueName: "reference"))
+        var buildSandboxImage: String?
+
         @Flag(name: .shortAndLong, help: "Suppress build output")
         var quiet: Bool = false
 
@@ -143,6 +151,14 @@ extension Application {
             do {
                 let platforms = try requestedPlatforms()
                 let buildRoute = try Self.buildRoute(for: platforms)
+                if buildRoute == .linux {
+                    if macOSBuildMode == .workload {
+                        throw ValidationError("--macos-build-mode workload is only supported for --platform darwin/arm64")
+                    }
+                    if buildSandboxImage != nil {
+                        throw ValidationError("--build-sandbox-image is only supported for --platform darwin/arm64")
+                    }
+                }
                 let buildFilePath = try resolveBuildFilePath()
                 let buildFileData = try loadBuildFileData(from: buildFilePath)
 
@@ -256,7 +272,7 @@ extension Application {
                                 handler.cancel()
                             }
                         }
-                        group.addTask { [buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log] in
+                        group.addTask { [buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log, macOSBuildMode, buildSandboxImage] in
                             let contextURL = URL(fileURLWithPath: contextDir, relativeTo: .currentDirectory()).absoluteURL
                             let engineInput = MacOSBuildEngine.Input(
                                 appRoot: systemHealth.appRoot,
@@ -270,6 +286,8 @@ extension Application {
                                 noCache: noCache,
                                 pull: pull,
                                 quiet: quiet,
+                                buildMode: macOSBuildMode,
+                                buildSandboxImage: buildSandboxImage,
                                 target: target,
                                 tags: imageNames,
                                 exports: exports,
@@ -296,6 +314,7 @@ extension Application {
 
                 var finalMessage = "Successfully built \(imageNames.joined(separator: ", "))"
                 let taskManager = ProgressTaskCoordinator()
+                let shouldUnpackBuiltImages = !(buildRoute == .macOS && macOSBuildMode == .workload)
                 // Currently, only a single export can be specified.
                 for exp in exports {
                     unpackProgress.add(tasks: 1)
@@ -313,7 +332,9 @@ extension Application {
                         }
                         for image in result.images {
                             try Task.checkCancellation()
-                            try await image.unpack(platform: nil, progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: unpackProgress.handler))
+                            if shouldUnpackBuiltImages {
+                                try await image.unpack(platform: nil, progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: unpackProgress.handler))
+                            }
 
                             // Tag the unpacked image with all requested tags
                             for tagName in imageNames {

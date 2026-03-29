@@ -268,6 +268,20 @@ extension SandboxClient {
         }
     }
 
+    public func removeWorkload(_ id: String) async throws {
+        let request = XPCMessage(route: SandboxRoutes.removeWorkload.rawValue)
+        request.set(key: SandboxKeys.id.rawValue, value: id)
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to remove workload \(id) in container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
     public func startProcess(_ id: String) async throws {
         let request = XPCMessage(route: SandboxRoutes.start.rawValue)
         request.set(key: SandboxKeys.id.rawValue, value: id)

@@ -85,13 +85,64 @@ struct SandboxConfigurationTests {
         let layout = MacOSSandboxLayout(root: root)
         try layout.prepareBaseDirectories()
 
-        #expect(layout.sandboxConfigurationURL == root.appendingPathComponent("sandbox.json"))
-        #expect(layout.readonlyInjectionManifestURL == root.appendingPathComponent("readonly/manifest.json"))
-        #expect(layout.workloadConfigurationURL(id: "exec-1") == root.appendingPathComponent("workloads/exec-1/config.json"))
-        #expect(layout.workloadStdoutLogURL(id: "exec-1") == root.appendingPathComponent("workloads/exec-1/stdout.log"))
+        let stateRoot = root.appendingPathComponent("state/v1")
+        #expect(layout.stateRootURL == stateRoot)
+        #expect(layout.sandboxConfigurationURL == stateRoot.appendingPathComponent("sandbox.json"))
+        #expect(layout.readonlyInjectionManifestURL == stateRoot.appendingPathComponent("readonly/manifest.json"))
+        #expect(layout.workloadConfigurationURL(id: "exec-1") == stateRoot.appendingPathComponent("workloads/exec-1/config.json"))
+        #expect(layout.workloadStdoutLogURL(id: "exec-1") == stateRoot.appendingPathComponent("workloads/exec-1/stdout.log"))
+        #expect(FileManager.default.fileExists(atPath: layout.stateRootURL.path))
         #expect(FileManager.default.fileExists(atPath: layout.temporaryDirectoryURL.path))
         #expect(FileManager.default.fileExists(atPath: layout.readonlyInjectionDirectoryURL.path))
         #expect(FileManager.default.fileExists(atPath: layout.workloadsDirectoryURL.path))
+    }
+
+    @Test
+    func sandboxConfigurationDecodingRejectsMissingSchemaVersion() throws {
+        let json = """
+            {
+              "id": "sandbox-1",
+              "image": {
+                "reference": "example/macos:latest",
+                "descriptor": {
+                  "mediaType": "application/vnd.oci.image.index.v1+json",
+                  "digest": "sha256:test",
+                  "size": 1
+                }
+              }
+            }
+            """
+
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(SandboxConfiguration.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test
+    func workloadConfigurationDecodingRejectsMissingSchemaVersion() throws {
+        let json = """
+            {
+              "id": "workload-1",
+              "processConfiguration": {
+                "executable": "/bin/sh",
+                "arguments": [],
+                "environment": [],
+                "workingDirectory": "/",
+                "terminal": false,
+                "user": {
+                  "id": {
+                    "uid": 0,
+                    "gid": 0
+                  }
+                }
+              },
+              "injectionState": "notRequired"
+            }
+            """
+
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(WorkloadConfiguration.self, from: Data(json.utf8))
+        }
     }
 
     private func makeContainerConfiguration() throws -> ContainerConfiguration {

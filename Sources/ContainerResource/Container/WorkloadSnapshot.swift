@@ -16,16 +16,89 @@
 
 import Foundation
 
+public enum WorkloadInjectionState: String, Sendable, Codable, Equatable {
+    /// The workload starts from a directly supplied process definition and does not need guest injection.
+    case notRequired
+    /// The workload has an image-backed payload that still needs to be injected into the guest.
+    case pending
+    /// The workload image payload and metadata are already present in the guest.
+    case injected
+}
+
 /// Configuration for a workload that runs inside a sandbox.
 public struct WorkloadConfiguration: Sendable, Codable {
+    public static let schemaVersion = 1
+
+    /// Persisted schema version for workload state.
+    public var persistedSchemaVersion: Int
     /// Identifier of the workload within the sandbox.
     public var id: String
     /// Process configuration used to start the workload.
     public var processConfiguration: ProcessConfiguration
+    /// Source reference of the workload image when the workload is image-backed.
+    public var workloadImageReference: String?
+    /// Resolved digest of the workload image when the workload is image-backed.
+    public var workloadImageDigest: String?
+    /// Guest path for the injected workload payload root.
+    public var guestPayloadPath: String?
+    /// Guest path for the injected workload metadata file.
+    public var guestMetadataPath: String?
+    /// Injection progress for image-backed workloads.
+    public var injectionState: WorkloadInjectionState
 
-    public init(id: String, processConfiguration: ProcessConfiguration) {
+    /// Whether the workload is backed by an OCI workload image.
+    public var isImageBacked: Bool {
+        workloadImageReference != nil || workloadImageDigest != nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case persistedSchemaVersion = "schemaVersion"
+        case id
+        case processConfiguration
+        case workloadImageReference
+        case workloadImageDigest
+        case guestPayloadPath
+        case guestMetadataPath
+        case injectionState
+    }
+
+    public init(
+        id: String,
+        processConfiguration: ProcessConfiguration,
+        workloadImageReference: String? = nil,
+        workloadImageDigest: String? = nil,
+        guestPayloadPath: String? = nil,
+        guestMetadataPath: String? = nil,
+        injectionState: WorkloadInjectionState = .notRequired
+    ) {
+        self.persistedSchemaVersion = Self.schemaVersion
         self.id = id
         self.processConfiguration = processConfiguration
+        self.workloadImageReference = workloadImageReference
+        self.workloadImageDigest = workloadImageDigest
+        self.guestPayloadPath = guestPayloadPath
+        self.guestMetadataPath = guestMetadataPath
+        self.injectionState = injectionState
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(Int.self, forKey: .persistedSchemaVersion)
+        guard schemaVersion == Self.schemaVersion else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .persistedSchemaVersion,
+                in: container,
+                debugDescription: "unsupported WorkloadConfiguration schemaVersion \(schemaVersion)"
+            )
+        }
+        self.persistedSchemaVersion = schemaVersion
+        self.id = try container.decode(String.self, forKey: .id)
+        self.processConfiguration = try container.decode(ProcessConfiguration.self, forKey: .processConfiguration)
+        self.workloadImageReference = try container.decodeIfPresent(String.self, forKey: .workloadImageReference)
+        self.workloadImageDigest = try container.decodeIfPresent(String.self, forKey: .workloadImageDigest)
+        self.guestPayloadPath = try container.decodeIfPresent(String.self, forKey: .guestPayloadPath)
+        self.guestMetadataPath = try container.decodeIfPresent(String.self, forKey: .guestMetadataPath)
+        self.injectionState = try container.decode(WorkloadInjectionState.self, forKey: .injectionState)
     }
 }
 

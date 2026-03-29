@@ -100,47 +100,47 @@ Related design docs:
 
 ### TODO
 
-- [ ] Lock the image-role contract and reject role mismatches early.
-  - [ ] add explicit annotations:
+- [x] Lock the image-role contract and reject role mismatches early.
+  - [x] add explicit annotations:
     - `org.apple.container.macos.image.role=sandbox`
     - `org.apple.container.macos.image.role=workload`
     - `org.apple.container.macos.workload.format=v1`
-  - [ ] keep current VM bundle validation only for `sandbox image`
-  - [ ] add workload-image validation for ordinary filesystem layers plus OCI config
-  - [ ] fail fast when:
-    - a `workload image` is used to boot a sandbox
-    - a `sandbox image` is used as a workload payload
-- [ ] Extend the workload resource model to support image-backed workloads.
-  - [ ] extend `WorkloadConfiguration` to persist:
+  - [x] keep current VM bundle validation only for `sandbox image`
+  - [x] add workload-image validation for ordinary filesystem layers plus OCI config
+  - [x] fail fast when:
+    - [x] a `workload image` is used to boot a sandbox
+    - [x] a `sandbox image` is used as a workload payload
+- [x] Extend the workload resource model to support image-backed workloads.
+  - [x] extend `WorkloadConfiguration` to persist:
     - workload image reference
     - resolved workload image digest
     - guest payload path
     - guest metadata path
     - injection state
-  - [ ] make `CreateWorkload` reference a workload image plus runtime overrides, not
+  - [x] make `CreateWorkload` reference a workload image plus runtime overrides, not
     only a raw process definition
-  - [ ] keep `InspectWorkload` stable across restart recovery by rebuilding state from
+  - [x] keep `InspectWorkload` stable across restart recovery by rebuilding state from
     persisted workload configuration
 - [ ] Define the workload OCI artifact format on top of standard image primitives.
-  - [ ] use ordinary OCI filesystem payload layers for workload contents
-  - [ ] source default startup metadata from OCI image config:
+  - [x] use ordinary OCI filesystem payload layers for workload contents
+  - [x] source default startup metadata from OCI image config:
     - `entrypoint`
     - `cmd`
     - environment
     - user
     - working directory
-  - [ ] persist guest `meta.json` with:
+  - [x] persist guest `meta.json` with:
     - workload image digest
     - effective process metadata
     - creation timestamp
-  - [ ] add a dedicated host-side workload packager, for example
+  - [x] add a dedicated host-side workload packager, for example
     `MacOSWorkloadPackager`, that walks a payload root and emits OCI output
 - [ ] Implement host unpack, guest injection, and cleanup semantics.
-  - [ ] unpack workload layers on the host into a cache keyed by workload image digest
-  - [ ] inject each workload into:
+  - [x] unpack workload layers on the host into a cache keyed by workload image digest
+  - [x] inject each workload into:
     - `/var/lib/container/workloads/<id>/rootfs`
     - `/var/lib/container/workloads/<id>/meta.json`
-  - [ ] start workloads from persisted image metadata plus runtime overrides by
+  - [x] start workloads from persisted image metadata plus runtime overrides by
     reusing the existing process-start path
   - [ ] separate cleanup responsibilities:
     - remove the guest instance directory when one workload is removed
@@ -166,14 +166,14 @@ Related design docs:
 - [ ] Add focused coverage for the mixed sandbox/workload flow.
   - [ ] one sandbox image can host multiple workload images
   - [ ] workload images can be packed, pushed, pulled, validated, unpacked, and injected
-  - [ ] workload-start defaults come from OCI config and can be overridden at runtime
+  - [x] workload-start defaults come from OCI config and can be overridden at runtime
   - [ ] workload builds use machine-global tools from the sandbox image without
     copying those tools into the workload image
   - [ ] workload builds never depend on whole-guest diff detection
 
 ### Exit Criteria
 
-- [ ] Runtime rejects sandbox/workload role mismatches before VM boot or payload
+- [x] Runtime rejects sandbox/workload role mismatches before VM boot or payload
   injection begins.
 - [ ] One sandbox image can host multiple workload images with stable injection,
   startup, restart recovery, and cleanup.

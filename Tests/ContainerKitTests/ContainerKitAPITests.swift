@@ -26,7 +26,9 @@ struct ContainerKitAPITests {
         let _: ContainerListFilters.Type = ContainerListFilters.self
         let _: ContainerSnapshot.Type = ContainerSnapshot.self
         let _: ContainerStopOptions.Type = ContainerStopOptions.self
+        let _: ClientProcess.Protocol = ClientProcess.self
         let _: DiskUsageStats.Type = DiskUsageStats.self
+        let _: ExecSyncResult.Type = ExecSyncResult.self
         let _: Image.Type = Image.self
         let _: NetworkConfiguration.Type = NetworkConfiguration.self
         let _: NetworkState.Type = NetworkState.self
@@ -60,6 +62,12 @@ struct ContainerKitAPITests {
         }
         let _: (ContainerConfiguration, ContainerCreateOptions) async throws -> Void = { configuration, options in
             try await kit.createContainer(configuration: configuration, options: options)
+        }
+        let _: (String, ProcessConfiguration, Duration?, Data?) async throws -> ExecSyncResult = { id, configuration, timeout, standardInput in
+            try await kit.execSync(id: id, configuration: configuration, timeout: timeout, standardInput: standardInput)
+        }
+        let _: (String, ProcessConfiguration, String, [FileHandle?]) async throws -> any ClientProcess = { id, configuration, processId, stdio in
+            try await kit.streamExec(id: id, configuration: configuration, processId: processId, stdio: stdio)
         }
         let _: (ContainerConfiguration, ContainerCreateOptions) async throws -> Void = { configuration, options in
             try await kit.createSandbox(configuration: configuration, options: options)
@@ -102,6 +110,9 @@ struct ContainerKitAPITests {
         }
         let _: (String) async throws -> SandboxLogPaths = { id in
             try await kit.sandboxLogPaths(id: id)
+        }
+        let _: (String, UInt32) async throws -> FileHandle = { id, port in
+            try await kit.streamPortForward(id: id, port: port)
         }
         let _: () async throws -> [Image] = {
             try await kit.listImages()

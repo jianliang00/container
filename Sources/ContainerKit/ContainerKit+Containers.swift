@@ -37,6 +37,34 @@ public extension ContainerKit {
         )
     }
 
+    func execSync(
+        id: String,
+        configuration: ProcessConfiguration,
+        timeout: Duration? = nil,
+        standardInput: Data? = nil
+    ) async throws -> ExecSyncResult {
+        try await containerClient.execSync(
+            containerId: id,
+            configuration: configuration,
+            timeout: timeout,
+            standardInput: standardInput
+        )
+    }
+
+    func streamExec(
+        id: String,
+        configuration: ProcessConfiguration,
+        processId: String = UUID().uuidString.lowercased(),
+        stdio: [FileHandle?]
+    ) async throws -> any ClientProcess {
+        try await containerClient.streamExec(
+            containerId: id,
+            processId: processId,
+            configuration: configuration,
+            stdio: stdio
+        )
+    }
+
     func stopContainer(
         id: String,
         options: ContainerStopOptions = .default

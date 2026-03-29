@@ -198,16 +198,16 @@ Related design docs:
   - [x] `RemoveWorkload`
   - [x] `InspectSandbox`
   - [x] `InspectWorkload`
-  - [ ] `ExecSync`
-  - [ ] `StreamExec`
+  - [x] `ExecSync`
+  - [x] `StreamExec`
   - [ ] `StreamAttach`
-  - [ ] `StreamPortForward`
+  - [x] `StreamPortForward`
 - [x] Make inspect operations return stable snapshots.
 - [x] Publish logging and event interfaces.
   - per-workload stdout and stderr
   - sandbox event log
   - log path or log-reading APIs
-- [ ] Implement `PortForward` over the sidecar or vsock path.
+- [x] Implement `PortForward` over the sidecar or vsock path.
 - [x] Keep CLI parsing, on-disk layout, and sidecar protocol details out of the control API.
 - [ ] Add state transition, idempotency, recovery, and error propagation tests.
 

@@ -73,8 +73,8 @@ class TestCLIMacOSBuildBase: CLITest {
             args += ["-t", tag]
         }
 
-        args.append(tempDir.appendingPathComponent("context").path)
         args += otherArgs
+        args.append(tempDir.appendingPathComponent("context").path)
         return try run(arguments: args)
     }
 

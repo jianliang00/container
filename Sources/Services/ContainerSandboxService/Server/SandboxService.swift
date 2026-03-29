@@ -431,6 +431,20 @@ public actor SandboxService {
         return reply
     }
 
+    @Sendable
+    public func removeWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        self.log.info("`removeWorkload` xpc handler")
+        return try await self.lock.withLock { [self] _ in
+            let id = try message.id()
+            let processInfo = try await self.removeStoppedWorkloadProcessInfo(id: id)
+            for handle in processInfo.io {
+                handle?.readabilityHandler = nil
+                try? handle?.close()
+            }
+            return message.reply()
+        }
+    }
+
     /// Stop the container workload, any ad hoc processes, and the underlying
     /// virtual machine.
     ///
@@ -1244,6 +1258,29 @@ extension FileHandle: @retroactive ReaderStream, @retroactive Writer {
 // MARK: State handler and bundle creation helpers
 
 extension SandboxService {
+    private func removeStoppedWorkloadProcessInfo(id: String) throws -> ProcessInfo {
+        if let container, id == container.container.id {
+            throw ContainerizationError(.invalidArgument, message: "cannot remove the init workload \(id)")
+        }
+        guard let processInfo = self.processes[id] else {
+            throw ContainerizationError(.notFound, message: "process with id \(id)")
+        }
+        switch processInfo.state {
+        case .running, .stopping:
+            throw ContainerizationError(.invalidState, message: "cannot remove running workload \(id)")
+        default:
+            break
+        }
+
+        let fallbackStatus = ExitStatus(exitCode: 255, exitedAt: Date())
+        for continuation in self.waiters[id] ?? [] {
+            continuation.resume(returning: fallbackStatus)
+        }
+        self.removeWaiters(for: id)
+        self.processes.removeValue(forKey: id)
+        return processInfo
+    }
+
     private func addWaiter(id: String, cont: CheckedContinuation<ExitStatus, Never>) {
         var current = self.waiters[id] ?? []
         current.append(cont)

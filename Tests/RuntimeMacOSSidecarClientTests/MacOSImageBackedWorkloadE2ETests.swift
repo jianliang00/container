@@ -25,58 +25,171 @@ struct MacOSImageBackedWorkloadE2ETests {
         do {
             _ = try await ClientImage.load(from: archiveURL.path)
             let workloadImage = try await ClientImage.get(reference: workloadReference)
-            let baseImage = try await ClientImage.get(reference: baseReference)
-
-            let configuration = makeContainerConfiguration(
-                id: containerID,
-                image: baseImage.description
+            try await runImageBackedWorkloadLifecycle(
+                containerClient: containerClient,
+                baseReference: baseReference,
+                containerID: containerID,
+                workloadReference: workloadReference,
+                workloadDigest: workloadImage.digest
             )
-            try await containerClient.create(configuration: configuration, options: .default)
-            _ = try await containerClient.bootstrap(id: containerID, stdio: [nil, nil, nil])
-            try await waitForContainerStatus(client: containerClient, id: containerID, status: .running, timeoutSeconds: 180)
+        } catch {
+            try? await cleanupContainer(client: containerClient, id: containerID)
+            try? await ClientImage.delete(reference: workloadReference, garbageCollect: true)
+            throw error
+        }
 
-            let sandboxClient = try await SandboxClient.create(id: containerID, runtime: configuration.runtimeHandler)
-            try await waitForSandboxStatus(client: sandboxClient, status: .running, timeoutSeconds: 180)
+        try await cleanupContainer(client: containerClient, id: containerID)
+        try? await ClientImage.delete(reference: workloadReference, garbageCollect: true)
+    }
 
-            let workloadID = "hello"
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            let workloadConfiguration = WorkloadConfiguration(
-                id: workloadID,
-                processConfiguration: ProcessConfiguration(
-                    executable: "",
-                    arguments: ["e2e-ok"],
-                    environment: [],
-                    workingDirectory: "/",
-                    terminal: false,
-                    user: .id(uid: 0, gid: 0)
-                ),
-                workloadImageReference: "\(workloadReference)@\(workloadImage.digest)",
-                workloadImageDigest: workloadImage.digest
+    @Test
+    func oneSandboxRunsMultipleImageBackedWorkloadsInsideRealGuest() async throws {
+        let baseReference = ProcessInfo.processInfo.environment["CONTAINER_MACOS_BASE_REF"] ?? "ghcr.io/jianliang00/macos-base:26.3"
+        let tempDirectory = try makeTemporaryDirectory(prefix: "macos-workload-multi-e2e")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let workloadReferenceA = "local/macos-workload-multi-a:\(UUID().uuidString.lowercased())"
+        let workloadReferenceB = "local/macos-workload-multi-b:\(UUID().uuidString.lowercased())"
+        let archiveA = try createWorkloadImageArchive(
+            reference: workloadReferenceA,
+            in: tempDirectory.appendingPathComponent("workload-a", isDirectory: true),
+            payloadMessage: "payload-a"
+        )
+        let archiveB = try createWorkloadImageArchive(
+            reference: workloadReferenceB,
+            in: tempDirectory.appendingPathComponent("workload-b", isDirectory: true),
+            payloadMessage: "payload-b"
+        )
+
+        let containerClient = ContainerClient()
+        let containerID = "macos-workload-multi-e2e-\(UUID().uuidString.lowercased())"
+
+        do {
+            _ = try await ClientImage.load(from: archiveA.path)
+            _ = try await ClientImage.load(from: archiveB.path)
+            let workloadImageA = try await ClientImage.get(reference: workloadReferenceA)
+            let workloadImageB = try await ClientImage.get(reference: workloadReferenceB)
+
+            let (_, sandboxClient) = try await bootstrapWorkloadSandbox(
+                containerClient: containerClient,
+                baseReference: baseReference,
+                containerID: containerID
+            )
+
+            let stdoutPipeA = Pipe()
+            let stderrPipeA = Pipe()
+            let stdoutPipeB = Pipe()
+            let stderrPipeB = Pipe()
+
+            let workloadA = makeWorkloadConfiguration(
+                id: "hello-a",
+                argument: "arg-a",
+                workloadReference: workloadReferenceA,
+                workloadDigest: workloadImageA.digest
+            )
+            let workloadB = makeWorkloadConfiguration(
+                id: "hello-b",
+                argument: "arg-b",
+                workloadReference: workloadReferenceB,
+                workloadDigest: workloadImageB.digest
             )
 
             try await sandboxClient.createWorkload(
-                workloadConfiguration,
-                stdio: [nil, stdoutPipe.fileHandleForWriting, stderrPipe.fileHandleForWriting]
+                workloadA,
+                stdio: [nil, stdoutPipeA.fileHandleForWriting, stderrPipeA.fileHandleForWriting]
             )
-            try stdoutPipe.fileHandleForWriting.close()
-            try stderrPipe.fileHandleForWriting.close()
+            try await sandboxClient.createWorkload(
+                workloadB,
+                stdio: [nil, stdoutPipeB.fileHandleForWriting, stderrPipeB.fileHandleForWriting]
+            )
+            try stdoutPipeA.fileHandleForWriting.close()
+            try stderrPipeA.fileHandleForWriting.close()
+            try stdoutPipeB.fileHandleForWriting.close()
+            try stderrPipeB.fileHandleForWriting.close()
 
-            try await sandboxClient.startWorkload(workloadID)
-            let exitStatus = try await sandboxClient.wait(workloadID)
-            #expect(exitStatus.exitCode == 0)
+            try await sandboxClient.startWorkload(workloadA.id)
+            try await sandboxClient.startWorkload(workloadB.id)
 
-            let snapshot = try await sandboxClient.inspectWorkload(workloadID)
-            #expect(snapshot.configuration.injectionState == .injected)
-            #expect(snapshot.configuration.processConfiguration.executable == "/bin/hello")
-            #expect(snapshot.configuration.processConfiguration.workingDirectory == "/workspace")
+            let exitStatusA = try await sandboxClient.wait(workloadA.id)
+            let exitStatusB = try await sandboxClient.wait(workloadB.id)
+            #expect(exitStatusA.exitCode == 0)
+            #expect(exitStatusB.exitCode == 0)
 
-            let stdout = try readAllText(from: stdoutPipe.fileHandleForReading)
-            let stderr = try readAllText(from: stderrPipe.fileHandleForReading)
-            #expect(stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            #expect(stdout.contains("arg=e2e-ok"))
-            #expect(stdout.contains("/var/lib/container/workloads/\(workloadID)/rootfs/workspace"))
-            #expect(stdout.contains("payload-from-image"))
+            let snapshotA = try await sandboxClient.inspectWorkload(workloadA.id)
+            let snapshotB = try await sandboxClient.inspectWorkload(workloadB.id)
+            #expect(snapshotA.configuration.injectionState == .injected)
+            #expect(snapshotB.configuration.injectionState == .injected)
+            #expect(snapshotA.configuration.workloadImageDigest == workloadImageA.digest)
+            #expect(snapshotB.configuration.workloadImageDigest == workloadImageB.digest)
+
+            let cacheRoot = MacOSGuestCache.workloadRootfsCacheDirectory()
+            let cachedRootfsA = cacheRoot
+                .appendingPathComponent(MacOSGuestCache.safeDigest(workloadImageA.digest), isDirectory: true)
+                .appendingPathComponent("rootfs", isDirectory: true)
+            let cachedRootfsB = cacheRoot
+                .appendingPathComponent(MacOSGuestCache.safeDigest(workloadImageB.digest), isDirectory: true)
+                .appendingPathComponent("rootfs", isDirectory: true)
+            #expect(FileManager.default.fileExists(atPath: cachedRootfsA.path))
+            #expect(FileManager.default.fileExists(atPath: cachedRootfsB.path))
+
+            let stdoutA = try readAllText(from: stdoutPipeA.fileHandleForReading)
+            let stderrA = try readAllText(from: stderrPipeA.fileHandleForReading)
+            let stdoutB = try readAllText(from: stdoutPipeB.fileHandleForReading)
+            let stderrB = try readAllText(from: stderrPipeB.fileHandleForReading)
+            #expect(stderrA.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            #expect(stderrB.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            #expect(stdoutA.contains("arg=arg-a"))
+            #expect(stdoutB.contains("arg=arg-b"))
+            #expect(stdoutA.contains("/var/lib/container/workloads/\(workloadA.id)/rootfs/workspace"))
+            #expect(stdoutB.contains("/var/lib/container/workloads/\(workloadB.id)/rootfs/workspace"))
+            #expect(stdoutA.contains("payload-a"))
+            #expect(stdoutB.contains("payload-b"))
+        } catch {
+            try? await cleanupContainer(client: containerClient, id: containerID)
+            try? await ClientImage.delete(reference: workloadReferenceA, garbageCollect: true)
+            try? await ClientImage.delete(reference: workloadReferenceB, garbageCollect: true)
+            throw error
+        }
+
+        try await cleanupContainer(client: containerClient, id: containerID)
+        try? await ClientImage.delete(reference: workloadReferenceA, garbageCollect: true)
+        try? await ClientImage.delete(reference: workloadReferenceB, garbageCollect: true)
+    }
+}
+
+@Suite(.serialized, .enabled(if: isMacOSImageBackedWorkloadRegistryE2EEnabled(), "requires CONTAINER_ENABLE_MACOS_WORKLOAD_REGISTRY_E2E=1 and macOS 26+"))
+struct MacOSImageBackedWorkloadRegistryE2ETests {
+    @Test
+    func pushedAndPulledWorkloadImageRunsInsideRealGuest() async throws {
+        let baseReference = ProcessInfo.processInfo.environment["CONTAINER_MACOS_BASE_REF"] ?? "ghcr.io/jianliang00/macos-base:26.3"
+        let workloadReference = remoteWorkloadReference()
+        let tempDirectory = try makeTemporaryDirectory(prefix: "macos-workload-registry-e2e")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let archiveURL = try createWorkloadImageArchive(reference: workloadReference, in: tempDirectory)
+        let containerClient = ContainerClient()
+        let containerID = "macos-workload-registry-e2e-\(UUID().uuidString.lowercased())"
+
+        do {
+            _ = try await ClientImage.load(from: archiveURL.path)
+            let loadedImage = try await ClientImage.get(reference: workloadReference)
+            try await loadedImage.push(scheme: .https, progressUpdate: nil)
+            try await ClientImage.delete(reference: workloadReference, garbageCollect: true)
+
+            let pulledImage = try await ClientImage.pull(
+                reference: workloadReference,
+                platform: .init(arch: "arm64", os: "darwin"),
+                scheme: .https
+            )
+            try await validatePulledWorkloadImageContract(pulledImage)
+
+            try await runImageBackedWorkloadLifecycle(
+                containerClient: containerClient,
+                baseReference: baseReference,
+                containerID: containerID,
+                workloadReference: workloadReference,
+                workloadDigest: pulledImage.digest
+            )
         } catch {
             try? await cleanupContainer(client: containerClient, id: containerID)
             try? await ClientImage.delete(reference: workloadReference, garbageCollect: true)
@@ -96,6 +209,13 @@ private func isMacOSImageBackedWorkloadE2EEnabled() -> Bool {
         return false
     }
     return true
+}
+
+private func isMacOSImageBackedWorkloadRegistryE2EEnabled() -> Bool {
+    guard ProcessInfo.processInfo.environment["CONTAINER_ENABLE_MACOS_WORKLOAD_REGISTRY_E2E"] == "1" else {
+        return false
+    }
+    return isMacOSImageBackedWorkloadE2EEnabled()
 }
 
 private func makeContainerConfiguration(
@@ -178,12 +298,136 @@ private func cleanupContainer(client: ContainerClient, id: String) async throws 
     try? await client.delete(id: id, force: true)
 }
 
+private func runImageBackedWorkloadLifecycle(
+    containerClient: ContainerClient,
+    baseReference: String,
+    containerID: String,
+    workloadReference: String,
+    workloadDigest: String
+) async throws {
+    let (_, sandboxClient) = try await bootstrapWorkloadSandbox(
+        containerClient: containerClient,
+        baseReference: baseReference,
+        containerID: containerID
+    )
+
+    let workloadID = "hello"
+    let stdoutPipe = Pipe()
+    let stderrPipe = Pipe()
+    let workloadConfiguration = makeWorkloadConfiguration(
+        id: workloadID,
+        argument: "e2e-ok",
+        workloadReference: workloadReference,
+        workloadDigest: workloadDigest
+    )
+
+    try await sandboxClient.createWorkload(
+        workloadConfiguration,
+        stdio: [nil, stdoutPipe.fileHandleForWriting, stderrPipe.fileHandleForWriting]
+    )
+    try stdoutPipe.fileHandleForWriting.close()
+    try stderrPipe.fileHandleForWriting.close()
+
+    try await sandboxClient.startWorkload(workloadID)
+    let exitStatus = try await sandboxClient.wait(workloadID)
+    #expect(exitStatus.exitCode == 0)
+
+    let snapshot = try await sandboxClient.inspectWorkload(workloadID)
+    #expect(snapshot.configuration.injectionState == .injected)
+    #expect(snapshot.configuration.processConfiguration.executable == "/bin/hello")
+    #expect(snapshot.configuration.processConfiguration.workingDirectory == "/workspace")
+
+    let cachedRootfs = MacOSGuestCache.workloadRootfsCacheDirectory()
+        .appendingPathComponent(MacOSGuestCache.safeDigest(workloadDigest), isDirectory: true)
+        .appendingPathComponent("rootfs", isDirectory: true)
+    #expect(FileManager.default.fileExists(atPath: cachedRootfs.path))
+
+    let stdout = try readAllText(from: stdoutPipe.fileHandleForReading)
+    let stderr = try readAllText(from: stderrPipe.fileHandleForReading)
+    #expect(stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    #expect(stdout.contains("arg=e2e-ok"))
+    #expect(stdout.contains("/var/lib/container/workloads/\(workloadID)/rootfs/workspace"))
+    #expect(stdout.contains("payload-from-image"))
+}
+
+private func bootstrapWorkloadSandbox(
+    containerClient: ContainerClient,
+    baseReference: String,
+    containerID: String
+) async throws -> (ContainerConfiguration, SandboxClient) {
+    let baseImage = try await ClientImage.get(reference: baseReference)
+    let configuration = makeContainerConfiguration(
+        id: containerID,
+        image: baseImage.description
+    )
+    try await containerClient.create(configuration: configuration, options: .default)
+    _ = try await containerClient.bootstrap(id: containerID, stdio: [nil, nil, nil])
+    try await waitForContainerStatus(client: containerClient, id: containerID, status: .running, timeoutSeconds: 180)
+
+    let sandboxClient = try await SandboxClient.create(id: containerID, runtime: configuration.runtimeHandler)
+    try await waitForSandboxStatus(client: sandboxClient, status: .running, timeoutSeconds: 180)
+    return (configuration, sandboxClient)
+}
+
+private func makeWorkloadConfiguration(
+    id: String,
+    argument: String,
+    workloadReference: String,
+    workloadDigest: String
+) -> WorkloadConfiguration {
+    WorkloadConfiguration(
+        id: id,
+        processConfiguration: ProcessConfiguration(
+            executable: "",
+            arguments: [argument],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        ),
+        workloadImageReference: "\(workloadReference)@\(workloadDigest)",
+        workloadImageDigest: workloadDigest
+    )
+}
+
 private func readAllText(from handle: FileHandle) throws -> String {
     let data = try handle.readToEnd() ?? Data()
     return String(decoding: data, as: UTF8.self)
 }
 
-private func createWorkloadImageArchive(reference: String, in temporaryRoot: URL) throws -> URL {
+private func validatePulledWorkloadImageContract(_ image: ClientImage) async throws {
+    let platform = try Platform(from: "darwin/arm64")
+    let index = try await image.index()
+    guard let descriptor = index.manifests.first(where: { $0.platform == platform }) else {
+        throw NSError(
+            domain: "MacOSImageBackedWorkloadRegistryE2ETests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "missing darwin/arm64 manifest in pulled workload image"]
+        )
+    }
+    let manifest = try await image.manifest(for: platform)
+    let config = try await image.config(for: platform)
+    try MacOSImageContract.validateWorkloadImage(
+        descriptorAnnotations: descriptor.annotations,
+        manifest: manifest,
+        imageConfig: config
+    )
+}
+
+private func remoteWorkloadReference() -> String {
+    if let explicitReference = ProcessInfo.processInfo.environment["CONTAINER_MACOS_WORKLOAD_REGISTRY_REF"],
+        !explicitReference.isEmpty
+    {
+        return explicitReference
+    }
+    return "ttl.sh/macos-workload-\(UUID().uuidString.lowercased()):1h"
+}
+
+private func createWorkloadImageArchive(
+    reference: String,
+    in temporaryRoot: URL,
+    payloadMessage: String = "payload-from-image"
+) throws -> URL {
     let fileManager = FileManager.default
     let payloadRoot = temporaryRoot.appendingPathComponent("payload", isDirectory: true)
     try fileManager.createDirectory(at: payloadRoot.appendingPathComponent("bin"), withIntermediateDirectories: true)
@@ -200,7 +444,7 @@ private func createWorkloadImageArchive(reference: String, in temporaryRoot: URL
         """.utf8
     ).write(to: executableURL)
     try fileManager.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: executableURL.path)
-    try Data("payload-from-image\n".utf8).write(to: payloadRoot.appendingPathComponent("etc/message.txt"))
+    try Data("\(payloadMessage)\n".utf8).write(to: payloadRoot.appendingPathComponent("etc/message.txt"))
 
     let archiveURL = temporaryRoot.appendingPathComponent("workload-image.tar")
     try MacOSWorkloadPackager.package(

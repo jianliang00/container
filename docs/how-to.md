@@ -10,11 +10,12 @@ How to use the features of `container`.
 ## Use `ContainerKit` from SwiftPM
 
 If you want to embed `container` from another Swift project, depend on the
-facade product instead of importing lower-level modules directly:
+facade product instead of importing lower-level modules directly. For official
+releases, prefer a tagged semantic version:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/apple/container.git", branch: "main")
+    .package(url: "https://github.com/apple/container.git", from: "0.4.1") // replace with the release you target
 ],
 targets: [
     .executableTarget(
@@ -25,6 +26,9 @@ targets: [
     )
 ]
 ```
+
+If you are validating unreleased changes before a tag exists, use a branch or
+revision dependency during development instead.
 
 `ContainerKit` is a client facade for already-installed, already-running
 services. Check service readiness explicitly before making other calls:

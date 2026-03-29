@@ -94,4 +94,8 @@ public extension ContainerKit {
     func sandboxLogPaths(id: String) async throws -> SandboxLogPaths {
         try await containerClient.sandboxLogPaths(id: id)
     }
+
+    func streamPortForward(id: String, port: UInt32) async throws -> FileHandle {
+        try await containerClient.dial(id: id, port: port)
+    }
 }

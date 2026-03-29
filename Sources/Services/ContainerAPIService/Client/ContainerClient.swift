@@ -302,6 +302,41 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Create a streaming exec process inside a running container.
+    public func streamExec(
+        containerId: String,
+        processId: String = UUID().uuidString.lowercased(),
+        configuration: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) async throws -> ClientProcess {
+        try await createProcess(
+            containerId: containerId,
+            processId: processId,
+            configuration: configuration,
+            stdio: stdio
+        )
+    }
+
+    /// Execute a process synchronously and capture stdout and stderr.
+    public func execSync(
+        containerId: String,
+        configuration: ProcessConfiguration,
+        timeout: Duration? = nil,
+        standardInput: Data? = nil
+    ) async throws -> ExecSyncResult {
+        try await ExecSyncRunner.run(
+            timeout: timeout,
+            standardInput: standardInput
+        ) { stdio in
+            try await self.createProcess(
+                containerId: containerId,
+                processId: UUID().uuidString.lowercased(),
+                configuration: configuration,
+                stdio: stdio
+            )
+        }
+    }
+
     /// Create a workload inside a started sandbox.
     public func createWorkload(
         containerId: String,

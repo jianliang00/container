@@ -112,6 +112,7 @@ public actor MacOSSandboxService {
     var sessions: [String: Session] = [:]
     private var workloads: [String: WorkloadRecord] = [:]
     private var workloadSessions: [String: String] = [:]
+    private var externalProcessIDs: Set<String> = []
     private var waiters: [String: [CheckedContinuation<ExitStatus, Never>]] = [:]
     var guestMountsPrepared = false
     var readOnlyInjectionsPrepared = false
@@ -211,20 +212,41 @@ extension MacOSSandboxService {
 
     @Sendable
     public func createProcess(_ message: XPCMessage) async throws -> XPCMessage {
-        try await createWorkload(message)
+        let processID = try message.id()
+        let config = try message.processConfig()
+        let stdio = message.stdio()
+        try await createExecProcessIfNeeded(processID: processID, config: config, stdio: stdio)
+        return message.reply()
     }
 
     @Sendable
     public func startProcess(_ message: XPCMessage) async throws -> XPCMessage {
-        try await startWorkload(message)
+        let processID = try message.id()
+        if workloads[processID] != nil {
+            try await startWorkloadIfNeeded(workloadID: processID)
+        } else {
+            try await startExecProcessIfNeeded(processID: processID)
+        }
+        return message.reply()
     }
 
     @Sendable
     public func wait(_ message: XPCMessage) async throws -> XPCMessage {
-        let workloadID = try message.id()
-        writeContainerLog(Data(("wait requested for workload \(workloadID)\n").utf8))
-        let status = try await waitForWorkload(workloadID)
-        writeContainerLog(Data(("wait completed for workload \(workloadID) code=\(status.exitCode)\n").utf8))
+        let processID = try message.id()
+        let status: ExitStatus
+        if workloads[processID] != nil {
+            writeContainerLog(Data(("wait requested for workload \(processID)\n").utf8))
+            status = try await waitForWorkload(processID)
+            writeContainerLog(Data(("wait completed for workload \(processID) code=\(status.exitCode)\n").utf8))
+        } else {
+            guard externalProcessIDs.contains(processID) else {
+                throw ContainerizationError(.notFound, message: "process \(processID) not found")
+            }
+            writeContainerLog(Data(("wait requested for process \(processID)\n").utf8))
+            status = try await waitForProcess(processID)
+            writeContainerLog(Data(("wait completed for process \(processID) code=\(status.exitCode)\n").utf8))
+            cleanupExitedExternalProcessIfNeeded(processID: processID)
+        }
         let reply = message.reply()
         reply.set(key: SandboxKeys.exitCode.rawValue, value: Int64(status.exitCode))
         reply.set(key: SandboxKeys.exitedAt.rawValue, value: status.exitedAt)
@@ -233,18 +255,32 @@ extension MacOSSandboxService {
 
     @Sendable
     public func kill(_ message: XPCMessage) async throws -> XPCMessage {
-        let workloadID = try message.id()
+        let processID = try message.id()
         let signal = Int32(message.int64(key: SandboxKeys.signal.rawValue))
-        try sendSignalToWorkload(workloadID: workloadID, signal: signal)
+        if workloads[processID] != nil {
+            try sendSignalToWorkload(workloadID: processID, signal: signal)
+        } else {
+            guard externalProcessIDs.contains(processID) else {
+                throw ContainerizationError(.notFound, message: "process \(processID) not found")
+            }
+            try sendSignalToProcess(processID: processID, signal: signal)
+        }
         return message.reply()
     }
 
     @Sendable
     public func resize(_ message: XPCMessage) async throws -> XPCMessage {
-        let workloadID = try message.id()
+        let processID = try message.id()
         let width = UInt16(message.uint64(key: SandboxKeys.width.rawValue))
         let height = UInt16(message.uint64(key: SandboxKeys.height.rawValue))
-        try sendResizeToWorkload(workloadID: workloadID, width: width, height: height)
+        if workloads[processID] != nil {
+            try sendResizeToWorkload(workloadID: processID, width: width, height: height)
+        } else {
+            guard externalProcessIDs.contains(processID) else {
+                throw ContainerizationError(.notFound, message: "process \(processID) not found")
+            }
+            try sendResizeToProcess(processID: processID, width: width, height: height)
+        }
         return message.reply()
     }
 
@@ -460,6 +496,34 @@ extension MacOSSandboxService {
         }
     }
 
+    private func createExecProcessIfNeeded(
+        processID: String,
+        config: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) async throws {
+        guard let _ = configuration else {
+            throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        guard sandboxState == .booted || sandboxState == .running else {
+            throw ContainerizationError(.invalidState, message: "sandbox not started")
+        }
+        guard workloads[processID] == nil else {
+            throw ContainerizationError(.exists, message: "workload \(processID) already exists")
+        }
+        guard sessions[processID] == nil else {
+            throw ContainerizationError(.exists, message: "process \(processID) already exists")
+        }
+
+        let session = try makeSession(
+            processID: processID,
+            config: config,
+            stdio: stdio,
+            includeInSnapshots: false
+        )
+        sessions[processID] = session
+        externalProcessIDs.insert(processID)
+    }
+
     private func removeWorkloadIfNeeded(workloadID: String) async throws {
         guard let containerConfiguration = configuration else {
             throw ContainerizationError(.invalidState, message: "sandbox not prepared")
@@ -566,6 +630,41 @@ extension MacOSSandboxService {
 
         if workloadID == configuration.id {
             sandboxState = .running
+        }
+    }
+
+    private func startExecProcessIfNeeded(processID: String) async throws {
+        guard let configuration else {
+            throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        guard sandboxState == .booted || sandboxState == .running else {
+            throw ContainerizationError(.invalidState, message: "sandbox not started")
+        }
+        guard externalProcessIDs.contains(processID), var session = sessions[processID] else {
+            throw ContainerizationError(.notFound, message: "process \(processID) not found")
+        }
+        if session.started {
+            return
+        }
+
+        #if arch(arm64)
+        try await prepareGuestMountsIfNeeded(containerConfig: configuration)
+        try await prepareReadOnlyInjectionsIfNeeded()
+        try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
+        writeContainerLog(Data(("startProcess using sidecar process stream path for \(processID)\n").utf8))
+        #else
+        throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
+        #endif
+
+        let startedAt = session.startedAt ?? Date()
+        if var current = sessions[processID] {
+            current.started = true
+            current.startedAt = current.startedAt ?? startedAt
+            sessions[processID] = current
+        } else {
+            session.started = true
+            session.startedAt = startedAt
+            sessions[processID] = session
         }
     }
 
@@ -2127,7 +2226,22 @@ extension MacOSSandboxService {
             try? session.stderrLogHandle?.close()
         }
         sessions.removeAll()
+        externalProcessIDs.removeAll()
         guestAgentLogCaptureProcessID = nil
+    }
+
+    private func cleanupExitedExternalProcessIfNeeded(processID: String) {
+        guard externalProcessIDs.contains(processID) else {
+            return
+        }
+        guard waiters[processID]?.isEmpty ?? true else {
+            return
+        }
+        guard sessions[processID]?.exitStatus != nil else {
+            return
+        }
+        externalProcessIDs.remove(processID)
+        cleanupTemporarySession(processID: processID)
     }
 
     #if arch(arm64)
@@ -2560,6 +2674,41 @@ extension MacOSSandboxService {
 
     func testingCreateWorkload(_ configuration: WorkloadConfiguration) async throws {
         try await createWorkloadIfNeeded(workloadConfiguration: configuration, stdio: [nil, nil, nil])
+    }
+
+    func testingCreateProcess(_ id: String, config: ProcessConfiguration) async throws {
+        try await createExecProcessIfNeeded(processID: id, config: config, stdio: [nil, nil, nil])
+    }
+
+    func testingStartProcess(_ id: String) async throws {
+        try await startExecProcessIfNeeded(processID: id)
+    }
+
+    func testingWaitExternalProcess(_ id: String) async throws -> ExitStatus {
+        guard externalProcessIDs.contains(id) else {
+            throw ContainerizationError(.notFound, message: "process \(id) not found")
+        }
+        let status = try await waitForProcess(id)
+        cleanupExitedExternalProcessIfNeeded(processID: id)
+        return status
+    }
+
+    func testingSignalExternalProcess(_ id: String, signal: Int32) throws {
+        guard externalProcessIDs.contains(id) else {
+            throw ContainerizationError(.notFound, message: "process \(id) not found")
+        }
+        try sendSignalToProcess(processID: id, signal: signal)
+    }
+
+    func testingResizeExternalProcess(_ id: String, width: UInt16, height: UInt16) throws {
+        guard externalProcessIDs.contains(id) else {
+            throw ContainerizationError(.notFound, message: "process \(id) not found")
+        }
+        try sendResizeToProcess(processID: id, width: width, height: height)
+    }
+
+    func testingExternalProcessExists(_ id: String) -> Bool {
+        externalProcessIDs.contains(id) && sessions[id] != nil
     }
 
     func testingStartWorkload(_ workloadID: String) async throws {

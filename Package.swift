@@ -114,6 +114,7 @@ let package = Package(
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "TOML", package: "swift-toml"),
                 .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "ContainerizationOS", package: "containerization"),
                 "ContainerBuild",
@@ -412,6 +413,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerImagesServiceClient",
                 "ContainerNetworkServiceClient",
@@ -470,8 +472,12 @@ let package = Package(
         .testTarget(
             name: "RuntimeMacOSSidecarClientTests",
             dependencies: [
+                "ContainerAPIClient",
+                "ContainerCommands",
                 .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerResource",
+                "ContainerSandboxServiceClient",
                 "RuntimeMacOSSidecarShared",
                 .product(name: "Logging", package: "swift-log", condition: .when(platforms: [.macOS])),
                 .target(name: "container-runtime-macos", condition: .when(platforms: [.macOS])),

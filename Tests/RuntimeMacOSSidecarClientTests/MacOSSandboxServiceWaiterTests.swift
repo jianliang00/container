@@ -102,8 +102,9 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(snapshot.exitCode == 17)
         #expect(snapshot.startedDate != nil)
         #expect(snapshot.exitedAt != nil)
-        #expect(snapshot.stdoutLogPath == tempRoot.appendingPathComponent("workloads/exec-finished/stdout.log").path)
-        #expect(snapshot.stderrLogPath == tempRoot.appendingPathComponent("workloads/exec-finished/stderr.log").path)
+        let layout = MacOSSandboxLayout(root: tempRoot)
+        #expect(snapshot.stdoutLogPath == layout.workloadStdoutLogURL(id: "exec-finished").path)
+        #expect(snapshot.stderrLogPath == layout.workloadStderrLogURL(id: "exec-finished").path)
         #expect(FileManager.default.fileExists(atPath: try #require(snapshot.stdoutLogPath)))
         #expect(FileManager.default.fileExists(atPath: try #require(snapshot.stderrLogPath)))
     }
@@ -148,7 +149,8 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(await service.testingSessionID(for: "visible-workload") == "__workload__internal")
         #expect(snapshot.id == "visible-workload")
         #expect(snapshot.configuration.processConfiguration.executable == "/bin/sh")
-        #expect(snapshot.stdoutLogPath == tempRoot.appendingPathComponent("workloads/visible-workload/stdout.log").path)
+        let layout = MacOSSandboxLayout(root: tempRoot)
+        #expect(snapshot.stdoutLogPath == layout.workloadStdoutLogURL(id: "visible-workload").path)
     }
 
     @Test
@@ -278,10 +280,13 @@ struct MacOSSandboxServiceWaiterTests {
         let readonlyEntries = try MacOSReadOnlyFileInjectionStore.load(from: layout)
 
         #expect(sandbox.id == containerConfiguration.id)
+        #expect(sandbox.persistedSchemaVersion == SandboxConfiguration.schemaVersion)
         #expect(sandbox.image.reference == containerConfiguration.image.reference)
         #expect(sandbox.readOnlyFiles == [.init(source: readonlySource.path, destination: "/etc/container.env")])
         #expect(workload.id == containerConfiguration.id)
+        #expect(workload.persistedSchemaVersion == WorkloadConfiguration.schemaVersion)
         #expect(workload.processConfiguration.executable == containerConfiguration.initProcess.executable)
+        #expect(workload.injectionState == .notRequired)
         #expect(readonlyEntries.count == 1)
         #expect(readonlyEntries[0].destination == "/etc/container.env")
     }
@@ -312,6 +317,60 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(snapshot.configuration.processConfiguration.executable == "/usr/bin/env")
         #expect(snapshot.configuration.processConfiguration.workingDirectory == "/tmp")
         #expect(snapshot.configuration.processConfiguration.environment == ["FOO=bar"])
+    }
+
+    @Test
+    func persistedImageBackedWorkloadConfigurationSurvivesSnapshotRebuild() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        let persistedConfig = WorkloadConfiguration(
+            id: "exec-image-backed",
+            processConfiguration: baseProcessConfiguration(),
+            workloadImageReference: "registry.local/example/workload:latest",
+            workloadImageDigest: "sha256:workload",
+            guestPayloadPath: "/var/lib/container/workloads/exec-image-backed/rootfs",
+            guestMetadataPath: "/var/lib/container/workloads/exec-image-backed/meta.json",
+            injectionState: .injected
+        )
+
+        try await service.testingPersistWorkloadConfiguration(persistedConfig)
+        await service.testingAddSession(id: "exec-image-backed", config: baseProcessConfiguration())
+
+        let snapshot = try await service.testingInspectWorkload("exec-image-backed")
+
+        #expect(snapshot.configuration.workloadImageReference == persistedConfig.workloadImageReference)
+        #expect(snapshot.configuration.workloadImageDigest == persistedConfig.workloadImageDigest)
+        #expect(snapshot.configuration.guestPayloadPath == persistedConfig.guestPayloadPath)
+        #expect(snapshot.configuration.guestMetadataPath == persistedConfig.guestMetadataPath)
+        #expect(snapshot.configuration.injectionState == .injected)
+    }
+
+    @Test
+    func persistingImageBackedWorkloadFillsDefaultGuestPathsAndPendingInjection() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        let persistedConfig = WorkloadConfiguration(
+            id: "exec-image-defaulted",
+            processConfiguration: baseProcessConfiguration(),
+            workloadImageReference: "registry.local/example/workload:latest",
+            workloadImageDigest: "sha256:workload"
+        )
+        let layout = MacOSSandboxLayout(root: tempRoot)
+
+        try await service.testingPersistWorkloadConfiguration(persistedConfig)
+
+        let workloadData = try Data(contentsOf: layout.workloadConfigurationURL(id: persistedConfig.id))
+        let workload = try JSONDecoder().decode(WorkloadConfiguration.self, from: workloadData)
+
+        #expect(workload.workloadImageReference == persistedConfig.workloadImageReference)
+        #expect(workload.workloadImageDigest == persistedConfig.workloadImageDigest)
+        #expect(workload.guestPayloadPath == "/var/lib/container/workloads/exec-image-defaulted/rootfs")
+        #expect(workload.guestMetadataPath == "/var/lib/container/workloads/exec-image-defaulted/meta.json")
+        #expect(workload.injectionState == .pending)
     }
 }
 

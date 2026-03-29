@@ -36,6 +36,7 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
     public let executable: String
     public let arguments: [String]
     public let environment: [String]?
+    public let rootDirectory: String?
     public let workingDirectory: String?
     public let terminal: Bool
     public let user: String?
@@ -48,6 +49,7 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
         executable: String,
         arguments: [String] = [],
         environment: [String]? = nil,
+        rootDirectory: String? = nil,
         workingDirectory: String? = nil,
         terminal: Bool = false,
         user: String? = nil,
@@ -59,6 +61,7 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
+        self.rootDirectory = rootDirectory
         self.workingDirectory = workingDirectory
         self.terminal = terminal
         self.user = user

@@ -37,6 +37,11 @@ public enum MacOSGuestCache {
             .appendingPathComponent("com.apple.container/rebuild-cache")
     }
 
+    public static func workloadRootfsCacheDirectory(fileManager: FileManager = .default) -> URL {
+        fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("com.apple.container/workload-rootfs-cache")
+    }
+
     public static func guestDiskCacheDirectory(appRoot: URL) -> URL {
         appRoot.appendingPathComponent("macos-guest-disk-cache")
     }

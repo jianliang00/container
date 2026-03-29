@@ -109,6 +109,243 @@ struct MacOSImageBackedWorkloadTests {
         #expect(workloadStartRequest.exec?.workingDirectory == "\(guestRoot)/workspace")
         #expect(workloadStartRequest.exec?.user == "nobody")
     }
+
+    @Test
+    func stopSandboxCleansGuestWorkloadDirectoriesButKeepsHostRootfsCache() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-stop-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory)
+        let cacheEntry = MacOSGuestCache.workloadRootfsCacheDirectory()
+            .appendingPathComponent(MacOSGuestCache.safeDigest(image.indexDigest), isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheEntry) }
+
+        let socketPath = "/tmp/sidecar-workload-stop-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        try await service.testingPrepareSandbox(containerConfiguration, state: "running")
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let workloadID = "image-backed-cleanup"
+        let workloadConfiguration = WorkloadConfiguration(
+            id: workloadID,
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: ["override-arg"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
+            workloadImageDigest: image.indexDigest
+        )
+
+        try await service.testingCreateWorkload(workloadConfiguration)
+        try await service.testingStartWorkload(workloadID)
+
+        let cachedRootfs = cacheEntry.appendingPathComponent("rootfs", isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: cachedRootfs.path))
+
+        try await service.testingStop()
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let updatedConfiguration = await service.testingWorkloadConfiguration(workloadID)
+        let configurationAfterStop = try #require(updatedConfiguration)
+        #expect(configurationAfterStop.injectionState == .pending)
+        #expect(FileManager.default.fileExists(atPath: cachedRootfs.path))
+
+        let cleanupRequest = try #require(
+            server.recordedRequests().first(where: {
+                $0.method == .processStart && ($0.processID?.hasPrefix("workload-cleanup-all-") ?? false)
+            })
+        )
+        let cleanupScript = cleanupRequest.exec?.arguments.last ?? ""
+        #expect(cleanupScript.contains("rm -rf '/var/lib/container/workloads'"))
+        #expect(cleanupScript.contains("mkdir -p '/var/lib/container/workloads'"))
+    }
+
+    @Test
+    func removeStoppedImageBackedWorkloadCleansGuestInstanceDirectoryAndKeepsHostCache() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-remove-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory)
+        let cacheEntry = MacOSGuestCache.workloadRootfsCacheDirectory()
+            .appendingPathComponent(MacOSGuestCache.safeDigest(image.indexDigest), isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: cacheEntry) }
+
+        let socketPath = "/tmp/sidecar-workload-remove-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(
+            socketPath: socketPath,
+            immediateExitPrefixes: ["workload-prepare-", "workload-cleanup-", "__workload__"]
+        )
+        defer { server.stop() }
+
+        server.start()
+
+        let root = tempDirectory.appendingPathComponent("sandbox")
+        let service = MacOSSandboxService(
+            root: root,
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        try await service.testingPrepareSandbox(containerConfiguration, state: "running")
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let workloadID = "image-backed-removed"
+        let workloadConfiguration = WorkloadConfiguration(
+            id: workloadID,
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: ["override-arg"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
+            workloadImageDigest: image.indexDigest
+        )
+
+        try await service.testingCreateWorkload(workloadConfiguration)
+        try await service.testingStartWorkload(workloadID)
+        let exitStatus = try await service.testingWaitForProcess(workloadID)
+        #expect(exitStatus.exitCode == 0)
+
+        let cachedRootfs = cacheEntry.appendingPathComponent("rootfs", isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: cachedRootfs.path))
+
+        let layout = MacOSSandboxLayout(root: root)
+        let workloadStateDirectory = layout.workloadDirectoryURL(id: workloadID)
+        #expect(FileManager.default.fileExists(atPath: workloadStateDirectory.path))
+
+        try await service.testingRemoveWorkload(workloadID)
+
+        server.stop()
+        try server.waitForCompletion()
+
+        await #expect(throws: Error.self) {
+            try await service.testingInspectWorkload(workloadID)
+        }
+        #expect(!FileManager.default.fileExists(atPath: workloadStateDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: cachedRootfs.path))
+
+        let cleanupRequest = try #require(
+            server.recordedRequests().first(where: {
+                $0.method == .processStart && ($0.processID?.hasPrefix("workload-cleanup-") ?? false)
+            })
+        )
+        let cleanupScript = cleanupRequest.exec?.arguments.last ?? ""
+        #expect(cleanupScript.contains("root='/var/lib/container/workloads/\(workloadID)'"))
+        #expect(cleanupScript.contains("rm -rf \"$root\""))
+    }
+
+    @Test
+    func oneSandboxCanHostMultipleWorkloadImages() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-multi-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let imageA = try Self.makeWorkloadImage(in: tempDirectory.appendingPathComponent("image-a", isDirectory: true))
+        let imageB = try Self.makeWorkloadImage(in: tempDirectory.appendingPathComponent("image-b", isDirectory: true))
+        let combinedStore = Self.combineWorkloadStores([imageA, imageB])
+
+        let socketPath = "/tmp/sidecar-workload-multi-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(
+            socketPath: socketPath,
+            immediateExitPrefixes: ["workload-prepare-", "workload-cleanup-", "__workload__"]
+        )
+        defer { server.stop() }
+
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: combinedStore
+        )
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: imageA.indexDigest)
+        try await service.testingPrepareSandbox(containerConfiguration, state: "running")
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let workloadA = WorkloadConfiguration(
+            id: "workload-a",
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: ["arg-a"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload-a:latest@\(imageA.indexDigest)",
+            workloadImageDigest: imageA.indexDigest
+        )
+        let workloadB = WorkloadConfiguration(
+            id: "workload-b",
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: ["arg-b"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload-b:latest@\(imageB.indexDigest)",
+            workloadImageDigest: imageB.indexDigest
+        )
+
+        try await service.testingCreateWorkload(workloadA)
+        try await service.testingCreateWorkload(workloadB)
+        try await service.testingStartWorkload(workloadA.id)
+        try await service.testingStartWorkload(workloadB.id)
+
+        let statusA = try await service.testingWaitForProcess(workloadA.id)
+        let statusB = try await service.testingWaitForProcess(workloadB.id)
+        #expect(statusA.exitCode == 0)
+        #expect(statusB.exitCode == 0)
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let snapshotA = try await service.testingInspectWorkload(workloadA.id)
+        let snapshotB = try await service.testingInspectWorkload(workloadB.id)
+        #expect(snapshotA.configuration.injectionState == .injected)
+        #expect(snapshotB.configuration.injectionState == .injected)
+        #expect(snapshotA.configuration.workloadImageDigest == imageA.indexDigest)
+        #expect(snapshotB.configuration.workloadImageDigest == imageB.indexDigest)
+
+        let requests = server.recordedRequests()
+        let metadataAData = try #require(
+            requests.first(where: { $0.fsBegin?.path == "/var/lib/container/workloads/\(workloadA.id)/meta.json" })?.fsBegin?.inlineData
+        )
+        let metadataBData = try #require(
+            requests.first(where: { $0.fsBegin?.path == "/var/lib/container/workloads/\(workloadB.id)/meta.json" })?.fsBegin?.inlineData
+        )
+        let metadataA = try JSONDecoder().decode(MacOSWorkloadGuestMetadata.self, from: metadataAData)
+        let metadataB = try JSONDecoder().decode(MacOSWorkloadGuestMetadata.self, from: metadataBData)
+        #expect(metadataA.workloadImageDigest == imageA.indexDigest)
+        #expect(metadataB.workloadImageDigest == imageB.indexDigest)
+
+        let injectedPaths = Set(requests.compactMap { $0.fsBegin?.path })
+        #expect(injectedPaths.contains("/var/lib/container/workloads/\(workloadA.id)/rootfs/bin/hello"))
+        #expect(injectedPaths.contains("/var/lib/container/workloads/\(workloadB.id)/rootfs/bin/hello"))
+    }
 }
 
 extension MacOSImageBackedWorkloadTests {
@@ -166,6 +403,7 @@ extension MacOSImageBackedWorkloadTests {
     private struct Unimplemented: Error {}
 
     private static func makeWorkloadImage(in directory: URL) throws -> CreatedWorkloadImage {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let layer1Root = directory.appendingPathComponent("layer1-root")
         let layer2Root = directory.appendingPathComponent("layer2-root")
         try FileManager.default.createDirectory(at: layer1Root.appendingPathComponent("bin"), withIntermediateDirectories: true)
@@ -246,6 +484,13 @@ extension MacOSImageBackedWorkloadTests {
         )
     }
 
+    private static func combineWorkloadStores(_ images: [CreatedWorkloadImage]) -> MockContentStore {
+        let entries = images.reduce(into: [String: URL]()) { partialResult, image in
+            partialResult.merge(image.store.entries, uniquingKeysWith: { _, new in new })
+        }
+        return MockContentStore(entries: entries)
+    }
+
     private static func writeJSON<T: Encodable>(_ value: T, named name: String, in directory: URL) throws -> URL {
         let url = directory.appendingPathComponent(name)
         let data = try JSONEncoder().encode(value)
@@ -305,14 +550,19 @@ extension MacOSImageBackedWorkloadTests {
 
 private final class RecordingSidecarServer: @unchecked Sendable {
     private let socketPath: String
+    private let immediateExitPrefixes: [String]
     private let requests = LockedBox<[MacOSSidecarRequest]>([])
     private let done = DispatchSemaphore(value: 0)
     private let errorBox = LockedBox<Error?>(nil)
     private let listenFD = LockedBox<Int32?>(nil)
     private let clientFD = LockedBox<Int32?>(nil)
 
-    init(socketPath: String) throws {
+    init(
+        socketPath: String,
+        immediateExitPrefixes: [String] = ["workload-prepare-", "workload-cleanup-"]
+    ) throws {
         self.socketPath = socketPath
+        self.immediateExitPrefixes = immediateExitPrefixes
         let listeningFD = try makeUnixListener(path: socketPath)
         self.listenFD.withLock { fd in
             fd = listeningFD
@@ -351,7 +601,7 @@ private final class RecordingSidecarServer: @unchecked Sendable {
 
                     case .processStart:
                         try writeResponse(.success(requestID: request.requestID), to: accepted)
-                        if let processID = request.processID, processID.hasPrefix("workload-prepare-") {
+                        if let processID = request.processID, shouldEmitImmediateExit(for: processID, prefixes: immediateExitPrefixes) {
                             try writeEvent(.init(event: .processExit, processID: processID, exitCode: 0), to: accepted)
                         }
 
@@ -404,6 +654,10 @@ private final class RecordingSidecarServer: @unchecked Sendable {
     func recordedRequests() -> [MacOSSidecarRequest] {
         requests.withLock { $0 }
     }
+}
+
+private func shouldEmitImmediateExit(for processID: String, prefixes: [String]) -> Bool {
+    prefixes.contains { processID.hasPrefix($0) }
 }
 
 private final class LockedBox<T>: @unchecked Sendable {

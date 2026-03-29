@@ -21,10 +21,16 @@ import ContainerSandboxServiceClient
 import Containerization
 import ContainerizationError
 import ContainerizationOCI
+import ContainerizationOS
 import CryptoKit
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
+
+enum MacOSBuildMode: String, Sendable {
+    case sandbox
+    case workload
+}
 
 struct MacOSBuildEngine {
     static let buildPlatform = Platform(arch: "arm64", os: "darwin")
@@ -34,6 +40,7 @@ struct MacOSBuildEngine {
     static let chunkSize = 256 * 1024
     static let stageStopTimeoutSeconds: Int32 = 20
     static let machineIdentifierFilename = "MachineIdentifier.bin"
+    static let workloadPayloadRoot = "/var/lib/container/build/payload"
 
     struct Input {
         let appRoot: URL
@@ -47,6 +54,8 @@ struct MacOSBuildEngine {
         let noCache: Bool
         let pull: Bool
         let quiet: Bool
+        let buildMode: MacOSBuildMode
+        let buildSandboxImage: String?
         let target: String
         let tags: [String]
         let exports: [Builder.BuildExport]
@@ -148,39 +157,86 @@ struct MacOSBuildEngine {
     }
 
     struct StageState {
-        let baseConfig: ContainerizationOCI.Image
+        let imageBaseConfig: ContainerizationOCI.Image
+        let runBaseConfig: ContainerizationOCI.Image
+        let buildMode: MacOSBuildMode
+        let payloadRoot: String?
         var buildArguments: [String: String]
-        var environment: [String: String]
+        var runEnvironment: [String: String]
+        var imageEnvironment: [String: String]
         var labels: [String: String]
-        var workingDirectory: String
-        var user: String?
+        var runWorkingDirectory: String
+        var imageWorkingDirectory: String
+        var runUser: String?
+        var imageUser: String?
         var cmd: [String]?
         var entrypoint: [String]?
 
-        init(baseConfig: ContainerizationOCI.Image, initialBuildArguments: [String: String]) {
-            self.baseConfig = baseConfig
+        init(
+            imageBaseConfig: ContainerizationOCI.Image,
+            runBaseConfig: ContainerizationOCI.Image,
+            buildMode: MacOSBuildMode,
+            payloadRoot: String?,
+            initialBuildArguments: [String: String]
+        ) {
+            self.imageBaseConfig = imageBaseConfig
+            self.runBaseConfig = runBaseConfig
+            self.buildMode = buildMode
+            self.payloadRoot = payloadRoot
             self.buildArguments = initialBuildArguments
-            self.environment = Self.environmentDictionary(from: baseConfig.config?.env ?? [])
-            self.labels = baseConfig.config?.labels ?? [:]
-            self.workingDirectory = baseConfig.config?.workingDir ?? "/"
-            self.user = baseConfig.config?.user
-            self.cmd = baseConfig.config?.cmd
-            self.entrypoint = baseConfig.config?.entrypoint
+            self.runEnvironment = Self.environmentDictionary(from: runBaseConfig.config?.env ?? [])
+            self.imageEnvironment = Self.environmentDictionary(from: imageBaseConfig.config?.env ?? [])
+            self.labels = imageBaseConfig.config?.labels ?? [:]
+            self.runWorkingDirectory = runBaseConfig.config?.workingDir ?? "/"
+            self.imageWorkingDirectory = imageBaseConfig.config?.workingDir ?? "/"
+            self.runUser = runBaseConfig.config?.user
+            self.imageUser = imageBaseConfig.config?.user
+            self.cmd = imageBaseConfig.config?.cmd
+            self.entrypoint = imageBaseConfig.config?.entrypoint
+
+            if buildMode == .workload {
+                let root = payloadRoot ?? MacOSBuildEngine.workloadPayloadRoot
+                self.runWorkingDirectory = root
+                self.imageWorkingDirectory = "/"
+                self.imageEnvironment = [:]
+                self.imageUser = nil
+                self.labels = [:]
+                self.cmd = nil
+                self.entrypoint = nil
+            }
         }
 
         var variables: [String: String] {
             var merged = buildArguments
-            for (key, value) in environment {
+            for (key, value) in runEnvironment {
                 merged[key] = value
             }
             return merged
         }
 
-        func resolvedPath(for value: String, preserveTrailingSlash: Bool = false) -> String {
+        func resolvedGuestPath(for value: String, preserveTrailingSlash: Bool = false) -> String {
+            if buildMode == .workload {
+                guard let payloadRoot else {
+                    return normalizeAbsolutePath(value, preserveTrailingSlash: preserveTrailingSlash)
+                }
+                let imagePath = resolvedImagePath(for: value, preserveTrailingSlash: preserveTrailingSlash)
+                if imagePath == "/" {
+                    return payloadRoot
+                }
+                return joinPaths(payloadRoot, String(imagePath.dropFirst()))
+            }
+
             guard !value.hasPrefix("/") else {
                 return normalizeAbsolutePath(value, preserveTrailingSlash: preserveTrailingSlash)
             }
-            return normalizeAbsolutePath(workingDirectory + "/" + value, preserveTrailingSlash: preserveTrailingSlash)
+            return normalizeAbsolutePath(runWorkingDirectory + "/" + value, preserveTrailingSlash: preserveTrailingSlash)
+        }
+
+        func resolvedImagePath(for value: String, preserveTrailingSlash: Bool = false) -> String {
+            guard !value.hasPrefix("/") else {
+                return normalizeAbsolutePath(value, preserveTrailingSlash: preserveTrailingSlash)
+            }
+            return normalizeAbsolutePath(imageWorkingDirectory + "/" + value, preserveTrailingSlash: preserveTrailingSlash)
         }
 
         func finalImage(labelOverrides: [String: String]) -> ContainerizationOCI.Image {
@@ -188,27 +244,27 @@ struct MacOSBuildEngine {
             for (key, value) in labelOverrides {
                 mergedLabels[key] = value
             }
-            let env = environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" }
+            let env = imageEnvironment.keys.sorted().map { "\($0)=\(imageEnvironment[$0] ?? "")" }
             let config = ImageConfig(
-                user: user,
+                user: imageUser,
                 env: env.isEmpty ? nil : env,
                 entrypoint: entrypoint,
                 cmd: cmd,
-                workingDir: workingDirectory,
+                workingDir: imageWorkingDirectory,
                 labels: mergedLabels.isEmpty ? nil : mergedLabels,
-                stopSignal: baseConfig.config?.stopSignal
+                stopSignal: imageBaseConfig.config?.stopSignal
             )
             return .init(
                 created: Self.createdTimestamp(),
-                author: baseConfig.author,
-                architecture: baseConfig.architecture,
-                os: baseConfig.os,
-                osVersion: baseConfig.osVersion,
-                osFeatures: baseConfig.osFeatures,
-                variant: baseConfig.variant,
+                author: imageBaseConfig.author,
+                architecture: imageBaseConfig.architecture,
+                os: imageBaseConfig.os,
+                osVersion: imageBaseConfig.osVersion,
+                osFeatures: imageBaseConfig.osFeatures,
+                variant: imageBaseConfig.variant,
                 config: config,
                 rootfs: .init(type: "layers", diffIDs: []),
-                history: baseConfig.history
+                history: imageBaseConfig.history
             )
         }
 
@@ -248,7 +304,8 @@ struct MacOSBuildEngine {
         let planner = Planner(
             dockerfile: input.dockerfile,
             buildArgs: cliBuildArgs,
-            target: input.target
+            target: input.target,
+            buildMode: input.buildMode
         )
         let plan = try planner.makePlan()
         let contextProvider = try BuildContextProvider(contextRoot: input.contextDirectory)
@@ -258,24 +315,70 @@ struct MacOSBuildEngine {
             .appendingPathComponent(input.buildID)
             .appendingPathComponent("copy-from-cache")
 
-        var stageBaseImages: [Int: ClientImage] = [:]
-        var stageBaseConfigs: [Int: ContainerizationOCI.Image] = [:]
+        let workloadSandboxImage: ClientImage?
+        if input.buildMode == .workload {
+            guard let buildSandboxImage = input.buildSandboxImage, !buildSandboxImage.isEmpty else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "macOS workload builds require --build-sandbox-image"
+                )
+            }
+            workloadSandboxImage = try await resolveBaseImage(reference: buildSandboxImage, pull: input.pull)
+        } else {
+            workloadSandboxImage = nil
+        }
+        let workloadSandboxConfig = try await workloadSandboxImage?.config(for: buildPlatform)
+
+        var stageRuntimeBaseImages: [Int: ClientImage] = [:]
+        var stageRuntimeConfigs: [Int: ContainerizationOCI.Image] = [:]
+        var stageImageBaseConfigs: [Int: ContainerizationOCI.Image] = [:]
         for stage in plan.executionStages {
-            let baseImage = try await resolveBaseImage(reference: stage.baseImage, pull: input.pull)
-            stageBaseImages[stage.index] = baseImage
-            stageBaseConfigs[stage.index] = try await baseImage.config(for: buildPlatform)
+            if input.buildMode == .workload {
+                guard let workloadSandboxImage, let workloadSandboxConfig else {
+                    throw ContainerizationError(.internalError, message: "missing workload build sandbox image/config")
+                }
+                stageRuntimeBaseImages[stage.index] = workloadSandboxImage
+                stageRuntimeConfigs[stage.index] = workloadSandboxConfig
+                stageImageBaseConfigs[stage.index] = workloadImageBaseConfig()
+            } else {
+                let baseImage = try await resolveBaseImage(reference: stage.baseImage, pull: input.pull)
+                let baseConfig = try await baseImage.config(for: buildPlatform)
+                stageRuntimeBaseImages[stage.index] = baseImage
+                stageRuntimeConfigs[stage.index] = baseConfig
+                stageImageBaseConfigs[stage.index] = baseConfig
+            }
         }
 
-        let plannedExports = try plannedCopySourceExports(
-            plan: plan,
-            baseConfigs: stageBaseConfigs,
-            initialBuildArguments: cliBuildArgs
-        )
+        let plannedExports: [Int: [String]] = if input.buildMode == .sandbox {
+            try plannedCopySourceExports(
+                plan: plan,
+                baseConfigs: stageImageBaseConfigs,
+                initialBuildArguments: cliBuildArgs
+            )
+        } else {
+            [:]
+        }
         var exportedStageSources: [Int: [String: CachedStageSourceEntry]] = [:]
 
         for stage in plan.executionStages {
-            guard let baseImage = stageBaseImages[stage.index], let baseConfig = stageBaseConfigs[stage.index] else {
+            guard
+                let runtimeBaseImage = stageRuntimeBaseImages[stage.index],
+                let runtimeBaseConfig = stageRuntimeConfigs[stage.index],
+                let imageBaseConfig = stageImageBaseConfigs[stage.index]
+            else {
                 throw ContainerizationError(.internalError, message: "missing cached base image/config for stage \(stage.index)")
+            }
+            let hostPayloadRoot: URL?
+            if input.buildMode == .workload {
+                let payloadRoot = workloadPayloadDirectory(
+                    appRoot: input.appRoot,
+                    buildID: input.buildID,
+                    stageIndex: stage.index
+                )
+                try FileManager.default.createDirectory(at: payloadRoot, withIntermediateDirectories: true)
+                hostPayloadRoot = payloadRoot
+            } else {
+                hostPayloadRoot = nil
             }
             if !input.quiet {
                 writeStderrLine("Building macOS stage \(stage.name ?? "#\(stage.index)")")
@@ -283,10 +386,11 @@ struct MacOSBuildEngine {
             let runtime = try await StageRuntime.start(
                 appRoot: input.appRoot,
                 buildID: input.buildID,
-                baseImage: baseImage,
+                baseImage: runtimeBaseImage,
                 stageIndex: stage.index,
                 cpus: input.cpus,
-                memory: input.memory
+                memory: input.memory,
+                hostPayloadRoot: hostPayloadRoot
             )
 
             do {
@@ -299,7 +403,9 @@ struct MacOSBuildEngine {
                 )
                 let state = try await execute(
                     stage: stage,
-                    baseConfig: baseConfig,
+                    imageBaseConfig: imageBaseConfig,
+                    runtimeBaseConfig: runtimeBaseConfig,
+                    buildMode: input.buildMode,
                     runtime: runtime,
                     transport: transport,
                     stages: plan.stages,
@@ -343,34 +449,71 @@ struct MacOSBuildEngine {
                         writeStderrLine(message)
                     }
                 if export.type == "local" {
-                    if !input.quiet {
-                        writeStderrLine("Exporting local macOS image directory")
+                    if input.buildMode == .workload {
+                        guard let hostPayloadRoot else {
+                            throw ContainerizationError(.internalError, message: "missing host payload directory for workload build")
+                        }
+                        if !input.quiet {
+                            writeStderrLine("Exporting local macOS workload payload directory")
+                        }
+                        let exportStartedAt = Date()
+                        try exportLocalWorkloadDirectory(from: hostPayloadRoot, to: archiveURL)
+                        if !input.quiet {
+                            writeStderrLine("Finished local macOS workload payload export")
+                        }
+                        MacOSExportProfiler.log(
+                            "build.localExport: \(MacOSExportProfiler.format(Date().timeIntervalSince(exportStartedAt)))"
+                        )
+                    } else {
+                        if !input.quiet {
+                            writeStderrLine("Exporting local macOS image directory")
+                        }
+                        let exportStartedAt = Date()
+                        try exportLocalImageDirectory(from: bundleURL, to: archiveURL)
+                        if !input.quiet {
+                            writeStderrLine("Finished local macOS image export")
+                        }
+                        MacOSExportProfiler.log(
+                            "build.localExport: \(MacOSExportProfiler.format(Date().timeIntervalSince(exportStartedAt)))"
+                        )
                     }
-                    let exportStartedAt = Date()
-                    try exportLocalImageDirectory(from: bundleURL, to: archiveURL)
-                    if !input.quiet {
-                        writeStderrLine("Finished local macOS image export")
-                    }
-                    MacOSExportProfiler.log(
-                        "build.localExport: \(MacOSExportProfiler.format(Date().timeIntervalSince(exportStartedAt)))"
-                    )
                 } else {
-                    let parentDiskSource = try await baseImage.macOSChunkedDiskSource(for: buildPlatform)
-                    if !input.quiet {
-                        writeStderrLine("Exporting macOS OCI image")
+                    if input.buildMode == .workload {
+                        guard let hostPayloadRoot else {
+                            throw ContainerizationError(.internalError, message: "missing host payload directory for workload build")
+                        }
+                        if !input.quiet {
+                            writeStderrLine("Exporting macOS workload OCI image")
+                        }
+                        let packageStartedAt = Date()
+                        try MacOSWorkloadPackager.package(
+                            payloadRoot: hostPayloadRoot,
+                            outputTar: archiveURL,
+                            reference: input.tags.first,
+                            imageConfig: state.finalImage(labelOverrides: cliLabels),
+                            progress: packagingProgress
+                        )
+                        MacOSExportProfiler.log(
+                            "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
+                        )
+                    } else {
+                        let parentDiskSource = try await runtimeBaseImage.macOSChunkedDiskSource(for: buildPlatform)
+                        if !input.quiet {
+                            writeStderrLine("Exporting macOS OCI image")
+                        }
+                        let packageStartedAt = Date()
+                        try MacOSImagePackager.package(
+                            imageDirectory: bundleURL,
+                            outputTar: archiveURL,
+                            reference: input.tags.first,
+                            imageConfig: state.finalImage(labelOverrides: cliLabels),
+                            parentDiskSource: parentDiskSource,
+                            progress: packagingProgress
+                        )
+                        MacOSExportProfiler.log(
+                            "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
+                        )
                     }
-                    let packageStartedAt = Date()
-                    try MacOSImagePackager.package(
-                        imageDirectory: bundleURL,
-                        outputTar: archiveURL,
-                        reference: input.tags.first,
-                        imageConfig: state.finalImage(labelOverrides: cliLabels),
-                        parentDiskSource: parentDiskSource,
-                        progress: packagingProgress
-                    )
-                    MacOSExportProfiler.log(
-                        "build.packageCall: \(MacOSExportProfiler.format(Date().timeIntervalSince(packageStartedAt)))"
-                    )
                 }
 
                 await runtime.delete()
@@ -455,6 +598,14 @@ struct MacOSBuildEngine {
         }
     }
 
+    private static func workloadPayloadDirectory(appRoot: URL, buildID: String, stageIndex: Int) -> URL {
+        appRoot
+            .appendingPathComponent("builder")
+            .appendingPathComponent(buildID)
+            .appendingPathComponent("workload-payload")
+            .appendingPathComponent("stage-\(stageIndex)")
+    }
+
     static func exportLocalImageDirectory(from imageDirectory: URL, to outputDirectory: URL) throws {
         let image = try MacOSImagePackager.validateImageDirectory(imageDirectory)
         let fm = FileManager.default
@@ -477,6 +628,15 @@ struct MacOSBuildEngine {
                 to: destination.appendingPathComponent(machineIdentifierFilename)
             )
         }
+    }
+
+    static func exportLocalWorkloadDirectory(from payloadRoot: URL, to outputDirectory: URL) throws {
+        let fm = FileManager.default
+        let destination = outputDirectory.standardizedFileURL
+        if fm.fileExists(atPath: destination.path) {
+            try fm.removeItem(at: destination)
+        }
+        try fm.copyItem(at: payloadRoot, to: destination)
     }
 
     private static func commandToOCIArguments(_ command: CommandForm) -> [String] {
@@ -569,7 +729,13 @@ struct MacOSBuildEngine {
                 throw ContainerizationError(.internalError, message: "missing base config for stage \(stage.index)")
             }
 
-            var state = StageState(baseConfig: baseConfig, initialBuildArguments: initialBuildArguments)
+            var state = StageState(
+                imageBaseConfig: baseConfig,
+                runBaseConfig: baseConfig,
+                buildMode: .sandbox,
+                payloadRoot: nil,
+                initialBuildArguments: initialBuildArguments
+            )
             for instruction in stage.instructions {
                 switch instruction {
                 case .arg(let argument):
@@ -580,7 +746,8 @@ struct MacOSBuildEngine {
                     var variables = state.variables
                     for pair in pairs {
                         let expanded = try VariableExpander.expand(pair.value, variables: variables)
-                        state.environment[pair.key] = expanded
+                        state.runEnvironment[pair.key] = expanded
+                        state.imageEnvironment[pair.key] = expanded
                         variables[pair.key] = expanded
                     }
 
@@ -594,11 +761,13 @@ struct MacOSBuildEngine {
 
                 case .workdir(let path):
                     let expanded = try VariableExpander.expand(path, variables: state.variables)
-                    state.workingDirectory = state.resolvedPath(for: expanded)
+                    state.runWorkingDirectory = state.resolvedGuestPath(for: expanded)
+                    state.imageWorkingDirectory = state.resolvedImagePath(for: expanded)
 
                 case .user(let rawValue):
                     let expanded = try VariableExpander.expand(rawValue, variables: state.variables)
-                    state.user = expanded
+                    state.runUser = expanded
+                    state.imageUser = expanded
 
                 case .copy(let fileInstruction):
                     let expandedSources = try fileInstruction.sources.map {
@@ -630,9 +799,28 @@ struct MacOSBuildEngine {
         return exports.mapValues { $0.sorted() }
     }
 
+    private static func workloadImageBaseConfig() -> ContainerizationOCI.Image {
+        .init(
+            architecture: buildPlatform.architecture,
+            os: buildPlatform.os,
+            config: .init(
+                user: nil,
+                env: nil,
+                entrypoint: nil,
+                cmd: nil,
+                workingDir: "/",
+                labels: nil,
+                stopSignal: nil
+            ),
+            rootfs: .init(type: "layers", diffIDs: [])
+        )
+    }
+
     private static func execute(
         stage: Stage,
-        baseConfig: ContainerizationOCI.Image,
+        imageBaseConfig: ContainerizationOCI.Image,
+        runtimeBaseConfig: ContainerizationOCI.Image,
+        buildMode: MacOSBuildMode,
         runtime: StageRuntime,
         transport: FileTransport,
         stages: [Stage],
@@ -641,7 +829,13 @@ struct MacOSBuildEngine {
         quiet: Bool,
         log: Logger
     ) async throws -> StageState {
-        var state = StageState(baseConfig: baseConfig, initialBuildArguments: initialBuildArguments)
+        var state = StageState(
+            imageBaseConfig: imageBaseConfig,
+            runBaseConfig: runtimeBaseConfig,
+            buildMode: buildMode,
+            payloadRoot: buildMode == .workload ? workloadPayloadRoot : nil,
+            initialBuildArguments: initialBuildArguments
+        )
 
         for instruction in stage.instructions {
             switch instruction {
@@ -653,7 +847,8 @@ struct MacOSBuildEngine {
                 var variables = state.variables
                 for pair in pairs {
                     let expanded = try VariableExpander.expand(pair.value, variables: variables)
-                    state.environment[pair.key] = expanded
+                    state.runEnvironment[pair.key] = expanded
+                    state.imageEnvironment[pair.key] = expanded
                     variables[pair.key] = expanded
                 }
 
@@ -667,20 +862,24 @@ struct MacOSBuildEngine {
 
             case .workdir(let path):
                 let expanded = try VariableExpander.expand(path, variables: state.variables)
-                let resolved = state.resolvedPath(for: expanded)
-                try await transport.createDirectory(at: resolved)
-                state.workingDirectory = resolved
+                let resolvedGuestPath = state.resolvedGuestPath(for: expanded)
+                if !(buildMode == .workload && resolvedGuestPath == workloadPayloadRoot) {
+                    try await transport.createDirectory(at: resolvedGuestPath)
+                }
+                state.runWorkingDirectory = resolvedGuestPath
+                state.imageWorkingDirectory = state.resolvedImagePath(for: expanded)
 
             case .user(let rawValue):
                 let expanded = try VariableExpander.expand(rawValue, variables: state.variables)
-                state.user = expanded
+                state.runUser = expanded
+                state.imageUser = expanded
 
             case .copy(let fileInstruction):
                 let expandedSources = try fileInstruction.sources.map {
                     try VariableExpander.expand($0, variables: state.variables)
                 }
                 let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
-                let resolvedDestination = state.resolvedPath(
+                let resolvedDestination = state.resolvedGuestPath(
                     for: expandedDestination,
                     preserveTrailingSlash: expandedDestination.hasSuffix("/")
                 )
@@ -716,7 +915,7 @@ struct MacOSBuildEngine {
                 let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
                 try await transport.copy(
                     sources: expandedSources,
-                    destination: state.resolvedPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
+                    destination: state.resolvedGuestPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
                     kind: .add
                 )
 
@@ -726,9 +925,9 @@ struct MacOSBuildEngine {
                 }
                 try await runtime.run(
                     command: command,
-                    environment: state.environment,
-                    workingDirectory: state.workingDirectory,
-                    user: state.user.map { .raw(userString: $0) } ?? .id(uid: 0, gid: 0),
+                    environment: state.runEnvironment,
+                    workingDirectory: state.runWorkingDirectory,
+                    user: state.runUser.map { .raw(userString: $0) } ?? .id(uid: 0, gid: 0),
                     quiet: quiet,
                     log: log
                 )
@@ -763,11 +962,13 @@ extension MacOSBuildEngine {
         private let dockerfile: Data
         private let buildArgs: [String: String]
         private let target: String
+        private let buildMode: MacOSBuildMode
 
-        init(dockerfile: Data, buildArgs: [String: String], target: String) {
+        init(dockerfile: Data, buildArgs: [String: String], target: String, buildMode: MacOSBuildMode = .sandbox) {
             self.dockerfile = dockerfile
             self.buildArgs = buildArgs
             self.target = target
+            self.buildMode = buildMode
         }
 
         func makePlan() throws -> Plan {
@@ -807,11 +1008,13 @@ extension MacOSBuildEngine {
                     let expandedPlatform = try from.platform.map {
                         try VariableExpander.expand($0, variables: variables)
                     }
-                    if let expandedPlatform, expandedPlatform != buildPlatform.description {
-                        throw ContainerizationError(
-                            .unsupported,
-                            message: "darwin builds require FROM --platform=darwin/arm64, got \(expandedPlatform)"
-                        )
+                    if let expandedPlatform {
+                        if expandedPlatform != buildPlatform.description {
+                            throw ContainerizationError(
+                                .unsupported,
+                                message: "darwin builds require FROM --platform=darwin/arm64, got \(expandedPlatform)"
+                            )
+                        }
                     }
 
                     let baseImage = try VariableExpander.expand(from.image, variables: variables)
@@ -868,6 +1071,9 @@ extension MacOSBuildEngine {
                 throw ContainerizationError(.notFound, message: "target stage \(target) not found")
             }
 
+            if buildMode == .workload {
+                try validateWorkloadStages(stages)
+            }
             try validateCopySourceReferences(in: stages)
             return .init(stages: stages, targetStage: selected)
         }
@@ -1117,12 +1323,33 @@ extension MacOSBuildEngine {
                     guard case .copy(let fileTransfer) = instruction, let fromStage = fileTransfer.fromStage else {
                         continue
                     }
+                    if buildMode == .workload {
+                        throw ContainerizationError(
+                            .unsupported,
+                            message: "macOS workload builds do not support COPY --from; use a single FROM scratch stage"
+                        )
+                    }
                     _ = try resolveCopySourceStageIndex(
                         reference: fromStage,
                         currentStageIndex: stage.index,
                         stages: stages
                     )
                 }
+            }
+        }
+
+        private func validateWorkloadStages(_ stages: [Stage]) throws {
+            guard stages.count == 1 else {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "macOS workload builds currently require a single FROM scratch stage"
+                )
+            }
+            guard let stage = stages.first, stage.baseImage.lowercased() == "scratch" else {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "macOS workload builds require FROM scratch; use --build-sandbox-image for the build environment"
+                )
             }
         }
 
@@ -2098,6 +2325,32 @@ extension MacOSBuildEngine {
 
 extension MacOSBuildEngine {
     final class StageRuntime {
+        private final class SandboxProcess: ClientProcess, @unchecked Sendable {
+            let id: String
+            private let sandboxClient: SandboxClient
+
+            init(id: String, sandboxClient: SandboxClient) {
+                self.id = id
+                self.sandboxClient = sandboxClient
+            }
+
+            func start() async throws {
+                try await sandboxClient.startProcess(id)
+            }
+
+            func resize(_ size: Terminal.Size) async throws {
+                try await sandboxClient.resize(id, size: size)
+            }
+
+            func kill(_ signal: Int32) async throws {
+                try await sandboxClient.kill(id, signal: Int64(signal))
+            }
+
+            func wait() async throws -> Int32 {
+                try await sandboxClient.wait(id).exitCode
+            }
+        }
+
         let containerClient: ContainerClient
         let containerID: String
         let sandboxClient: SandboxClient
@@ -2114,7 +2367,8 @@ extension MacOSBuildEngine {
             baseImage: ClientImage,
             stageIndex: Int,
             cpus: Int64,
-            memory: String
+            memory: String,
+            hostPayloadRoot: URL? = nil
         ) async throws -> StageRuntime {
             let containerClient = ContainerClient()
             let containerID = MacOSBuildEngine.stageContainerID(buildID: buildID, stageIndex: stageIndex)
@@ -2132,7 +2386,8 @@ extension MacOSBuildEngine {
                 baseImage: baseImage.description,
                 initProcess: initProcess,
                 cpus: cpus,
-                memory: memory
+                memory: memory,
+                hostPayloadRoot: hostPayloadRoot
             )
             configuration.resources.memoryInBytes = max(configuration.resources.memoryInBytes, 8192.mib())
 
@@ -2148,6 +2403,8 @@ extension MacOSBuildEngine {
                     startupMessage: "Waiting for macOS build guest..."
                 )
                 let sandboxClient = try await SandboxClient.create(id: containerID, runtime: MacOSBuildEngine.runtimeName)
+                try await waitForContainerStatus(client: containerClient, id: containerID, status: .running, timeoutSeconds: 180)
+                try await waitForSandboxStatus(client: sandboxClient, status: .running, timeoutSeconds: 180)
                 _ = appRoot
                 return .init(containerClient: containerClient, containerID: containerID, sandboxClient: sandboxClient)
             } catch {
@@ -2161,7 +2418,8 @@ extension MacOSBuildEngine {
             baseImage: ImageDescription,
             initProcess: ProcessConfiguration,
             cpus: Int64,
-            memory: String
+            memory: String,
+            hostPayloadRoot: URL? = nil
         ) throws -> ContainerConfiguration {
             var configuration = ContainerConfiguration(id: containerID, image: baseImage, process: initProcess)
             configuration.platform = MacOSBuildEngine.buildPlatform
@@ -2173,6 +2431,15 @@ extension MacOSBuildEngine {
                 networkBackend: .virtualizationNAT
             )
             configuration.resources = try Parser.resources(cpus: cpus, memory: memory)
+            if let hostPayloadRoot {
+                configuration.mounts.append(
+                    .virtiofs(
+                        source: hostPayloadRoot.path,
+                        destination: MacOSBuildEngine.workloadPayloadRoot,
+                        options: []
+                    )
+                )
+            }
             return configuration
         }
 
@@ -2333,7 +2600,7 @@ extension MacOSBuildEngine {
             user: ProcessConfiguration.User,
             stdio: [FileHandle?]
         ) async throws -> ClientProcess {
-            let processID = UUID().uuidString
+            let processID = UUID().uuidString.lowercased()
             let config: ProcessConfiguration
             switch command {
             case .shell(let value):
@@ -2359,12 +2626,8 @@ extension MacOSBuildEngine {
                 )
             }
 
-            return try await containerClient.createProcess(
-                containerId: containerID,
-                processId: processID,
-                configuration: config,
-                stdio: stdio
-            )
+            try await sandboxClient.createProcess(processID, config: config, stdio: stdio)
+            return SandboxProcess(id: processID, sandboxClient: sandboxClient)
         }
 
         private func runForStatus(
@@ -2452,6 +2715,49 @@ extension MacOSBuildEngine {
                 output.append(data)
             }
             return output
+        }
+
+        private static func waitForContainerStatus(
+            client: ContainerClient,
+            id: String,
+            status: RuntimeStatus,
+            timeoutSeconds: TimeInterval
+        ) async throws {
+            let deadline = Date().addingTimeInterval(timeoutSeconds)
+            while Date() < deadline {
+                let snapshot = try await client.get(id: id)
+                if snapshot.status == status {
+                    return
+                }
+                try await Task.sleep(for: .seconds(2))
+            }
+
+            let snapshot = try await client.get(id: id)
+            throw ContainerizationError(
+                .internalError,
+                message: "container \(id) did not reach \(status.rawValue); last status=\(snapshot.status.rawValue)"
+            )
+        }
+
+        private static func waitForSandboxStatus(
+            client: SandboxClient,
+            status: RuntimeStatus,
+            timeoutSeconds: TimeInterval
+        ) async throws {
+            let deadline = Date().addingTimeInterval(timeoutSeconds)
+            while Date() < deadline {
+                let snapshot = try await client.state()
+                if snapshot.status == status {
+                    return
+                }
+                try await Task.sleep(for: .seconds(2))
+            }
+
+            let snapshot = try await client.state()
+            throw ContainerizationError(
+                .internalError,
+                message: "sandbox did not reach \(status.rawValue); last status=\(snapshot.status.rawValue)"
+            )
         }
 
         private func deleteWithRetries(maxAttempts: Int = 20, retryDelayNanoseconds: UInt64 = 250_000_000) async {

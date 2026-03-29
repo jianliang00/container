@@ -178,6 +178,68 @@ struct MacOSImageBackedWorkloadTests {
     }
 
     @Test
+    func stopRunningImageBackedWorkloadSignalsSidecarAndMarksWorkloadStopped() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-stop-one-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory)
+        let socketPath = "/tmp/sidecar-workload-stop-one-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(
+            socketPath: socketPath,
+            exitOnSignalPrefixes: ["__workload__"]
+        )
+        defer { server.stop() }
+
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        try await service.testingPrepareSandbox(containerConfiguration, state: "running")
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let workloadID = "image-backed-stop-one"
+        let workloadConfiguration = WorkloadConfiguration(
+            id: workloadID,
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: ["override-arg"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
+            workloadImageDigest: image.indexDigest
+        )
+
+        try await service.testingCreateWorkload(workloadConfiguration)
+        try await service.testingStartWorkload(workloadID)
+        try await service.testingStopWorkload(
+            workloadID,
+            options: .init(timeoutInSeconds: 1, signal: SIGTERM)
+        )
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let snapshot = try await service.testingInspectWorkload(workloadID)
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.exitCode == 0)
+
+        let signalRequest = try #require(
+            server.recordedRequests().first(where: {
+                $0.method == .processSignal && ($0.processID?.hasPrefix("__workload__") ?? false)
+            })
+        )
+        #expect(signalRequest.signal == SIGTERM)
+    }
+
+    @Test
     func removeStoppedImageBackedWorkloadCleansGuestInstanceDirectoryAndKeepsHostCache() async throws {
         let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-remove-tests")
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
@@ -551,6 +613,7 @@ extension MacOSImageBackedWorkloadTests {
 private final class RecordingSidecarServer: @unchecked Sendable {
     private let socketPath: String
     private let immediateExitPrefixes: [String]
+    private let exitOnSignalPrefixes: [String]
     private let requests = LockedBox<[MacOSSidecarRequest]>([])
     private let done = DispatchSemaphore(value: 0)
     private let errorBox = LockedBox<Error?>(nil)
@@ -559,10 +622,12 @@ private final class RecordingSidecarServer: @unchecked Sendable {
 
     init(
         socketPath: String,
-        immediateExitPrefixes: [String] = ["workload-prepare-", "workload-cleanup-"]
+        immediateExitPrefixes: [String] = ["workload-prepare-", "workload-cleanup-"],
+        exitOnSignalPrefixes: [String] = []
     ) throws {
         self.socketPath = socketPath
         self.immediateExitPrefixes = immediateExitPrefixes
+        self.exitOnSignalPrefixes = exitOnSignalPrefixes
         let listeningFD = try makeUnixListener(path: socketPath)
         self.listenFD.withLock { fd in
             fd = listeningFD
@@ -602,6 +667,12 @@ private final class RecordingSidecarServer: @unchecked Sendable {
                     case .processStart:
                         try writeResponse(.success(requestID: request.requestID), to: accepted)
                         if let processID = request.processID, shouldEmitImmediateExit(for: processID, prefixes: immediateExitPrefixes) {
+                            try writeEvent(.init(event: .processExit, processID: processID, exitCode: 0), to: accepted)
+                        }
+
+                    case .processSignal:
+                        try writeResponse(.success(requestID: request.requestID), to: accepted)
+                        if let processID = request.processID, shouldEmitImmediateExit(for: processID, prefixes: exitOnSignalPrefixes) {
                             try writeEvent(.init(event: .processExit, processID: processID, exitCode: 0), to: accepted)
                         }
 

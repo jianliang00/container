@@ -7,6 +7,56 @@
 
 How to use the features of `container`.
 
+## Use `ContainerKit` from SwiftPM
+
+If you want to embed `container` from another Swift project, depend on the
+facade product instead of importing lower-level modules directly:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/apple/container.git", branch: "main")
+],
+targets: [
+    .executableTarget(
+        name: "ExampleApp",
+        dependencies: [
+            .product(name: "ContainerKit", package: "container")
+        ]
+    )
+]
+```
+
+`ContainerKit` is a client facade for already-installed, already-running
+services. Check service readiness explicitly before making other calls:
+
+```swift
+import ContainerKit
+
+let kit = ContainerKit()
+let health = try await kit.health()
+print("container services reachable at \(health.installRoot.path(percentEncoded: false))")
+
+let containers = try await kit.listContainers()
+print("found \(containers.count) containers")
+```
+
+If your embedding app also needs explicit lifecycle control, add
+`ContainerKitServices` separately. The embedding app or installer must provide
+the helper installation layout explicitly; the library does not download or
+locate helpers automatically.
+
+```swift
+import ContainerKitServices
+
+let installation = ContainerInstallation(
+    installRoot: URL(filePath: "/usr/local"),
+    apiServerExecutableURL: URL(filePath: "/usr/local/bin/container-apiserver")
+)
+
+let services = ContainerKitServices(installation: installation)
+try await services.ensureRunning()
+```
+
 ## Configure memory and CPUs for your containers
 
 Since the containers created by `container` are lightweight virtual machines, consider the needs of your containerized application when you use `container run`.  The `--memory` and `--cpus` options allow you to override the default memory and CPU limits for the virtual machine. The default values are 1 gigabyte of RAM and 4 CPUs. You can use abbreviations for memory units; for example, to run a container for image `big` with 8 CPUs and 32 GiBytes of memory, use:

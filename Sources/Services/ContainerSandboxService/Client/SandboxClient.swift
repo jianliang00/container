@@ -268,6 +268,25 @@ extension SandboxClient {
         }
     }
 
+    public func stopWorkload(_ id: String, options: ContainerStopOptions = .default) async throws {
+        let request = XPCMessage(route: SandboxRoutes.stopWorkload.rawValue)
+        request.set(key: SandboxKeys.id.rawValue, value: id)
+
+        let data = try JSONEncoder().encode(options)
+        request.set(key: SandboxKeys.stopOptions.rawValue, value: data)
+
+        let responseTimeout = Duration(.seconds(Int64(options.timeoutInSeconds + 1)))
+        do {
+            try await self.client.send(request, responseTimeout: responseTimeout)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to stop workload \(id) in container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
     public func removeWorkload(_ id: String) async throws {
         let request = XPCMessage(route: SandboxRoutes.removeWorkload.rawValue)
         request.set(key: SandboxKeys.id.rawValue, value: id)

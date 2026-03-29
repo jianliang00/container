@@ -27,6 +27,8 @@ public enum SandboxRoutes: String {
     case createWorkload = "com.apple.container.sandbox/createWorkload"
     /// Start a workload in the sandbox.
     case startWorkload = "com.apple.container.sandbox/startWorkload"
+    /// Stop a running workload in the sandbox.
+    case stopWorkload = "com.apple.container.sandbox/stopWorkload"
     /// Remove a stopped workload from the sandbox.
     case removeWorkload = "com.apple.container.sandbox/removeWorkload"
     /// Create a process in the sandbox.

@@ -159,7 +159,7 @@ Related design docs:
   - [x] narrow `RUN` semantics to "only writes under `payloadRoot` are committed"
   - [x] add explicit build-sandbox selection, such as
     `--build-sandbox-image <sandbox-ref>`
-  - [ ] reject or clearly document unsupported workload-build cases:
+  - [x] reject or clearly document unsupported workload-build cases:
     - guest-global installers whose writes must become workload payload
     - `pkg`-driven system installs captured as workload payload
     - whole-guest diff capture

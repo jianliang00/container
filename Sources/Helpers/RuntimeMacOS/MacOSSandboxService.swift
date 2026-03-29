@@ -195,6 +195,14 @@ extension MacOSSandboxService {
     }
 
     @Sendable
+    public func stopWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        let workloadID = try message.id()
+        let stopOptions = try message.stopOptions()
+        try await stopWorkloadIfNeeded(workloadID: workloadID, stopOptions: stopOptions)
+        return message.reply()
+    }
+
+    @Sendable
     public func removeWorkload(_ message: XPCMessage) async throws -> XPCMessage {
         let workloadID = try message.id()
         try await removeWorkloadIfNeeded(workloadID: workloadID)
@@ -480,6 +488,39 @@ extension MacOSSandboxService {
         discardWorkloadSession(workloadID: workloadID)
         workloads.removeValue(forKey: workloadID)
         try removeWorkloadStateDirectoryIfPresent(workloadID: workloadID)
+    }
+
+    private func stopWorkloadIfNeeded(workloadID: String, stopOptions: ContainerStopOptions) async throws {
+        guard let containerConfiguration = configuration else {
+            throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        guard workloadID != containerConfiguration.id else {
+            throw ContainerizationError(.invalidArgument, message: "cannot stop the init workload \(workloadID); use StopSandbox")
+        }
+        guard sandboxState == .booted || sandboxState == .running else {
+            throw ContainerizationError(.invalidState, message: "sandbox not started")
+        }
+        guard let record = workloads[workloadID] else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        guard isWorkloadRunning(record) else {
+            return
+        }
+
+        writeContainerLog(
+            Data(
+                ("stopWorkload requested id=\(workloadID) signal=\(stopOptions.signal) timeout=\(stopOptions.timeoutInSeconds)\n").utf8
+            )
+        )
+
+        do {
+            try sendSignalToWorkload(workloadID: workloadID, signal: stopOptions.signal)
+            _ = try await waitForWorkload(workloadID, timeout: stopOptions.timeoutInSeconds)
+        } catch let error as ContainerizationError where error.code == .timeout {
+            writeContainerLog(Data(("stopWorkload timeout for \(workloadID); escalating to SIGKILL\n").utf8))
+            try sendSignalToWorkload(workloadID: workloadID, signal: SIGKILL)
+            _ = try await waitForWorkload(workloadID)
+        }
     }
 
     private func startWorkloadIfNeeded(workloadID: String) async throws {
@@ -2492,6 +2533,10 @@ extension MacOSSandboxService {
 
     func testingRemoveWorkload(_ workloadID: String) async throws {
         try await removeWorkloadIfNeeded(workloadID: workloadID)
+    }
+
+    func testingStopWorkload(_ workloadID: String, options: ContainerStopOptions = .default) async throws {
+        try await stopWorkloadIfNeeded(workloadID: workloadID, stopOptions: options)
     }
 
     func testingStop(_ options: ContainerStopOptions = .default) async throws {

@@ -134,11 +134,18 @@ Builder contract:
 - `ENV`, `USER`, `CMD`, and `ENTRYPOINT` update workload image config
 - `RUN` may use tools from the build sandbox, but only writes under `payloadRoot`
   are committed
+- the first version uses `FROM scratch` for the workload image itself and selects
+  the runtime build environment explicitly with `--build-sandbox-image <sandbox-ref>`
 
 Path rule:
 
 - `COPY . /app` -> `<payloadRoot>/app`
 - `WORKDIR /app` -> `<payloadRoot>/app`
+- `RUN` with `WORKDIR /app` sees `/app` as `<payloadRoot>/app`, so relative writes
+  are captured in the workload image
+- absolute guest-global writes such as `/usr/local/bin/tool`, `/Library/...`, or
+  `/Applications/...` execute in the build sandbox and are not committed into the
+  workload image
 
 ### 4.3 Unsupported workload-build cases
 
@@ -147,6 +154,23 @@ Reject or clearly document:
 - installers that require guest-global writes to be captured as workload payload
 - `pkg`-driven system installs intended to become workload payload
 - whole-guest diff capture
+
+Current first-version rule:
+
+- if the desired result must be captured from whole-guest filesystem mutations,
+  use `sandbox build`
+- if the desired result is a portable payload rooted under `payloadRoot`, use
+  `workload build`
+- commands that only use machine-global tools from the sandbox image are supported
+  as long as their committed outputs land under `payloadRoot`
+
+Examples:
+
+- supported: `RUN python3 -m venv ./venv` with `WORKDIR /app`
+- supported: `RUN /bin/chmod 755 ../bin/hello` after `WORKDIR /workspace`
+- unsupported as workload payload capture: `RUN installer -pkg tool.pkg -target /`
+- unsupported as workload payload capture: `RUN brew install foo` when the intent is
+  to package `/opt/homebrew` into one workload image
 
 ## 5. Globally Available Tools
 

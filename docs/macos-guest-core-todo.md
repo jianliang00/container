@@ -82,7 +82,7 @@ Related design docs:
 
 ### Exit Criteria
 
-- [ ] Two workloads can run reliably inside the same sandbox.
+- [x] Two workloads can run reliably inside the same sandbox.
 - [ ] Stopping a sandbox consistently stops and cleans up all attached workloads.
 - [x] Workload state is queryable independently from sandbox state.
 
@@ -121,7 +121,7 @@ Related design docs:
     only a raw process definition
   - [x] keep `InspectWorkload` stable across restart recovery by rebuilding state from
     persisted workload configuration
-- [ ] Define the workload OCI artifact format on top of standard image primitives.
+- [x] Define the workload OCI artifact format on top of standard image primitives.
   - [x] use ordinary OCI filesystem payload layers for workload contents
   - [x] source default startup metadata from OCI image config:
     - `entrypoint`
@@ -135,51 +135,52 @@ Related design docs:
     - creation timestamp
   - [x] add a dedicated host-side workload packager, for example
     `MacOSWorkloadPackager`, that walks a payload root and emits OCI output
-- [ ] Implement host unpack, guest injection, and cleanup semantics.
+- [x] Implement host unpack, guest injection, and cleanup semantics.
   - [x] unpack workload layers on the host into a cache keyed by workload image digest
   - [x] inject each workload into:
     - `/var/lib/container/workloads/<id>/rootfs`
     - `/var/lib/container/workloads/<id>/meta.json`
   - [x] start workloads from persisted image metadata plus runtime overrides by
     reusing the existing process-start path
-  - [ ] separate cleanup responsibilities:
-    - remove the guest instance directory when one workload is removed
-    - remove all guest workload directories when the sandbox is stopped
-    - keep host unpack cache separate from guest instance lifetime
-  - [ ] cover restart points before and after injection so recovery can determine
+  - [x] separate cleanup responsibilities:
+    - [x] remove the guest instance directory when one workload is removed
+    - [x] remove all guest workload directories when the sandbox is stopped
+    - [x] keep host unpack cache separate from guest instance lifetime
+  - [x] cover restart points before and after injection so recovery can determine
     whether reinjection is needed
 - [ ] Split macOS build into explicit `sandbox build` and `workload build` modes.
-  - [ ] keep the current whole-disk commit flow as `sandbox build`
-  - [ ] add explicit `payloadRoot`, recommended as
+  - [x] keep the current whole-disk commit flow as `sandbox build`
+  - [x] add explicit `payloadRoot`, recommended as
     `/var/lib/container/build/payload`
-  - [ ] route `COPY` and `ADD(local)` into `payloadRoot`
-  - [ ] track `WORKDIR` relative to `payloadRoot`
-  - [ ] persist `ENV`, `USER`, `CMD`, and `ENTRYPOINT` into workload image config
-  - [ ] keep `RUN` executing in the build sandbox so it can use machine-global tools
-  - [ ] narrow `RUN` semantics to "only writes under `payloadRoot` are committed"
-  - [ ] add explicit build-sandbox selection, such as
+  - [x] route `COPY` and `ADD(local)` into `payloadRoot`
+  - [x] track `WORKDIR` relative to `payloadRoot`
+  - [x] persist `ENV`, `USER`, `CMD`, and `ENTRYPOINT` into workload image config
+  - [x] keep `RUN` executing in the build sandbox so it can use machine-global tools
+  - [x] narrow `RUN` semantics to "only writes under `payloadRoot` are committed"
+  - [x] add explicit build-sandbox selection, such as
     `--build-sandbox-image <sandbox-ref>`
   - [ ] reject or clearly document unsupported workload-build cases:
     - guest-global installers whose writes must become workload payload
     - `pkg`-driven system installs captured as workload payload
     - whole-guest diff capture
+  - [x] stabilize the real-guest `RUN` path in workload-build mode
 - [ ] Add focused coverage for the mixed sandbox/workload flow.
-  - [ ] one sandbox image can host multiple workload images
-  - [ ] workload images can be packed, pushed, pulled, validated, unpacked, and injected
+  - [x] one sandbox image can host multiple workload images
+  - [x] workload images can be packed, pushed, pulled, validated, unpacked, and injected
   - [x] workload-start defaults come from OCI config and can be overridden at runtime
-  - [ ] workload builds use machine-global tools from the sandbox image without
+  - [x] workload builds use machine-global tools from the sandbox image without
     copying those tools into the workload image
-  - [ ] workload builds never depend on whole-guest diff detection
+  - [x] workload builds never depend on whole-guest diff detection
 
 ### Exit Criteria
 
 - [x] Runtime rejects sandbox/workload role mismatches before VM boot or payload
   injection begins.
-- [ ] One sandbox image can host multiple workload images with stable injection,
+- [x] One sandbox image can host multiple workload images with stable injection,
   startup, restart recovery, and cleanup.
-- [ ] Workload images can be packed, pushed, pulled, validated, unpacked, and started
+- [x] Workload images can be packed, pushed, pulled, validated, unpacked, and started
   from OCI config defaults plus runtime overrides.
-- [ ] `workload build` commits only `payloadRoot`, while `sandbox build` remains the
+- [x] `workload build` commits only `payloadRoot`, while `sandbox build` remains the
   only path that commits machine-global guest state.
 
 ## 4. P4: Core Control Surface

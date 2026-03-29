@@ -195,6 +195,13 @@ extension MacOSSandboxService {
     }
 
     @Sendable
+    public func removeWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        let workloadID = try message.id()
+        try await removeWorkloadIfNeeded(workloadID: workloadID)
+        return message.reply()
+    }
+
+    @Sendable
     public func createProcess(_ message: XPCMessage) async throws -> XPCMessage {
         try await createWorkload(message)
     }
@@ -236,6 +243,11 @@ extension MacOSSandboxService {
     @Sendable
     public func stop(_ message: XPCMessage) async throws -> XPCMessage {
         let stopOptions = try message.stopOptions()
+        try await stopSandbox(stopOptions: stopOptions)
+        return message.reply()
+    }
+
+    private func stopSandbox(stopOptions: ContainerStopOptions) async throws {
         sandboxState = .stopping
         writeContainerLog(Data(("stop requested signal=\(stopOptions.signal) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
 
@@ -269,7 +281,6 @@ extension MacOSSandboxService {
         closeAllSessions()
         writeContainerLog(Data(("stop: sessions closed\n").utf8))
         sandboxState = .stopped(0)
-        return message.reply()
     }
 
     @Sendable
@@ -368,7 +379,9 @@ extension MacOSSandboxService {
     private func prepareSandboxIfNeeded() async throws -> ContainerConfiguration {
         if let configuration {
             try restorePersistedWorkloadsIfNeeded(containerConfig: configuration)
-            try resetImageBackedWorkloadsForColdBootIfNeeded()
+            if shouldResetImageBackedWorkloadsForRecovery() {
+                try resetImageBackedWorkloadsForColdBootIfNeeded()
+            }
             return configuration
         }
 
@@ -376,7 +389,9 @@ extension MacOSSandboxService {
         self.configuration = config
         try persistSandboxMetadata(for: config)
         try restorePersistedWorkloadsIfNeeded(containerConfig: config)
-        try resetImageBackedWorkloadsForColdBootIfNeeded()
+        if shouldResetImageBackedWorkloadsForRecovery() {
+            try resetImageBackedWorkloadsForColdBootIfNeeded()
+        }
         return config
     }
 
@@ -435,6 +450,36 @@ extension MacOSSandboxService {
             try? FileManager.default.removeItem(at: workloadConfigurationPath(for: workloadID))
             throw error
         }
+    }
+
+    private func removeWorkloadIfNeeded(workloadID: String) async throws {
+        guard let containerConfiguration = configuration else {
+            throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        guard workloadID != containerConfiguration.id else {
+            throw ContainerizationError(.invalidArgument, message: "cannot remove the init workload \(workloadID)")
+        }
+        guard let record = workloads[workloadID] else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        guard !isWorkloadRunning(record) else {
+            throw ContainerizationError(.invalidState, message: "cannot remove running workload \(workloadID)")
+        }
+
+        if record.configuration.isImageBacked, sandboxState == .booted || sandboxState == .running {
+            try await cleanupGuestWorkloadInstance(workloadID: workloadID, containerConfig: containerConfiguration)
+        }
+
+        if let sessionID = record.sessionID {
+            resumeWaiters(
+                for: sessionID,
+                fallbackStatus: record.exitStatus ?? sessions[sessionID]?.exitStatus ?? ExitStatus(exitCode: 255, exitedAt: Date()),
+                reason: "workload_removed"
+            )
+        }
+        discardWorkloadSession(workloadID: workloadID)
+        workloads.removeValue(forKey: workloadID)
+        try removeWorkloadStateDirectoryIfPresent(workloadID: workloadID)
     }
 
     private func startWorkloadIfNeeded(workloadID: String) async throws {
@@ -697,6 +742,13 @@ extension MacOSSandboxService {
             updated.injectionState = .pending
             try updateWorkloadConfiguration(updated)
         }
+    }
+
+    private func shouldResetImageBackedWorkloadsForRecovery() -> Bool {
+        if case .created = sandboxState {
+            return true
+        }
+        return false
     }
 
     private func resolveCreatedWorkloadConfiguration(_ configuration: WorkloadConfiguration) async throws -> WorkloadConfiguration {
@@ -1647,6 +1699,16 @@ extension MacOSSandboxService {
         workloads.values.filter { $0.startedAt != nil && $0.exitStatus == nil }.count
     }
 
+    private func isWorkloadRunning(_ record: WorkloadRecord) -> Bool {
+        guard record.exitStatus == nil else {
+            return false
+        }
+        if let sessionID = record.sessionID, let session = sessions[sessionID] {
+            return session.started && session.exitStatus == nil
+        }
+        return record.startedAt != nil
+    }
+
     private func makeWorkloadRecord(configuration: WorkloadConfiguration) -> WorkloadRecord {
         WorkloadRecord(
             id: configuration.id,
@@ -1747,6 +1809,14 @@ extension MacOSSandboxService {
             updated.sessionID = nil
             workloads[workloadID] = updated
         }
+    }
+
+    private func removeWorkloadStateDirectoryIfPresent(workloadID: String) throws {
+        let directoryURL = workloadDirectory(for: workloadID)
+        guard FileManager.default.fileExists(atPath: directoryURL.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: directoryURL)
     }
 
     func makeSession(
@@ -2396,6 +2466,9 @@ extension MacOSSandboxService {
         }
         try persistSandboxMetadata(for: configuration)
         try restorePersistedWorkloadsIfNeeded(containerConfig: configuration)
+        if shouldResetImageBackedWorkloadsForRecovery() {
+            try resetImageBackedWorkloadsForColdBootIfNeeded()
+        }
     }
 
     func testingInstallSidecarClient(socketPath: String, launchLabel: String = "testing-sidecar") {
@@ -2415,6 +2488,14 @@ extension MacOSSandboxService {
 
     func testingStartWorkload(_ workloadID: String) async throws {
         try await startWorkloadIfNeeded(workloadID: workloadID)
+    }
+
+    func testingRemoveWorkload(_ workloadID: String) async throws {
+        try await removeWorkloadIfNeeded(workloadID: workloadID)
+    }
+
+    func testingStop(_ options: ContainerStopOptions = .default) async throws {
+        try await stopSandbox(stopOptions: options)
     }
 
     func testingWorkloadConfiguration(_ workloadID: String) -> WorkloadConfiguration? {

@@ -348,6 +348,58 @@ struct MacOSSandboxServiceWaiterTests {
     }
 
     @Test
+    func coldBootRecoveryResetsInjectedImageBackedWorkloadToPending() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        let persistedConfig = WorkloadConfiguration(
+            id: "exec-image-cold-boot",
+            processConfiguration: baseProcessConfiguration(),
+            workloadImageReference: "registry.local/example/workload:latest",
+            workloadImageDigest: "sha256:workload",
+            guestPayloadPath: "/var/lib/container/workloads/exec-image-cold-boot/rootfs",
+            guestMetadataPath: "/var/lib/container/workloads/exec-image-cold-boot/meta.json",
+            injectionState: .injected
+        )
+
+        try await service.testingPersistWorkloadConfiguration(persistedConfig)
+        try await service.testingPrepareSandbox(try baseContainerConfiguration(), state: "created")
+
+        let snapshot = try await service.testingInspectWorkload("exec-image-cold-boot")
+
+        #expect(snapshot.configuration.guestPayloadPath == persistedConfig.guestPayloadPath)
+        #expect(snapshot.configuration.guestMetadataPath == persistedConfig.guestMetadataPath)
+        #expect(snapshot.configuration.injectionState == .pending)
+    }
+
+    @Test
+    func warmRecoveryKeepsInjectedImageBackedWorkloadInjected() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        let persistedConfig = WorkloadConfiguration(
+            id: "exec-image-warm-recovery",
+            processConfiguration: baseProcessConfiguration(),
+            workloadImageReference: "registry.local/example/workload:latest",
+            workloadImageDigest: "sha256:workload",
+            guestPayloadPath: "/var/lib/container/workloads/exec-image-warm-recovery/rootfs",
+            guestMetadataPath: "/var/lib/container/workloads/exec-image-warm-recovery/meta.json",
+            injectionState: .injected
+        )
+
+        try await service.testingPersistWorkloadConfiguration(persistedConfig)
+        try await service.testingPrepareSandbox(try baseContainerConfiguration(), state: "running")
+
+        let snapshot = try await service.testingInspectWorkload("exec-image-warm-recovery")
+
+        #expect(snapshot.configuration.guestPayloadPath == persistedConfig.guestPayloadPath)
+        #expect(snapshot.configuration.guestMetadataPath == persistedConfig.guestMetadataPath)
+        #expect(snapshot.configuration.injectionState == .injected)
+    }
+
+    @Test
     func persistingImageBackedWorkloadFillsDefaultGuestPathsAndPendingInjection() async throws {
         let tempRoot = makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }

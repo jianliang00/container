@@ -186,11 +186,109 @@ struct MacOSBuildEngineTests {
             config: .init(user: "root", env: nil, entrypoint: nil, cmd: nil, workingDir: "/", labels: nil, stopSignal: nil),
             rootfs: .init(type: "layers", diffIDs: [])
         )
-        var state = MacOSBuildEngine.StageState(baseConfig: base, initialBuildArguments: [:])
-        state.user = "nobody"
+        var state = MacOSBuildEngine.StageState(
+            imageBaseConfig: base,
+            runBaseConfig: base,
+            buildMode: .sandbox,
+            payloadRoot: nil,
+            initialBuildArguments: [:]
+        )
+        state.imageUser = "nobody"
 
         let final = state.finalImage(labelOverrides: [:])
         #expect(final.config?.user == "nobody")
+    }
+
+    @Test
+    func workloadStageStateMapsGuestPathsUnderPayloadRootWithoutLeakingImageMetadata() throws {
+        let sandboxBase = ContainerizationOCI.Image(
+            architecture: "arm64",
+            os: "darwin",
+            config: .init(
+                user: "root",
+                env: ["PATH=/usr/bin:/bin", "HOME=/var/root"],
+                entrypoint: nil,
+                cmd: nil,
+                workingDir: "/tmp",
+                labels: nil,
+                stopSignal: nil
+            ),
+            rootfs: .init(type: "layers", diffIDs: [])
+        )
+        let workloadBase = ContainerizationOCI.Image(
+            architecture: "arm64",
+            os: "darwin",
+            config: .init(
+                user: nil,
+                env: nil,
+                entrypoint: nil,
+                cmd: nil,
+                workingDir: "/",
+                labels: nil,
+                stopSignal: nil
+            ),
+            rootfs: .init(type: "layers", diffIDs: [])
+        )
+
+        var state = MacOSBuildEngine.StageState(
+            imageBaseConfig: workloadBase,
+            runBaseConfig: sandboxBase,
+            buildMode: .workload,
+            payloadRoot: MacOSBuildEngine.workloadPayloadRoot,
+            initialBuildArguments: [:]
+        )
+
+        #expect(state.variables["PATH"] == "/usr/bin:/bin")
+        #expect(state.imageWorkingDirectory == "/")
+        #expect(state.runWorkingDirectory == MacOSBuildEngine.workloadPayloadRoot)
+
+        state.imageWorkingDirectory = "/app"
+        state.runWorkingDirectory = "\(MacOSBuildEngine.workloadPayloadRoot)/app"
+        #expect(state.resolvedImagePath(for: "bin/tool") == "/app/bin/tool")
+        #expect(state.resolvedGuestPath(for: "bin/tool") == "\(MacOSBuildEngine.workloadPayloadRoot)/app/bin/tool")
+
+        let final = state.finalImage(labelOverrides: [:])
+        #expect(final.config?.env == nil)
+        #expect(final.config?.workingDir == "/app")
+        #expect(final.config?.user == nil)
+    }
+
+    @Test
+    func workloadPlannerRequiresSingleFromScratchStage() throws {
+        let dockerfile = Data(
+            """
+            FROM registry.local/macos-base:latest
+            RUN sw_vers
+            """.utf8
+        )
+
+        expectError(containing: "macOS workload builds require FROM scratch") {
+            _ = try MacOSBuildEngine.Planner(
+                dockerfile: dockerfile,
+                buildArgs: [:],
+                target: "",
+                buildMode: .workload
+            ).makePlan()
+        }
+    }
+
+    @Test
+    func workloadPlannerRejectsCopyFromStage() throws {
+        let dockerfile = Data(
+            """
+            FROM scratch AS build
+            COPY --from=build /app/file.txt /app/file.txt
+            """.utf8
+        )
+
+        expectError(containing: "macOS workload builds do not support COPY --from") {
+            _ = try MacOSBuildEngine.Planner(
+                dockerfile: dockerfile,
+                buildArgs: [:],
+                target: "",
+                buildMode: .workload
+            ).makePlan()
+        }
     }
 
     @Test
@@ -248,6 +346,43 @@ struct MacOSBuildEngineTests {
         #expect(configuration.platform == MacOSBuildEngine.buildPlatform)
         #expect(configuration.macosGuest?.networkBackend == .virtualizationNAT)
         #expect(configuration.macosGuest?.guiEnabled == false)
+        #expect(configuration.mounts.isEmpty)
+    }
+
+    @Test
+    func workloadStageBuildContainerMountsHostPayloadDirectory() throws {
+        let process = ProcessConfiguration(
+            executable: "/usr/bin/tail",
+            arguments: ["-f", "/dev/null"],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+        let image = ImageDescription(
+            reference: "local/macos-base:latest",
+            descriptor: .init(
+                mediaType: "application/vnd.oci.image.index.v1+json",
+                digest: "sha256:test",
+                size: 1
+            )
+        )
+        let hostPayloadRoot = URL(fileURLWithPath: "/tmp/macos-build-payload")
+
+        let configuration = try MacOSBuildEngine.StageRuntime.makeStageContainerConfiguration(
+            containerID: "macos-build-stage-workload",
+            baseImage: image,
+            initProcess: process,
+            cpus: 4,
+            memory: "8g",
+            hostPayloadRoot: hostPayloadRoot
+        )
+
+        #expect(configuration.mounts.count == 1)
+        #expect(configuration.mounts[0].type == .virtiofs)
+        #expect(configuration.mounts[0].source == hostPayloadRoot.path)
+        #expect(configuration.mounts[0].destination == MacOSBuildEngine.workloadPayloadRoot)
+        #expect(configuration.mounts[0].options.isEmpty)
     }
 
     @Test

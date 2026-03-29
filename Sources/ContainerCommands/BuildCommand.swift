@@ -28,6 +28,8 @@ import Foundation
 import NIO
 import TerminalProgress
 
+extension MacOSBuildMode: ExpressibleByArgument {}
+
 extension Application {
     public struct BuildCommand: AsyncLoggableCommand {
         public init() {}
@@ -117,6 +119,12 @@ extension Application {
         @Option(name: .long, help: ArgumentHelp("Progress type (format: auto|plain|tty)", valueName: "type"))
         var progress: ProgressType = .auto
 
+        @Option(name: .customLong("macos-build-mode"), help: ArgumentHelp("macOS build mode (sandbox|workload)", valueName: "mode"))
+        var macOSBuildMode: MacOSBuildMode = .sandbox
+
+        @Option(name: .customLong("build-sandbox-image"), help: ArgumentHelp("Sandbox image to use as the build environment for macOS workload builds", valueName: "reference"))
+        var buildSandboxImage: String?
+
         @Flag(name: .shortAndLong, help: "Suppress build output")
         var quiet: Bool = false
 
@@ -158,6 +166,14 @@ extension Application {
             do {
                 let platforms = try requestedPlatforms()
                 let buildRoute = try Self.buildRoute(for: platforms)
+                if buildRoute == .linux {
+                    if macOSBuildMode == .workload {
+                        throw ValidationError("--macos-build-mode workload is only supported for --platform darwin/arm64")
+                    }
+                    if buildSandboxImage != nil {
+                        throw ValidationError("--build-sandbox-image is only supported for --platform darwin/arm64")
+                    }
+                }
                 let buildFilePath = try resolveBuildFilePath()
                 let buildFileData = try loadBuildFileData(from: buildFilePath)
 
@@ -271,7 +287,7 @@ extension Application {
                                 handler.cancel()
                             }
                         }
-                        group.addTask { [buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log] in
+                        group.addTask { [buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log, macOSBuildMode, buildSandboxImage] in
                             let contextURL = URL(fileURLWithPath: contextDir, relativeTo: .currentDirectory()).absoluteURL
                             let engineInput = MacOSBuildEngine.Input(
                                 appRoot: systemHealth.appRoot,
@@ -285,6 +301,8 @@ extension Application {
                                 noCache: noCache,
                                 pull: pull,
                                 quiet: quiet,
+                                buildMode: macOSBuildMode,
+                                buildSandboxImage: buildSandboxImage,
                                 target: target,
                                 tags: imageNames,
                                 exports: exports,
@@ -296,6 +314,74 @@ extension Application {
                         try await group.next()
                     }
                 }
+
+                let unpackProgressConfig = try ProgressConfig(
+                    description: "Unpacking built image",
+                    itemsName: "entries",
+                    showTasks: exports.count > 1,
+                    totalTasks: exports.count
+                )
+                let unpackProgress = ProgressBar(config: unpackProgressConfig)
+                defer {
+                    unpackProgress.finish()
+                }
+                unpackProgress.start()
+
+                var finalMessage = "Successfully built \(imageNames.joined(separator: ", "))"
+                let taskManager = ProgressTaskCoordinator()
+                let shouldUnpackBuiltImages = !(buildRoute == .macOS && macOSBuildMode == .workload)
+                // Currently, only a single export can be specified.
+                for exp in exports {
+                    unpackProgress.add(tasks: 1)
+                    let unpackTask = await taskManager.startTask()
+                    switch exp.type {
+                    case "oci":
+                        try Task.checkCancellation()
+                        guard let dest = exp.destination else {
+                            throw ContainerizationError(.invalidArgument, message: "dest is required \(exp.rawValue)")
+                        }
+                        let result = try await ClientImage.load(from: dest.absolutePath(), force: false)
+                        guard result.rejectedMembers.isEmpty else {
+                            log.error("archive contains invalid members", metadata: ["paths": "\(result.rejectedMembers)"])
+                            throw ContainerizationError(.internalError, message: "failed to load archive")
+                        }
+                        for image in result.images {
+                            try Task.checkCancellation()
+                            if shouldUnpackBuiltImages {
+                                try await image.unpack(platform: nil, progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: unpackProgress.handler))
+                            }
+
+                            // Tag the unpacked image with all requested tags
+                            for tagName in imageNames {
+                                try Task.checkCancellation()
+                                _ = try await image.tag(new: tagName)
+                            }
+                        }
+                    case "tar":
+                        guard let dest = exp.destination else {
+                            throw ContainerizationError(.invalidArgument, message: "dest is required \(exp.rawValue)")
+                        }
+                        let tarURL = tempURL.appendingPathComponent("out.tar")
+                        try FileManager.default.moveItem(at: tarURL, to: dest)
+                        finalMessage = "Successfully exported to \(dest.absolutePath())"
+                    case "local":
+                        guard let dest = exp.destination else {
+                            throw ContainerizationError(.invalidArgument, message: "dest is required \(exp.rawValue)")
+                        }
+                        let localDir = tempURL.appendingPathComponent("local")
+
+                        guard FileManager.default.fileExists(atPath: localDir.path) else {
+                            throw ContainerizationError(.invalidArgument, message: "expected local output not found")
+                        }
+                        try FileManager.default.copyItem(at: localDir, to: dest)
+                        finalMessage = "Successfully exported to \(dest.absolutePath())"
+                    default:
+                        throw ContainerizationError(.invalidArgument, message: "invalid exporter \(exp.rawValue)")
+                    }
+                }
+                await taskManager.finish()
+                unpackProgress.finish()
+                print(finalMessage)
             } catch {
                 throw NSError(domain: "Build", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(error)"])
             }

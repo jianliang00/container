@@ -323,10 +323,15 @@ Those remain available to advanced consumers through existing lower-level module
 Service lifecycle control should live in a separate top-level type:
 
 ```swift
+public struct ContainerInstallation: Sendable {
+    public let installRoot: URL
+    public let apiServerExecutableURL: URL
+}
+
 public struct ContainerKitServices: Sendable {
     public init(
         appRoot: URL = ApplicationRoot.defaultURL,
-        installRoot: URL = InstallRoot.defaultURL
+        installation: ContainerInstallation
     )
 }
 ```
@@ -357,6 +362,7 @@ Phase 1 of `ContainerKitServices` should support only:
 - verifying health after startup
 - best-effort stop and deregistration
 - launchd registration and health reporting
+- explicit startup of an already-installed runtime
 
 Phase 1 should not attempt:
 
@@ -364,6 +370,7 @@ Phase 1 should not attempt:
 - base image installation
 - interactive confirmation
 - plugin installation workflows
+- helper download, embedding, or auto-install flows
 
 Those tasks are deployment and provisioning concerns and should only be added later if a real embedding use case requires them.
 
@@ -388,6 +395,7 @@ For the optional service layer:
 - `stop()` should reuse the same shutdown approach as `container system stop`
 - plist generation should use `LaunchPlist`
 - launchd registration and deregistration should use `ServiceManager`
+- helper discovery should be explicit through `ContainerInstallation`, not inferred from the embedding app's executable path
 
 This keeps runtime behavior aligned with the CLI without making the library depend on the CLI command implementations.
 
@@ -417,6 +425,8 @@ The supported readiness check is:
 The facade should not try to auto-start or auto-register services. That behavior belongs to installation and operator workflows, not routine SDK calls.
 
 `ContainerKitServices` is the explicit opt-in layer for consumers who do want programmatic startup and shutdown. Even there, startup must be initiated by a direct API call such as `start()` or `ensureRunning()`, never implicitly during `init` or on first client request.
+
+`ContainerKitServices` must also not guess where helper executables live for external SwiftPM consumers. The embedding app, installer, or deployment tooling is responsible for providing that layout through `ContainerInstallation`.
 
 ## 8. Why This Boundary Is Reasonable
 
@@ -463,6 +473,7 @@ Changes:
 
 - add `ContainerKitServices` product and target
 - implement explicit `start`, `stop`, `status`, and `ensureRunning`
+- add `ContainerInstallation` so helper paths are provided explicitly by the embedding app or installer
 - build those APIs directly on reusable launchd/bootstrap code, not on `ArgumentParser` commands
 
 Acceptance criteria:

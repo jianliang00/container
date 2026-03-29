@@ -31,8 +31,13 @@ struct ContainerKitAPITests {
         let _: NetworkConfiguration.Type = NetworkConfiguration.self
         let _: NetworkState.Type = NetworkState.self
         let _: ProcessConfiguration.Type = ProcessConfiguration.self
+        let _: SandboxConfiguration.Type = SandboxConfiguration.self
+        let _: SandboxLogPaths.Type = SandboxLogPaths.self
+        let _: SandboxSnapshot.Type = SandboxSnapshot.self
         let _: SystemHealth.Type = SystemHealth.self
         let _: Volume.Type = Volume.self
+        let _: WorkloadConfiguration.Type = WorkloadConfiguration.self
+        let _: WorkloadSnapshot.Type = WorkloadSnapshot.self
 
         #expect(Bool(true))
     }
@@ -56,14 +61,47 @@ struct ContainerKitAPITests {
         let _: (ContainerConfiguration, ContainerCreateOptions) async throws -> Void = { configuration, options in
             try await kit.createContainer(configuration: configuration, options: options)
         }
+        let _: (ContainerConfiguration, ContainerCreateOptions) async throws -> Void = { configuration, options in
+            try await kit.createSandbox(configuration: configuration, options: options)
+        }
+        let _: (String) async throws -> Void = { id in
+            try await kit.startSandbox(id: id)
+        }
+        let _: (String) async throws -> SandboxSnapshot = { id in
+            try await kit.inspectSandbox(id: id)
+        }
         let _: (String, ContainerStopOptions) async throws -> Void = { id, options in
             try await kit.stopContainer(id: id, options: options)
+        }
+        let _: (String, ContainerStopOptions) async throws -> Void = { id, options in
+            try await kit.stopSandbox(id: id, options: options)
         }
         let _: (String, Bool) async throws -> Void = { id, force in
             try await kit.deleteContainer(id: id, force: force)
         }
+        let _: (String, Bool) async throws -> Void = { id, force in
+            try await kit.removeSandbox(id: id, force: force)
+        }
         let _: (String) async throws -> UInt64 = { id in
             try await kit.containerDiskUsage(id: id)
+        }
+        let _: (String, WorkloadConfiguration) async throws -> Void = { sandboxID, configuration in
+            try await kit.createWorkload(sandboxID: sandboxID, configuration: configuration)
+        }
+        let _: (String, String) async throws -> Void = { sandboxID, workloadID in
+            try await kit.startWorkload(sandboxID: sandboxID, workloadID: workloadID)
+        }
+        let _: (String, String, ContainerStopOptions) async throws -> Void = { sandboxID, workloadID, options in
+            try await kit.stopWorkload(sandboxID: sandboxID, workloadID: workloadID, options: options)
+        }
+        let _: (String, String) async throws -> Void = { sandboxID, workloadID in
+            try await kit.removeWorkload(sandboxID: sandboxID, workloadID: workloadID)
+        }
+        let _: (String, String) async throws -> WorkloadSnapshot = { sandboxID, workloadID in
+            try await kit.inspectWorkload(sandboxID: sandboxID, workloadID: workloadID)
+        }
+        let _: (String) async throws -> SandboxLogPaths = { id in
+            try await kit.sandboxLogPaths(id: id)
         }
         let _: () async throws -> [Image] = {
             try await kit.listImages()
@@ -113,4 +151,3 @@ struct ContainerKitAPITests {
         #expect(Bool(true))
     }
 }
-

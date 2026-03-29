@@ -188,27 +188,27 @@ Related design docs:
 ### TODO
 
 - [ ] Publish the runtime control API.
-  - `CreateSandbox`
-  - `StartSandbox`
-  - `StopSandbox`
-  - `RemoveSandbox`
-  - `CreateWorkload`
-  - `StartWorkload`
-  - `StopWorkload`
-  - `RemoveWorkload`
-  - `InspectSandbox`
-  - `InspectWorkload`
-  - `ExecSync`
-  - `StreamExec`
-  - `StreamAttach`
-  - `StreamPortForward`
-- [ ] Make inspect operations return stable snapshots.
-- [ ] Publish logging and event interfaces.
+  - [x] `CreateSandbox`
+  - [x] `StartSandbox`
+  - [x] `StopSandbox`
+  - [x] `RemoveSandbox`
+  - [x] `CreateWorkload`
+  - [x] `StartWorkload`
+  - [x] `StopWorkload`
+  - [x] `RemoveWorkload`
+  - [x] `InspectSandbox`
+  - [x] `InspectWorkload`
+  - [ ] `ExecSync`
+  - [ ] `StreamExec`
+  - [ ] `StreamAttach`
+  - [ ] `StreamPortForward`
+- [x] Make inspect operations return stable snapshots.
+- [x] Publish logging and event interfaces.
   - per-workload stdout and stderr
   - sandbox event log
   - log path or log-reading APIs
 - [ ] Implement `PortForward` over the sidecar or vsock path.
-- [ ] Keep CLI parsing, on-disk layout, and sidecar protocol details out of the control API.
+- [x] Keep CLI parsing, on-disk layout, and sidecar protocol details out of the control API.
 - [ ] Add state transition, idempotency, recovery, and error propagation tests.
 
 ### Exit Criteria

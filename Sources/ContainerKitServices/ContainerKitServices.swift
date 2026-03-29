@@ -48,15 +48,27 @@ public struct ContainerKitServices: Sendable {
 
     let appRoot: URL
     let installation: ContainerInstallation
-    let kit: ContainerKit
+    let dependencies: ContainerKitServicesDependencies
 
     public init(
         appRoot: URL = ApplicationRoot.defaultURL,
         installation: ContainerInstallation
     ) {
+        self.init(
+            appRoot: appRoot,
+            installation: installation,
+            dependencies: .live()
+        )
+    }
+
+    init(
+        appRoot: URL = ApplicationRoot.defaultURL,
+        installation: ContainerInstallation,
+        dependencies: ContainerKitServicesDependencies
+    ) {
         self.appRoot = appRoot
         self.installation = installation
-        self.kit = ContainerKit()
+        self.dependencies = dependencies
     }
 }
 

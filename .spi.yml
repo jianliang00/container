@@ -5,9 +5,10 @@ builder:
       documentation_targets:
         - ContainerAPIService
         - ContainerAPIClient
-        - ContainerRuntimeClient
-        - ContainerRuntimeLinuxClient
-        - ContainerRuntimeLinuxServer
+        - ContainerKit
+        - ContainerKitServices
+        - ContainerSandboxService
+        - ContainerSandboxServiceClient
         - ContainerNetworkService
         - ContainerNetworkServiceClient
         - ContainerImagesService

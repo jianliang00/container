@@ -126,8 +126,10 @@ into an executable checklist. It assumes the current tree does not yet contain
       - `Sources/ContainerKitServices/ContainerKitServices+Status.swift`
 - [ ] Add the root type:
       `public struct ContainerKitServices: Sendable`
+- [ ] Add the explicit installation description:
+      `public struct ContainerInstallation { let installRoot: URL; let apiServerExecutableURL: URL }`
 - [ ] Add the initializer:
-      `init(appRoot: URL = ApplicationRoot.defaultURL, installRoot: URL = InstallRoot.defaultURL)`
+      `init(appRoot: URL = ApplicationRoot.defaultURL, installation: ContainerInstallation)`
 - [ ] Add the public `ServiceStatus` value type:
       - `isRegistered: Bool`
       - `health: SystemHealth?`
@@ -136,7 +138,8 @@ into an executable checklist. It assumes the current tree does not yet contain
 
 - [ ] Implement `start(timeout:)` without calling `ArgumentParser` command
       implementations.
-- [ ] Resolve the `container-apiserver` executable path in library code.
+- [ ] Do not infer the `container-apiserver` executable path from the
+      embedding app. Require it through `ContainerInstallation`.
 - [ ] Build the launchd environment with `ApplicationRoot` and `InstallRoot`.
 - [ ] Generate the plist with `LaunchPlist`.
 - [ ] Write the plist into the app root service directory
@@ -180,6 +183,8 @@ into an executable checklist. It assumes the current tree does not yet contain
 - [ ] Service lifecycle remains explicit and opt-in.
 - [ ] `ContainerKitServices` can start, stop, check, and ensure API service
       readiness without importing CLI command types.
+- [ ] `ContainerKitServices` requires explicit helper installation inputs
+      instead of assuming CLI-style colocated binaries.
 - [ ] Phase 1 exclusions remain out of scope:
       kernel installation, base image installation, plugin installation, and
       interactive confirmation.

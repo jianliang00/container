@@ -33,6 +33,8 @@ let package = Package(
         .library(name: "ContainerBuild", targets: ["ContainerBuild"]),
         .library(name: "ContainerAPIService", targets: ["ContainerAPIService"]),
         .library(name: "ContainerAPIClient", targets: ["ContainerAPIClient"]),
+        .library(name: "ContainerKit", targets: ["ContainerKit"]),
+        .library(name: "ContainerKitServices", targets: ["ContainerKitServices"]),
         .library(name: "ContainerImagesService", targets: ["ContainerImagesService", "ContainerImagesServiceClient"]),
         .library(name: "ContainerNetworkService", targets: ["ContainerNetworkService", "ContainerNetworkServiceClient"]),
         .library(name: "ContainerSandboxService", targets: ["ContainerSandboxService", "ContainerSandboxServiceClient"]),
@@ -210,6 +212,13 @@ let package = Package(
             ],
             path: "Sources/Services/ContainerAPIService/Client"
         ),
+        .target(
+            name: "ContainerKit",
+            dependencies: [
+                "ContainerAPIClient",
+                "ContainerResource",
+            ]
+        ),
         .testTarget(
             name: "ContainerAPIClientTests",
             dependencies: [
@@ -217,6 +226,12 @@ let package = Package(
                 "ContainerAPIClient",
                 "ContainerResource",
                 "ContainerPersistence",
+            ]
+        ),
+        .testTarget(
+            name: "ContainerKitTests",
+            dependencies: [
+                "ContainerKit",
             ]
         ),
         .executableTarget(
@@ -486,10 +501,23 @@ let package = Package(
                 "ContainerVersion",
             ]
         ),
+        .target(
+            name: "ContainerKitServices",
+            dependencies: [
+                "ContainerKit",
+                "ContainerPlugin",
+            ]
+        ),
         .testTarget(
             name: "ContainerPluginTests",
             dependencies: [
                 "ContainerPlugin"
+            ]
+        ),
+        .testTarget(
+            name: "ContainerKitServicesTests",
+            dependencies: [
+                "ContainerKitServices",
             ]
         ),
         .testTarget(

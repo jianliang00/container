@@ -18,6 +18,7 @@
 import ContainerResource
 import Containerization
 import ContainerizationError
+import Darwin
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
@@ -130,6 +131,86 @@ struct MacOSSandboxServiceWaiterTests {
 
         #expect(snapshots.map(\.id) == ["visible-workload"])
         #expect(await service.testingVisibleSessionCount() == 1)
+    }
+
+    @Test
+    func createProcessKeepsExecSessionsOutOfPersistedWorkloadState() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(baseContainerConfiguration())
+
+        let processID = "exec-hidden"
+        try await service.testingCreateProcess(
+            processID,
+            config: makeProcessConfiguration(executable: "/usr/bin/id", arguments: ["-u"])
+        )
+
+        let layout = MacOSSandboxLayout(root: tempRoot)
+        let snapshotIDs = (await service.testingWorkloadSnapshots()).map(\.id)
+        #expect(!FileManager.default.fileExists(atPath: layout.workloadConfigurationURL(id: processID).path))
+        #expect(!snapshotIDs.contains(processID))
+
+        do {
+            _ = try await service.testingInspectWorkload(processID)
+            Issue.record("expected hidden exec session to stay out of workload inspect")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .notFound)
+        }
+    }
+
+    @Test
+    func processHandlersUseExternalProcessIdentifiersWithoutCreatingWorkloads() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(baseContainerConfiguration())
+
+        let socketPath = tempRoot.appendingPathComponent("exec-sidecar.sock").path
+        let server = try RecordingExecSidecarServer(
+            socketPath: socketPath,
+            exitOnSignalProcessIDs: ["exec-live"]
+        )
+        defer { server.stop() }
+        server.start()
+
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let processID = "exec-live"
+        try await service.testingCreateProcess(
+            processID,
+            config: makeProcessConfiguration(executable: "/bin/sleep", arguments: ["5"])
+        )
+        try await service.testingStartProcess(processID)
+        try await service.testingResizeExternalProcess(processID, width: 120, height: 40)
+        try await service.testingSignalExternalProcess(processID, signal: SIGTERM)
+
+        let status = try await service.testingWaitExternalProcess(processID)
+
+        server.stop()
+        try server.waitForCompletion()
+
+        #expect(status.exitCode == 0)
+        let processStillExists = await service.testingExternalProcessExists(processID)
+        #expect(!processStillExists)
+
+        let requests = server.recordedRequests()
+        let sawStart = requests.contains { $0.method == .processStart && $0.processID == processID }
+        let sawResize = requests.contains {
+            $0.method == .processResize && $0.processID == processID && $0.width == 120 && $0.height == 40
+        }
+        let sawSignal = requests.contains {
+            $0.method == .processSignal && $0.processID == processID && $0.signal == SIGTERM
+        }
+        let sawInternalWorkloadID = requests.contains { $0.processID == "__workload__\(processID)" }
+        #expect(sawStart)
+        #expect(sawResize)
+        #expect(sawSignal)
+        #expect(!sawInternalWorkloadID)
+        let snapshotIDs = (await service.testingWorkloadSnapshots()).map(\.id)
+        #expect(!snapshotIDs.contains(processID))
     }
 
     @Test
@@ -536,6 +617,172 @@ private func baseContainerConfiguration() throws -> ContainerConfiguration {
     configuration.runtimeHandler = "container-runtime-macos"
     configuration.platform = .init(arch: "arm64", os: "darwin")
     return configuration
+}
+
+private final class RecordingExecSidecarServer: @unchecked Sendable {
+    private let socketPath: String
+    private let exitOnSignalProcessIDs: Set<String>
+    private let requests = LockedBox<[MacOSSidecarRequest]>([])
+    private let errorBox = LockedBox<Error?>(nil)
+    private let done = DispatchSemaphore(value: 0)
+    private let listenFD = LockedBox<Int32?>(nil)
+    private let clientFD = LockedBox<Int32?>(nil)
+
+    init(socketPath: String, exitOnSignalProcessIDs: Set<String> = []) throws {
+        self.socketPath = socketPath
+        self.exitOnSignalProcessIDs = exitOnSignalProcessIDs
+        let listeningFD = try makeUnixListener(path: socketPath)
+        self.listenFD.withLock { $0 = listeningFD }
+    }
+
+    func start() {
+        Thread.detachNewThread { [self] in
+            defer { done.signal() }
+            do {
+                guard let listeningFD = listenFD.withLock({ $0 }) else {
+                    return
+                }
+                let accepted = Darwin.accept(listeningFD, nil, nil)
+                guard accepted >= 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                clientFD.withLock { $0 = accepted }
+                defer {
+                    clientFD.withLock { fd in
+                        if fd == accepted {
+                            fd = nil
+                        }
+                    }
+                    Darwin.close(accepted)
+                }
+
+                while true {
+                    let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: accepted)
+                    guard envelope.kind == .request, let request = envelope.request else {
+                        continue
+                    }
+                    requests.withLock { $0.append(request) }
+
+                    try writeResponse(.success(requestID: request.requestID), to: accepted)
+                    if request.method == .processSignal,
+                        let processID = request.processID,
+                        exitOnSignalProcessIDs.contains(processID)
+                    {
+                        try writeEvent(.init(event: .processExit, processID: processID, exitCode: 0), to: accepted)
+                    }
+                }
+            } catch {
+                let nsError = error as NSError
+                if nsError.domain == NSPOSIXErrorDomain && (nsError.code == Int(ECONNABORTED) || nsError.code == Int(EBADF)) {
+                    return
+                }
+                if nsError.localizedDescription.contains("unexpected EOF") {
+                    return
+                }
+                errorBox.withLock { $0 = error }
+            }
+        }
+    }
+
+    func stop() {
+        let listeningFD = listenFD.withLock { fd -> Int32? in
+            let current = fd
+            fd = nil
+            return current
+        }
+        clientFD.withLock { fd in
+            if let fd, fd >= 0 {
+                _ = Darwin.shutdown(fd, SHUT_RDWR)
+                Darwin.close(fd)
+            }
+            fd = nil
+        }
+        if let listeningFD {
+            _ = Darwin.shutdown(listeningFD, SHUT_RDWR)
+            Darwin.close(listeningFD)
+        }
+        _ = unlink(socketPath)
+    }
+
+    func waitForCompletion(timeout: TimeInterval = 2.0) throws {
+        guard done.wait(timeout: .now() + timeout) == .success else {
+            throw POSIXError(.ETIMEDOUT)
+        }
+        if let error = errorBox.withLock({ $0 }) {
+            throw error
+        }
+    }
+
+    func recordedRequests() -> [MacOSSidecarRequest] {
+        requests.withLock { $0 }
+    }
+}
+
+private final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+
+    init(_ value: T) {
+        self.value = value
+    }
+
+    func withLock<R>(_ body: (inout T) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
+    }
+}
+
+private func makeUnixListener(path: String) throws -> Int32 {
+    let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    let parent = URL(fileURLWithPath: path).deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+    _ = unlink(path)
+
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let maxLength = MemoryLayout.size(ofValue: addr.sun_path)
+    let utf8 = Array(path.utf8)
+    guard utf8.count < maxLength else {
+        Darwin.close(fd)
+        throw POSIXError(.ENAMETOOLONG)
+    }
+    withUnsafeMutableBytes(of: &addr.sun_path) { buffer in
+        buffer.initializeMemory(as: CChar.self, repeating: 0)
+        for (index, byte) in utf8.enumerated() {
+            buffer[index] = byte
+        }
+    }
+
+    let addrLen = socklen_t(MemoryLayout<sa_family_t>.size + utf8.count + 1)
+    let bindResult = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { pointer in
+            Darwin.bind(fd, pointer, addrLen)
+        }
+    }
+    guard bindResult == 0 else {
+        let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        Darwin.close(fd)
+        throw error
+    }
+    guard Darwin.listen(fd, 8) == 0 else {
+        let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        Darwin.close(fd)
+        throw error
+    }
+    return fd
+}
+
+private func writeResponse(_ response: MacOSSidecarResponse, to fd: Int32) throws {
+    try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.response(response), fd: fd)
+}
+
+private func writeEvent(_ event: MacOSSidecarEvent, to fd: Int32) throws {
+    try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.event(event), fd: fd)
 }
 
 private func waitUntilWaiterRegistered(

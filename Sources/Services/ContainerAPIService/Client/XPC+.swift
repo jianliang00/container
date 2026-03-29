@@ -67,6 +67,8 @@ public enum XPCKeys: String {
     /// Process request keys.
     case signal
     case snapshot
+    case workloadConfig
+    case workloadSnapshot
     case stdin
     case stdout
     case stderr
@@ -74,6 +76,7 @@ public enum XPCKeys: String {
     case width
     case height
     case processConfig
+    case sandboxLogPaths
 
     /// Update progress
     case progressUpdateEndpoint
@@ -136,18 +139,25 @@ public enum XPCRoute: String {
     case containerCreate
     case containerBootstrap
     case containerCreateProcess
+    case containerCreateWorkload
     case containerStartProcess
+    case containerStartSandbox
+    case containerStartWorkload
     case containerWait
     case containerDelete
     case containerStop
+    case containerStopWorkload
     case containerDial
     case containerResize
     case containerKill
     case containerState
+    case containerInspectWorkload
     case containerLogs
+    case containerSandboxLogPaths
     case containerEvent
     case containerStats
     case containerDiskUsage
+    case containerRemoveWorkload
 
     case pluginLoad
     case pluginGet

@@ -39,6 +39,7 @@ public actor ContainersService {
     struct ContainerState {
         var snapshot: ContainerSnapshot
         var client: SandboxClient?
+        var sandboxStartTask: Task<SandboxClient, Error>?
         var bootstrapTask: Task<SandboxClient, Error>?
         var processStartTasks: [String: Task<StartProcessResult, Error>] = [:]
 
@@ -341,34 +342,45 @@ public actor ContainersService {
     public func bootstrap(id: String, stdio: [FileHandle?]) async throws {
         self.log.debug("\(#function)")
 
-        let (task, config) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration) in
+        let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
             var state = try await self.getContainerState(id: id, context: context)
-
-            // We've already bootstrapped this container. Ideally we should be able to
-            // return some sort of error code from the sandbox svc to check here, but this
-            // is also a very simple check and faster than doing an rpc to get the same result.
-            if let client = state.client {
-                return (Task { client }, state.snapshot.configuration)
-            }
 
             let path = self.containerRoot.appendingPathComponent(id)
             let config = try Self.getContainerConfiguration(at: path)
             if let task = state.bootstrapTask {
-                return (task, config)
+                return (task, config, false)
+            }
+            if state.snapshot.configuration.runtimeHandler == Self.macOSRuntimeName,
+                let task = state.sandboxStartTask
+            {
+                let task = Task {
+                    let sandboxClient = try await task.value
+                    try await sandboxClient.startWorkload(id)
+                    return sandboxClient
+                }
+                state.bootstrapTask = task
+                await self.setContainerState(id, state, context: context)
+                return (task, config, false)
             }
 
-            try Self.registerService(
-                plugin: self.runtimePlugins.first { $0.name == config.runtimeHandler }!,
-                loader: self.pluginLoader,
-                configuration: config,
-                path: path
-            )
+            if let client = state.client {
+                if state.snapshot.status == .running {
+                    return (Task { client }, config, false)
+                }
+                let task = Task {
+                    try await client.startWorkload(id)
+                    return client
+                }
+                state.bootstrapTask = task
+                await self.setContainerState(id, state, context: context)
+                return (task, config, false)
+            }
 
-            let runtime = state.snapshot.configuration.runtimeHandler
             let task = Task {
-                let sandboxClient = try await SandboxClient.create(
+                let sandboxClient = try await self.makeSandboxClient(
                     id: id,
-                    runtime: runtime
+                    configuration: config,
+                    existingClient: nil
                 )
                 try await sandboxClient.bootstrap(stdio: stdio)
                 return sandboxClient
@@ -376,7 +388,7 @@ public actor ContainersService {
 
             state.bootstrapTask = task
             await self.setContainerState(id, state, context: context)
-            return (task, config)
+            return (task, config, true)
         }
 
         do {
@@ -387,25 +399,23 @@ public actor ContainersService {
                     try await self.registerContainerExitCallback(id: id)
                     try await self.trackContainerExit(id: id, client: sandboxClient)
                     let sandboxSnapshot = try await sandboxClient.state()
-                    state.snapshot.status = sandboxSnapshot.status
+                    state.snapshot.status = Self.containerRuntimeStatus(from: sandboxSnapshot)
                     state.snapshot.networks = sandboxSnapshot.networks
                     state.snapshot.startedDate =
-                        sandboxSnapshot.status == .running
+                        state.snapshot.status == .running
                         ? (state.snapshot.startedDate ?? Date())
                         : nil
                     state.client = sandboxClient
                 }
+                state.sandboxStartTask = nil
                 state.bootstrapTask = nil
                 await self.setContainerState(id, state, context: context)
             }
         } catch {
-            let label = Self.fullLaunchdServiceLabel(
-                runtimeName: config.runtimeHandler,
-                instanceId: id
-            )
-
-            await self.exitMonitor.stopTracking(id: id)
-            try? ServiceManager.deregister(fullServiceLabel: label)
+            if cleanupOnFailure {
+                await self.exitMonitor.stopTracking(id: id)
+                try? self.deregisterSandboxService(id: id, runtimeName: config.runtimeHandler)
+            }
             try? await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
                 state.bootstrapTask = nil
@@ -414,6 +424,186 @@ public actor ContainersService {
 
             throw error
         }
+    }
+
+    /// Start the sandbox guest without starting any workloads.
+    public func startSandbox(id: String) async throws {
+        self.log.debug("\(#function)")
+
+        let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
+            var state = try await self.getContainerState(id: id, context: context)
+            try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+
+            let path = self.containerRoot.appendingPathComponent(id)
+            let config = try Self.getContainerConfiguration(at: path)
+
+            if let task = state.sandboxStartTask {
+                return (task, config, false)
+            }
+            if let task = state.bootstrapTask {
+                return (task, config, false)
+            }
+
+            let existingClient = state.client
+            let task = Task {
+                let sandboxClient = try await self.makeSandboxClient(
+                    id: id,
+                    configuration: config,
+                    existingClient: existingClient
+                )
+                try await sandboxClient.createSandbox()
+                try await sandboxClient.startSandbox(stdio: [nil, nil, nil])
+                return sandboxClient
+            }
+
+            state.sandboxStartTask = task
+            await self.setContainerState(id, state, context: context)
+            return (task, config, existingClient == nil)
+        }
+
+        do {
+            let sandboxClient = try await task.value
+            let sandboxSnapshot = try await sandboxClient.state()
+            try await self.lock.withLock { context in
+                var state = try await self.getContainerState(id: id, context: context)
+                state.client = sandboxClient
+                state.sandboxStartTask = nil
+                state.snapshot.networks = sandboxSnapshot.networks
+                await self.setContainerState(id, state, context: context)
+            }
+        } catch {
+            if cleanupOnFailure {
+                try? self.deregisterSandboxService(id: id, runtimeName: config.runtimeHandler)
+            }
+            try? await self.lock.withLock { context in
+                var state = try await self.getContainerState(id: id, context: context)
+                state.sandboxStartTask = nil
+                await self.setContainerState(id, state, context: context)
+            }
+            throw error
+        }
+    }
+
+    public func inspectSandbox(id: String) async throws -> SandboxSnapshot {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+
+        if let task = state.bootstrapTask ?? state.sandboxStartTask {
+            let client = try await task.value
+            return try await client.state()
+        }
+        if let client = state.client {
+            return try await client.state()
+        }
+
+        let path = self.containerRoot.appendingPathComponent(id)
+        let configuration = try Self.getContainerConfiguration(at: path)
+        return try Self.makePersistedSandboxSnapshot(
+            root: path,
+            configuration: configuration,
+            containerStatus: state.snapshot.status,
+            containerNetworks: state.snapshot.networks,
+            startedDate: state.snapshot.startedDate
+        )
+    }
+
+    public func createWorkload(
+        id: String,
+        configuration: WorkloadConfiguration,
+        stdio: [FileHandle?]
+    ) async throws {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let client = try state.getClient()
+        try await client.createWorkload(configuration, stdio: stdio)
+    }
+
+    public func startWorkload(id: String, workloadID: String) async throws {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let client = try state.getClient()
+        try await client.startWorkload(workloadID)
+
+        if workloadID == id {
+            let shouldTrackExit = try await self.lock.withLock { context -> Bool in
+                var updated = try await self.getContainerState(id: id, context: context)
+                let shouldTrack = updated.snapshot.status != .running
+                updated.snapshot.status = .running
+                updated.snapshot.startedDate = updated.snapshot.startedDate ?? Date()
+                await self.setContainerState(id, updated, context: context)
+                return shouldTrack
+            }
+            if shouldTrackExit {
+                try await self.registerContainerExitCallback(id: id)
+                try await self.trackContainerExit(id: id, client: client)
+            }
+        }
+    }
+
+    public func stopWorkload(
+        id: String,
+        workloadID: String,
+        options: ContainerStopOptions = .default
+    ) async throws {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let client = try state.getClient()
+        try await client.stopWorkload(workloadID, options: options)
+    }
+
+    public func removeWorkload(id: String, workloadID: String) async throws {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let client = try state.getClient()
+        try await client.removeWorkload(workloadID)
+    }
+
+    public func inspectWorkload(id: String, workloadID: String) async throws -> WorkloadSnapshot {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+
+        if let task = state.bootstrapTask ?? state.sandboxStartTask {
+            let client = try await task.value
+            return try await client.inspectWorkload(workloadID)
+        }
+        if let client = state.client {
+            return try await client.inspectWorkload(workloadID)
+        }
+
+        let path = self.containerRoot.appendingPathComponent(id)
+        let configuration = try Self.getContainerConfiguration(at: path)
+        let sandboxSnapshot = try Self.makePersistedSandboxSnapshot(
+            root: path,
+            configuration: configuration,
+            containerStatus: state.snapshot.status,
+            containerNetworks: state.snapshot.networks,
+            startedDate: state.snapshot.startedDate
+        )
+        guard let snapshot = sandboxSnapshot.workloads.first(where: { $0.id == workloadID }) else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        return snapshot
+    }
+
+    public func sandboxLogPaths(id: String) async throws -> SandboxLogPaths {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let root = self.containerRoot.appendingPathComponent(id)
+        return Self.makeSandboxLogPaths(root: root)
     }
 
     /// Create a new process in the container.
@@ -698,6 +888,8 @@ public actor ContainersService {
         state.snapshot.status = .stopped
         state.snapshot.networks = []
         state.client = nil
+        state.sandboxStartTask = nil
+        state.bootstrapTask = nil
         await self.setContainerState(id, state, context: context)
 
         let options = try getContainerCreationOptions(id: id)
@@ -708,6 +900,139 @@ public actor ContainersService {
 
     private static func fullLaunchdServiceLabel(runtimeName: String, instanceId: String) -> String {
         "\(Self.launchdDomainString)/\(Self.machServicePrefix).\(runtimeName).\(instanceId)"
+    }
+
+    private func makeSandboxClient(
+        id: String,
+        configuration: ContainerConfiguration,
+        existingClient: SandboxClient?
+    ) async throws -> SandboxClient {
+        if let existingClient {
+            return existingClient
+        }
+
+        let path = self.containerRoot.appendingPathComponent(id)
+        guard let plugin = self.runtimePlugins.first(where: { $0.name == configuration.runtimeHandler }) else {
+            throw ContainerizationError(
+                .notFound,
+                message: "unable to locate runtime plugin \(configuration.runtimeHandler)"
+            )
+        }
+
+        let label = Self.fullLaunchdServiceLabel(
+            runtimeName: configuration.runtimeHandler,
+            instanceId: id
+        )
+        if try !ServiceManager.isRegistered(fullServiceLabel: label) {
+            try Self.registerService(
+                plugin: plugin,
+                loader: self.pluginLoader,
+                configuration: configuration,
+                path: path
+            )
+        }
+
+        return try await SandboxClient.create(
+            id: id,
+            runtime: configuration.runtimeHandler
+        )
+    }
+
+    private func deregisterSandboxService(id: String, runtimeName: String) throws {
+        let label = Self.fullLaunchdServiceLabel(
+            runtimeName: runtimeName,
+            instanceId: id
+        )
+        try ServiceManager.deregister(fullServiceLabel: label)
+    }
+
+    private static func requireMacOSGuestControl(configuration: ContainerConfiguration) throws {
+        guard configuration.runtimeHandler == Self.macOSRuntimeName else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "sandbox/workload control APIs are currently only supported for macOS guest sandboxes"
+            )
+        }
+    }
+
+    private static func makePersistedSandboxSnapshot(
+        root: URL,
+        configuration: ContainerConfiguration,
+        containerStatus: RuntimeStatus,
+        containerNetworks: [Attachment],
+        startedDate: Date?
+    ) throws -> SandboxSnapshot {
+        let networks = (try MacOSGuestNetworkLeaseStore.load(from: root))?.attachments ?? containerNetworks
+        let workloads = try loadPersistedWorkloadSnapshots(root: root, configuration: configuration)
+        return SandboxSnapshot(
+            configuration: SandboxConfiguration(containerConfiguration: configuration),
+            status: containerStatus,
+            networks: networks,
+            containers: [
+                ContainerSnapshot(
+                    configuration: configuration,
+                    status: containerStatus,
+                    networks: networks,
+                    startedDate: startedDate
+                )
+            ],
+            workloads: workloads
+        )
+    }
+
+    private static func loadPersistedWorkloadSnapshots(
+        root: URL,
+        configuration: ContainerConfiguration
+    ) throws -> [WorkloadSnapshot] {
+        let layout = MacOSSandboxLayout(root: root)
+        var configurations: [WorkloadConfiguration] = [
+            WorkloadConfiguration(
+                id: configuration.id,
+                processConfiguration: configuration.initProcess
+            )
+        ]
+
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: layout.workloadsDirectoryURL.path) {
+            for candidate in try fileManager.contentsOfDirectory(
+                at: layout.workloadsDirectoryURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                let configURL = candidate.appendingPathComponent("config.json")
+                guard fileManager.fileExists(atPath: configURL.path) else {
+                    continue
+                }
+                let data = try Data(contentsOf: configURL)
+                let workload = try JSONDecoder().decode(WorkloadConfiguration.self, from: data)
+                if workload.id == configuration.id {
+                    configurations[0] = workload
+                } else {
+                    configurations.append(workload)
+                }
+            }
+        }
+
+        return configurations
+            .sorted(by: { $0.id < $1.id })
+            .map { workload in
+                WorkloadSnapshot(
+                    configuration: workload,
+                    status: .stopped,
+                    stdoutLogPath: layout.workloadStdoutLogURL(id: workload.id).path,
+                    stderrLogPath: layout.workloadStderrLogURL(id: workload.id).path
+                )
+            }
+    }
+
+    private static func makeSandboxLogPaths(root: URL) -> SandboxLogPaths {
+        let layout = MacOSSandboxLayout(root: root)
+        return SandboxLogPaths(
+            eventLogPath: layout.stdioLogURL.path,
+            bootLogPath: layout.bootLogURL.path,
+            guestAgentLogPath: layout.guestAgentHostLogURL.path,
+            guestAgentStderrLogPath: layout.guestAgentHostStderrLogURL.path
+        )
     }
 
     private func _cleanUp(id: String) async throws {
@@ -913,14 +1238,31 @@ public actor ContainersService {
         client: SandboxClient
     ) -> ContainerState {
         var recovered = existing
-        recovered.snapshot.status = sandboxSnapshot.status
+        recovered.snapshot.status = containerRuntimeStatus(from: sandboxSnapshot)
         recovered.snapshot.networks = sandboxSnapshot.networks
-        if sandboxSnapshot.status != .running {
+        if recovered.snapshot.status == .running {
+            let containerID = sandboxSnapshot.configuration?.id ?? sandboxSnapshot.containers.first?.id
+            let initStartedDate = containerID.flatMap { id in
+                sandboxSnapshot.workloads.first(where: { $0.id == id })?.startedDate
+            }
+            recovered.snapshot.startedDate = recovered.snapshot.startedDate ?? initStartedDate ?? Date()
+        } else {
             recovered.snapshot.startedDate = nil
         }
         recovered.client = client
+        recovered.sandboxStartTask = nil
         recovered.bootstrapTask = nil
         return recovered
+    }
+
+    private static func containerRuntimeStatus(from sandboxSnapshot: SandboxSnapshot) -> RuntimeStatus {
+        let containerID = sandboxSnapshot.configuration?.id ?? sandboxSnapshot.containers.first?.id
+        if let containerID,
+            let initWorkload = sandboxSnapshot.workloads.first(where: { $0.id == containerID })
+        {
+            return initWorkload.status
+        }
+        return sandboxSnapshot.status
     }
 
     private func setContainerState(_ id: String, _ state: ContainerState, context: AsyncLock.Context) async {

@@ -20,6 +20,7 @@ import Containerization
 import ContainerizationError
 import Foundation
 import Logging
+import RuntimeMacOSSidecarShared
 import Testing
 
 @testable import container_runtime_macos
@@ -423,6 +424,62 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(workload.guestPayloadPath == "/var/lib/container/workloads/exec-image-defaulted/rootfs")
         #expect(workload.guestMetadataPath == "/var/lib/container/workloads/exec-image-defaulted/meta.json")
         #expect(workload.injectionState == .pending)
+    }
+
+    @Test
+    func bootedSandboxStateReportsRunningForInspect() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(try baseContainerConfiguration(), state: "booted")
+
+        let snapshot = try await service.testingStateSnapshot()
+
+        #expect(snapshot.status == .running)
+        #expect(snapshot.configuration?.id == "sandbox-under-test")
+        #expect(snapshot.workloads.contains(where: { $0.id == "sandbox-under-test" }))
+    }
+
+    @Test
+    func sandboxEventLogExcludesWorkloadStdoutAndStderr() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(try baseContainerConfiguration(), state: "booted")
+        try await service.testingOpenLogs()
+        await service.testingAddSession(
+            id: "exec-logs",
+            config: baseProcessConfiguration(),
+            started: true,
+            sessionID: "__workload__exec-logs"
+        )
+
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processStdout,
+                processID: "__workload__exec-logs",
+                data: Data("hello stdout\n".utf8)
+            )
+        )
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processStderr,
+                processID: "__workload__exec-logs",
+                data: Data("hello stderr\n".utf8)
+            )
+        )
+
+        let workload = try await service.testingInspectWorkload("exec-logs")
+        let sandboxLog = try String(contentsOfFile: await service.testingContainerLogPath(), encoding: .utf8)
+        let stdoutLog = try String(contentsOfFile: try #require(workload.stdoutLogPath), encoding: .utf8)
+        let stderrLog = try String(contentsOfFile: try #require(workload.stderrLogPath), encoding: .utf8)
+
+        #expect(stdoutLog.contains("hello stdout"))
+        #expect(stderrLog.contains("hello stderr"))
+        #expect(!sandboxLog.contains("hello stdout"))
+        #expect(!sandboxLog.contains("hello stderr"))
     }
 }
 

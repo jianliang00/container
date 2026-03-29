@@ -18,6 +18,10 @@ import ContainerizationOCI
 
 /// Configuration for a sandbox VM and the resources it owns.
 public struct SandboxConfiguration: Sendable, Codable {
+    public static let schemaVersion = 1
+
+    /// Persisted schema version for sandbox state.
+    public var persistedSchemaVersion: Int
     /// Identifier of the sandbox.
     public var id: String
     /// Image used to provision the sandbox.
@@ -55,6 +59,28 @@ public struct SandboxConfiguration: Sendable, Codable {
     /// macOS guest runtime options for the sandbox.
     public var macosGuest: ContainerConfiguration.MacOSGuestOptions?
 
+    enum CodingKeys: String, CodingKey {
+        case persistedSchemaVersion = "schemaVersion"
+        case id
+        case image
+        case mounts
+        case readOnlyFiles
+        case publishedPorts
+        case publishedSockets
+        case labels
+        case sysctls
+        case networks
+        case dns
+        case rosetta
+        case platform
+        case resources
+        case runtimeHandler
+        case virtualization
+        case ssh
+        case readOnly
+        case macosGuest
+    }
+
     public init(
         id: String,
         image: ImageDescription,
@@ -75,6 +101,7 @@ public struct SandboxConfiguration: Sendable, Codable {
         readOnly: Bool = false,
         macosGuest: ContainerConfiguration.MacOSGuestOptions? = nil
     ) {
+        self.persistedSchemaVersion = Self.schemaVersion
         self.id = id
         self.image = image
         self.mounts = mounts
@@ -116,5 +143,36 @@ public struct SandboxConfiguration: Sendable, Codable {
             readOnly: containerConfiguration.readOnly,
             macosGuest: containerConfiguration.macosGuest
         )
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(Int.self, forKey: .persistedSchemaVersion)
+        guard schemaVersion == Self.schemaVersion else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .persistedSchemaVersion,
+                in: container,
+                debugDescription: "unsupported SandboxConfiguration schemaVersion \(schemaVersion)"
+            )
+        }
+        self.persistedSchemaVersion = schemaVersion
+        self.id = try container.decode(String.self, forKey: .id)
+        self.image = try container.decode(ImageDescription.self, forKey: .image)
+        self.mounts = try container.decodeIfPresent([Filesystem].self, forKey: .mounts) ?? []
+        self.readOnlyFiles = try container.decodeIfPresent([ReadOnlyFileInjection].self, forKey: .readOnlyFiles) ?? []
+        self.publishedPorts = try container.decodeIfPresent([PublishPort].self, forKey: .publishedPorts) ?? []
+        self.publishedSockets = try container.decodeIfPresent([PublishSocket].self, forKey: .publishedSockets) ?? []
+        self.labels = try container.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        self.sysctls = try container.decodeIfPresent([String: String].self, forKey: .sysctls) ?? [:]
+        self.networks = try container.decodeIfPresent([AttachmentConfiguration].self, forKey: .networks) ?? []
+        self.dns = try container.decodeIfPresent(ContainerConfiguration.DNSConfiguration.self, forKey: .dns)
+        self.rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
+        self.platform = try container.decodeIfPresent(ContainerizationOCI.Platform.self, forKey: .platform) ?? .current
+        self.resources = try container.decodeIfPresent(ContainerConfiguration.Resources.self, forKey: .resources) ?? .init()
+        self.runtimeHandler = try container.decodeIfPresent(String.self, forKey: .runtimeHandler) ?? "container-runtime-linux"
+        self.virtualization = try container.decodeIfPresent(Bool.self, forKey: .virtualization) ?? false
+        self.ssh = try container.decodeIfPresent(Bool.self, forKey: .ssh) ?? false
+        self.readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+        self.macosGuest = try container.decodeIfPresent(ContainerConfiguration.MacOSGuestOptions.self, forKey: .macosGuest)
     }
 }

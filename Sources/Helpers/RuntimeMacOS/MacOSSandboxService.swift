@@ -19,6 +19,7 @@ import ContainerResource
 import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
+import ContainerizationArchive
 import ContainerizationError
 import ContainerizationOCI
 import Darwin
@@ -51,6 +52,7 @@ final class SidecarEventPump: @unchecked Sendable {
 public actor MacOSSandboxService {
     private static let defaultAgentPort: UInt32 = 27000
     private static let guestAgentLogGuestPath = "/var/log/container-macos-guest-agent.log"
+    private static let guestWorkloadsRootPath = "/var/lib/container/workloads"
 
     private enum State: Equatable {
         case created
@@ -70,7 +72,7 @@ public actor MacOSSandboxService {
 
     struct Session {
         let processID: String
-        let config: ProcessConfiguration
+        var config: ProcessConfiguration
         let stdio: [FileHandle?]
         let includeInSnapshots: Bool
         let stdoutLogURL: URL
@@ -103,6 +105,7 @@ public actor MacOSSandboxService {
     let root: URL
     private let connection: xpc_connection_t?
     let log: Logger
+    private let contentStore: any ContentStore
 
     private var sandboxState: State = .created
     var configuration: ContainerConfiguration?
@@ -120,10 +123,16 @@ public actor MacOSSandboxService {
     var sidecarEventPump: SidecarEventPump?
     var sidecarEventPumpTask: Task<Void, Never>?
 
-    public init(root: URL, connection: xpc_connection_t? = nil, log: Logger) {
+    public init(
+        root: URL,
+        connection: xpc_connection_t? = nil,
+        log: Logger,
+        contentStore: any ContentStore = RemoteContentStoreClient()
+    ) {
         self.root = root
         self.connection = connection
         self.log = log
+        self.contentStore = contentStore
     }
 
     private var layout: MacOSSandboxLayout {
@@ -162,18 +171,17 @@ extension MacOSSandboxService {
         guard case .created = sandboxState else {
             throw ContainerizationError(.invalidState, message: "container expected to be in created state, got: \(sandboxState)")
         }
-        _ = try await prepareSandboxIfNeeded()
+        let config = try await prepareSandboxIfNeeded()
         try await startSandboxIfNeeded(stdio: message.stdio())
+        try await startWorkloadIfNeeded(workloadID: config.id)
         return message.reply()
     }
 
     @Sendable
     public func createWorkload(_ message: XPCMessage) async throws -> XPCMessage {
         let id = try message.id()
-        let processConfig = try message.processConfig()
-        try createWorkloadIfNeeded(
-            workloadID: id,
-            processConfiguration: processConfig,
+        try await createWorkloadIfNeeded(
+            workloadConfiguration: try message.workloadConfiguration(id: id),
             stdio: message.stdio()
         )
         return message.reply()
@@ -246,6 +254,10 @@ extension MacOSSandboxService {
             }
         }
 
+        if let configuration {
+            await cleanupGuestWorkloadsIfNeeded(containerConfig: configuration)
+        }
+
         #if arch(arm64)
         writeContainerLog(Data(("stop: sidecar shutdown start\n").utf8))
         await stopAndQuitSidecarIfPresent()
@@ -290,7 +302,7 @@ extension MacOSSandboxService {
         let networks = await inspectSandboxNetworkState(containerConfig: configuration).attachments
 
         let snapshot = SandboxSnapshot(
-            configuration: sandboxConfigurationSnapshot(),
+            configuration: try sandboxConfigurationSnapshot(),
             status: status,
             networks: networks,
             containers: [
@@ -356,6 +368,7 @@ extension MacOSSandboxService {
     private func prepareSandboxIfNeeded() async throws -> ContainerConfiguration {
         if let configuration {
             try restorePersistedWorkloadsIfNeeded(containerConfig: configuration)
+            try resetImageBackedWorkloadsForColdBootIfNeeded()
             return configuration
         }
 
@@ -363,6 +376,7 @@ extension MacOSSandboxService {
         self.configuration = config
         try persistSandboxMetadata(for: config)
         try restorePersistedWorkloadsIfNeeded(containerConfig: config)
+        try resetImageBackedWorkloadsForColdBootIfNeeded()
         return config
     }
 
@@ -399,11 +413,9 @@ extension MacOSSandboxService {
         sandboxState = .booted
     }
 
-    private func createWorkloadIfNeeded(
-        workloadID: String,
-        processConfiguration: ProcessConfiguration,
-        stdio: [FileHandle?]
-    ) throws {
+    private func createWorkloadIfNeeded(workloadConfiguration: WorkloadConfiguration, stdio: [FileHandle?]) async throws {
+        let workloadConfiguration = try await resolveCreatedWorkloadConfiguration(workloadConfiguration)
+        let workloadID = workloadConfiguration.id
         guard let _ = configuration else {
             throw ContainerizationError(.invalidState, message: "sandbox not prepared")
         }
@@ -414,7 +426,6 @@ extension MacOSSandboxService {
             throw ContainerizationError(.exists, message: "workload \(workloadID) already exists")
         }
 
-        let workloadConfiguration = WorkloadConfiguration(id: workloadID, processConfiguration: processConfiguration)
         try persistWorkloadConfiguration(workloadConfiguration)
         do {
             upsertWorkloadRecord(configuration: workloadConfiguration)
@@ -432,6 +443,10 @@ extension MacOSSandboxService {
         }
         guard sandboxState == .booted || sandboxState == .running else {
             throw ContainerizationError(.invalidState, message: "sandbox not started")
+        }
+        try await ensureImageBackedWorkloadInjectedIfNeeded(workloadID: workloadID, containerConfig: configuration)
+        if let record = workloads[workloadID] {
+            try validateWorkloadConfigurationForStart(record.configuration)
         }
 
         let sessionID = try sessionID(forWorkload: workloadID)
@@ -532,8 +547,8 @@ extension MacOSSandboxService {
         layout.workloadStderrLogURL(id: processID)
     }
 
-    private func sandboxConfigurationSnapshot() -> SandboxConfiguration? {
-        if let persisted = try? loadJSON(SandboxConfiguration.self, from: sandboxConfigurationPath()) {
+    private func sandboxConfigurationSnapshot() throws -> SandboxConfiguration? {
+        if let persisted = try loadJSONIfPresent(SandboxConfiguration.self, from: sandboxConfigurationPath()) {
             return persisted
         }
         if let configuration {
@@ -542,9 +557,9 @@ extension MacOSSandboxService {
         return nil
     }
 
-    private func workloadConfigurationSnapshot(for processID: String, fallback: ProcessConfiguration) -> WorkloadConfiguration {
-        if let persisted = try? loadJSON(WorkloadConfiguration.self, from: workloadConfigurationPath(for: processID)) {
-            return persisted
+    private func workloadConfigurationSnapshot(for processID: String, fallback: ProcessConfiguration) throws -> WorkloadConfiguration {
+        if let persisted = try loadJSONIfPresent(WorkloadConfiguration.self, from: workloadConfigurationPath(for: processID)) {
+            return normalizeWorkloadConfiguration(persisted)
         }
         return WorkloadConfiguration(id: processID, processConfiguration: fallback)
     }
@@ -562,7 +577,8 @@ extension MacOSSandboxService {
 
     private func persistWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
         try layout.prepareBaseDirectories()
-        try persistJSON(configuration, to: workloadConfigurationPath(for: configuration.id))
+        let normalized = normalizeWorkloadConfiguration(configuration)
+        try persistJSON(normalized, to: workloadConfigurationPath(for: normalized.id))
     }
 
     private func persistJSON<Value: Encodable>(_ value: Value, to url: URL) throws {
@@ -575,6 +591,13 @@ extension MacOSSandboxService {
     private func loadJSON<Value: Decodable>(_ type: Value.Type, from url: URL) throws -> Value {
         let data = try Data(contentsOf: url)
         return try JSONDecoder().decode(type, from: data)
+    }
+
+    private func loadJSONIfPresent<Value: Decodable>(_ type: Value.Type, from url: URL) throws -> Value? {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+        return try loadJSON(type, from: url)
     }
 
     private func restorePersistedWorkloadsIfNeeded(containerConfig: ContainerConfiguration) throws {
@@ -598,9 +621,820 @@ extension MacOSSandboxService {
             guard fm.fileExists(atPath: configURL.path) else {
                 continue
             }
-            let workloadConfiguration = try loadJSON(WorkloadConfiguration.self, from: configURL)
+            let workloadConfiguration = normalizeWorkloadConfiguration(
+                try loadJSON(WorkloadConfiguration.self, from: configURL)
+            )
             upsertWorkloadRecord(configuration: workloadConfiguration)
         }
+    }
+
+    private func normalizeWorkloadConfiguration(_ configuration: WorkloadConfiguration) -> WorkloadConfiguration {
+        guard configuration.isImageBacked else {
+            return configuration
+        }
+
+        return WorkloadConfiguration(
+            id: configuration.id,
+            processConfiguration: configuration.processConfiguration,
+            workloadImageReference: configuration.workloadImageReference,
+            workloadImageDigest: configuration.workloadImageDigest,
+            guestPayloadPath: configuration.guestPayloadPath ?? guestPayloadPath(for: configuration.id),
+            guestMetadataPath: configuration.guestMetadataPath ?? guestMetadataPath(for: configuration.id),
+            injectionState: configuration.injectionState == .notRequired ? .pending : configuration.injectionState
+        )
+    }
+
+    private func validateWorkloadConfigurationForStart(_ configuration: WorkloadConfiguration) throws {
+        guard configuration.isImageBacked else {
+            return
+        }
+        guard configuration.injectionState == .injected else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "image-backed workload \(configuration.id) has not been injected into the guest yet"
+            )
+        }
+        guard configuration.guestPayloadPath != nil, configuration.guestMetadataPath != nil else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "image-backed workload \(configuration.id) is missing guest payload metadata"
+            )
+        }
+    }
+
+    private func guestPayloadPath(for workloadID: String) -> String {
+        "\(Self.guestWorkloadsRootPath)/\(workloadID)/rootfs"
+    }
+
+    private func guestMetadataPath(for workloadID: String) -> String {
+        "\(Self.guestWorkloadsRootPath)/\(workloadID)/meta.json"
+    }
+
+    private struct ResolvedWorkloadImage {
+        let imageDigest: String
+        let manifest: Manifest
+        let imageConfig: ContainerizationOCI.Image
+    }
+
+    private enum WorkloadLayerEntryKind {
+        case directory
+        case file
+        case symlink
+    }
+
+    private struct WorkloadLayerEntry {
+        let url: URL
+        let relativePath: String
+        let kind: WorkloadLayerEntryKind
+    }
+
+    private func resetImageBackedWorkloadsForColdBootIfNeeded() throws {
+        for configuration in workloads.values.map(\.configuration) {
+            guard configuration.isImageBacked, configuration.injectionState == .injected else {
+                continue
+            }
+            var updated = configuration
+            updated.injectionState = .pending
+            try updateWorkloadConfiguration(updated)
+        }
+    }
+
+    private func resolveCreatedWorkloadConfiguration(_ configuration: WorkloadConfiguration) async throws -> WorkloadConfiguration {
+        let normalized = normalizeWorkloadConfiguration(configuration)
+        guard normalized.isImageBacked else {
+            return normalized
+        }
+
+        let resolvedImage = try await resolveWorkloadImage(for: normalized)
+        let processConfiguration = try resolveEffectiveProcessConfiguration(
+            imageConfig: resolvedImage.imageConfig.config,
+            requestedConfiguration: normalized.processConfiguration
+        )
+        return WorkloadConfiguration(
+            id: normalized.id,
+            processConfiguration: processConfiguration,
+            workloadImageReference: normalized.workloadImageReference,
+            workloadImageDigest: resolvedImage.imageDigest,
+            guestPayloadPath: normalized.guestPayloadPath,
+            guestMetadataPath: normalized.guestMetadataPath,
+            injectionState: .pending
+        )
+    }
+
+    private func ensureImageBackedWorkloadInjectedIfNeeded(
+        workloadID: String,
+        containerConfig: ContainerConfiguration
+    ) async throws {
+        guard let record = workloads[workloadID], record.configuration.isImageBacked else {
+            return
+        }
+        guard record.configuration.injectionState != .injected else {
+            return
+        }
+        guard let guestPayloadPath = record.configuration.guestPayloadPath,
+            let guestMetadataPath = record.configuration.guestMetadataPath
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "image-backed workload \(workloadID) is missing guest payload metadata"
+            )
+        }
+
+        let resolvedImage = try await resolveWorkloadImage(for: record.configuration)
+        let hostRootfs = try await unpackWorkloadRootfs(resolvedImage)
+        let metadata = try workloadGuestMetadata(
+            workloadImageDigest: resolvedImage.imageDigest,
+            processConfiguration: record.configuration.processConfiguration
+        )
+        let metadataFile = try writeTemporaryWorkloadMetadataFile(metadata, workloadID: workloadID)
+        defer { try? FileManager.default.removeItem(at: metadataFile) }
+
+        writeContainerLog(
+            Data(
+                ("injecting image-backed workload \(workloadID) digest=\(resolvedImage.imageDigest) guestRoot=\(guestPayloadPath)\n").utf8
+            )
+        )
+
+        do {
+            try await prepareGuestWorkloadInstanceDirectory(workloadID: workloadID, containerConfig: containerConfig)
+            try await injectDirectoryTree(from: hostRootfs, to: guestPayloadPath)
+            try await writeGuestFile(from: metadataFile, to: guestMetadataPath)
+
+            var updated = record.configuration
+            updated.workloadImageDigest = resolvedImage.imageDigest
+            updated.injectionState = .injected
+            try updateWorkloadConfiguration(updated)
+        } catch {
+            try? await cleanupGuestWorkloadInstance(workloadID: workloadID, containerConfig: containerConfig)
+            throw error
+        }
+    }
+
+    private func resolveWorkloadImage(for configuration: WorkloadConfiguration) async throws -> ResolvedWorkloadImage {
+        guard let imageDigest = resolvedWorkloadImageDigest(for: configuration) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "image-backed workload \(configuration.id) requires a resolved workload image digest"
+            )
+        }
+        let platform = self.configuration?.platform ?? .init(arch: "arm64", os: "darwin")
+
+        guard let indexContent: Content = try await contentStore.get(digest: imageDigest) else {
+            throw ContainerizationError(.notFound, message: "missing workload image index blob \(imageDigest)")
+        }
+        let index: Index = try indexContent.decode()
+        guard let manifestDescriptor = index.manifests.first(where: { $0.platform == platform }) else {
+            throw ContainerizationError(.notFound, message: "no workload image manifest for platform \(platform)")
+        }
+        guard let manifestContent: Content = try await contentStore.get(digest: manifestDescriptor.digest) else {
+            throw ContainerizationError(.notFound, message: "missing workload image manifest blob \(manifestDescriptor.digest)")
+        }
+        let manifest: Manifest = try manifestContent.decode()
+        guard let configContent: Content = try await contentStore.get(digest: manifest.config.digest) else {
+            throw ContainerizationError(.notFound, message: "missing workload image config blob \(manifest.config.digest)")
+        }
+        let imageConfig: ContainerizationOCI.Image = try configContent.decode()
+
+        do {
+            try MacOSImageContract.validateWorkloadImage(
+                descriptorAnnotations: manifestDescriptor.annotations,
+                manifest: manifest,
+                imageConfig: imageConfig
+            )
+        } catch {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "image \(configuration.workloadImageReference ?? imageDigest) cannot be used as a macOS workload payload: \(error.localizedDescription)"
+            )
+        }
+
+        let supportedLayerMediaTypes = Set([
+            MediaTypes.imageLayer,
+            MediaTypes.imageLayerGzip,
+            MediaTypes.imageLayerZstd,
+            MediaTypes.dockerImageLayer,
+            MediaTypes.dockerImageLayerGzip,
+            MediaTypes.dockerImageLayerZstd,
+        ])
+        if let unsupported = manifest.layers.first(where: { !supportedLayerMediaTypes.contains($0.mediaType) }) {
+            throw ContainerizationError(
+                .unsupported,
+                message: "macOS workload image layer media type \(unsupported.mediaType) is not supported"
+            )
+        }
+
+        return ResolvedWorkloadImage(
+            imageDigest: imageDigest,
+            manifest: manifest,
+            imageConfig: imageConfig
+        )
+    }
+
+    private func resolvedWorkloadImageDigest(for configuration: WorkloadConfiguration) -> String? {
+        if let digest = configuration.workloadImageDigest, !digest.isEmpty {
+            return digest
+        }
+        guard let reference = configuration.workloadImageReference,
+            let digestStart = reference.lastIndex(of: "@")
+        else {
+            return nil
+        }
+        let digest = String(reference[reference.index(after: digestStart)...])
+        return digest.isEmpty ? nil : digest
+    }
+
+    // Image-backed workloads currently use a default-shaped ProcessConfiguration as an
+    // internal "no explicit override" marker until the public workload image create
+    // surface grows dedicated override fields.
+    private func resolveEffectiveProcessConfiguration(
+        imageConfig: ImageConfig?,
+        requestedConfiguration: ProcessConfiguration
+    ) throws -> ProcessConfiguration {
+        let command: [String]
+        let requestedExecutable = requestedConfiguration.executable.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !requestedExecutable.isEmpty {
+            command = [requestedExecutable] + requestedConfiguration.arguments
+        } else {
+            var fallback: [String] = imageConfig?.entrypoint ?? []
+            if !requestedConfiguration.arguments.isEmpty {
+                fallback.append(contentsOf: requestedConfiguration.arguments)
+            } else if let cmd = imageConfig?.cmd {
+                fallback.append(contentsOf: cmd)
+            }
+            guard !fallback.isEmpty else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "workload image does not define an entrypoint/cmd and no explicit executable override was supplied"
+                )
+            }
+            command = fallback
+        }
+
+        let resolvedWorkingDirectory: String = {
+            let requested = requestedConfiguration.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !requested.isEmpty, requested != "/" {
+                return requested
+            }
+            if let imageWorkingDirectory = imageConfig?.workingDir, !imageWorkingDirectory.isEmpty {
+                return imageWorkingDirectory
+            }
+            return requested.isEmpty ? "/" : requested
+        }()
+
+        let resolvedUser: ProcessConfiguration.User = {
+            switch requestedConfiguration.user {
+            case .raw(let userString) where !userString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+                return .raw(userString: userString)
+            case .id(let uid, let gid) where uid != 0 || gid != 0:
+                return .id(uid: uid, gid: gid)
+            default:
+                if let imageUser = imageConfig?.user, !imageUser.isEmpty {
+                    return .raw(userString: imageUser)
+                }
+                return requestedConfiguration.user
+            }
+        }()
+
+        return ProcessConfiguration(
+            executable: command[0],
+            arguments: Array(command.dropFirst()),
+            environment: mergeEnvironmentEntries(base: imageConfig?.env ?? [], overrides: requestedConfiguration.environment),
+            workingDirectory: resolvedWorkingDirectory,
+            terminal: requestedConfiguration.terminal,
+            user: resolvedUser,
+            supplementalGroups: requestedConfiguration.supplementalGroups,
+            rlimits: requestedConfiguration.rlimits
+        )
+    }
+
+    private func mergeEnvironmentEntries(base: [String], overrides: [String]) -> [String] {
+        var orderedKeys: [String] = []
+        var rawValues: [String: String] = [:]
+
+        func insert(_ entry: String) {
+            let key = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? entry
+            if rawValues[key] == nil {
+                orderedKeys.append(key)
+            }
+            rawValues[key] = entry
+        }
+
+        for entry in base {
+            insert(entry)
+        }
+        for entry in overrides {
+            insert(entry)
+        }
+
+        return orderedKeys.compactMap { rawValues[$0] }
+    }
+
+    private func resolveLaunchProcessConfiguration(
+        for processID: String,
+        sessionConfiguration: ProcessConfiguration
+    ) async throws -> ProcessConfiguration {
+        guard let workloadID = workloadID(forSession: processID),
+            let record = workloads[workloadID],
+            record.configuration.isImageBacked,
+            let guestPayloadPath = record.configuration.guestPayloadPath
+        else {
+            return sessionConfiguration
+        }
+
+        let resolvedImage = try await resolveWorkloadImage(for: record.configuration)
+        let hostRootfs = try await unpackWorkloadRootfs(resolvedImage)
+        return mapImageBackedWorkloadProcessConfiguration(
+            sessionConfiguration,
+            guestPayloadPath: guestPayloadPath,
+            hostRootfs: hostRootfs
+        )
+    }
+
+    private func mapImageBackedWorkloadProcessConfiguration(
+        _ configuration: ProcessConfiguration,
+        guestPayloadPath: String,
+        hostRootfs: URL
+    ) -> ProcessConfiguration {
+        ProcessConfiguration(
+            executable: mapImageBackedWorkloadPath(
+                configuration.executable,
+                guestPayloadPath: guestPayloadPath,
+                hostRootfs: hostRootfs
+            ) ?? configuration.executable,
+            arguments: configuration.arguments.map {
+                mapImageBackedWorkloadArgument(
+                    $0,
+                    guestPayloadPath: guestPayloadPath,
+                    hostRootfs: hostRootfs
+                )
+            },
+            environment: configuration.environment,
+            workingDirectory: mapImageBackedWorkloadWorkingDirectory(
+                configuration.workingDirectory,
+                guestPayloadPath: guestPayloadPath,
+                hostRootfs: hostRootfs
+            ),
+            terminal: configuration.terminal,
+            user: configuration.user,
+            supplementalGroups: configuration.supplementalGroups,
+            rlimits: configuration.rlimits
+        )
+    }
+
+    private func mapImageBackedWorkloadArgument(
+        _ argument: String,
+        guestPayloadPath: String,
+        hostRootfs: URL
+    ) -> String {
+        if let mapped = mapImageBackedWorkloadPath(
+            argument,
+            guestPayloadPath: guestPayloadPath,
+            hostRootfs: hostRootfs
+        ) {
+            return mapped
+        }
+
+        guard let equalsIndex = argument.firstIndex(of: "=") else {
+            return argument
+        }
+        let valueStart = argument.index(after: equalsIndex)
+        let value = String(argument[valueStart...])
+        guard let mappedValue = mapImageBackedWorkloadPath(
+            value,
+            guestPayloadPath: guestPayloadPath,
+            hostRootfs: hostRootfs
+        ) else {
+            return argument
+        }
+        return String(argument[..<valueStart]) + mappedValue
+    }
+
+    private func mapImageBackedWorkloadWorkingDirectory(
+        _ workingDirectory: String,
+        guestPayloadPath: String,
+        hostRootfs: URL
+    ) -> String {
+        let normalized = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty || normalized == "/" {
+            return guestPayloadPath
+        }
+        return mapImageBackedWorkloadPath(
+            normalized,
+            guestPayloadPath: guestPayloadPath,
+            hostRootfs: hostRootfs,
+            requireDirectory: true
+        ) ?? workingDirectory
+    }
+
+    private func mapImageBackedWorkloadPath(
+        _ path: String,
+        guestPayloadPath: String,
+        hostRootfs: URL,
+        requireDirectory: Bool? = nil
+    ) -> String? {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return nil
+        }
+        guard normalized.hasPrefix("/") else {
+            return nil
+        }
+
+        let relativePath = normalized.drop(while: { $0 == "/" })
+        guard !relativePath.isEmpty else {
+            return guestPayloadPath
+        }
+
+        let hostCandidate = hostRootfs.appendingPathComponent(String(relativePath))
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: hostCandidate.path, isDirectory: &isDirectory) else {
+            return nil
+        }
+        if let requireDirectory, isDirectory.boolValue != requireDirectory {
+            return nil
+        }
+        return joinGuestPath(guestPayloadPath, String(relativePath))
+    }
+
+    private func unpackWorkloadRootfs(_ resolvedImage: ResolvedWorkloadImage) async throws -> URL {
+        let fileManager = FileManager.default
+        let cacheRoot = MacOSGuestCache.workloadRootfsCacheDirectory(fileManager: fileManager)
+        let cachedDirectory = cacheRoot.appendingPathComponent(MacOSGuestCache.safeDigest(resolvedImage.imageDigest), isDirectory: true)
+        let cachedRootfs = cachedDirectory.appendingPathComponent("rootfs", isDirectory: true)
+        if fileManager.fileExists(atPath: cachedRootfs.path) {
+            return cachedRootfs
+        }
+
+        try fileManager.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        let stagingDirectory = cacheRoot.appendingPathComponent(".workload-\(UUID().uuidString)", isDirectory: true)
+        let stagingRootfs = stagingDirectory.appendingPathComponent("rootfs", isDirectory: true)
+        try fileManager.createDirectory(at: stagingRootfs, withIntermediateDirectories: true)
+
+        do {
+            for (index, layer) in resolvedImage.manifest.layers.enumerated() {
+                guard let layerContent: Content = try await contentStore.get(digest: layer.digest) else {
+                    throw ContainerizationError(.notFound, message: "missing workload layer blob \(layer.digest)")
+                }
+                let extractedLayerDirectory = stagingDirectory.appendingPathComponent("layer-\(index)", isDirectory: true)
+                let rejectedMembers = try ArchiveReader(file: layerContent.path).extractContents(to: extractedLayerDirectory)
+                guard rejectedMembers.isEmpty else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "workload layer \(layer.digest) contains rejected archive members: \(rejectedMembers.joined(separator: ", "))"
+                    )
+                }
+                try applyExtractedWorkloadLayer(at: extractedLayerDirectory, to: stagingRootfs)
+                try? fileManager.removeItem(at: extractedLayerDirectory)
+            }
+
+            do {
+                try fileManager.moveItem(at: stagingDirectory, to: cachedDirectory)
+            } catch {
+                if fileManager.fileExists(atPath: cachedRootfs.path) {
+                    try? fileManager.removeItem(at: stagingDirectory)
+                    return cachedRootfs
+                }
+                throw error
+            }
+        } catch {
+            try? fileManager.removeItem(at: stagingDirectory)
+            throw error
+        }
+
+        return cachedRootfs
+    }
+
+    private func applyExtractedWorkloadLayer(at sourceRoot: URL, to destinationRoot: URL) throws {
+        try applyWhiteouts(from: sourceRoot, to: destinationRoot)
+        for entry in try walkWorkloadLayerTree(root: sourceRoot) {
+            guard !isWhiteoutEntry(entry.url) else {
+                continue
+            }
+            let destinationURL = destinationRoot.appendingPathComponent(entry.relativePath)
+            switch entry.kind {
+            case .directory:
+                try createOrMergeDirectory(from: entry.url, to: destinationURL)
+            case .file:
+                try cloneOrCopyLeafItem(from: entry.url, to: destinationURL)
+            case .symlink:
+                try recreateSymbolicLink(from: entry.url, to: destinationURL)
+            }
+        }
+    }
+
+    private func applyWhiteouts(from sourceRoot: URL, to destinationRoot: URL) throws {
+        let fileManager = FileManager.default
+        for entry in try walkWorkloadLayerTree(root: sourceRoot) {
+            let basename = entry.url.lastPathComponent
+            if basename == ".wh..wh..opq" {
+                let relativeDirectory = (entry.relativePath as NSString).deletingLastPathComponent
+                let targetDirectory = relativeDirectory.isEmpty
+                    ? destinationRoot
+                    : destinationRoot.appendingPathComponent(relativeDirectory)
+                if fileManager.fileExists(atPath: targetDirectory.path) {
+                    for child in try fileManager.contentsOfDirectory(at: targetDirectory, includingPropertiesForKeys: nil, options: []) {
+                        try fileManager.removeItem(at: child)
+                    }
+                }
+                try fileManager.removeItem(at: entry.url)
+                continue
+            }
+            guard basename.hasPrefix(".wh.") else {
+                continue
+            }
+
+            let parentDirectory = (entry.relativePath as NSString).deletingLastPathComponent
+            let targetName = String(basename.dropFirst(4))
+            let targetRelativePath = parentDirectory.isEmpty ? targetName : "\(parentDirectory)/\(targetName)"
+            let targetURL = destinationRoot.appendingPathComponent(targetRelativePath)
+            if fileManager.fileExists(atPath: targetURL.path) {
+                try fileManager.removeItem(at: targetURL)
+            }
+            try fileManager.removeItem(at: entry.url)
+        }
+    }
+
+    private func walkWorkloadLayerTree(root: URL) throws -> [WorkloadLayerEntry] {
+        var entries: [WorkloadLayerEntry] = []
+        try collectWorkloadLayerTreeEntries(at: root, root: root, into: &entries)
+        return entries
+    }
+
+    private func collectWorkloadLayerTreeEntries(
+        at directory: URL,
+        root: URL,
+        into entries: inout [WorkloadLayerEntry]
+    ) throws {
+        let children = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        for child in children {
+            let relativePath = String(child.path.dropFirst(root.path.count + 1))
+            let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if values.isSymbolicLink == true {
+                entries.append(.init(url: child, relativePath: relativePath, kind: .symlink))
+                continue
+            }
+            if values.isDirectory == true {
+                entries.append(.init(url: child, relativePath: relativePath, kind: .directory))
+                try collectWorkloadLayerTreeEntries(at: child, root: root, into: &entries)
+                continue
+            }
+            entries.append(.init(url: child, relativePath: relativePath, kind: .file))
+        }
+    }
+
+    private func isWhiteoutEntry(_ url: URL) -> Bool {
+        let basename = url.lastPathComponent
+        return basename == ".wh..wh..opq" || basename.hasPrefix(".wh.")
+    }
+
+    private func createOrMergeDirectory(from source: URL, to destination: URL) throws {
+        let fileManager = FileManager.default
+        var isDirectory = ObjCBool(false)
+        if fileManager.fileExists(atPath: destination.path, isDirectory: &isDirectory), !isDirectory.boolValue {
+            try fileManager.removeItem(at: destination)
+        }
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        try applyHostMetadata(from: source, to: destination)
+    }
+
+    private func cloneOrCopyLeafItem(from source: URL, to destination: URL) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        _ = try FilesystemClone.cloneOrCopyItem(at: source, to: destination)
+        try applyHostMetadata(from: source, to: destination)
+    }
+
+    private func recreateSymbolicLink(from source: URL, to destination: URL) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        let target = try fileManager.destinationOfSymbolicLink(atPath: source.path)
+        try fileManager.createSymbolicLink(atPath: destination.path, withDestinationPath: target)
+    }
+
+    private func applyHostMetadata(from source: URL, to destination: URL) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+        var updatedAttributes: [FileAttributeKey: Any] = [:]
+        if let permissions = attributes[.posixPermissions] {
+            updatedAttributes[.posixPermissions] = permissions
+        }
+        if let modificationDate = attributes[.modificationDate] {
+            updatedAttributes[.modificationDate] = modificationDate
+        }
+        if !updatedAttributes.isEmpty {
+            try FileManager.default.setAttributes(updatedAttributes, ofItemAtPath: destination.path)
+        }
+    }
+
+    private func prepareGuestWorkloadInstanceDirectory(
+        workloadID: String,
+        containerConfig: ContainerConfiguration
+    ) async throws {
+        try await runGuestBootstrapScript(
+            processIDPrefix: "workload-prepare",
+            script: """
+                set -euo pipefail
+                root=\(shQuoteForWorkloadScript("\(Self.guestWorkloadsRootPath)/\(workloadID)"))
+                rm -rf "$root"
+                mkdir -p "$root/rootfs"
+                """,
+            containerConfig: containerConfig
+        )
+    }
+
+    private func cleanupGuestWorkloadInstance(
+        workloadID: String,
+        containerConfig: ContainerConfiguration
+    ) async throws {
+        try await runGuestBootstrapScript(
+            processIDPrefix: "workload-cleanup",
+            script: """
+                set -euo pipefail
+                root=\(shQuoteForWorkloadScript("\(Self.guestWorkloadsRootPath)/\(workloadID)"))
+                rm -rf "$root"
+                """,
+            containerConfig: containerConfig
+        )
+    }
+
+    private func cleanupGuestWorkloadsIfNeeded(containerConfig: ContainerConfiguration) async {
+        guard workloads.values.contains(where: { $0.configuration.isImageBacked }) else {
+            return
+        }
+        do {
+            try await runGuestBootstrapScript(
+                processIDPrefix: "workload-cleanup-all",
+                script: """
+                    set -euo pipefail
+                    rm -rf \(shQuoteForWorkloadScript(Self.guestWorkloadsRootPath))
+                    mkdir -p \(shQuoteForWorkloadScript(Self.guestWorkloadsRootPath))
+                """,
+                containerConfig: containerConfig
+            )
+            for configuration in workloads.values.map(\.configuration) where configuration.isImageBacked {
+                var updated = configuration
+                updated.injectionState = .pending
+                try updateWorkloadConfiguration(updated)
+            }
+        } catch {
+            writeContainerLog(Data(("failed to clean guest workloads before stop: \(describeError(error))\n").utf8))
+        }
+    }
+
+    private func runGuestBootstrapScript(
+        processIDPrefix: String,
+        script: String,
+        containerConfig: ContainerConfiguration,
+        timeout: Int32 = 30
+    ) async throws {
+        let processID = "\(processIDPrefix)-\(UUID().uuidString)"
+        var session = try makeSession(
+            processID: processID,
+            config: ProcessConfiguration(
+                executable: "/bin/sh",
+                arguments: ["-ceu", script],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            stdio: [nil, nil, nil],
+            includeInSnapshots: false
+        )
+
+        sessions[processID] = session
+        defer {
+            cleanupTemporarySession(processID: processID)
+        }
+
+        do {
+            try await startSessionViaSidecarProcessStream(&session, containerConfig: containerConfig)
+            let status = try await waitForProcess(processID, timeout: timeout)
+            guard status.exitCode == 0 else {
+                let detail =
+                    sessions[processID]?.lastAgentError ?? sessions[processID]?.lastStderr ?? "bootstrap script exited with status \(status.exitCode)"
+                throw ContainerizationError(.internalError, message: detail)
+            }
+        } catch {
+            try? sendSignalToProcess(processID: processID, signal: SIGKILL)
+            throw error
+        }
+    }
+
+    private func cleanupTemporarySession(processID: String) {
+        guard let session = sessions.removeValue(forKey: processID) else {
+            return
+        }
+        session.stdio[0]?.readabilityHandler = nil
+        try? session.stdio[1]?.close()
+        try? session.stdio[2]?.close()
+        try? session.stdoutLogHandle?.close()
+        try? session.stderrLogHandle?.close()
+    }
+
+    private func injectDirectoryTree(from sourceRoot: URL, to guestRoot: String) async throws {
+        for entry in try walkWorkloadLayerTree(root: sourceRoot) {
+            let destinationPath = joinGuestPath(guestRoot, entry.relativePath)
+            switch entry.kind {
+            case .directory:
+                try await createGuestDirectory(from: entry.url, to: destinationPath)
+            case .file:
+                try await writeGuestFile(from: entry.url, to: destinationPath)
+            case .symlink:
+                try await createGuestSymbolicLink(from: entry.url, to: destinationPath)
+            }
+        }
+    }
+
+    private func createGuestDirectory(from source: URL, to destinationPath: String) async throws {
+        try await MacOSSidecarFileTransfer.createDirectory(
+            at: destinationPath,
+            options: .init(mode: hostFileMode(at: source), mtime: hostModificationTime(at: source)),
+            begin: { payload in
+                try await self.sendFSBegin(payload)
+            }
+        )
+    }
+
+    private func writeGuestFile(from source: URL, to destinationPath: String) async throws {
+        try await MacOSSidecarFileTransfer.writeFile(
+            from: source,
+            to: destinationPath,
+            options: .init(mode: hostFileMode(at: source), mtime: hostModificationTime(at: source), overwrite: true),
+            begin: { payload in
+                try await self.sendFSBegin(payload)
+            },
+            chunk: { payload in
+                try await self.sendFSChunk(payload)
+            },
+            end: { payload in
+                try await self.sendFSEnd(payload)
+            }
+        )
+    }
+
+    private func createGuestSymbolicLink(from source: URL, to destinationPath: String) async throws {
+        let target = try FileManager.default.destinationOfSymbolicLink(atPath: source.path)
+        try await MacOSSidecarFileTransfer.createSymbolicLink(
+            at: destinationPath,
+            target: target,
+            options: .init(mtime: hostModificationTime(at: source), overwrite: true),
+            begin: { payload in
+                try await self.sendFSBegin(payload)
+            }
+        )
+    }
+
+    private func hostFileMode(at url: URL) -> UInt32? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.posixPermissions] as? NSNumber)?.uint32Value
+    }
+
+    private func hostModificationTime(at url: URL) -> Int64? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.modificationDate] as? Date).map { Int64($0.timeIntervalSince1970) }
+    }
+
+    private func writeTemporaryWorkloadMetadataFile(
+        _ metadata: MacOSWorkloadGuestMetadata,
+        workloadID: String
+    ) throws -> URL {
+        try layout.prepareBaseDirectories()
+        let url = layout.temporaryDirectoryURL.appendingPathComponent("workload-\(workloadID)-meta-\(UUID().uuidString).json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(metadata).write(to: url, options: .atomic)
+        return url
+    }
+
+    private func workloadGuestMetadata(
+        workloadImageDigest: String,
+        processConfiguration: ProcessConfiguration
+    ) throws -> MacOSWorkloadGuestMetadata {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return MacOSWorkloadGuestMetadata(
+            workloadImageDigest: workloadImageDigest,
+            createdAt: formatter.string(from: Date()),
+            processConfiguration: processConfiguration
+        )
+    }
+
+    private func updateWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
+        let existingSessionID = workloads[configuration.id]?.sessionID
+        upsertWorkloadRecord(configuration: configuration)
+        if let existingSessionID, var session = sessions[existingSessionID] {
+            session.config = configuration.processConfiguration
+            sessions[existingSessionID] = session
+        }
+        try persistWorkloadConfiguration(configuration)
     }
 
     private func openAppendLogHandle(at url: URL) throws -> FileHandle {
@@ -693,39 +1527,48 @@ extension MacOSSandboxService {
     }
 
     private func resolveTemplateLayers(containerConfig: ContainerConfiguration) async throws -> LayerPaths {
-        let store = RemoteContentStoreClient()
-
-        guard let indexContent: Content = try await store.get(digest: containerConfig.image.digest) else {
+        guard let indexContent: Content = try await contentStore.get(digest: containerConfig.image.digest) else {
             throw ContainerizationError(.notFound, message: "missing index blob \(containerConfig.image.digest)")
         }
         let index: Index = try indexContent.decode()
         guard let manifestDescriptor = index.manifests.first(where: { $0.platform == containerConfig.platform }) else {
             throw ContainerizationError(.notFound, message: "no manifest for platform \(containerConfig.platform)")
         }
-        guard let manifestContent: Content = try await store.get(digest: manifestDescriptor.digest) else {
+        guard let manifestContent: Content = try await contentStore.get(digest: manifestDescriptor.digest) else {
             throw ContainerizationError(.notFound, message: "missing manifest blob \(manifestDescriptor.digest)")
         }
         let manifest: Manifest = try manifestContent.decode()
+        do {
+            try MacOSImageContract.validateSandboxImage(
+                descriptorAnnotations: manifestDescriptor.annotations,
+                manifest: manifest
+            )
+        } catch {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "image \(containerConfig.image.reference) cannot boot a macOS sandbox: \(error.localizedDescription)"
+            )
+        }
         let layers = try MacOSImageLayers(manifest: manifest)
 
-        guard let hardwareContent: Content = try await store.get(digest: layers.hardwareModel.digest) else {
+        guard let hardwareContent: Content = try await contentStore.get(digest: layers.hardwareModel.digest) else {
             throw ContainerizationError(.notFound, message: "missing hardware model blob \(layers.hardwareModel.digest)")
         }
-        guard let auxiliaryContent: Content = try await store.get(digest: layers.auxiliaryStorage.digest) else {
+        guard let auxiliaryContent: Content = try await contentStore.get(digest: layers.auxiliaryStorage.digest) else {
             throw ContainerizationError(.notFound, message: "missing auxiliary storage blob \(layers.auxiliaryStorage.digest)")
         }
 
         let diskImagePath: URL
         switch layers {
         case .v0(_, _, let diskImage):
-            guard let diskContent: Content = try await store.get(digest: diskImage.digest) else {
+            guard let diskContent: Content = try await contentStore.get(digest: diskImage.digest) else {
                 throw ContainerizationError(.notFound, message: "missing disk image blob \(diskImage.digest)")
             }
             diskImagePath = diskContent.path
 
         case .v1(_, _, let diskLayoutDesc, let diskChunks):
             diskImagePath = try await resolveV1DiskImage(
-                store: store,
+                store: contentStore,
                 manifestDigest: manifestDescriptor.digest,
                 diskLayoutDescriptor: diskLayoutDesc,
                 diskChunks: diskChunks
@@ -741,7 +1584,7 @@ extension MacOSSandboxService {
 
     /// Resolve a v1 chunked disk image: check rebuild cache, rebuild if needed.
     private func resolveV1DiskImage(
-        store: RemoteContentStoreClient,
+        store: any ContentStore,
         manifestDigest: String,
         diskLayoutDescriptor: Descriptor,
         diskChunks: [Descriptor]
@@ -1186,23 +2029,27 @@ extension MacOSSandboxService {
         writeContainerLog(Data(("sidecar process.start begin for \(processID) on vsock port \(agentPort)\n").utf8))
         sessions[processID] = session
 
+        let launchConfiguration = try await resolveLaunchProcessConfiguration(
+            for: processID,
+            sessionConfiguration: session.config
+        )
         let execIdentity: (user: String?, uid: UInt32?, gid: UInt32?) =
-            switch session.config.user {
+            switch launchConfiguration.user {
             case .raw(let userString):
                 (userString, nil, nil)
             case .id(let uid, let gid):
                 (nil, uid, gid)
             }
         let request = MacOSSidecarExecRequestPayload(
-            executable: session.config.executable,
-            arguments: session.config.arguments,
-            environment: session.config.environment,
-            workingDirectory: session.config.workingDirectory,
-            terminal: session.config.terminal,
+            executable: launchConfiguration.executable,
+            arguments: launchConfiguration.arguments,
+            environment: launchConfiguration.environment,
+            workingDirectory: launchConfiguration.workingDirectory,
+            terminal: launchConfiguration.terminal,
             user: execIdentity.user,
             uid: execIdentity.uid,
             gid: execIdentity.gid,
-            supplementalGroups: session.config.supplementalGroups.isEmpty ? nil : session.config.supplementalGroups,
+            supplementalGroups: launchConfiguration.supplementalGroups.isEmpty ? nil : launchConfiguration.supplementalGroups,
             stdin: nil
         )
 
@@ -1373,6 +2220,20 @@ private func describeError(_ error: Error) -> String {
     return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
 }
 
+private func joinGuestPath(_ base: String, _ relativePath: String) -> String {
+    guard !relativePath.isEmpty else {
+        return base
+    }
+    return base.hasSuffix("/") ? base + relativePath : base + "/" + relativePath
+}
+
+private func shQuoteForWorkloadScript(_ value: String) -> String {
+    if value.isEmpty {
+        return "''"
+    }
+    return "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+}
+
 // MARK: - XPC helpers
 
 extension XPCMessage {
@@ -1405,6 +2266,20 @@ extension XPCMessage {
             throw ContainerizationError(.invalidArgument, message: "missing process configuration")
         }
         return try JSONDecoder().decode(ProcessConfiguration.self, from: data)
+    }
+
+    fileprivate func workloadConfiguration(id fallbackID: String) throws -> WorkloadConfiguration {
+        if let data = self.dataNoCopy(key: SandboxKeys.workloadConfig.rawValue) {
+            let configuration = try JSONDecoder().decode(WorkloadConfiguration.self, from: data)
+            guard configuration.id == fallbackID else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "workload configuration id \(configuration.id) does not match requested id \(fallbackID)"
+                )
+            }
+            return configuration
+        }
+        return WorkloadConfiguration(id: fallbackID, processConfiguration: try processConfig())
     }
 
     fileprivate func stopOptions() throws -> ContainerStopOptions {
@@ -1442,9 +2317,12 @@ extension MacOSSandboxService {
         }
         sessions[actualSessionID] = session
         if includeInSnapshots {
-            let workloadConfiguration =
-                (try? loadJSON(WorkloadConfiguration.self, from: workloadConfigurationPath(for: id)))
-                ?? .init(id: id, processConfiguration: config)
+            let workloadConfiguration: WorkloadConfiguration
+            if let persisted = try! loadJSONIfPresent(WorkloadConfiguration.self, from: workloadConfigurationPath(for: id)) {
+                workloadConfiguration = persisted
+            } else {
+                workloadConfiguration = .init(id: id, processConfiguration: config)
+            }
             upsertWorkloadRecord(configuration: workloadConfiguration)
             attachSession(actualSessionID, toWorkload: id)
             if started, let startedAt = session.startedAt {
@@ -1504,5 +2382,42 @@ extension MacOSSandboxService {
 
     func testingPersistWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
         try persistWorkloadConfiguration(configuration)
+    }
+
+    func testingPrepareSandbox(_ configuration: ContainerConfiguration, state: String = "booted") throws {
+        self.configuration = configuration
+        switch state {
+        case "created":
+            self.sandboxState = .created
+        case "running":
+            self.sandboxState = .running
+        default:
+            self.sandboxState = .booted
+        }
+        try persistSandboxMetadata(for: configuration)
+        try restorePersistedWorkloadsIfNeeded(containerConfig: configuration)
+    }
+
+    func testingInstallSidecarClient(socketPath: String, launchLabel: String = "testing-sidecar") {
+        let client = MacOSSidecarClient(socketPath: socketPath, log: log)
+        client.setEventHandler { [weak self] event in
+            guard let self else { return }
+            Task {
+                await self.handleSidecarEvent(event)
+            }
+        }
+        sidecarHandle = SidecarHandle(launchLabel: launchLabel, client: client)
+    }
+
+    func testingCreateWorkload(_ configuration: WorkloadConfiguration) async throws {
+        try await createWorkloadIfNeeded(workloadConfiguration: configuration, stdio: [nil, nil, nil])
+    }
+
+    func testingStartWorkload(_ workloadID: String) async throws {
+        try await startWorkloadIfNeeded(workloadID: workloadID)
+    }
+
+    func testingWorkloadConfiguration(_ workloadID: String) -> WorkloadConfiguration? {
+        workloads[workloadID]?.configuration
     }
 }

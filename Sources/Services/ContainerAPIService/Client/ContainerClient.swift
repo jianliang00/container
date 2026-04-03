@@ -392,6 +392,54 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Attach to a running workload's primary session.
+    public func attachWorkload(
+        containerId: String,
+        workloadId: String,
+        options: WorkloadAttachOptions = .init(),
+        stdio: [FileHandle?],
+        attachmentID: String = UUID().uuidString.lowercased()
+    ) async throws -> ClientWorkloadAttachment {
+        do {
+            let request = XPCMessage(route: .containerAttachWorkload)
+            request.set(key: .id, value: containerId)
+            request.set(key: .processIdentifier, value: workloadId)
+            request.set(key: .attachmentIdentifier, value: attachmentID)
+            request.set(key: .attachOptions, value: try JSONEncoder().encode(options))
+
+            for (i, h) in stdio.enumerated() {
+                let key: XPCKeys = try {
+                    switch i {
+                    case 0: .stdin
+                    case 1: .stdout
+                    case 2: .stderr
+                    default:
+                        throw ContainerizationError(.invalidArgument, message: "invalid fd \(i)")
+                    }
+                }()
+
+                if let h {
+                    request.set(key: key, value: h)
+                }
+            }
+
+            try await xpcClient.send(request)
+            return ClientWorkloadAttachmentImpl(
+                containerId: containerId,
+                workloadId: workloadId,
+                attachmentID: attachmentID,
+                takesControl: options.takesControl,
+                xpcClient: xpcClient
+            )
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to attach workload in sandbox",
+                cause: error
+            )
+        }
+    }
+
     /// Stop a workload running inside a sandbox.
     public func stopWorkload(
         containerId: String,

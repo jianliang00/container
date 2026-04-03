@@ -254,6 +254,60 @@ extension SandboxClient {
         }
     }
 
+    public func attachWorkload(
+        _ workloadID: String,
+        attachmentID: String,
+        options: WorkloadAttachOptions,
+        stdio: [FileHandle?]
+    ) async throws {
+        let request = XPCMessage(route: SandboxRoutes.attachWorkload.rawValue)
+        request.set(key: SandboxKeys.id.rawValue, value: workloadID)
+        request.set(key: SandboxKeys.attachmentIdentifier.rawValue, value: attachmentID)
+        request.set(key: SandboxKeys.attachOptions.rawValue, value: try JSONEncoder().encode(options))
+
+        for (i, h) in stdio.enumerated() {
+            let key: SandboxKeys = try {
+                switch i {
+                case 0: .stdin
+                case 1: .stdout
+                case 2: .stderr
+                default:
+                    throw ContainerizationError(.invalidArgument, message: "invalid fd \(i)")
+                }
+            }()
+
+            if let h {
+                request.set(key: key.rawValue, value: h)
+            }
+        }
+
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to attach workload \(workloadID) in container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
+    public func detachWorkloadAttachment(_ attachmentID: String, from workloadID: String) async throws {
+        let request = XPCMessage(route: SandboxRoutes.detachWorkloadAttachment.rawValue)
+        request.set(key: SandboxKeys.id.rawValue, value: workloadID)
+        request.set(key: SandboxKeys.attachmentIdentifier.rawValue, value: attachmentID)
+
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to detach attachment \(attachmentID) from workload \(workloadID) in container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
     public func startWorkload(_ id: String) async throws {
         let request = XPCMessage(route: SandboxRoutes.startWorkload.rawValue)
         request.set(key: SandboxKeys.id.rawValue, value: id)
@@ -333,10 +387,13 @@ extension SandboxClient {
         }
     }
 
-    public func kill(_ id: String, signal: Int64) async throws {
+    public func kill(_ id: String, signal: Int64, attachmentID: String? = nil) async throws {
         let request = XPCMessage(route: SandboxRoutes.kill.rawValue)
         request.set(key: SandboxKeys.id.rawValue, value: id)
         request.set(key: SandboxKeys.signal.rawValue, value: signal)
+        if let attachmentID {
+            request.set(key: SandboxKeys.attachmentIdentifier.rawValue, value: attachmentID)
+        }
 
         do {
             try await self.client.send(request)
@@ -349,9 +406,12 @@ extension SandboxClient {
         }
     }
 
-    public func resize(_ id: String, size: Terminal.Size) async throws {
+    public func resize(_ id: String, size: Terminal.Size, attachmentID: String? = nil) async throws {
         let request = XPCMessage(route: SandboxRoutes.resize.rawValue)
         request.set(key: SandboxKeys.id.rawValue, value: id)
+        if let attachmentID {
+            request.set(key: SandboxKeys.attachmentIdentifier.rawValue, value: attachmentID)
+        }
         request.set(key: SandboxKeys.width.rawValue, value: UInt64(size.width))
         request.set(key: SandboxKeys.height.rawValue, value: UInt64(size.height))
 

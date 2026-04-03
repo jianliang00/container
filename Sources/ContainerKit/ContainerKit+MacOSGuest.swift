@@ -65,6 +65,22 @@ public extension ContainerKit {
         )
     }
 
+    func streamAttach(
+        sandboxID: String,
+        workloadID: String,
+        options: WorkloadAttachOptions = .init(),
+        attachmentID: String = UUID().uuidString.lowercased(),
+        stdio: [FileHandle?]
+    ) async throws -> any ClientWorkloadAttachment {
+        try await containerClient.attachWorkload(
+            containerId: sandboxID,
+            workloadId: workloadID,
+            options: options,
+            stdio: stdio,
+            attachmentID: attachmentID
+        )
+    }
+
     func stopWorkload(
         sandboxID: String,
         workloadID: String,

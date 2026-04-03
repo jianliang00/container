@@ -82,6 +82,8 @@ extension RuntimeMacOSHelper {
                         SandboxRoutes.bootstrap.rawValue: service.bootstrap,
                         SandboxRoutes.createWorkload.rawValue: service.createWorkload,
                         SandboxRoutes.startWorkload.rawValue: service.startWorkload,
+                        SandboxRoutes.attachWorkload.rawValue: service.attachWorkload,
+                        SandboxRoutes.detachWorkloadAttachment.rawValue: service.detachWorkloadAttachment,
                         SandboxRoutes.stopWorkload.rawValue: service.stopWorkload,
                         SandboxRoutes.removeWorkload.rawValue: service.removeWorkload,
                         SandboxRoutes.createProcess.rawValue: service.createProcess,

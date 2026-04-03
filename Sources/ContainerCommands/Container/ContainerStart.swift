@@ -56,19 +56,21 @@ extension Application {
             let detach = !self.attach && !self.interactive
             let client = ContainerClient()
             let container = try await client.get(id: containerId)
+            let alreadyRunning = container.status == .running
 
             // Bootstrap and process start are both idempotent and don't fail the second time
-            // around, however not doing an rpc is always faster :). The other bit is we don't
-            // support attach currently, so we can't do `start -a` a second time and have it succeed.
-            if container.status == .running {
-                if !detach {
+            // around, however not doing an rpc is always faster :).
+            if alreadyRunning {
+                if detach {
+                    print(containerId)
+                    return
+                }
+                guard container.configuration.macosGuest != nil else {
                     throw ContainerizationError(
                         .invalidArgument,
                         message: "attach is currently unsupported on already running containers"
                     )
                 }
-                print(containerId)
-                return
             }
 
             for mount in container.configuration.mounts where mount.isVirtiofs {
@@ -87,30 +89,46 @@ extension Application {
                     try? io.close()
                 }
 
-                let process = try await client.bootstrap(id: container.id, stdio: io.stdio)
-                progress.finish()
-                let startupMessage =
-                    container.configuration.macosGuest == nil
-                    ? nil
-                    : "Waiting for macOS guest..."
+                if alreadyRunning {
+                    progress.finish()
+                    let attachment = try await client.attachWorkload(
+                        containerId: container.id,
+                        workloadId: container.id,
+                        options: .init(takesControl: true),
+                        stdio: io.stdio
+                    )
+                    exitCode = try await io.handleAttachment(
+                        attachment: attachment,
+                        log: log
+                    )
+                } else {
+                    let process = try await client.bootstrap(id: container.id, stdio: io.stdio)
+                    progress.finish()
+                    let startupMessage =
+                        container.configuration.macosGuest == nil
+                        ? nil
+                        : "Waiting for macOS guest..."
 
-                if detach {
-                    try await ProcessIO.startProcess(
+                    if detach {
+                        try await ProcessIO.startProcess(
+                            process: process,
+                            startupMessage: startupMessage
+                        )
+                        try io.closeAfterStart()
+                        print(self.containerId)
+                        return
+                    }
+
+                    exitCode = try await io.handleProcess(
                         process: process,
+                        log: log,
                         startupMessage: startupMessage
                     )
-                    try io.closeAfterStart()
-                    print(self.containerId)
-                    return
                 }
-
-                exitCode = try await io.handleProcess(
-                    process: process,
-                    log: log,
-                    startupMessage: startupMessage
-                )
             } catch {
-                try? await client.stop(id: container.id)
+                if !alreadyRunning {
+                    try? await client.stop(id: container.id)
+                }
 
                 if error is ContainerizationError {
                     throw error

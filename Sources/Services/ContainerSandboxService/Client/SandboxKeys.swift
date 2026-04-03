@@ -17,6 +17,7 @@
 public enum SandboxKeys: String {
     /// ID key.
     case id
+    case attachmentIdentifier
     /// Vsock port number key.
     case port
     /// Exit code for a process
@@ -40,6 +41,7 @@ public enum SandboxKeys: String {
     case height
     case processConfig
     case workloadConfig
+    case attachOptions
 
     /// Filesystem request payload.
     case fsPayload

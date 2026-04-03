@@ -160,7 +160,8 @@ public struct ContainersHarness: Sendable {
         try await service.resize(
             id: id,
             processID: processID,
-            size: Terminal.Size(width: UInt16(width), height: UInt16(height))
+            size: Terminal.Size(width: UInt16(width), height: UInt16(height)),
+            attachmentID: message.optionalAttachmentIdentifier()
         )
 
         return message.reply()
@@ -185,7 +186,8 @@ public struct ContainersHarness: Sendable {
         try await service.kill(
             id: id,
             processID: processID,
-            signal: try message.signal()
+            signal: try message.signal(),
+            attachmentID: message.optionalAttachmentIdentifier()
         )
         return message.reply()
     }
@@ -266,6 +268,48 @@ public struct ContainersHarness: Sendable {
             throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
         }
         try await service.startWorkload(id: id, workloadID: workloadID)
+        return message.reply()
+    }
+
+    @Sendable
+    public func attachWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard let workloadID = message.string(key: .processIdentifier) else {
+            throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
+        }
+        guard let attachmentID = message.optionalAttachmentIdentifier() else {
+            throw ContainerizationError(.invalidArgument, message: "attachment identifier cannot be empty")
+        }
+
+        try await service.attachWorkload(
+            id: id,
+            workloadID: workloadID,
+            attachmentID: attachmentID,
+            options: try message.attachOptions(),
+            stdio: message.stdio()
+        )
+        return message.reply()
+    }
+
+    @Sendable
+    public func detachWorkloadAttachment(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard let workloadID = message.string(key: .processIdentifier) else {
+            throw ContainerizationError(.invalidArgument, message: "process ID cannot be empty")
+        }
+        guard let attachmentID = message.optionalAttachmentIdentifier() else {
+            throw ContainerizationError(.invalidArgument, message: "attachment identifier cannot be empty")
+        }
+
+        try await service.detachWorkloadAttachment(
+            id: id,
+            workloadID: workloadID,
+            attachmentID: attachmentID
+        )
         return message.reply()
     }
 

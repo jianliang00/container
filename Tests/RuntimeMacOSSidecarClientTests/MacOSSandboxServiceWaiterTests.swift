@@ -562,6 +562,222 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(!sandboxLog.contains("hello stdout"))
         #expect(!sandboxLog.contains("hello stderr"))
     }
+
+    @Test
+    func workloadAttachFansOutLiveOutputWithoutReplay() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-attach-fanout",
+            config: baseProcessConfiguration(),
+            started: true,
+            sessionID: "__workload__exec-attach-fanout"
+        )
+
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processStdout,
+                processID: "__workload__exec-attach-fanout",
+                data: Data("before-attach\n".utf8)
+            )
+        )
+
+        let readerA = Pipe()
+        let readerB = Pipe()
+        try await service.testingAttachWorkload(
+            "exec-attach-fanout",
+            attachmentID: "reader-a",
+            options: .init(),
+            stdio: [nil, readerA.fileHandleForWriting, nil]
+        )
+        try await service.testingAttachWorkload(
+            "exec-attach-fanout",
+            attachmentID: "reader-b",
+            options: .init(),
+            stdio: [nil, readerB.fileHandleForWriting, nil]
+        )
+
+        let replayA = await waitForPipeChunk(readerA.fileHandleForReading, timeout: .milliseconds(150))
+        let replayB = await waitForPipeChunk(readerB.fileHandleForReading, timeout: .milliseconds(150))
+        #expect(replayA == nil)
+        #expect(replayB == nil)
+
+        let readA = Task {
+            await waitForPipeChunk(readerA.fileHandleForReading)
+        }
+        let readB = Task {
+            await waitForPipeChunk(readerB.fileHandleForReading)
+        }
+
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processStderr,
+                processID: "__workload__exec-attach-fanout",
+                data: Data("after-attach\n".utf8)
+            )
+        )
+
+        let dataA = try #require(await readA.value)
+        let dataB = try #require(await readB.value)
+        #expect(String(data: dataA, encoding: .utf8) == "after-attach\n")
+        #expect(String(data: dataB, encoding: .utf8) == "after-attach\n")
+    }
+
+    @Test
+    func workloadAttachAllowsSingleControllerAndExtraReaders() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-attach-controller",
+            config: baseProcessConfiguration(),
+            started: true,
+            sessionID: "__workload__exec-attach-controller"
+        )
+
+        let controllerPipe = Pipe()
+        try await service.testingAttachWorkload(
+            "exec-attach-controller",
+            attachmentID: "controller",
+            options: .init(takesControl: true),
+            stdio: [nil, controllerPipe.fileHandleForWriting, nil]
+        )
+
+        let readerPipe = Pipe()
+        try await service.testingAttachWorkload(
+            "exec-attach-controller",
+            attachmentID: "reader",
+            options: .init(),
+            stdio: [nil, readerPipe.fileHandleForWriting, nil]
+        )
+
+        #expect(await service.testingControllerAttachmentID(for: "exec-attach-controller") == "controller")
+        #expect(await service.testingAttachmentIDs(for: "exec-attach-controller") == ["controller", "reader"])
+
+        do {
+            try await service.testingAttachWorkload(
+                "exec-attach-controller",
+                attachmentID: "controller-2",
+                options: .init(takesControl: true),
+                stdio: [nil, nil, nil]
+            )
+            Issue.record("expected second controlling attachment to fail")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .invalidState)
+        }
+    }
+
+    @Test
+    func workloadAttachControlOperationsRequireControllerAndDetachReleasesIt() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-attach-control",
+            config: baseProcessConfiguration(),
+            started: true,
+            sessionID: "__workload__exec-attach-control"
+        )
+
+        let socketPath = tempRoot.appendingPathComponent("a.sock").path
+        let server = try RecordingExecSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start()
+
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let readerPipe = Pipe()
+        try await service.testingAttachWorkload(
+            "exec-attach-control",
+            attachmentID: "reader",
+            options: .init(),
+            stdio: [nil, readerPipe.fileHandleForWriting, nil]
+        )
+
+        do {
+            try await service.testingSignalWorkload(
+                "exec-attach-control",
+                signal: SIGUSR1,
+                attachmentID: "reader"
+            )
+            Issue.record("expected output-only attachment signal to fail")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .invalidState)
+        }
+
+        try await service.testingAttachWorkload(
+            "exec-attach-control",
+            attachmentID: "controller-a",
+            options: .init(takesControl: true),
+            stdio: [nil, nil, nil]
+        )
+        try await service.testingResizeWorkload(
+            "exec-attach-control",
+            width: 120,
+            height: 40,
+            attachmentID: "controller-a"
+        )
+        try await service.testingSignalWorkload(
+            "exec-attach-control",
+            signal: SIGUSR1,
+            attachmentID: "controller-a"
+        )
+
+        try await service.testingDetachWorkloadAttachment("controller-a", from: "exec-attach-control")
+        #expect(await service.testingControllerAttachmentID(for: "exec-attach-control") == nil)
+
+        try await service.testingAttachWorkload(
+            "exec-attach-control",
+            attachmentID: "controller-b",
+            options: .init(takesControl: true),
+            stdio: [nil, nil, nil]
+        )
+        #expect(await service.testingControllerAttachmentID(for: "exec-attach-control") == "controller-b")
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let requests = server.recordedRequests()
+        let sawResize = requests.contains {
+            $0.method == .processResize && $0.processID == "__workload__exec-attach-control" && $0.width == 120 && $0.height == 40
+        }
+        let sawSignal = requests.contains {
+            $0.method == .processSignal && $0.processID == "__workload__exec-attach-control" && $0.signal == SIGUSR1
+        }
+        #expect(sawResize)
+        #expect(sawSignal)
+    }
+
+    @Test
+    func workloadAttachFailsForStoppedWorkload() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-attach-stopped",
+            config: baseProcessConfiguration(),
+            started: true,
+            exitCode: 0,
+            sessionID: "__workload__exec-attach-stopped"
+        )
+
+        do {
+            try await service.testingAttachWorkload(
+                "exec-attach-stopped",
+                attachmentID: "reader",
+                options: .init(),
+                stdio: [nil, nil, nil]
+            )
+            Issue.record("expected attach to stopped workload to fail")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .invalidState)
+        }
+    }
 }
 
 private func makeSandboxService(root: URL) -> MacOSSandboxService {
@@ -798,5 +1014,48 @@ private func waitUntilWaiterRegistered(
     }
 
     Issue.record("timed out waiting for waiter registration on \(id)")
+}
+
+private func waitForPipeChunk(
+    _ handle: FileHandle,
+    timeout: Duration = .seconds(1)
+) async -> Data? {
+    final class PipeReadState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed = false
+
+        func complete(with body: () -> Void) {
+            let shouldRun = lock.withLock { () -> Bool in
+                guard !completed else {
+                    return false
+                }
+                completed = true
+                return true
+            }
+            guard shouldRun else {
+                return
+            }
+            body()
+        }
+    }
+
+    let state = PipeReadState()
+    return await withCheckedContinuation { continuation in
+        handle.readabilityHandler = { fileHandle in
+            let data = fileHandle.availableData
+            fileHandle.readabilityHandler = nil
+            state.complete {
+                continuation.resume(returning: data.isEmpty ? nil : data)
+            }
+        }
+
+        Task {
+            try? await Task.sleep(for: timeout)
+            handle.readabilityHandler = nil
+            state.complete {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
 }
 #endif

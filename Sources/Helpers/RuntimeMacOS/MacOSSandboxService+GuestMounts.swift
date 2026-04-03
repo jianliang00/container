@@ -90,11 +90,7 @@ extension MacOSSandboxService {
         guard let session = sessions.removeValue(forKey: processID) else {
             return
         }
-        session.stdio[0]?.readabilityHandler = nil
-        try? session.stdio[1]?.close()
-        try? session.stdio[2]?.close()
-        try? session.stdoutLogHandle?.close()
-        try? session.stderrLogHandle?.close()
+        closeSessionResources(session)
     }
 
     private static func guestMountBootstrapScript(shares: [MacOSGuestMountMapping.HostPathShare]) -> String {

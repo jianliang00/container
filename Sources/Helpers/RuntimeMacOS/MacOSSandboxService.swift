@@ -23,6 +23,7 @@ import ContainerizationArchive
 import ContainerizationError
 import ContainerizationOCI
 import Darwin
+import Dispatch
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
@@ -49,10 +50,136 @@ final class SidecarEventPump: @unchecked Sendable {
     }
 }
 
+final class AttachmentOutputPump: @unchecked Sendable {
+    private let fileHandle: FileHandle
+    private let writeQueue: DispatchQueue
+    private let maxBufferedBytes: Int
+    private let onFailure: @Sendable (String) -> Void
+
+    private let lock = NSLock()
+    private var pendingWrites: [Data] = []
+    private var bufferedBytes = 0
+    private var draining = false
+    private var closed = false
+
+    init(
+        fileHandle: FileHandle,
+        label: String,
+        maxBufferedBytes: Int = 1 << 20,
+        onFailure: @escaping @Sendable (String) -> Void
+    ) {
+        self.fileHandle = fileHandle
+        self.writeQueue = DispatchQueue(label: label)
+        self.maxBufferedBytes = maxBufferedBytes
+        self.onFailure = onFailure
+    }
+
+    func enqueue(_ data: Data) {
+        guard !data.isEmpty else {
+            return
+        }
+
+        let result = lock.withLock { () -> (scheduleDrain: Bool, failureMessage: String?) in
+            guard !closed else {
+                return (false, nil)
+            }
+            if bufferedBytes + data.count > maxBufferedBytes {
+                closed = true
+                pendingWrites.removeAll(keepingCapacity: false)
+                bufferedBytes = 0
+                draining = false
+                return (false, "attachment output buffer exceeded \(maxBufferedBytes) bytes")
+            }
+
+            pendingWrites.append(data)
+            bufferedBytes += data.count
+            guard !draining else {
+                return (false, nil)
+            }
+            draining = true
+            return (true, nil)
+        }
+
+        if let failureMessage = result.failureMessage {
+            try? fileHandle.close()
+            onFailure(failureMessage)
+            return
+        }
+        guard result.scheduleDrain else {
+            return
+        }
+
+        writeQueue.async { [self] in
+            drain()
+        }
+    }
+
+    func close() {
+        let shouldClose = lock.withLock {
+            guard !closed else {
+                return false
+            }
+            closed = true
+            pendingWrites.removeAll(keepingCapacity: false)
+            bufferedBytes = 0
+            return true
+        }
+
+        guard shouldClose else {
+            return
+        }
+        try? fileHandle.close()
+    }
+
+    private func drain() {
+        while true {
+            let nextWrite: Data? = lock.withLock {
+                guard !closed || !pendingWrites.isEmpty else {
+                    draining = false
+                    return nil
+                }
+                guard !pendingWrites.isEmpty else {
+                    draining = false
+                    return nil
+                }
+
+                let next = pendingWrites.removeFirst()
+                bufferedBytes -= next.count
+                return next
+            }
+
+            guard let nextWrite else {
+                return
+            }
+
+            do {
+                try fileHandle.write(contentsOf: nextWrite)
+            } catch {
+                let shouldNotify = lock.withLock {
+                    guard !closed else {
+                        return false
+                    }
+                    closed = true
+                    pendingWrites.removeAll(keepingCapacity: false)
+                    bufferedBytes = 0
+                    draining = false
+                    return true
+                }
+                try? fileHandle.close()
+                if shouldNotify {
+                    onFailure("failed to write attachment stream: \(error.localizedDescription)")
+                }
+                return
+            }
+        }
+    }
+}
+
 public actor MacOSSandboxService {
     private static let defaultAgentPort: UInt32 = 27000
     private static let guestAgentLogGuestPath = "/var/log/container-macos-guest-agent.log"
     private static let guestWorkloadsRootPath = "/var/lib/container/workloads"
+    private static let primaryAttachmentID = "__primary__"
 
     private enum State: Equatable {
         case created
@@ -71,15 +198,24 @@ public actor MacOSSandboxService {
     }
 
     struct Session {
+        struct Attachment {
+            let id: String
+            let stdin: FileHandle?
+            var stdoutPump: AttachmentOutputPump?
+            var stderrPump: AttachmentOutputPump?
+            let takesControl: Bool
+            var stdinClosed: Bool = false
+        }
+
         let processID: String
         var config: ProcessConfiguration
-        let stdio: [FileHandle?]
         let includeInSnapshots: Bool
         let stdoutLogURL: URL
         let stderrLogURL: URL
         var stdoutLogHandle: FileHandle?
         var stderrLogHandle: FileHandle?
-        var stdinClosed: Bool = false
+        var attachments: [String: Attachment] = [:]
+        var controllerAttachmentID: String?
         var started: Bool = false
         var startedAt: Date?
         var exitStatus: ExitStatus?
@@ -196,6 +332,31 @@ extension MacOSSandboxService {
     }
 
     @Sendable
+    public func attachWorkload(_ message: XPCMessage) async throws -> XPCMessage {
+        let workloadID = try message.id()
+        let attachmentID = try message.attachmentIdentifier()
+        let options = try message.attachOptions()
+        try attachToRunningWorkload(
+            workloadID: workloadID,
+            attachmentID: attachmentID,
+            options: options,
+            stdio: message.stdio()
+        )
+        return message.reply()
+    }
+
+    @Sendable
+    public func detachWorkloadAttachment(_ message: XPCMessage) async throws -> XPCMessage {
+        let workloadID = try message.id()
+        let attachmentID = try message.attachmentIdentifier()
+        try detachAttachmentFromWorkloadIfPresent(
+            workloadID: workloadID,
+            attachmentID: attachmentID
+        )
+        return message.reply()
+    }
+
+    @Sendable
     public func stopWorkload(_ message: XPCMessage) async throws -> XPCMessage {
         let workloadID = try message.id()
         let stopOptions = try message.stopOptions()
@@ -257,9 +418,20 @@ extension MacOSSandboxService {
     public func kill(_ message: XPCMessage) async throws -> XPCMessage {
         let processID = try message.id()
         let signal = Int32(message.int64(key: SandboxKeys.signal.rawValue))
+        let attachmentID = message.optionalAttachmentIdentifier()
         if workloads[processID] != nil {
-            try sendSignalToWorkload(workloadID: processID, signal: signal)
+            try sendSignalToWorkload(
+                workloadID: processID,
+                signal: signal,
+                attachmentID: attachmentID
+            )
         } else {
+            guard attachmentID == nil else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "attachment identifiers only apply to workloads"
+                )
+            }
             guard externalProcessIDs.contains(processID) else {
                 throw ContainerizationError(.notFound, message: "process \(processID) not found")
             }
@@ -273,9 +445,21 @@ extension MacOSSandboxService {
         let processID = try message.id()
         let width = UInt16(message.uint64(key: SandboxKeys.width.rawValue))
         let height = UInt16(message.uint64(key: SandboxKeys.height.rawValue))
+        let attachmentID = message.optionalAttachmentIdentifier()
         if workloads[processID] != nil {
-            try sendResizeToWorkload(workloadID: processID, width: width, height: height)
+            try sendResizeToWorkload(
+                workloadID: processID,
+                width: width,
+                height: height,
+                attachmentID: attachmentID
+            )
         } else {
+            guard attachmentID == nil else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "attachment identifiers only apply to workloads"
+                )
+            }
             guard externalProcessIDs.contains(processID) else {
                 throw ContainerizationError(.notFound, message: "process \(processID) not found")
             }
@@ -1524,11 +1708,7 @@ extension MacOSSandboxService {
         guard let session = sessions.removeValue(forKey: processID) else {
             return
         }
-        session.stdio[0]?.readabilityHandler = nil
-        try? session.stdio[1]?.close()
-        try? session.stdio[2]?.close()
-        try? session.stdoutLogHandle?.close()
-        try? session.stderrLogHandle?.close()
+        closeSessionResources(session)
     }
 
     private func injectDirectoryTree(from sourceRoot: URL, to guestRoot: String) async throws {
@@ -1938,11 +2118,7 @@ extension MacOSSandboxService {
             return
         }
         if let session = sessions.removeValue(forKey: sessionID) {
-            session.stdio[0]?.readabilityHandler = nil
-            try? session.stdio[1]?.close()
-            try? session.stdio[2]?.close()
-            try? session.stdoutLogHandle?.close()
-            try? session.stderrLogHandle?.close()
+            closeSessionResources(session)
         }
         workloadSessions.removeValue(forKey: sessionID)
         if var updated = workloads[workloadID] {
@@ -1975,16 +2151,211 @@ extension MacOSSandboxService {
         } else {
             logs = try openWorkloadLogFiles(processID: processID)
         }
-        return Session(
+        var session = Session(
             processID: processID,
             config: config,
-            stdio: stdio,
             includeInSnapshots: includeInSnapshots,
             stdoutLogURL: logs.stdoutURL,
             stderrLogURL: logs.stderrURL,
             stdoutLogHandle: logs.stdoutHandle,
             stderrLogHandle: logs.stderrHandle
         )
+        installPrimaryAttachmentIfNeeded(
+            on: &session,
+            sessionID: processID,
+            stdio: stdio
+        )
+        return session
+    }
+
+    private func installPrimaryAttachmentIfNeeded(
+        on session: inout Session,
+        sessionID: String,
+        stdio: [FileHandle?]
+    ) {
+        guard stdio.contains(where: { $0 != nil }) else {
+            return
+        }
+        session.attachments[Self.primaryAttachmentID] = makeAttachment(
+            sessionID: sessionID,
+            attachmentID: Self.primaryAttachmentID,
+            stdio: stdio,
+            takesControl: true
+        )
+        session.controllerAttachmentID = Self.primaryAttachmentID
+        installControllerReadabilityHandler(processID: sessionID, session: &session)
+    }
+
+    private func makeAttachment(
+        sessionID: String,
+        attachmentID: String,
+        stdio: [FileHandle?],
+        takesControl: Bool
+    ) -> Session.Attachment {
+        func makePump(stream: String, fileHandle: FileHandle?) -> AttachmentOutputPump? {
+            guard let fileHandle else {
+                return nil
+            }
+            return AttachmentOutputPump(
+                fileHandle: fileHandle,
+                label: "com.apple.container.runtime.attach.\(sessionID).\(attachmentID).\(stream)"
+            ) { [service = self] reason in
+                Task {
+                    await service.handleAttachmentOutputFailure(
+                        sessionID: sessionID,
+                        attachmentID: attachmentID,
+                        reason: reason
+                    )
+                }
+            }
+        }
+
+        return Session.Attachment(
+            id: attachmentID,
+            stdin: stdio[0],
+            stdoutPump: makePump(stream: "stdout", fileHandle: stdio[1]),
+            stderrPump: makePump(stream: "stderr", fileHandle: stdio[2]),
+            takesControl: takesControl
+        )
+    }
+
+    private func installControllerReadabilityHandler(processID: String, session: inout Session) {
+        for attachment in session.attachments.values {
+            attachment.stdin?.readabilityHandler = nil
+        }
+
+        guard let controllerAttachmentID = session.controllerAttachmentID,
+            let attachment = session.attachments[controllerAttachmentID],
+            let stdin = attachment.stdin
+        else {
+            return
+        }
+
+        let service = self
+        stdin.readabilityHandler = { handle in
+            let data = handle.availableData
+            Task {
+                await service.forwardAttachmentStdin(
+                    processID: processID,
+                    attachmentID: controllerAttachmentID,
+                    data: data
+                )
+            }
+        }
+    }
+
+    private func closeAttachmentResources(_ attachment: Session.Attachment) {
+        attachment.stdin?.readabilityHandler = nil
+        try? attachment.stdin?.close()
+        attachment.stdoutPump?.close()
+        attachment.stderrPump?.close()
+    }
+
+    func closeSessionResources(_ session: Session) {
+        for attachment in session.attachments.values {
+            closeAttachmentResources(attachment)
+        }
+        try? session.stdoutLogHandle?.close()
+        try? session.stderrLogHandle?.close()
+    }
+
+    private func handleAttachmentOutputFailure(
+        sessionID: String,
+        attachmentID: String,
+        reason: String
+    ) {
+        writeContainerLog(
+            Data(
+                ("detaching attachment \(attachmentID) from \(sessionID): \(reason)\n").utf8
+            )
+        )
+        detachAttachmentIfPresent(
+            sessionID: sessionID,
+            attachmentID: attachmentID
+        )
+    }
+
+    private func attachToRunningWorkload(
+        workloadID: String,
+        attachmentID: String,
+        options: WorkloadAttachOptions,
+        stdio: [FileHandle?]
+    ) throws {
+        guard let record = workloads[workloadID] else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        guard isWorkloadRunning(record) else {
+            throw ContainerizationError(.invalidState, message: "workload \(workloadID) is not running")
+        }
+
+        let sessionID = try sessionID(forWorkload: workloadID)
+        guard var session = sessions[sessionID], session.started, session.exitStatus == nil else {
+            throw ContainerizationError(.invalidState, message: "workload \(workloadID) has no running session")
+        }
+        guard session.attachments[attachmentID] == nil else {
+            throw ContainerizationError(.exists, message: "attachment \(attachmentID) already exists")
+        }
+        if options.takesControl, let currentController = session.controllerAttachmentID {
+            throw ContainerizationError(
+                .invalidState,
+                message: "workload \(workloadID) is already controlled by attachment \(currentController)"
+            )
+        }
+
+        session.attachments[attachmentID] = makeAttachment(
+            sessionID: sessionID,
+            attachmentID: attachmentID,
+            stdio: stdio,
+            takesControl: options.takesControl
+        )
+        if options.takesControl {
+            session.controllerAttachmentID = attachmentID
+            installControllerReadabilityHandler(processID: sessionID, session: &session)
+        }
+        sessions[sessionID] = session
+    }
+
+    private func detachAttachmentFromWorkloadIfPresent(workloadID: String, attachmentID: String) throws {
+        guard workloads[workloadID] != nil else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        guard let sessionID = workloads[workloadID]?.sessionID else {
+            return
+        }
+        detachAttachmentIfPresent(sessionID: sessionID, attachmentID: attachmentID)
+    }
+
+    private func detachAttachmentIfPresent(sessionID: String, attachmentID: String) {
+        guard var session = sessions[sessionID] else {
+            return
+        }
+        guard let attachment = session.attachments.removeValue(forKey: attachmentID) else {
+            return
+        }
+
+        if session.controllerAttachmentID == attachmentID {
+            session.controllerAttachmentID = nil
+        }
+        closeAttachmentResources(attachment)
+        installControllerReadabilityHandler(processID: sessionID, session: &session)
+        sessions[sessionID] = session
+    }
+
+    private func requireControllingAttachment(
+        for session: Session,
+        processID: String,
+        attachmentID: String
+    ) throws {
+        guard let controllerAttachmentID = session.controllerAttachmentID,
+            controllerAttachmentID == attachmentID,
+            let attachment = session.attachments[attachmentID],
+            attachment.takesControl
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "attachment \(attachmentID) does not control workload \(processID)"
+            )
+        }
     }
 
     private func workloadSnapshot(processID: String) throws -> WorkloadSnapshot {
@@ -2037,8 +2408,7 @@ extension MacOSSandboxService {
             )
         } catch {
             if let session = sessions.removeValue(forKey: processID) {
-                try? session.stdoutLogHandle?.close()
-                try? session.stderrLogHandle?.close()
+                closeSessionResources(session)
             }
             guestAgentLogCaptureProcessID = nil
             writeContainerLog(
@@ -2219,11 +2589,7 @@ extension MacOSSandboxService {
                 workloads[workloadID] = record
                 workloadSessions.removeValue(forKey: sessionID)
             }
-            session.stdio[0]?.readabilityHandler = nil
-            try? session.stdio[1]?.close()
-            try? session.stdio[2]?.close()
-            try? session.stdoutLogHandle?.close()
-            try? session.stderrLogHandle?.close()
+            closeSessionResources(session)
         }
         sessions.removeAll()
         externalProcessIDs.removeAll()
@@ -2282,15 +2648,7 @@ extension MacOSSandboxService {
             try await startProcessViaSidecarWithRetries(port: agentPort, processID: processID, request: request)
             session.started = true
             session.startedAt = session.startedAt ?? Date()
-            if let stdin = session.stdio[0] {
-                let service = self
-                stdin.readabilityHandler = { handle in
-                    let data = handle.availableData
-                    Task {
-                        await service.forwardHostStdin(processID: processID, data: data)
-                    }
-                }
-            }
+            installControllerReadabilityHandler(processID: processID, session: &session)
             sessions[processID] = session
             writeContainerLog(Data(("sidecar process.start sent for \(processID)\n").utf8))
         } catch {
@@ -2308,28 +2666,46 @@ extension MacOSSandboxService {
     }
     #endif
 
-    private func forwardHostStdin(processID: String, data: Data) async {
+    private func forwardAttachmentStdin(
+        processID: String,
+        attachmentID: String,
+        data: Data
+    ) async {
         guard var session = sessions[processID], session.started else {
+            return
+        }
+        guard session.controllerAttachmentID == attachmentID else {
+            return
+        }
+        guard var attachment = session.attachments[attachmentID], attachment.takesControl else {
             return
         }
 
         do {
-            if session.stdinClosed {
+            if attachment.stdinClosed {
                 return
             }
             guard let client = sidecarHandle?.client else {
                 throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
             }
             if data.isEmpty {
-                session.stdinClosed = true
+                attachment.stdinClosed = true
+                attachment.stdin?.readabilityHandler = nil
+                session.attachments[attachmentID] = attachment
                 sessions[processID] = session
-                session.stdio[0]?.readabilityHandler = nil
                 try client.processClose(processID: processID)
             } else {
                 try client.processStdin(processID: processID, data: data)
             }
         } catch {
-            log.error("failed to forward stdin", metadata: ["process_id": "\(processID)", "error": "\(error)"])
+            log.error(
+                "failed to forward stdin",
+                metadata: [
+                    "process_id": "\(processID)",
+                    "attachment_id": "\(attachmentID)",
+                    "error": "\(error)",
+                ]
+            )
         }
     }
 
@@ -2337,9 +2713,20 @@ extension MacOSSandboxService {
         try sendSignalToSession(processID: processID, signal: signal)
     }
 
-    private func sendSignalToSession(processID: String, signal: Int32) throws {
+    private func sendSignalToSession(
+        processID: String,
+        signal: Int32,
+        attachmentID: String? = nil
+    ) throws {
         guard let session = sessions[processID] else {
             throw ContainerizationError(.notFound, message: "process \(processID) not found")
+        }
+        if let attachmentID {
+            try requireControllingAttachment(
+                for: session,
+                processID: processID,
+                attachmentID: attachmentID
+            )
         }
         if session.exitStatus != nil {
             return
@@ -2350,18 +2737,38 @@ extension MacOSSandboxService {
         try client.processSignal(processID: processID, signal: signal)
     }
 
-    private func sendSignalToWorkload(workloadID: String, signal: Int32) throws {
+    private func sendSignalToWorkload(
+        workloadID: String,
+        signal: Int32,
+        attachmentID: String? = nil
+    ) throws {
         let sessionID = try sessionID(forWorkload: workloadID)
-        try sendSignalToSession(processID: sessionID, signal: signal)
+        try sendSignalToSession(
+            processID: sessionID,
+            signal: signal,
+            attachmentID: attachmentID
+        )
     }
 
     private func sendResizeToProcess(processID: String, width: UInt16, height: UInt16) throws {
         try sendResizeToSession(processID: processID, width: width, height: height)
     }
 
-    private func sendResizeToSession(processID: String, width: UInt16, height: UInt16) throws {
+    private func sendResizeToSession(
+        processID: String,
+        width: UInt16,
+        height: UInt16,
+        attachmentID: String? = nil
+    ) throws {
         guard let session = sessions[processID] else {
             throw ContainerizationError(.notFound, message: "process \(processID) not found")
+        }
+        if let attachmentID {
+            try requireControllingAttachment(
+                for: session,
+                processID: processID,
+                attachmentID: attachmentID
+            )
         }
         if session.exitStatus != nil {
             return
@@ -2372,9 +2779,19 @@ extension MacOSSandboxService {
         try client.processResize(processID: processID, width: width, height: height)
     }
 
-    private func sendResizeToWorkload(workloadID: String, width: UInt16, height: UInt16) throws {
+    private func sendResizeToWorkload(
+        workloadID: String,
+        width: UInt16,
+        height: UInt16,
+        attachmentID: String? = nil
+    ) throws {
         let sessionID = try sessionID(forWorkload: workloadID)
-        try sendResizeToSession(processID: sessionID, width: width, height: height)
+        try sendResizeToSession(
+            processID: sessionID,
+            width: width,
+            height: height,
+            attachmentID: attachmentID
+        )
     }
 
     func handleSidecarEvent(_ event: MacOSSidecarEvent) {
@@ -2386,17 +2803,19 @@ extension MacOSSandboxService {
         switch event.event {
         case .processStdout:
             if let data = event.data, !data.isEmpty {
-                if let stdout = session.stdio[1] {
-                    try? stdout.write(contentsOf: data)
+                for attachment in session.attachments.values {
+                    attachment.stdoutPump?.enqueue(data)
                 }
                 try? session.stdoutLogHandle?.write(contentsOf: data)
             }
         case .processStderr:
             if let data = event.data, !data.isEmpty {
-                if let stderr = session.stdio[2] {
-                    try? stderr.write(contentsOf: data)
-                } else if let stdout = session.stdio[1] {
-                    try? stdout.write(contentsOf: data)
+                for attachment in session.attachments.values {
+                    if let stderrPump = attachment.stderrPump {
+                        stderrPump.enqueue(data)
+                    } else {
+                        attachment.stdoutPump?.enqueue(data)
+                    }
                 }
                 try? session.stderrLogHandle?.write(contentsOf: data)
                 if let text = String(data: data, encoding: .utf8)?
@@ -2418,11 +2837,7 @@ extension MacOSSandboxService {
             writeContainerLog(Data(("sidecar process exit event for \(processID) code=\(code)\n").utf8))
             let status = ExitStatus(exitCode: code, exitedAt: Date())
             session.exitStatus = status
-            session.stdio[0]?.readabilityHandler = nil
-            try? session.stdio[1]?.close()
-            try? session.stdio[2]?.close()
-            try? session.stdoutLogHandle?.close()
-            try? session.stderrLogHandle?.close()
+            closeSessionResources(session)
             sessions[processID] = session
             if processID == guestAgentLogCaptureProcessID {
                 guestAgentLogCaptureProcessID = nil
@@ -2510,6 +2925,24 @@ extension XPCMessage {
             return .default
         }
         return try JSONDecoder().decode(ContainerStopOptions.self, from: data)
+    }
+
+    fileprivate func attachmentIdentifier() throws -> String {
+        guard let attachmentID = self.string(key: SandboxKeys.attachmentIdentifier.rawValue) else {
+            throw ContainerizationError(.invalidArgument, message: "missing attachment identifier")
+        }
+        return attachmentID
+    }
+
+    fileprivate func optionalAttachmentIdentifier() -> String? {
+        self.string(key: SandboxKeys.attachmentIdentifier.rawValue)
+    }
+
+    fileprivate func attachOptions() throws -> WorkloadAttachOptions {
+        guard let data = self.dataNoCopy(key: SandboxKeys.attachOptions.rawValue) else {
+            return .init()
+        }
+        return try JSONDecoder().decode(WorkloadAttachOptions.self, from: data)
     }
 }
 
@@ -2670,6 +3103,72 @@ extension MacOSSandboxService {
             }
         }
         sidecarHandle = SidecarHandle(launchLabel: launchLabel, client: client)
+    }
+
+    func testingAttachWorkload(
+        _ workloadID: String,
+        attachmentID: String,
+        options: WorkloadAttachOptions,
+        stdio: [FileHandle?]
+    ) throws {
+        try attachToRunningWorkload(
+            workloadID: workloadID,
+            attachmentID: attachmentID,
+            options: options,
+            stdio: stdio
+        )
+    }
+
+    func testingDetachWorkloadAttachment(
+        _ attachmentID: String,
+        from workloadID: String
+    ) throws {
+        try detachAttachmentFromWorkloadIfPresent(
+            workloadID: workloadID,
+            attachmentID: attachmentID
+        )
+    }
+
+    func testingSignalWorkload(
+        _ workloadID: String,
+        signal: Int32,
+        attachmentID: String? = nil
+    ) throws {
+        try sendSignalToWorkload(
+            workloadID: workloadID,
+            signal: signal,
+            attachmentID: attachmentID
+        )
+    }
+
+    func testingResizeWorkload(
+        _ workloadID: String,
+        width: UInt16,
+        height: UInt16,
+        attachmentID: String? = nil
+    ) throws {
+        try sendResizeToWorkload(
+            workloadID: workloadID,
+            width: width,
+            height: height,
+            attachmentID: attachmentID
+        )
+    }
+
+    func testingAttachmentIDs(for workloadID: String) -> [String] {
+        guard let sessionID = workloads[workloadID]?.sessionID,
+            let session = sessions[sessionID]
+        else {
+            return []
+        }
+        return session.attachments.keys.sorted()
+    }
+
+    func testingControllerAttachmentID(for workloadID: String) -> String? {
+        guard let sessionID = workloads[workloadID]?.sessionID else {
+            return nil
+        }
+        return sessions[sessionID]?.controllerAttachmentID
     }
 
     func testingCreateWorkload(_ configuration: WorkloadConfiguration) async throws {

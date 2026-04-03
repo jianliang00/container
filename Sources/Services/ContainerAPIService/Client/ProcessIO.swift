@@ -210,7 +210,17 @@ public struct ProcessIO: Sendable {
             startupWriter: startupWriter
         )
         try closeAfterStart()
-        return try await handleInteractiveSession(
+        return try await handleStartedProcess(
+            process: process,
+            log: log
+        )
+    }
+
+    package func handleStartedProcess(
+        process: ClientProcess,
+        log: Logger
+    ) async throws -> Int32 {
+        try await handleInteractiveSession(
             log: log,
             waitForExit: {
                 try await process.wait()

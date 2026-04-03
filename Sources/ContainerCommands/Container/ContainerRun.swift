@@ -28,10 +28,19 @@ import TerminalProgress
 
 extension Application {
     public struct ContainerRun: AsyncLoggableCommand {
+        enum FailureCleanupAction {
+            case delete
+            case stop
+        }
+
         public init() {}
         public static let configuration = CommandConfiguration(
             commandName: "run",
             abstract: "Run a container")
+
+        static func failureCleanupAction(processStarted: Bool) -> FailureCleanupAction {
+            processStarted ? .stop : .delete
+        }
 
         @OptionGroup(title: "Process options")
         var processFlags: Flags.Process
@@ -63,6 +72,7 @@ extension Application {
         public func run() async throws {
             var exitCode: Int32 = 127
             let id = Utility.createContainerID(name: self.managementFlags.name)
+            var processStarted = false
 
             var progressConfig: ProgressConfig
             switch self.progressFlags.progress {
@@ -156,6 +166,7 @@ extension Application {
                         process: process,
                         startupMessage: startupMessage
                     )
+                    processStarted = true
                     try io.closeAfterStart()
                     print(id)
                     return
@@ -169,13 +180,23 @@ extension Application {
                     }
                 }
 
-                exitCode = try await io.handleProcess(
+                try await ProcessIO.startProcess(
                     process: process,
-                    log: log,
                     startupMessage: startupMessage
                 )
+                processStarted = true
+                try io.closeAfterStart()
+                exitCode = try await io.handleStartedProcess(
+                    process: process,
+                    log: log
+                )
             } catch {
-                try? await client.delete(id: id)
+                switch Self.failureCleanupAction(processStarted: processStarted) {
+                case .delete:
+                    try? await client.delete(id: id)
+                case .stop:
+                    try? await client.stop(id: id)
+                }
                 if error is ContainerizationError {
                     throw error
                 }

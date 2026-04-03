@@ -80,10 +80,8 @@ class TestCLIRunLifecycle: CLITest {
             try self.waitForContainerRunning(name)
 
             let (_, _, error, status) = try self.run(arguments: ["start", "-a", name])
-            #expect(status != 0, "expected start with attach to fail on already running container")
+            #expect(status != 0, "expected start with attach to fail on already running containers without macOS guest attach support")
             #expect(error.contains("attach is currently unsupported on already running containers"), "expected error message about attach not supported")
-
-            try self.doStop(name: name)
         }
     }
 

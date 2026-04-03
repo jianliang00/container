@@ -546,6 +546,39 @@ public actor ContainersService {
         }
     }
 
+    public func attachWorkload(
+        id: String,
+        workloadID: String,
+        attachmentID: String,
+        options: WorkloadAttachOptions,
+        stdio: [FileHandle?]
+    ) async throws {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let client = try state.getClient()
+        try await client.attachWorkload(
+            workloadID,
+            attachmentID: attachmentID,
+            options: options,
+            stdio: stdio
+        )
+    }
+
+    public func detachWorkloadAttachment(
+        id: String,
+        workloadID: String,
+        attachmentID: String
+    ) async throws {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: id)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let client = try state.getClient()
+        try await client.detachWorkloadAttachment(attachmentID, from: workloadID)
+    }
+
     public func stopWorkload(
         id: String,
         workloadID: String,
@@ -697,12 +730,17 @@ public actor ContainersService {
     }
 
     /// Send a signal to the container.
-    public func kill(id: String, processID: String, signal: Int64) async throws {
+    public func kill(
+        id: String,
+        processID: String,
+        signal: Int64,
+        attachmentID: String? = nil
+    ) async throws {
         self.log.debug("\(#function)")
 
         let state = try self._getContainerState(id: id)
         let client = try state.getClient()
-        try await client.kill(processID, signal: signal)
+        try await client.kill(processID, signal: signal, attachmentID: attachmentID)
     }
 
     /// Stop all containers inside the sandbox, aborting any processes currently
@@ -747,12 +785,17 @@ public actor ContainersService {
     }
 
     /// Resize resizes the container's PTY if one exists.
-    public func resize(id: String, processID: String, size: Terminal.Size) async throws {
+    public func resize(
+        id: String,
+        processID: String,
+        size: Terminal.Size,
+        attachmentID: String? = nil
+    ) async throws {
         self.log.debug("\(#function)")
 
         let state = try self._getContainerState(id: id)
         let client = try state.getClient()
-        try await client.resize(processID, size: size)
+        try await client.resize(processID, size: size, attachmentID: attachmentID)
     }
 
     // Get the logs for the container.
@@ -1345,5 +1388,16 @@ extension XPCMessage {
             throw ContainerizationError(.invalidArgument, message: "empty process configuration")
         }
         return try JSONDecoder().decode(ProcessConfiguration.self, from: data)
+    }
+
+    func optionalAttachmentIdentifier() -> String? {
+        self.string(key: .attachmentIdentifier)
+    }
+
+    func attachOptions() throws -> WorkloadAttachOptions {
+        guard let data = self.dataNoCopy(key: .attachOptions) else {
+            return .init()
+        }
+        return try JSONDecoder().decode(WorkloadAttachOptions.self, from: data)
     }
 }

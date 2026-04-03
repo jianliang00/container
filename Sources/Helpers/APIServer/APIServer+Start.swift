@@ -244,6 +244,8 @@ extension APIServer {
             routes[XPCRoute.containerCreateWorkload] = harness.createWorkload
             routes[XPCRoute.containerStartProcess] = harness.startProcess
             routes[XPCRoute.containerStartWorkload] = harness.startWorkload
+            routes[XPCRoute.containerAttachWorkload] = harness.attachWorkload
+            routes[XPCRoute.containerDetachWorkloadAttachment] = harness.detachWorkloadAttachment
             routes[XPCRoute.containerCreateProcess] = harness.createProcess
             routes[XPCRoute.containerStopWorkload] = harness.stopWorkload
             routes[XPCRoute.containerRemoveWorkload] = harness.removeWorkload

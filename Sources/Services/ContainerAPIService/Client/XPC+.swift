@@ -28,6 +28,7 @@ public enum XPCKeys: String {
     case id
     // ID for a process.
     case processIdentifier
+    case attachmentIdentifier
     /// Container configuration key.
     case containerConfig
     /// Container options key.
@@ -84,6 +85,7 @@ public enum XPCKeys: String {
     case height
     case processConfig
     case sandboxLogPaths
+    case attachOptions
 
     /// Update progress
     case progressUpdateEndpoint
@@ -154,6 +156,8 @@ public enum XPCRoute: String {
     case containerBootstrap
     case containerCreateProcess
     case containerCreateWorkload
+    case containerAttachWorkload
+    case containerDetachWorkloadAttachment
     case containerStartProcess
     case containerStartSandbox
     case containerStartWorkload

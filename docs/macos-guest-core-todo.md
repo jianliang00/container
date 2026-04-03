@@ -200,7 +200,7 @@ Related design docs:
   - [x] `InspectWorkload`
   - [x] `ExecSync`
   - [x] `StreamExec`
-  - [ ] `StreamAttach`
+  - [x] `StreamAttach`
   - [x] `StreamPortForward`
 - [x] Make inspect operations return stable snapshots.
 - [x] Publish logging and event interfaces.
@@ -214,7 +214,7 @@ Related design docs:
 ### Exit Criteria
 
 - [ ] External integrations can use only the control APIs and do not need to call the CLI or read internal state files.
-- [ ] `exec`, `attach`, `logs`, and `port-forward` have stable core-side contracts.
+- [x] `exec`, `attach`, `logs`, and `port-forward` have stable core-side contracts.
 
 ## 5. Later Enhancements
 

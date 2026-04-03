@@ -187,6 +187,25 @@ public struct ProcessIO: Sendable {
         )
     }
 
+    public func handleAttachment(
+        attachment: any ClientWorkloadAttachment,
+        log: Logger
+    ) async throws -> Int32 {
+        try closeAfterStart()
+        return try await handleInteractiveSession(
+            log: log,
+            waitForExit: {
+                try await attachment.wait()
+            },
+            resize: { size in
+                try await attachment.resize(size)
+            },
+            signal: { signal in
+                try await attachment.signal(signal)
+            }
+        )
+    }
+
     package func handleProcess(
         process: ClientProcess,
         log: Logger,
@@ -194,7 +213,6 @@ public struct ProcessIO: Sendable {
         startupDelayNanoseconds: UInt64 = 2_000_000_000,
         startupWriter: @escaping StartupNoticeWriter = Self.writeStandardErrorLine
     ) async throws -> Int32 {
-        let signals = AsyncSignalHandler.create(notify: Self.signalSet)
         try await Self.startProcess(
             process: process,
             startupMessage: startupMessage,
@@ -202,13 +220,34 @@ public struct ProcessIO: Sendable {
             startupWriter: startupWriter
         )
         try closeAfterStart()
+        return try await handleInteractiveSession(
+            log: log,
+            waitForExit: {
+                try await process.wait()
+            },
+            resize: { size in
+                try await process.resize(size)
+            },
+            signal: { signal in
+                try await process.kill(signal)
+            }
+        )
+    }
+
+    private func handleInteractiveSession(
+        log: Logger,
+        waitForExit: @escaping @Sendable () async throws -> Int32,
+        resize: @escaping @Sendable (Terminal.Size) async throws -> Void,
+        signal: @escaping @Sendable (Int32) async throws -> Void
+    ) async throws -> Int32 {
+        let signals = AsyncSignalHandler.create(notify: Self.signalSet)
 
         return try await withThrowingTaskGroup(of: Int32?.self, returning: Int32.self) { group in
             try await process.start()
             try closeAfterStart()
 
             let waitAdded = group.addTaskUnlessCancelled {
-                let code = try await process.wait()
+                let code = try await waitForExit()
                 try await wait()
                 return code
             }
@@ -222,12 +261,12 @@ public struct ProcessIO: Sendable {
                 let size = try current.size
                 // It's supremely possible the process could've exited already. We shouldn't treat
                 // this as fatal.
-                try? await process.resize(size)
+                try? await resize(size)
                 _ = group.addTaskUnlessCancelled {
                     let winchHandler = AsyncSignalHandler.create(notify: [SIGWINCH])
                     for await _ in winchHandler.signals {
                         do {
-                            try await process.resize(try current.size)
+                            try await resize(try current.size)
                         } catch {
                             log.error(
                                 "failed to send terminal resize event",
@@ -243,7 +282,7 @@ public struct ProcessIO: Sendable {
                 _ = group.addTaskUnlessCancelled {
                     for await sig in signals.signals {
                         do {
-                            try await process.kill(sig)
+                            try await signal(sig)
                         } catch {
                             log.error(
                                 "failed to send signal",

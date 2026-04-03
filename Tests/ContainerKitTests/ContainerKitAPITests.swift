@@ -27,6 +27,7 @@ struct ContainerKitAPITests {
         let _: ContainerSnapshot.Type = ContainerSnapshot.self
         let _: ContainerStopOptions.Type = ContainerStopOptions.self
         let _: ClientProcess.Protocol = ClientProcess.self
+        let _: ClientWorkloadAttachment.Protocol = ClientWorkloadAttachment.self
         let _: DiskUsageStats.Type = DiskUsageStats.self
         let _: ExecSyncResult.Type = ExecSyncResult.self
         let _: Image.Type = Image.self
@@ -38,6 +39,7 @@ struct ContainerKitAPITests {
         let _: SandboxSnapshot.Type = SandboxSnapshot.self
         let _: SystemHealth.Type = SystemHealth.self
         let _: Volume.Type = Volume.self
+        let _: WorkloadAttachOptions.Type = WorkloadAttachOptions.self
         let _: WorkloadConfiguration.Type = WorkloadConfiguration.self
         let _: WorkloadSnapshot.Type = WorkloadSnapshot.self
 
@@ -98,6 +100,20 @@ struct ContainerKitAPITests {
         }
         let _: (String, String) async throws -> Void = { sandboxID, workloadID in
             try await kit.startWorkload(sandboxID: sandboxID, workloadID: workloadID)
+        }
+        let _: (String, String, WorkloadAttachOptions, String, [FileHandle?]) async throws -> any ClientWorkloadAttachment = {
+            sandboxID,
+            workloadID,
+            options,
+            attachmentID,
+            stdio in
+            try await kit.streamAttach(
+                sandboxID: sandboxID,
+                workloadID: workloadID,
+                options: options,
+                attachmentID: attachmentID,
+                stdio: stdio
+            )
         }
         let _: (String, String, ContainerStopOptions) async throws -> Void = { sandboxID, workloadID, options in
             try await kit.stopWorkload(sandboxID: sandboxID, workloadID: workloadID, options: options)

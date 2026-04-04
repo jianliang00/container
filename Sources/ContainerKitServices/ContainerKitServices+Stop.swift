@@ -18,8 +18,8 @@ import ContainerKit
 import ContainerPlugin
 import Foundation
 
-public extension ContainerKitServices {
-    func stop() async throws {
+extension ContainerKitServices {
+    public func stop() async throws {
         let launchdDomainString = try dependencies.domainString()
         let fullAPIServerLabel = "\(launchdDomainString)/\(Self.apiServerServiceLabel)"
         let isRegistered = try dependencies.isServiceRegistered(Self.apiServerServiceLabel)

@@ -272,7 +272,11 @@ extension Application {
                                 handler.cancel()
                             }
                         }
-                        group.addTask { [buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log, macOSBuildMode, buildSandboxImage] in
+                        group.addTask {
+                            [
+                                buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log,
+                                macOSBuildMode, buildSandboxImage
+                            ] in
                             let contextURL = URL(fileURLWithPath: contextDir, relativeTo: .currentDirectory()).absoluteURL
                             let engineInput = MacOSBuildEngine.Input(
                                 appRoot: systemHealth.appRoot,

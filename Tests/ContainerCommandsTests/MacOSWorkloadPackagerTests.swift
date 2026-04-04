@@ -198,10 +198,11 @@ private func extractTar(_ tarURL: URL, to destinationURL: URL) throws {
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else {
-        let errorText = String(
-            data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        ) ?? "unknown tar error"
+        let errorText =
+            String(
+                data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? "unknown tar error"
         throw NSError(
             domain: "container.macos.tests",
             code: Int(process.terminationStatus),

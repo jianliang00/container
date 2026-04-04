@@ -18,8 +18,8 @@ import ContainerKit
 import ContainerPlugin
 import Foundation
 
-public extension ContainerKitServices {
-    func status() async throws -> ServiceStatus {
+extension ContainerKitServices {
+    public func status() async throws -> ServiceStatus {
         let isRegistered = try dependencies.isServiceRegistered(Self.apiServerServiceLabel)
         guard isRegistered else {
             return ServiceStatus(isRegistered: false, health: nil)
@@ -29,7 +29,7 @@ public extension ContainerKitServices {
         return ServiceStatus(isRegistered: true, health: health)
     }
 
-    func ensureRunning(timeout: Duration = .seconds(10)) async throws {
+    public func ensureRunning(timeout: Duration = .seconds(10)) async throws {
         let currentStatus = try await status()
         guard !currentStatus.isRegistered || currentStatus.health == nil else {
             return

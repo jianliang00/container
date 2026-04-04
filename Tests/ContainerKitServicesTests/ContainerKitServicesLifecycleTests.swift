@@ -145,10 +145,11 @@ struct ContainerKitServicesLifecycleTests {
         let healthResults = LockedBox<[HealthResult]>([
             .failure(TestError(message: "status sees unhealthy service")),
             .failure(TestError(message: "stop sees unhealthy service")),
-            .success(makeSystemHealth(
-                appRoot: installation.appRoot,
-                installRoot: installation.installRoot
-            )),
+            .success(
+                makeSystemHealth(
+                    appRoot: installation.appRoot,
+                    installRoot: installation.installRoot
+                )),
         ])
         let deregisteredLabels = LockedBox<[String]>([])
         let registeredPaths = LockedBox<[String]>([])

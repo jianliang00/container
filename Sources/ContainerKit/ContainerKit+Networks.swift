@@ -17,21 +17,20 @@
 import ContainerAPIClient
 import Foundation
 
-public extension ContainerKit {
-    func listNetworks() async throws -> [NetworkState] {
+extension ContainerKit {
+    public func listNetworks() async throws -> [NetworkState] {
         try await ClientNetwork.list()
     }
 
-    func getNetwork(id: String) async throws -> NetworkState {
+    public func getNetwork(id: String) async throws -> NetworkState {
         try await ClientNetwork.get(id: id)
     }
 
-    func createNetwork(configuration: NetworkConfiguration) async throws -> NetworkState {
+    public func createNetwork(configuration: NetworkConfiguration) async throws -> NetworkState {
         try await ClientNetwork.create(configuration: configuration)
     }
 
-    func deleteNetwork(id: String) async throws {
+    public func deleteNetwork(id: String) async throws {
         try await ClientNetwork.delete(id: id)
     }
 }
-

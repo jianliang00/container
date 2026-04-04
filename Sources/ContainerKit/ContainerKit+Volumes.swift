@@ -17,12 +17,12 @@
 import ContainerAPIClient
 import Foundation
 
-public extension ContainerKit {
-    func listVolumes() async throws -> [Volume] {
+extension ContainerKit {
+    public func listVolumes() async throws -> [Volume] {
         try await ClientVolume.list()
     }
 
-    func createVolume(
+    public func createVolume(
         name: String,
         driver: String = "local",
         driverOptions: [String: String] = [:],
@@ -36,16 +36,15 @@ public extension ContainerKit {
         )
     }
 
-    func inspectVolume(_ name: String) async throws -> Volume {
+    public func inspectVolume(_ name: String) async throws -> Volume {
         try await ClientVolume.inspect(name)
     }
 
-    func deleteVolume(name: String) async throws {
+    public func deleteVolume(name: String) async throws {
         try await ClientVolume.delete(name: name)
     }
 
-    func volumeDiskUsage(name: String) async throws -> UInt64 {
+    public func volumeDiskUsage(name: String) async throws -> UInt64 {
         try await ClientVolume.volumeDiskUsage(name: name)
     }
 }
-

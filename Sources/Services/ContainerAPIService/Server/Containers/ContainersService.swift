@@ -1056,7 +1056,8 @@ public actor ContainersService {
             }
         }
 
-        return configurations
+        return
+            configurations
             .sorted(by: { $0.id < $1.id })
             .map { workload in
                 WorkloadSnapshot(

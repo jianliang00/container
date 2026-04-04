@@ -214,6 +214,55 @@ struct MacOSSandboxServiceWaiterTests {
     }
 
     @Test
+    func externalProcessStartDoesNotRetryNonTransientSidecarFailure() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(baseContainerConfiguration())
+
+        let processID = "exec-missing"
+        let socketPath = "/tmp/exec-sidecar-failure-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingExecSidecarServer(
+            socketPath: socketPath,
+            processStartFailures: [
+                processID: .init(
+                    code: "invalidArgument",
+                    message: """
+                        guest-agent failed to start process \(processID): \
+                        failed to start process: NSPOSIXErrorDomain Code=2 \
+                        "The operation couldn’t be completed. No such file or directory"
+                        """
+                )
+            ]
+        )
+        defer { server.stop() }
+        server.start()
+
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+        try await service.testingCreateProcess(
+            processID,
+            config: makeProcessConfiguration(executable: "/path/does/not/exist")
+        )
+
+        do {
+            try await service.testingStartProcess(processID)
+            Issue.record("expected startProcess to fail")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .invalidArgument)
+            #expect(error.message.contains("No such file or directory"))
+        }
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let startRequests = server.recordedRequests().filter {
+            $0.method == .processStart && $0.processID == processID
+        }
+        #expect(startRequests.count == 1)
+    }
+
+    @Test
     func workloadInspectUsesExternalIDWhenMappedToInternalSession() async throws {
         let tempRoot = makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -838,15 +887,21 @@ private func baseContainerConfiguration() throws -> ContainerConfiguration {
 private final class RecordingExecSidecarServer: @unchecked Sendable {
     private let socketPath: String
     private let exitOnSignalProcessIDs: Set<String>
+    private let processStartFailures: [String: MacOSSidecarErrorPayload]
     private let requests = LockedBox<[MacOSSidecarRequest]>([])
     private let errorBox = LockedBox<Error?>(nil)
     private let done = DispatchSemaphore(value: 0)
     private let listenFD = LockedBox<Int32?>(nil)
     private let clientFD = LockedBox<Int32?>(nil)
 
-    init(socketPath: String, exitOnSignalProcessIDs: Set<String> = []) throws {
+    init(
+        socketPath: String,
+        exitOnSignalProcessIDs: Set<String> = [],
+        processStartFailures: [String: MacOSSidecarErrorPayload] = [:]
+    ) throws {
         self.socketPath = socketPath
         self.exitOnSignalProcessIDs = exitOnSignalProcessIDs
+        self.processStartFailures = processStartFailures
         let listeningFD = try makeUnixListener(path: socketPath)
         self.listenFD.withLock { $0 = listeningFD }
     }
@@ -879,12 +934,27 @@ private final class RecordingExecSidecarServer: @unchecked Sendable {
                     }
                     requests.withLock { $0.append(request) }
 
-                    try writeResponse(.success(requestID: request.requestID), to: accepted)
-                    if request.method == .processSignal,
+                    if request.method == .processStart,
                         let processID = request.processID,
-                        exitOnSignalProcessIDs.contains(processID)
+                        let failure = processStartFailures[processID]
                     {
-                        try writeEvent(.init(event: .processExit, processID: processID, exitCode: 0), to: accepted)
+                        try writeResponse(
+                            .failure(
+                                requestID: request.requestID,
+                                code: failure.code,
+                                message: failure.message,
+                                details: failure.details
+                            ),
+                            to: accepted
+                        )
+                    } else {
+                        try writeResponse(.success(requestID: request.requestID), to: accepted)
+                        if request.method == .processSignal,
+                            let processID = request.processID,
+                            exitOnSignalProcessIDs.contains(processID)
+                        {
+                            try writeEvent(.init(event: .processExit, processID: processID, exitCode: 0), to: accepted)
+                        }
                     }
                 }
             } catch {

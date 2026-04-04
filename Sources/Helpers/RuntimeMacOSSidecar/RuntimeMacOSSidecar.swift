@@ -1341,6 +1341,14 @@ final class SidecarControlServer: @unchecked Sendable {
         try sendFSChunk(payload)
     }
 
+    func _testWaitForProcessStartAck(
+        fd: Int32,
+        expectedProcessID: String,
+        timeoutSeconds: TimeInterval = 1
+    ) throws -> [SidecarGuestAgentFrame] {
+        try waitForProcessStartAck(fd: fd, expectedProcessID: expectedProcessID, timeoutSeconds: timeoutSeconds)
+    }
+
     private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: ProcessStreamSession) throws {
         session.writeLock.lock()
         defer { session.writeLock.unlock() }
@@ -1475,9 +1483,10 @@ final class SidecarControlServer: @unchecked Sendable {
                 ),
                 fd: fd
             )
+            let initialFrames = try waitForProcessStartAck(fd: fd, expectedProcessID: processID, timeoutSeconds: 3)
             let session = ProcessStreamSession(processID: processID, fd: fd)
             try registerProcessSession(session)
-            startProcessReadLoop(session)
+            startProcessReadLoop(session, initialFrames: initialFrames)
         } catch {
             _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
@@ -1485,16 +1494,17 @@ final class SidecarControlServer: @unchecked Sendable {
         }
     }
 
-    private func startProcessReadLoop(_ session: ProcessStreamSession) {
+    private func startProcessReadLoop(_ session: ProcessStreamSession, initialFrames: [SidecarGuestAgentFrame] = []) {
         Thread.detachNewThread { [weak self] in
-            self?.processReadLoop(session)
+            self?.processReadLoop(session, initialFrames: initialFrames)
         }
     }
 
-    private func processReadLoop(_ session: ProcessStreamSession) {
+    private func processReadLoop(_ session: ProcessStreamSession, initialFrames: [SidecarGuestAgentFrame] = []) {
         let processID = session.processID
         var exitEmitted = false
         var pendingExitCode: Int32?
+        var bufferedFrames = ArraySlice(initialFrames)
         defer {
             closeProcessStreamSession(session)
             _ = removeProcessSession(processID)
@@ -1506,7 +1516,10 @@ final class SidecarControlServer: @unchecked Sendable {
         do {
             while true {
                 let frame: SidecarGuestAgentFrame
-                if pendingExitCode == nil {
+                if let bufferedFrame = bufferedFrames.first {
+                    frame = bufferedFrame
+                    bufferedFrames.removeFirst()
+                } else if pendingExitCode == nil {
                     frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: session.fd)
                 } else {
                     guard let drained = try readProcessFrameIfAvailable(fd: session.fd, timeoutMilliseconds: 100) else {
@@ -1543,6 +1556,75 @@ final class SidecarControlServer: @unchecked Sendable {
             }
             if !isExpectedEOF(error) {
                 emitEvent(.init(event: .processError, processID: processID, message: "sidecar process stream read failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    private func waitForProcessStartAck(
+        fd: Int32,
+        expectedProcessID: String,
+        timeoutSeconds: TimeInterval
+    ) throws -> [SidecarGuestAgentFrame] {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = ResultBox<[SidecarGuestAgentFrame]>()
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                box.result = .success(try self.readProcessStartAck(fd: fd, expectedProcessID: expectedProcessID))
+            } catch {
+                box.result = .failure(error)
+            }
+            semaphore.signal()
+        }
+
+        if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            throw ContainerizationError(
+                .timeout,
+                message: "timed out waiting for guest-agent process start ack for \(expectedProcessID)"
+            )
+        }
+        switch box.result {
+        case .success(let frames)?:
+            return frames
+        case .failure(let error)?:
+            throw error
+        case nil:
+            throw ContainerizationError(
+                .internalError,
+                message: "guest-agent process start ack wait finished without result for \(expectedProcessID)"
+            )
+        }
+    }
+
+    private func readProcessStartAck(fd: Int32, expectedProcessID: String) throws -> [SidecarGuestAgentFrame] {
+        var bufferedFrames: [SidecarGuestAgentFrame] = []
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .ack:
+                guard frame.id == expectedProcessID else {
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "guest-agent process start ack ID mismatch (expected=\(expectedProcessID) actual=\(frame.id ?? "nil"))"
+                    )
+                }
+                return bufferedFrames
+            case .error:
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "guest-agent failed to start process \(expectedProcessID): \(frame.message ?? "unknown error")"
+                )
+            case .exit:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent process stream exited before start ack for \(expectedProcessID) (code=\(frame.exitCode ?? 1))"
+                )
+            case .stdout, .stderr:
+                bufferedFrames.append(frame)
+            case .ready:
+                continue
+            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
+                continue
             }
         }
     }

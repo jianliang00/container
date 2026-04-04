@@ -76,11 +76,13 @@ public enum MacOSImageContract {
         descriptorAnnotations: [String: String]? = nil,
         manifestAnnotations: [String: String]? = nil
     ) throws -> MacOSImageRole? {
-        guard let value = annotationValue(
-            key: roleAnnotation,
-            descriptorAnnotations: descriptorAnnotations,
-            manifestAnnotations: manifestAnnotations
-        ) else {
+        guard
+            let value = annotationValue(
+                key: roleAnnotation,
+                descriptorAnnotations: descriptorAnnotations,
+                manifestAnnotations: manifestAnnotations
+            )
+        else {
             return nil
         }
         guard let role = MacOSImageRole(rawValue: value) else {
@@ -93,11 +95,13 @@ public enum MacOSImageContract {
         descriptorAnnotations: [String: String]? = nil,
         manifestAnnotations: [String: String]? = nil
     ) throws -> MacOSWorkloadImageFormat? {
-        guard let value = annotationValue(
-            key: workloadFormatAnnotation,
-            descriptorAnnotations: descriptorAnnotations,
-            manifestAnnotations: manifestAnnotations
-        ) else {
+        guard
+            let value = annotationValue(
+                key: workloadFormatAnnotation,
+                descriptorAnnotations: descriptorAnnotations,
+                manifestAnnotations: manifestAnnotations
+            )
+        else {
             return nil
         }
         guard let format = MacOSWorkloadImageFormat(rawValue: value) else {

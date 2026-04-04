@@ -257,10 +257,20 @@ final class AgentConnection: @unchecked Sendable {
     private func startProcess(frame: GuestAgentFrame) throws {
         session?.cleanup()
 
+        guard let processID = frame.id, !processID.isEmpty else {
+            throw NSError(
+                domain: "container.macos.guest-agent.exec",
+                code: Int(EINVAL),
+                userInfo: [NSLocalizedDescriptionKey: "missing process identifier"]
+            )
+        }
+
         guard let executable = frame.executable else {
-            try send(frame: .error("missing executable"))
-            try send(frame: .exit(1))
-            return
+            throw NSError(
+                domain: "container.macos.guest-agent.exec",
+                code: Int(EINVAL),
+                userInfo: [NSLocalizedDescriptionKey: "missing executable"]
+            )
         }
 
         let terminal = frame.terminal == true
@@ -277,6 +287,7 @@ final class AgentConnection: @unchecked Sendable {
             )
             self.session = session
             try session.start(stdoutHandle: nil, stderrHandle: nil)
+            try send(frame: .ack(id: processID))
             return
         }
 
@@ -310,6 +321,7 @@ final class AgentConnection: @unchecked Sendable {
             )
             self.session = session
             try session.start()
+            try send(frame: .ack(id: processID))
         } else {
             let stdinPipe = Pipe()
             let stdoutPipe = Pipe()
@@ -328,6 +340,7 @@ final class AgentConnection: @unchecked Sendable {
             )
             self.session = session
             try session.start(stdoutHandle: stdoutPipe.fileHandleForReading, stderrHandle: stderrPipe.fileHandleForReading)
+            try send(frame: .ack(id: processID))
         }
     }
 

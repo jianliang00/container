@@ -18,8 +18,8 @@ import ContainerKit
 import ContainerPlugin
 import Foundation
 
-public extension ContainerKitServices {
-    func start(timeout: Duration = .seconds(10)) async throws {
+extension ContainerKitServices {
+    public func start(timeout: Duration = .seconds(10)) async throws {
         let plan = try registrationPlan()
 
         try dependencies.createDirectory(plan.plistURL.deletingLastPathComponent())
@@ -81,9 +81,9 @@ extension ContainerKitServices {
             code: 1,
             userInfo: [
                 NSLocalizedDescriptionKey: """
-                    \(action): \(error)
-                    \(collectAPIServerDiagnostics())
-                    """,
+                \(action): \(error)
+                \(collectAPIServerDiagnostics())
+                """,
                 NSUnderlyingErrorKey: error as NSError,
             ]
         )
@@ -126,7 +126,8 @@ extension ContainerKitServices {
     }
 
     private static func trimLaunchctlOutput(_ output: String, maxLines: Int) -> String {
-        let lines = output
+        let lines =
+            output
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
         guard lines.count > maxLines else {

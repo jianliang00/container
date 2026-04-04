@@ -279,7 +279,7 @@ let package = Package(
         .testTarget(
             name: "ContainerKitTests",
             dependencies: [
-                "ContainerKit",
+                "ContainerKit"
             ]
         ),
         .executableTarget(
@@ -608,7 +608,7 @@ let package = Package(
         .testTarget(
             name: "ContainerKitServicesTests",
             dependencies: [
-                "ContainerKitServices",
+                "ContainerKitServices"
             ]
         ),
         .testTarget(

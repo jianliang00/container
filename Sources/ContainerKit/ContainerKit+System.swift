@@ -17,13 +17,12 @@
 import ContainerAPIClient
 import Foundation
 
-public extension ContainerKit {
-    func health(timeout: Duration? = .seconds(5)) async throws -> SystemHealth {
+extension ContainerKit {
+    public func health(timeout: Duration? = .seconds(5)) async throws -> SystemHealth {
         try await ClientHealthCheck.ping(timeout: timeout)
     }
 
-    func diskUsage() async throws -> DiskUsageStats {
+    public func diskUsage() async throws -> DiskUsageStats {
         try await ClientDiskUsage.get()
     }
 }
-

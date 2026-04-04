@@ -18,16 +18,16 @@ import ContainerAPIClient
 import ContainerResource
 import Foundation
 
-public extension ContainerKit {
-    func listContainers(filters: ContainerListFilters = .all) async throws -> [ContainerSnapshot] {
+extension ContainerKit {
+    public func listContainers(filters: ContainerListFilters = .all) async throws -> [ContainerSnapshot] {
         try await containerClient.list(filters: filters)
     }
 
-    func getContainer(id: String) async throws -> ContainerSnapshot {
+    public func getContainer(id: String) async throws -> ContainerSnapshot {
         try await containerClient.get(id: id)
     }
 
-    func createContainer(
+    public func createContainer(
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions = .default
     ) async throws {
@@ -37,7 +37,7 @@ public extension ContainerKit {
         )
     }
 
-    func execSync(
+    public func execSync(
         id: String,
         configuration: ProcessConfiguration,
         timeout: Duration? = nil,
@@ -51,7 +51,7 @@ public extension ContainerKit {
         )
     }
 
-    func streamExec(
+    public func streamExec(
         id: String,
         configuration: ProcessConfiguration,
         processId: String = UUID().uuidString.lowercased(),
@@ -65,18 +65,18 @@ public extension ContainerKit {
         )
     }
 
-    func stopContainer(
+    public func stopContainer(
         id: String,
         options: ContainerStopOptions = .default
     ) async throws {
         try await containerClient.stop(id: id, opts: options)
     }
 
-    func deleteContainer(id: String, force: Bool = false) async throws {
+    public func deleteContainer(id: String, force: Bool = false) async throws {
         try await containerClient.delete(id: id, force: force)
     }
 
-    func containerDiskUsage(id: String) async throws -> UInt64 {
+    public func containerDiskUsage(id: String) async throws -> UInt64 {
         try await containerClient.diskUsage(id: id)
     }
 }

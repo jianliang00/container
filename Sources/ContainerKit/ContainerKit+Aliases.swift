@@ -15,8 +15,8 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
-import ContainerSandboxServiceClient
 import ContainerResource
+import ContainerSandboxServiceClient
 
 public typealias ContainerConfiguration = ContainerResource.ContainerConfiguration
 public typealias ContainerCreateOptions = ContainerResource.ContainerCreateOptions

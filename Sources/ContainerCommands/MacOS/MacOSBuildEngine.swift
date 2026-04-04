@@ -349,15 +349,16 @@ struct MacOSBuildEngine {
             }
         }
 
-        let plannedExports: [Int: [String]] = if input.buildMode == .sandbox {
-            try plannedCopySourceExports(
-                plan: plan,
-                baseConfigs: stageImageBaseConfigs,
-                initialBuildArguments: cliBuildArgs
-            )
-        } else {
-            [:]
-        }
+        let plannedExports: [Int: [String]] =
+            if input.buildMode == .sandbox {
+                try plannedCopySourceExports(
+                    plan: plan,
+                    baseConfigs: stageImageBaseConfigs,
+                    initialBuildArguments: cliBuildArgs
+                )
+            } else {
+                [:]
+            }
         var exportedStageSources: [Int: [String: CachedStageSourceEntry]] = [:]
 
         for stage in plan.executionStages {

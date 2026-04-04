@@ -17,21 +17,20 @@
 import ContainerAPIClient
 import Foundation
 
-public extension ContainerKit {
-    func listImages() async throws -> [Image] {
+extension ContainerKit {
+    public func listImages() async throws -> [Image] {
         try await ClientImage.list()
     }
 
-    func getImage(reference: String) async throws -> Image {
+    public func getImage(reference: String) async throws -> Image {
         try await ClientImage.get(reference: reference)
     }
 
-    func pullImage(reference: String) async throws -> Image {
+    public func pullImage(reference: String) async throws -> Image {
         try await ClientImage.pull(reference: reference)
     }
 
-    func deleteImage(reference: String, garbageCollect: Bool = false) async throws {
+    public func deleteImage(reference: String, garbageCollect: Bool = false) async throws {
         try await ClientImage.delete(reference: reference, garbageCollect: garbageCollect)
     }
 }
-

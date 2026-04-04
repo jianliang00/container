@@ -14,11 +14,11 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerPlugin
 import Foundation
 import Testing
 
 @testable import ContainerKitServices
-import ContainerPlugin
 
 struct ContainerKitServicesTests {
     @Test

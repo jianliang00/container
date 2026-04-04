@@ -18,8 +18,8 @@ import ContainerAPIClient
 import ContainerResource
 import Foundation
 
-public extension ContainerKit {
-    func createSandbox(
+extension ContainerKit {
+    public func createSandbox(
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions = .default
     ) async throws {
@@ -29,26 +29,26 @@ public extension ContainerKit {
         )
     }
 
-    func startSandbox(id: String) async throws {
+    public func startSandbox(id: String) async throws {
         try await containerClient.startSandbox(id: id)
     }
 
-    func inspectSandbox(id: String) async throws -> SandboxSnapshot {
+    public func inspectSandbox(id: String) async throws -> SandboxSnapshot {
         try await containerClient.inspectSandbox(id: id)
     }
 
-    func stopSandbox(
+    public func stopSandbox(
         id: String,
         options: ContainerStopOptions = .default
     ) async throws {
         try await containerClient.stop(id: id, opts: options)
     }
 
-    func removeSandbox(id: String, force: Bool = false) async throws {
+    public func removeSandbox(id: String, force: Bool = false) async throws {
         try await containerClient.delete(id: id, force: force)
     }
 
-    func createWorkload(
+    public func createWorkload(
         sandboxID: String,
         configuration: WorkloadConfiguration
     ) async throws {
@@ -58,14 +58,14 @@ public extension ContainerKit {
         )
     }
 
-    func startWorkload(sandboxID: String, workloadID: String) async throws {
+    public func startWorkload(sandboxID: String, workloadID: String) async throws {
         try await containerClient.startWorkload(
             containerId: sandboxID,
             workloadId: workloadID
         )
     }
 
-    func streamAttach(
+    public func streamAttach(
         sandboxID: String,
         workloadID: String,
         options: WorkloadAttachOptions = .init(),
@@ -81,7 +81,7 @@ public extension ContainerKit {
         )
     }
 
-    func stopWorkload(
+    public func stopWorkload(
         sandboxID: String,
         workloadID: String,
         options: ContainerStopOptions = .default
@@ -93,25 +93,25 @@ public extension ContainerKit {
         )
     }
 
-    func removeWorkload(sandboxID: String, workloadID: String) async throws {
+    public func removeWorkload(sandboxID: String, workloadID: String) async throws {
         try await containerClient.removeWorkload(
             containerId: sandboxID,
             workloadId: workloadID
         )
     }
 
-    func inspectWorkload(sandboxID: String, workloadID: String) async throws -> WorkloadSnapshot {
+    public func inspectWorkload(sandboxID: String, workloadID: String) async throws -> WorkloadSnapshot {
         try await containerClient.inspectWorkload(
             containerId: sandboxID,
             workloadId: workloadID
         )
     }
 
-    func sandboxLogPaths(id: String) async throws -> SandboxLogPaths {
+    public func sandboxLogPaths(id: String) async throws -> SandboxLogPaths {
         try await containerClient.sandboxLogPaths(id: id)
     }
 
-    func streamPortForward(id: String, port: UInt32) async throws -> FileHandle {
+    public func streamPortForward(id: String, port: UInt32) async throws -> FileHandle {
         try await containerClient.dial(id: id, port: port)
     }
 }

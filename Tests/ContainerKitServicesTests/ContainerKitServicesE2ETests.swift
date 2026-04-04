@@ -26,7 +26,8 @@ struct ContainerKitServicesE2ETests {
     func launchdStartStopRoundTrip() async throws {
         let installRoot = packageRoot()
         let appRoot = ApplicationRoot.defaultURL
-        let executableURL = installRoot
+        let executableURL =
+            installRoot
             .appending(path: ".build")
             .appending(path: "arm64-apple-macosx")
             .appending(path: "debug")

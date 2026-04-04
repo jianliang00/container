@@ -1375,11 +1375,13 @@ extension MacOSSandboxService {
         }
         let valueStart = argument.index(after: equalsIndex)
         let value = String(argument[valueStart...])
-        guard let mappedValue = mapImageBackedWorkloadPath(
-            value,
-            guestPayloadPath: guestPayloadPath,
-            hostRootfs: hostRootfs
-        ) else {
+        guard
+            let mappedValue = mapImageBackedWorkloadPath(
+                value,
+                guestPayloadPath: guestPayloadPath,
+                hostRootfs: hostRootfs
+            )
+        else {
             return argument
         }
         return String(argument[..<valueStart]) + mappedValue
@@ -1504,7 +1506,8 @@ extension MacOSSandboxService {
             let basename = entry.url.lastPathComponent
             if basename == ".wh..wh..opq" {
                 let relativeDirectory = (entry.relativePath as NSString).deletingLastPathComponent
-                let targetDirectory = relativeDirectory.isEmpty
+                let targetDirectory =
+                    relativeDirectory.isEmpty
                     ? destinationRoot
                     : destinationRoot.appendingPathComponent(relativeDirectory)
                 if fileManager.fileExists(atPath: targetDirectory.path) {
@@ -1648,10 +1651,10 @@ extension MacOSSandboxService {
             try await runGuestBootstrapScript(
                 processIDPrefix: "workload-cleanup-all",
                 script: """
-                    set -euo pipefail
-                    rm -rf \(shQuoteForWorkloadScript(Self.guestWorkloadsRootPath))
-                    mkdir -p \(shQuoteForWorkloadScript(Self.guestWorkloadsRootPath))
-                """,
+                        set -euo pipefail
+                        rm -rf \(shQuoteForWorkloadScript(Self.guestWorkloadsRootPath))
+                        mkdir -p \(shQuoteForWorkloadScript(Self.guestWorkloadsRootPath))
+                    """,
                 containerConfig: containerConfig
             )
             for configuration in workloads.values.map(\.configuration) where configuration.isImageBacked {

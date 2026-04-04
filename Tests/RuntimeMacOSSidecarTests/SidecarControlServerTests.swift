@@ -123,6 +123,60 @@ struct SidecarControlServerTests {
         #expect(frame.data == Data("payload".utf8))
         #expect(!server._testHasFSSession(txID: "tx-chunk"))
     }
+
+    @Test
+    func processStartHandshakeBuffersEarlyOutputUntilAck() throws {
+        let server = makeServer()
+        let pair = try makeSocketPair()
+        defer {
+            closeIfValid(pair.server)
+            closeIfValid(pair.peer)
+        }
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame(type: .stdout, data: Data("early-output\n".utf8)),
+            fd: pair.peer
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame.ack(id: "process-1"),
+            fd: pair.peer
+        )
+
+        let initialFrames = try server._testWaitForProcessStartAck(
+            fd: pair.server,
+            expectedProcessID: "process-1"
+        )
+
+        #expect(initialFrames.count == 1)
+        #expect(initialFrames.first?.type == .stdout)
+        #expect(initialFrames.first?.data == Data("early-output\n".utf8))
+    }
+
+    @Test
+    func processStartHandshakeThrowsGuestAgentErrorBeforeAck() throws {
+        let server = makeServer()
+        let pair = try makeSocketPair()
+        defer {
+            closeIfValid(pair.server)
+            closeIfValid(pair.peer)
+        }
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame(type: .error, message: "failed to start process: No such file or directory"),
+            fd: pair.peer
+        )
+
+        do {
+            _ = try server._testWaitForProcessStartAck(
+                fd: pair.server,
+                expectedProcessID: "process-2"
+            )
+            Issue.record("expected process start handshake to throw")
+        } catch {
+            #expect(String(describing: error).contains("failed to start process"))
+            #expect(String(describing: error).contains("No such file or directory"))
+        }
+    }
 }
 
 private func makeServer() -> SidecarControlServer {

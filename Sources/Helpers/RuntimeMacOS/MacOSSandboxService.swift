@@ -2652,15 +2652,22 @@ extension MacOSSandboxService {
             sessions[processID] = session
             writeContainerLog(Data(("sidecar process.start sent for \(processID)\n").utf8))
         } catch {
-            let detail = describeError(error)
+            let wrappedError: ContainerizationError = {
+                if let containerError = error as? ContainerizationError {
+                    return containerError
+                }
+                return ContainerizationError(.internalError, message: describeError(error), cause: error)
+            }()
+            let detail = wrappedError.message
             writeContainerLog(Data(("sidecar process.start failed for \(processID): \(detail)\n").utf8))
             throw ContainerizationError(
-                .internalError,
+                wrappedError.code,
                 message: """
                     failed to start process via macOS sidecar guest agent on vsock port \(agentPort): \(detail)
                     check host guest-agent log mirror: \(guestAgentHostLogPath().path)
                     check guest log: \(Self.guestAgentLogGuestPath)
-                    """
+                    """,
+                cause: wrappedError.cause ?? ((error as? ContainerizationError) == nil ? error : nil)
             )
         }
     }

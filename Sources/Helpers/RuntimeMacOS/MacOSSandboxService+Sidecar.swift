@@ -201,12 +201,47 @@ extension MacOSSandboxService {
                         )
                     )
                 }
-                if attempt < maxAttempts {
-                    try? await Task.sleep(nanoseconds: 500_000_000)
+                guard shouldRetrySidecarProcessStart(error), attempt < maxAttempts else {
+                    throw error
                 }
+                try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
         throw lastError ?? ContainerizationError(.timeout, message: "timed out waiting for sidecar process.start on port \(port)")
+    }
+
+    private func shouldRetrySidecarProcessStart(_ error: Error) -> Bool {
+        if let containerError = error as? ContainerizationError {
+            switch containerError.code {
+            case .timeout, .interrupted, .invalidState:
+                return true
+            case .internalError:
+                let message = containerError.message.lowercased()
+                return message.contains("connection reset by peer")
+                    || message.contains("broken pipe")
+                    || message.contains("connection refused")
+                    || message.contains("unexpected eof")
+                    || message.contains("sidecar control connection closed")
+                    || message.contains("failed to connect to macos sidecar control socket")
+                    || message.contains("timed out waiting for guest-agent ready frame")
+                    || message.contains("timed out waiting for guest-agent process start ack")
+                    || message.contains("guest-agent exited before ready")
+            default:
+                return false
+            }
+        }
+
+        let nsError = error as NSError
+        guard nsError.domain == NSPOSIXErrorDomain else {
+            return false
+        }
+        return [
+            Int(ECONNRESET),
+            Int(EPIPE),
+            Int(ENOTCONN),
+            Int(ECONNREFUSED),
+            Int(ETIMEDOUT),
+        ].contains(nsError.code)
     }
 
     func writeSidecarLaunchAgentPlist(

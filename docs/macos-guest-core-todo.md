@@ -83,7 +83,7 @@ Related design docs:
 ### Exit Criteria
 
 - [x] Two workloads can run reliably inside the same sandbox.
-- [ ] Stopping a sandbox consistently stops and cleans up all attached workloads.
+- [x] Stopping a sandbox consistently stops and cleans up all attached workloads.
 - [x] Workload state is queryable independently from sandbox state.
 
 ## 3. P3: Workload Image, Injection, and Build Split
@@ -187,7 +187,7 @@ Related design docs:
 
 ### TODO
 
-- [ ] Publish the runtime control API.
+- [x] Publish the runtime control API.
   - [x] `CreateSandbox`
   - [x] `StartSandbox`
   - [x] `StopSandbox`
@@ -209,11 +209,11 @@ Related design docs:
   - log path or log-reading APIs
 - [x] Implement `PortForward` over the sidecar or vsock path.
 - [x] Keep CLI parsing, on-disk layout, and sidecar protocol details out of the control API.
-- [ ] Add state transition, idempotency, recovery, and error propagation tests.
+- [x] Add state transition, idempotency, recovery, and error propagation tests.
 
 ### Exit Criteria
 
-- [ ] External integrations can use only the control APIs and do not need to call the CLI or read internal state files.
+- [x] External integrations can use only the control APIs and do not need to call the CLI or read internal state files.
 - [x] `exec`, `attach`, `logs`, and `port-forward` have stable core-side contracts.
 
 ## 5. Later Enhancements

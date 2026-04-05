@@ -484,6 +484,10 @@ extension MacOSSandboxService {
         sandboxState = .stopping
         writeContainerLog(Data(("stop requested signal=\(stopOptions.signal) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
 
+        if let configuration {
+            await stopAttachedWorkloadsIfNeeded(containerConfig: configuration, stopOptions: stopOptions)
+        }
+
         if let workloadID = configuration?.id,
             let sessionID = try? sessionID(forWorkload: workloadID),
             let current = sessions[sessionID],
@@ -514,6 +518,33 @@ extension MacOSSandboxService {
         closeAllSessions()
         writeContainerLog(Data(("stop: sessions closed\n").utf8))
         sandboxState = .stopped(0)
+    }
+
+    private func stopAttachedWorkloadsIfNeeded(
+        containerConfig: ContainerConfiguration,
+        stopOptions: ContainerStopOptions
+    ) async {
+        let runningWorkloadIDs = workloads.values
+            .filter { $0.id != containerConfig.id && isWorkloadRunning($0) }
+            .map(\.id)
+            .sorted()
+        guard !runningWorkloadIDs.isEmpty else {
+            return
+        }
+
+        for workloadID in runningWorkloadIDs {
+            writeContainerLog(Data(("stop: stopping attached workload \(workloadID)\n").utf8))
+            do {
+                try await stopWorkloadIfNeeded(workloadID: workloadID, stopOptions: stopOptions)
+                writeContainerLog(Data(("stop: attached workload \(workloadID) stopped\n").utf8))
+            } catch {
+                writeContainerLog(
+                    Data(
+                        ("stop: failed to stop attached workload \(workloadID): \(describeError(error))\n").utf8
+                    )
+                )
+            }
+        }
     }
 
     @Sendable
@@ -750,7 +781,7 @@ extension MacOSSandboxService {
         guard workloadID != containerConfiguration.id else {
             throw ContainerizationError(.invalidArgument, message: "cannot stop the init workload \(workloadID); use StopSandbox")
         }
-        guard sandboxState == .booted || sandboxState == .running else {
+        guard sandboxState == .booted || sandboxState == .running || sandboxState == .stopping else {
             throw ContainerizationError(.invalidState, message: "sandbox not started")
         }
         guard let record = workloads[workloadID] else {

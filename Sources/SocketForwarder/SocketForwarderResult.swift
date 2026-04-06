@@ -14,24 +14,118 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Foundation
 import NIO
+
+final class ForwarderChannelTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var channels: [ObjectIdentifier: any Channel] = [:]
+    private var waiters: [EventLoopPromise<Void>] = []
+    private var isClosing = false
+
+    func register(_ channel: any Channel) {
+        let identifier = ObjectIdentifier(channel)
+        let shouldClose: Bool
+
+        lock.lock()
+        channels[identifier] = channel
+        shouldClose = isClosing
+        lock.unlock()
+
+        channel.closeFuture.whenComplete { [weak self] _ in
+            self?.remove(identifier)
+        }
+
+        if shouldClose {
+            channel.eventLoop.execute {
+                _ = channel.close(mode: .all)
+            }
+        }
+    }
+
+    func closeAll() {
+        let channelsToClose: [any Channel]
+        let waitersToWake: [EventLoopPromise<Void>]
+
+        lock.lock()
+        isClosing = true
+        channelsToClose = Array(channels.values)
+        if channelsToClose.isEmpty {
+            waitersToWake = waiters
+            waiters.removeAll()
+        } else {
+            waitersToWake = []
+        }
+        lock.unlock()
+
+        for channel in channelsToClose {
+            channel.eventLoop.execute {
+                _ = channel.close(mode: .all)
+            }
+        }
+        for waiter in waitersToWake {
+            waiter.succeed(())
+        }
+    }
+
+    func waitForDrain(on eventLoop: any EventLoop) -> EventLoopFuture<Void> {
+        lock.lock()
+        if channels.isEmpty {
+            lock.unlock()
+            return eventLoop.makeSucceededFuture(())
+        }
+
+        let promise = eventLoop.makePromise(of: Void.self)
+        waiters.append(promise)
+        lock.unlock()
+        return promise.futureResult
+    }
+
+    private func remove(_ identifier: ObjectIdentifier) {
+        let waitersToWake: [EventLoopPromise<Void>]
+
+        lock.lock()
+        channels.removeValue(forKey: identifier)
+        if isClosing && channels.isEmpty {
+            waitersToWake = waiters
+            waiters.removeAll()
+        } else {
+            waitersToWake = []
+        }
+        lock.unlock()
+
+        for waiter in waitersToWake {
+            waiter.succeed(())
+        }
+    }
+}
 
 public struct SocketForwarderResult: Sendable {
     private let channel: any Channel
+    private let tracker: ForwarderChannelTracker?
 
     public init(channel: Channel) {
+        self.init(channel: channel, tracker: nil)
+    }
+
+    init(channel: Channel, tracker: ForwarderChannelTracker?) {
         self.channel = channel
+        self.tracker = tracker
     }
 
     public var proxyAddress: SocketAddress? { self.channel.localAddress }
 
     public func close() {
         self.channel.eventLoop.execute {
-            _ = channel.close()
+            _ = self.channel.close(mode: .all)
         }
+        self.tracker?.closeAll()
     }
 
     public func wait() async throws {
         try await self.channel.closeFuture.get()
+        if let tracker = self.tracker {
+            try await tracker.waitForDrain(on: self.channel.eventLoop).get()
+        }
     }
 }

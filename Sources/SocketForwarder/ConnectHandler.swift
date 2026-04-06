@@ -21,11 +21,13 @@ import NIOPosix
 final class ConnectHandler {
     private var pendingBytes: [NIOAny]
     private let serverAddress: SocketAddress
+    private let channelTracker: ForwarderChannelTracker?
     private var log: Logger? = nil
 
-    init(serverAddress: SocketAddress, log: Logger?) {
+    init(serverAddress: SocketAddress, log: Logger?, channelTracker: ForwarderChannelTracker? = nil) {
         self.pendingBytes = []
         self.serverAddress = serverAddress
+        self.channelTracker = channelTracker
         self.log = log
     }
 }
@@ -81,9 +83,10 @@ extension ConnectHandler {
             .whenComplete { result in
                 switch result {
                 case .success(let channel):
+                    self.channelTracker?.register(channel)
                     guard context.channel.isActive else {
                         self.log?.trace("backend - frontend channel closed, closing backend connection")
-                        context.channel.close(promise: nil)
+                        channel.close(mode: .all, promise: nil)
                         return
                     }
                     self.log?.trace("backend - connected")

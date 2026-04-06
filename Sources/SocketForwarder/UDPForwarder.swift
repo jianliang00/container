@@ -100,13 +100,20 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
 
     private let proxyAddress: SocketAddress
     private let serverAddress: SocketAddress
+    private let channelTracker: ForwarderChannelTracker
     private let log: Logger?
 
     private var proxies: LRUCache<String, ProxyContext>
 
-    init(proxyAddress: SocketAddress, serverAddress: SocketAddress, log: Logger? = nil) {
+    init(
+        proxyAddress: SocketAddress,
+        serverAddress: SocketAddress,
+        channelTracker: ForwarderChannelTracker,
+        log: Logger? = nil
+    ) {
         self.proxyAddress = proxyAddress
         self.serverAddress = serverAddress
+        self.channelTracker = channelTracker
         self.proxies = LRUCache(size: maxProxies)
         self.log = log
     }
@@ -138,6 +145,7 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
                 )
                 let proxyAddress = try SocketAddress(ipAddress: "0.0.0.0", port: 0)
                 let loopBoundProxy = NIOLoopBound(proxy, eventLoop: context.eventLoop)
+                let channelTracker = self.channelTracker
                 let proxyToServerFuture = DatagramBootstrap(group: context.eventLoop)
                     .channelInitializer { [log] channel in
                         log?.trace("frontend - initializing backend")
@@ -146,7 +154,11 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
                         }
                     }
                     .bind(to: proxyAddress)
-                    .flatMap { $0.closeFuture }
+                    .map { channel in
+                        channelTracker.register(channel)
+                        return channel.closeFuture
+                    }
+                    .flatMap { $0 }
                 let context = ProxyContext(proxy: proxy, closeFuture: proxyToServerFuture)
                 if let (_, evictedContext) = proxies.put(key: key, value: context) {
                     self.log?.trace("frontend - closing evicted backend")
@@ -185,12 +197,14 @@ public struct UDPForwarder: SocketForwarder {
 
     public func run() throws -> EventLoopFuture<SocketForwarderResult> {
         self.log?.trace("frontend - creating channel")
+        let tracker = ForwarderChannelTracker()
         let bootstrap = DatagramBootstrap(group: self.eventLoopGroup)
             .channelInitializer { serverChannel in
                 self.log?.trace("frontend - initializing channel")
                 let proxyToServerHandler = UDPProxyFrontend(
                     proxyAddress: proxyAddress,
                     serverAddress: serverAddress,
+                    channelTracker: tracker,
                     log: log
                 )
                 return serverChannel.eventLoop.makeCompletedFuture {
@@ -200,6 +214,6 @@ public struct UDPForwarder: SocketForwarder {
         return
             bootstrap
             .bind(to: proxyAddress)
-            .map { SocketForwarderResult(channel: $0) }
+            .map { SocketForwarderResult(channel: $0, tracker: tracker) }
     }
 }

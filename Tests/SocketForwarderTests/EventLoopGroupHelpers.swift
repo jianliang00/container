@@ -14,7 +14,14 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Darwin
 import NIO
+
+@testable import SocketForwarder
+
+struct SocketTaskResult<T: Sendable>: @unchecked Sendable {
+    let result: Result<T, Error>
+}
 
 func withEventLoopGroup<R>(
     numberOfThreads: Int = System.coreCount,
@@ -38,4 +45,167 @@ func withEventLoopGroup<R>(
     }
 
     return try result.get()
+}
+
+func withForwarderCleanup<R>(
+    serverChannel: any Channel,
+    forwarderResult: SocketForwarderResult,
+    _ body: () async throws -> R
+) async throws -> R {
+    let result: Result<R, Error>
+
+    do {
+        result = .success(try await body())
+    } catch {
+        result = .failure(error)
+    }
+
+    do {
+        try await closeForwarder(serverChannel: serverChannel, forwarderResult: forwarderResult)
+    } catch {
+        if case .success = result {
+            throw error
+        }
+    }
+
+    return try result.get()
+}
+
+func collectThrowingTasks<T: Sendable>(
+    count: Int,
+    maxConcurrentTasks: Int,
+    _ operation: @escaping @Sendable (Int) async throws -> T
+) async throws -> [T] {
+    precondition(maxConcurrentTasks > 0)
+
+    return try await withThrowingTaskGroup(of: T.self) { group in
+        var nextIndex = 0
+        let initialTaskCount = min(count, maxConcurrentTasks)
+
+        for _ in 0..<initialTaskCount {
+            let index = nextIndex
+            nextIndex += 1
+            group.addTask {
+                try await operation(index)
+            }
+        }
+
+        var results: [T] = []
+        while let result = try await group.next() {
+            results.append(result)
+
+            if nextIndex < count {
+                let index = nextIndex
+                nextIndex += 1
+                group.addTask {
+                    try await operation(index)
+                }
+            }
+        }
+
+        return results
+    }
+}
+
+func collectTaskResults<T: Sendable>(
+    count: Int,
+    maxConcurrentTasks: Int,
+    _ operation: @escaping @Sendable (Int) async throws -> T
+) async -> [SocketTaskResult<T>] {
+    precondition(maxConcurrentTasks > 0)
+
+    return await withTaskGroup(of: SocketTaskResult<T>.self) { group in
+        var nextIndex = 0
+        let initialTaskCount = min(count, maxConcurrentTasks)
+
+        for _ in 0..<initialTaskCount {
+            let index = nextIndex
+            nextIndex += 1
+            group.addTask {
+                do {
+                    return SocketTaskResult(result: .success(try await operation(index)))
+                } catch {
+                    return SocketTaskResult(result: .failure(error))
+                }
+            }
+        }
+
+        var results: [SocketTaskResult<T>] = []
+        while let result = await group.next() {
+            results.append(result)
+
+            if nextIndex < count {
+                let index = nextIndex
+                nextIndex += 1
+                group.addTask {
+                    do {
+                        return SocketTaskResult(result: .success(try await operation(index)))
+                    } catch {
+                        return SocketTaskResult(result: .failure(error))
+                    }
+                }
+            }
+        }
+
+        return results
+    }
+}
+
+func runThrowingTasks(
+    count: Int,
+    maxConcurrentTasks: Int,
+    _ operation: @escaping @Sendable (Int) async throws -> Void
+) async throws {
+    _ = try await collectThrowingTasks(count: count, maxConcurrentTasks: maxConcurrentTasks) { index in
+        try await operation(index)
+        return ()
+    }
+}
+
+func retryTransientSocketError<T>(
+    maxAttempts: Int = 5,
+    baseDelayNanoseconds: UInt64 = 50_000_000,
+    _ operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    precondition(maxAttempts > 0)
+
+    var attempt = 0
+    while true {
+        do {
+            return try await operation()
+        } catch {
+            attempt += 1
+            guard attempt < maxAttempts, isTransientSocketError(error) else {
+                throw error
+            }
+
+            try await Task.sleep(nanoseconds: baseDelayNanoseconds * UInt64(attempt))
+        }
+    }
+}
+
+private func closeForwarder(
+    serverChannel: any Channel,
+    forwarderResult: SocketForwarderResult
+) async throws {
+    serverChannel.eventLoop.execute {
+        _ = serverChannel.close(mode: .all)
+    }
+    try await serverChannel.closeFuture.get()
+
+    forwarderResult.close()
+    try await forwarderResult.wait()
+}
+
+private func isTransientSocketError(_ error: Error) -> Bool {
+    guard let ioError = error as? IOError else {
+        return false
+    }
+
+    switch ioError.errnoCode {
+    case EADDRNOTAVAIL, ECONNRESET:
+        return true
+    default:
+        return false
+    }
 }

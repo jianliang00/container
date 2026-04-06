@@ -42,14 +42,16 @@ public struct TCPForwarder: SocketForwarder {
 
     public func run() throws -> EventLoopFuture<SocketForwarderResult> {
         self.log?.trace("frontend - creating listener")
+        let tracker = ForwarderChannelTracker()
 
         let bootstrap = ServerBootstrap(group: self.eventLoopGroup)
             .serverChannelOption(ChannelOptions.socket(.init(SOL_SOCKET), .init(SO_REUSEADDR)), value: 1)
             .childChannelOption(ChannelOptions.socket(.init(SOL_SOCKET), .init(SO_REUSEADDR)), value: 1)
             .childChannelInitializer { channel in
-                channel.eventLoop.makeCompletedFuture {
+                tracker.register(channel)
+                return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(
-                        ConnectHandler(serverAddress: self.serverAddress, log: log)
+                        ConnectHandler(serverAddress: self.serverAddress, log: log, channelTracker: tracker)
                     )
                 }
             }
@@ -57,6 +59,6 @@ public struct TCPForwarder: SocketForwarder {
         return
             bootstrap
             .bind(to: self.proxyAddress)
-            .map { SocketForwarderResult(channel: $0) }
+            .map { SocketForwarderResult(channel: $0, tracker: tracker) }
     }
 }

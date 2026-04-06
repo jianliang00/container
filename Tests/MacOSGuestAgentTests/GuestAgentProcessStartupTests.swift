@@ -22,6 +22,7 @@ import Testing
 
 @testable import container_macos_guest_agent
 
+@Suite(.serialized)
 struct GuestAgentProcessStartupTests {
     @Test
     func missingExecutableReportsErrorWithoutAck() throws {

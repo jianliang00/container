@@ -21,6 +21,7 @@ import Testing
 
 @testable import ContainerCommands
 
+@Suite(.serialized)
 struct MacOSImagePackagerTests {
     @Test
     func packageCleansUpTemporaryLayoutDirectoryWhenLayoutCreationFails() throws {

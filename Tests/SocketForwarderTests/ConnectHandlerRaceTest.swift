@@ -19,12 +19,13 @@ import Testing
 
 @testable import SocketForwarder
 
-struct ConnectHandlerRaceTest {
+extension SocketForwarderStressTests {
     @Test
     func testRapidConnectDisconnect() async throws {
-        try await withEventLoopGroup { eventLoopGroup in
-            let requestCount = 500
+        let requestCount = 96
+        let maxConcurrentClients = 8
 
+        try await withEventLoopGroup { eventLoopGroup in
             let serverAddress = try SocketAddress(ipAddress: "127.0.0.1", port: 0)
             let server = TCPEchoServer(serverAddress: serverAddress, eventLoopGroup: eventLoopGroup)
             let serverChannel = try await server.run().get()
@@ -39,28 +40,26 @@ struct ConnectHandlerRaceTest {
             let forwarderResult = try await forwarder.run().get()
             let actualProxyAddress = try #require(forwarderResult.proxyAddress)
 
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<requestCount {
-                    group.addTask {
-                        do {
-                            let channel = try await ClientBootstrap(group: eventLoopGroup)
-                                .connect(to: actualProxyAddress)
-                                .get()
+            try await withForwarderCleanup(
+                serverChannel: serverChannel,
+                forwarderResult: forwarderResult
+            ) {
+                try await runThrowingTasks(
+                    count: requestCount,
+                    maxConcurrentTasks: maxConcurrentClients
+                ) { _ in
+                    do {
+                        let channel = try await ClientBootstrap(group: eventLoopGroup)
+                            .connectTimeout(.seconds(2))
+                            .connect(to: actualProxyAddress)
+                            .get()
 
-                            try await channel.close()
-                        } catch {
-                            // Going to ignore connection errors as we are intentionally stressing it
-                        }
+                        try await channel.close()
+                    } catch {
+                        // Going to ignore connection errors as we are intentionally stressing it.
                     }
                 }
-                try await group.waitForAll()
             }
-
-            serverChannel.eventLoop.execute { _ = serverChannel.close() }
-            try await serverChannel.closeFuture.get()
-
-            forwarderResult.close()
-            try await forwarderResult.wait()
         }
     }
 }

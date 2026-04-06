@@ -41,13 +41,11 @@ struct MacOSDiskChunkerTests {
             ]
         )
 
-        let results = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: diskURL,
-                blobsDir: blobsDir,
-                chunkSize: logicalSize
-            )
-        }
+        let results = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: diskURL,
+            blobsDir: blobsDir,
+            chunkSize: logicalSize
+        )
 
         #expect(results.count == 1)
 
@@ -68,13 +66,11 @@ struct MacOSDiskChunkerTests {
             ]
         )
 
-        try withBuiltinZstdOnly {
-            try MacOSDiskRebuilder.rebuild(
-                layout: layout,
-                chunkBlobPaths: [chunk.blobDigest: chunk.blobURL],
-                outputPath: rebuiltURL
-            )
-        }
+        try MacOSDiskRebuilder.rebuild(
+            layout: layout,
+            chunkBlobPaths: [chunk.blobDigest: chunk.blobURL],
+            outputPath: rebuiltURL
+        )
 
         #expect(try Data(contentsOf: rebuiltURL) == Data(contentsOf: diskURL))
     }
@@ -101,14 +97,12 @@ struct MacOSDiskChunkerTests {
             ]
         )
 
-        let results = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: diskURL,
-                blobsDir: blobsDir,
-                chunkSize: chunkSize,
-                maxConcurrentChunks: 2
-            )
-        }
+        let results = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: diskURL,
+            blobsDir: blobsDir,
+            chunkSize: chunkSize,
+            maxConcurrentChunks: 2
+        )
 
         #expect(results.count == 3)
         #expect(results.map(\.index) == [0, 1, 2])
@@ -130,14 +124,12 @@ struct MacOSDiskChunkerTests {
         )
 
         let blobPaths = Dictionary(uniqueKeysWithValues: results.map { ($0.blobDigest, $0.blobURL) })
-        try withBuiltinZstdOnly {
-            try MacOSDiskRebuilder.rebuild(
-                layout: layout,
-                chunkBlobPaths: blobPaths,
-                outputPath: rebuiltURL,
-                maxConcurrentChunks: 2
-            )
-        }
+        try MacOSDiskRebuilder.rebuild(
+            layout: layout,
+            chunkBlobPaths: blobPaths,
+            outputPath: rebuiltURL,
+            maxConcurrentChunks: 2
+        )
 
         #expect(try Data(contentsOf: rebuiltURL) == Data(contentsOf: diskURL))
     }
@@ -164,15 +156,13 @@ struct MacOSDiskChunkerTests {
         )
 
         let updates = LockedProgressUpdates()
-        let results = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: diskURL,
-                blobsDir: blobsDir,
-                chunkSize: chunkSize,
-                maxConcurrentChunks: 2,
-                progress: { updates.append($0) }
-            )
-        }
+        let results = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: diskURL,
+            blobsDir: blobsDir,
+            chunkSize: chunkSize,
+            maxConcurrentChunks: 2,
+            progress: { updates.append($0) }
+        )
 
         #expect(results.count == 3)
         let snapshots = updates.values().sorted { $0.completedChunks < $1.completedChunks }
@@ -218,14 +208,12 @@ struct MacOSDiskChunkerTests {
             ]
         )
 
-        let parentResults = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: parentDiskURL,
-                blobsDir: parentBlobsDir,
-                chunkSize: chunkSize,
-                maxConcurrentChunks: 2
-            )
-        }
+        let parentResults = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: parentDiskURL,
+            blobsDir: parentBlobsDir,
+            chunkSize: chunkSize,
+            maxConcurrentChunks: 2
+        )
 
         #expect(parentResults.count == 3)
         #expect(parentResults[0].blobDigest == parentResults[2].blobDigest)
@@ -253,15 +241,13 @@ struct MacOSDiskChunkerTests {
             )
         )
 
-        let childResults = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: childDiskURL,
-                blobsDir: childBlobsDir,
-                chunkSize: chunkSize,
-                parentDiskSource: parentDiskSource,
-                maxConcurrentChunks: 2
-            )
-        }
+        let childResults = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: childDiskURL,
+            blobsDir: childBlobsDir,
+            chunkSize: chunkSize,
+            parentDiskSource: parentDiskSource,
+            maxConcurrentChunks: 2
+        )
 
         #expect(childResults.count == 3)
         #expect(childResults[0].blobDigest == parentResults[0].blobDigest)
@@ -291,14 +277,12 @@ struct MacOSDiskChunkerTests {
             childResults.map { ($0.blobDigest, $0.blobURL) },
             uniquingKeysWith: { first, _ in first }
         )
-        try withBuiltinZstdOnly {
-            try MacOSDiskRebuilder.rebuild(
-                layout: layout,
-                chunkBlobPaths: blobPaths,
-                outputPath: rebuiltURL,
-                maxConcurrentChunks: 2
-            )
-        }
+        try MacOSDiskRebuilder.rebuild(
+            layout: layout,
+            chunkBlobPaths: blobPaths,
+            outputPath: rebuiltURL,
+            maxConcurrentChunks: 2
+        )
 
         #expect(try Data(contentsOf: rebuiltURL) == Data(contentsOf: childDiskURL))
         #expect(
@@ -334,14 +318,12 @@ struct MacOSDiskChunkerTests {
         #expect(cloneResult == .cloned)
         try overwrite(at: childDiskURL, offset: chunkSize + 8_192, data: Data("child-clone-1".utf8))
 
-        let parentResults = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: parentDiskURL,
-                blobsDir: parentBlobsDir,
-                chunkSize: chunkSize,
-                maxConcurrentChunks: 2
-            )
-        }
+        let parentResults = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: parentDiskURL,
+            blobsDir: parentBlobsDir,
+            chunkSize: chunkSize,
+            maxConcurrentChunks: 2
+        )
         let parentLayout = DiskLayout(
             logicalSize: logicalSize,
             chunkSize: chunkSize,
@@ -366,15 +348,13 @@ struct MacOSDiskChunkerTests {
             diskImagePath: parentDiskURL
         )
 
-        let childResults = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: childDiskURL,
-                blobsDir: childBlobsDir,
-                chunkSize: chunkSize,
-                parentDiskSource: parentDiskSource,
-                maxConcurrentChunks: 2
-            )
-        }
+        let childResults = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: childDiskURL,
+            blobsDir: childBlobsDir,
+            chunkSize: chunkSize,
+            parentDiskSource: parentDiskSource,
+            maxConcurrentChunks: 2
+        )
 
         #expect(childResults.count == 3)
         #expect(childResults[0].reusedFromParent)
@@ -436,21 +416,6 @@ private func overwrite(at url: URL, offset: Int64, data: Data) throws {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
-}
-
-private func withBuiltinZstdOnly<T>(_ body: () throws -> T) throws -> T {
-    setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
-    defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
-    let originalPath = getenv("PATH").map { String(cString: $0) }
-    defer {
-        if let originalPath {
-            setenv("PATH", originalPath, 1)
-        } else {
-            unsetenv("PATH")
-        }
-    }
-    setenv("PATH", "", 1)
-    return try body()
 }
 
 private final class LockedProgressUpdates: @unchecked Sendable {

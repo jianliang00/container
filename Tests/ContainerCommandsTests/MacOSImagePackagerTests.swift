@@ -49,13 +49,11 @@ struct MacOSImagePackagerTests {
             to: imageDirectory.appendingPathComponent(MacOSImagePackager.hardwareModelFilename)
         )
 
-        let seededChunks = try withBuiltinZstdOnly {
-            try MacOSDiskChunker.chunkDiskImage(
-                diskImage: diskImage,
-                blobsDir: seedBlobsDir,
-                chunkSize: DiskLayout.defaultChunkSize
-            )
-        }
+        let seededChunks = try MacOSDiskChunker.chunkDiskImage(
+            diskImage: diskImage,
+            blobsDir: seedBlobsDir,
+            chunkSize: DiskLayout.defaultChunkSize
+        )
         let seededChunk = try #require(seededChunks.first)
         let parentLayout = DiskLayout(
             logicalSize: logicalSize,
@@ -79,15 +77,13 @@ struct MacOSImagePackagerTests {
 
         let outputTar = tempDirectory.appendingPathComponent("out.tar")
         #expect(throws: Error.self) {
-            try withBuiltinZstdOnly {
-                try MacOSImagePackager.package(
-                    imageDirectory: imageDirectory,
-                    outputTar: outputTar,
-                    reference: nil,
-                    parentDiskSource: parentDiskSource,
-                    temporaryRootDirectory: layoutRoot
-                )
-            }
+            try MacOSImagePackager.package(
+                imageDirectory: imageDirectory,
+                outputTar: outputTar,
+                reference: nil,
+                parentDiskSource: parentDiskSource,
+                temporaryRootDirectory: layoutRoot
+            )
         }
 
         let leftoverLayouts = try FileManager.default.contentsOfDirectory(
@@ -123,14 +119,12 @@ struct MacOSImagePackagerTests {
 
         let outputTar = tempDirectory.appendingPathComponent("out.tar")
         let recorder = LockedMessages()
-        try withBuiltinZstdOnly {
-            try MacOSImagePackager.package(
-                imageDirectory: imageDirectory,
-                outputTar: outputTar,
-                reference: "local/test:latest",
-                progress: { recorder.append($0) }
-            )
-        }
+        try MacOSImagePackager.package(
+            imageDirectory: imageDirectory,
+            outputTar: outputTar,
+            reference: "local/test:latest",
+            progress: { recorder.append($0) }
+        )
 
         let messages = recorder.values()
         #expect(messages.contains("Packaging macOS image bundle"))
@@ -163,13 +157,11 @@ struct MacOSImagePackagerTests {
         )
 
         let outputTar = tempDirectory.appendingPathComponent("out.tar")
-        try withBuiltinZstdOnly {
-            try MacOSImagePackager.package(
-                imageDirectory: imageDirectory,
-                outputTar: outputTar,
-                reference: "local/test:latest"
-            )
-        }
+        try MacOSImagePackager.package(
+            imageDirectory: imageDirectory,
+            outputTar: outputTar,
+            reference: "local/test:latest"
+        )
 
         let extractRoot = tempDirectory.appendingPathComponent("extracted")
         try extractTar(outputTar, to: extractRoot)
@@ -223,21 +215,6 @@ private func createSparseDisk(
             }
         }
     }
-}
-
-private func withBuiltinZstdOnly<T>(_ body: () throws -> T) throws -> T {
-    setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
-    defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
-    let originalPath = getenv("PATH").map { String(cString: $0) }
-    defer {
-        if let originalPath {
-            setenv("PATH", originalPath, 1)
-        } else {
-            unsetenv("PATH")
-        }
-    }
-    setenv("PATH", "", 1)
-    return try body()
 }
 
 private func extractTar(_ tarURL: URL, to destinationURL: URL) throws {

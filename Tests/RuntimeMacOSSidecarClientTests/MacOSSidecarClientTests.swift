@@ -24,6 +24,7 @@ import Testing
 @testable import RuntimeMacOSSidecarShared
 @testable import container_runtime_macos
 
+@Suite(.serialized)
 struct MacOSSidecarClientTests {
     @Test
     func bootstrapAndProcessEventsFlowOverPersistentControlConnection() throws {

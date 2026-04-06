@@ -23,6 +23,7 @@ import Testing
 @testable import ContainerAPIClient
 @testable import ContainerPersistence
 
+@Suite(.serialized)
 struct ParserTest {
     @Test
     func testPublishPortParserTcp() throws {

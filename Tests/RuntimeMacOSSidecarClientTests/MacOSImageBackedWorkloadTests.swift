@@ -25,6 +25,7 @@ import Testing
 @testable import RuntimeMacOSSidecarShared
 @testable import container_runtime_macos
 
+@Suite(.serialized)
 struct MacOSImageBackedWorkloadTests {
     @Test
     func startImageBackedWorkloadInjectsPayloadMetadataAndMapsPayloadPathsWithoutChroot() async throws {

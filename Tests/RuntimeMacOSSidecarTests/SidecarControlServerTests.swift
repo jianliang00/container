@@ -23,6 +23,7 @@ import Testing
 
 @testable import container_runtime_macos_sidecar
 
+@Suite(.serialized)
 struct SidecarControlServerTests {
     @Test
     func ownerDisconnectClosesOwnedFileTransferSessions() throws {

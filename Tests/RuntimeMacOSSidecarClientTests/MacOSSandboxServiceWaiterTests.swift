@@ -26,6 +26,7 @@ import Testing
 
 @testable import container_runtime_macos
 
+@Suite(.serialized)
 struct MacOSSandboxServiceWaiterTests {
     @Test
     func waitForMissingProcessThrowsNotFound() async throws {

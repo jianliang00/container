@@ -84,7 +84,6 @@ jobs:
         env:
           CONTAINER_SKIP_VIRTUALIZATION_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
           CONTAINER_FORCE_DISABLE_CLI_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
-          CONTAINER_SERIALIZE_TESTS: "1"
         run: |
           APP_ROOT=$(mktemp -d -p "${RUNNER_TEMP}")
           trap 'rm -rf "${APP_ROOT}"; echo Removing data directory ${APP_ROOT}' EXIT

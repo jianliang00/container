@@ -21,6 +21,7 @@ import Testing
 
 @testable import ContainerCommands
 
+@Suite(.serialized)
 struct MacOSWorkloadPackagerTests {
     @Test
     func packageProducesValidWorkloadImageArchive() throws {

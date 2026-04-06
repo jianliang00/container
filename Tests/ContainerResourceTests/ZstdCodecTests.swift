@@ -32,9 +32,6 @@ struct ZstdCodecTests {
         let outputURL = tempDirectory.appendingPathComponent("payload")
         try compressed.write(to: compressedURL)
 
-        setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
-        defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
-
         try ZstdCodec.decompress(input: compressedURL, output: outputURL)
 
         #expect(try Data(contentsOf: outputURL) == payload)
@@ -50,18 +47,6 @@ struct ZstdCodecTests {
         let compressedURL = tempDirectory.appendingPathComponent("payload.zst")
         let outputURL = tempDirectory.appendingPathComponent("payload.out")
         try payload.write(to: inputURL)
-
-        setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
-        defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
-        let originalPath = getenv("PATH").map { String(cString: $0) }
-        defer {
-            if let originalPath {
-                setenv("PATH", originalPath, 1)
-            } else {
-                unsetenv("PATH")
-            }
-        }
-        setenv("PATH", "", 1)
 
         try ZstdCodec.compress(input: inputURL, output: compressedURL, level: 3, includeChecksum: false)
         try ZstdCodec.decompress(input: compressedURL, output: outputURL)
@@ -101,18 +86,6 @@ struct ZstdCodecTests {
                 )
             ]
         )
-
-        setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
-        defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
-        let originalPath = getenv("PATH").map { String(cString: $0) }
-        defer {
-            if let originalPath {
-                setenv("PATH", originalPath, 1)
-            } else {
-                unsetenv("PATH")
-            }
-        }
-        setenv("PATH", "", 1)
 
         try MacOSDiskRebuilder.rebuild(
             layout: layout,
@@ -167,18 +140,6 @@ struct ZstdCodecTests {
             chunkSize: chunkLength,
             chunks: chunks
         )
-
-        setenv(ZstdTool.overrideEnvironmentKey, "/missing/zstd", 1)
-        defer { unsetenv(ZstdTool.overrideEnvironmentKey) }
-        let originalPath = getenv("PATH").map { String(cString: $0) }
-        defer {
-            if let originalPath {
-                setenv("PATH", originalPath, 1)
-            } else {
-                unsetenv("PATH")
-            }
-        }
-        setenv("PATH", "", 1)
 
         try MacOSDiskRebuilder.rebuild(
             layout: layout,

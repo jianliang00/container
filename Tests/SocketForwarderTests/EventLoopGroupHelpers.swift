@@ -192,9 +192,14 @@ private func closeForwarder(
         _ = serverChannel.close(mode: .all)
     }
     try await serverChannel.closeFuture.get()
+    try await waitForEventLoopQuiescence(on: serverChannel.eventLoop)
 
     forwarderResult.close()
     try await forwarderResult.wait()
+}
+
+private func waitForEventLoopQuiescence(on eventLoop: any EventLoop) async throws {
+    try await eventLoop.submit {}.get()
 }
 
 private func isTransientSocketError(_ error: Error) -> Bool {

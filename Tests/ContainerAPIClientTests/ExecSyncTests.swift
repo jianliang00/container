@@ -17,6 +17,7 @@
 import ContainerizationError
 import ContainerizationOS
 import Darwin
+import Dispatch
 import Foundation
 import Testing
 
@@ -26,6 +27,7 @@ struct ExecSyncTests {
     @Test
     func capturesStdoutStderrAndStandardInput() async throws {
         let input = Data("hello from stdin".utf8)
+        let state = CapturingProcessState()
 
         let result = try await ExecSyncRunner.run(
             standardInput: input
@@ -33,16 +35,32 @@ struct ExecSyncTests {
             let stdin = try #require(stdio[0])
             let stdout = try #require(stdio[1])
             let stderr = try #require(stdio[2])
+            let processStdin = try duplicateFileHandle(stdin)
+            let processStdout = try duplicateFileHandle(stdout)
+            let processStderr = try duplicateFileHandle(stderr)
 
             return ScriptedProcess(
                 id: "exec-sync-capture",
                 onStart: {
-                    let received = try stdin.readToEnd() ?? Data()
-                    try stdout.write(contentsOf: received)
-                    try stderr.write(contentsOf: Data("stderr bytes".utf8))
+                    DispatchQueue.global().async {
+                        do {
+                            defer {
+                                try? processStdin.close()
+                                try? processStdout.close()
+                                try? processStderr.close()
+                            }
+
+                            let received = try processStdin.readToEnd() ?? Data()
+                            try processStdout.write(contentsOf: received)
+                            try processStderr.write(contentsOf: Data("stderr bytes".utf8))
+                            state.finish(.success(23))
+                        } catch {
+                            state.finish(.failure(error))
+                        }
+                    }
                 },
                 onWait: {
-                    23
+                    try await state.wait()
                 }
             )
         }
@@ -101,6 +119,55 @@ private final class ScriptedProcess: ClientProcess, @unchecked Sendable {
     }
 }
 
+private func duplicateFileHandle(_ handle: FileHandle) throws -> FileHandle {
+    let duplicatedFD = dup(handle.fileDescriptor)
+    guard duplicatedFD >= 0 else {
+        throw NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(errno),
+            userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errno))]
+        )
+    }
+    return FileHandle(fileDescriptor: duplicatedFD, closeOnDealloc: true)
+}
+
+private final class CapturingProcessState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Int32, Error>?
+    private var waitContinuation: CheckedContinuation<Result<Int32, Error>, Never>?
+
+    func finish(_ result: Result<Int32, Error>) {
+        let continuation = lock.withLock { () -> CheckedContinuation<Result<Int32, Error>, Never>? in
+            if let waitContinuation {
+                self.waitContinuation = nil
+                return waitContinuation
+            }
+
+            self.result = result
+            return nil
+        }
+
+        continuation?.resume(returning: result)
+    }
+
+    func wait() async throws -> Int32 {
+        if let result = lock.withLock({ self.result }) {
+            return try result.get()
+        }
+
+        let result = await withCheckedContinuation { (continuation: CheckedContinuation<Result<Int32, Error>, Never>) in
+            lock.withLock {
+                if let result = self.result {
+                    continuation.resume(returning: result)
+                    return
+                }
+                waitContinuation = continuation
+            }
+        }
+        return try result.get()
+    }
+}
+
 private actor HangingProcessState {
     private var signals: [Int32] = []
     private var waitContinuation: CheckedContinuation<Int32, Never>?
@@ -143,5 +210,13 @@ private final class HangingProcess: ClientProcess, @unchecked Sendable {
 
     func wait() async throws -> Int32 {
         await state.wait()
+    }
+}
+
+extension NSLock {
+    fileprivate func withLock<R>(_ body: () -> R) -> R {
+        lock()
+        defer { unlock() }
+        return body()
     }
 }

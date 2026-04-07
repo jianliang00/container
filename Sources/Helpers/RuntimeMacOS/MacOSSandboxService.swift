@@ -803,7 +803,10 @@ extension MacOSSandboxService {
         } catch let error as ContainerizationError where error.code == .timeout {
             writeContainerLog(Data(("stopWorkload timeout for \(workloadID); escalating to SIGKILL\n").utf8))
             try sendSignalToWorkload(workloadID: workloadID, signal: SIGKILL)
-            _ = try await waitForWorkload(workloadID)
+            _ = try await waitForWorkload(
+                workloadID,
+                timeout: max(stopOptions.timeoutInSeconds, 1)
+            )
         }
     }
 

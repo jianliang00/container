@@ -161,7 +161,7 @@ struct MacOSImageBackedWorkloadTests {
         let cachedRootfs = cacheEntry.appendingPathComponent("rootfs", isDirectory: true)
         #expect(FileManager.default.fileExists(atPath: cachedRootfs.path))
 
-        try await service.testingStop()
+        try await service.testingStop(.init(timeoutInSeconds: 1, signal: SIGTERM))
 
         server.stop()
         try server.waitForCompletion()
@@ -406,6 +406,99 @@ struct MacOSImageBackedWorkloadTests {
             })
         )
         #expect(signalRequest.signal == SIGTERM)
+    }
+
+    @Test
+    func stopSandboxSignalsAllRunningWorkloadsBeforeCleanup() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-stop-all-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory)
+        let socketPath = "/tmp/sidecar-workload-stop-all-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(
+            socketPath: socketPath,
+            exitOnSignalPrefixes: ["__workload__"]
+        )
+        defer { server.stop() }
+
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        try await service.testingPrepareSandbox(containerConfiguration, state: "running")
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let workloadA = WorkloadConfiguration(
+            id: "image-backed-stop-all-a",
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: ["arg-a"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
+            workloadImageDigest: image.indexDigest
+        )
+        let workloadB = WorkloadConfiguration(
+            id: "image-backed-stop-all-b",
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: ["arg-b"],
+                environment: [],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
+            workloadImageDigest: image.indexDigest
+        )
+
+        try await service.testingCreateWorkload(workloadA)
+        try await service.testingCreateWorkload(workloadB)
+        try await service.testingStartWorkload(workloadA.id)
+        try await service.testingStartWorkload(workloadB.id)
+
+        let beforeStopA = try await service.testingInspectWorkload(workloadA.id)
+        let beforeStopB = try await service.testingInspectWorkload(workloadB.id)
+        #expect(beforeStopA.status == .running)
+        #expect(beforeStopB.status == .running)
+
+        let sessionIDA = try #require(await service.testingSessionID(for: workloadA.id))
+        let sessionIDB = try #require(await service.testingSessionID(for: workloadB.id))
+
+        try await service.testingStop(.init(timeoutInSeconds: 1, signal: SIGTERM))
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let requests = server.recordedRequests()
+        let signalRequests = requests.enumerated().filter {
+            $0.element.method == .processSignal && ($0.element.processID?.hasPrefix("__workload__") ?? false)
+        }
+        #expect(signalRequests.count == 2)
+        #expect(Set(signalRequests.compactMap { $0.element.processID }) == Set([sessionIDA, sessionIDB]))
+        #expect(signalRequests.allSatisfy { $0.element.signal == SIGTERM })
+
+        let cleanupIndex = try #require(
+            requests.firstIndex(where: {
+                $0.method == .processStart && ($0.processID?.hasPrefix("workload-cleanup-all-") ?? false)
+            })
+        )
+        #expect(signalRequests.map { $0.offset }.allSatisfy { $0 < cleanupIndex })
+
+        let snapshotA = try await service.testingInspectWorkload(workloadA.id)
+        let snapshotB = try await service.testingInspectWorkload(workloadB.id)
+        #expect(snapshotA.status == .stopped)
+        #expect(snapshotB.status == .stopped)
+        #expect(snapshotA.exitCode == 0)
+        #expect(snapshotB.exitCode == 0)
     }
 
     @Test

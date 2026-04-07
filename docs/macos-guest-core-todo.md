@@ -148,7 +148,7 @@ Related design docs:
     - [x] keep host unpack cache separate from guest instance lifetime
   - [x] cover restart points before and after injection so recovery can determine
     whether reinjection is needed
-- [ ] Split macOS build into explicit `sandbox build` and `workload build` modes.
+- [x] Split macOS build into explicit `sandbox build` and `workload build` modes.
   - [x] keep the current whole-disk commit flow as `sandbox build`
   - [x] add explicit `payloadRoot`, recommended as
     `/var/lib/container/build/payload`

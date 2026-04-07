@@ -396,10 +396,13 @@ public actor ContainersService {
             try await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
                 if state.client == nil {
-                    try await self.registerContainerExitCallback(id: id)
-                    try await self.trackContainerExit(id: id, client: sandboxClient)
                     let sandboxSnapshot = try await sandboxClient.state()
-                    state.snapshot.status = Self.containerRuntimeStatus(from: sandboxSnapshot)
+                    let runtimeStatus = Self.containerRuntimeStatus(from: sandboxSnapshot)
+                    try await self.registerContainerExitCallback(id: id)
+                    if runtimeStatus == .running {
+                        try await self.trackContainerExit(id: id, client: sandboxClient)
+                    }
+                    state.snapshot.status = runtimeStatus
                     state.snapshot.networks = sandboxSnapshot.networks
                     state.snapshot.startedDate =
                         state.snapshot.status == .running
@@ -688,8 +691,6 @@ public actor ContainersService {
                     return StartProcessResult.exec
                 }
 
-                try await self.trackContainerExit(id: id, client: client)
-
                 let sandboxSnapshot = try await client.state()
                 return .initProcessStarted(networks: sandboxSnapshot.networks)
             }
@@ -704,15 +705,21 @@ public actor ContainersService {
         case .run(let task, let client, let isInit):
             do {
                 let result = try await task.value
-                try await self.lock.withLock { context in
+                let shouldTrackExit = try await self.lock.withLock { context -> Bool in
                     var state = try await self.getContainerState(id: id, context: context)
                     state.processStartTasks.removeValue(forKey: processID)
+                    var shouldTrackExit = false
                     if case .initProcessStarted(let networks) = result {
+                        shouldTrackExit = state.snapshot.status != .running
                         state.snapshot.status = .running
                         state.snapshot.networks = networks
                         state.snapshot.startedDate = Date()
                     }
                     await self.setContainerState(id, state, context: context)
+                    return shouldTrackExit
+                }
+                if isInit, shouldTrackExit {
+                    try await self.trackContainerExit(id: id, client: client)
                 }
             } catch {
                 try? await self.lock.withLock { context in
@@ -1230,12 +1237,11 @@ public actor ContainersService {
                 ]
             )
 
-            guard shouldTrackExit else {
-                return
-            }
-
             do {
                 try await self.registerContainerExitCallback(id: id)
+                guard shouldTrackExit else {
+                    return
+                }
                 try await self.trackContainerExit(id: id, client: client)
             } catch {
                 self.log.warning(

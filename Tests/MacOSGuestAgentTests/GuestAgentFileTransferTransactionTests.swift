@@ -368,6 +368,21 @@ struct GuestAgentFileTransferTransactionTests {
     }
 
     @Test
+    func execIdentityMatchingCurrentProcessDoesNotRequireSpawnedSession() throws {
+        let resolved = try GuestAgentExecIdentity.resolve(
+            from: .init(
+                type: .exec,
+                executable: "/usr/bin/id",
+                uid: UInt32(geteuid()),
+                gid: UInt32(getegid())
+            )
+        )
+        let identity = try #require(resolved)
+
+        #expect(identity.requiresSpawnedSession() == false)
+    }
+
+    @Test
     func execIdentityRejectsUnknownNamedUser() throws {
         let unknownUser = "codex-user-\(UUID().uuidString)"
 
@@ -420,7 +435,7 @@ struct GuestAgentFileTransferTransactionTests {
     }
 
     @Test
-    func ttyCloseDeliversEOFToSpawnedProcessSession() throws {
+    func ttyCloseDeliversEOFToCurrentIdentityExec() throws {
         let (serverFD, clientSocket) = try socketPair()
         let connection = AgentConnection(fd: serverFD)
         var clientFD = clientSocket

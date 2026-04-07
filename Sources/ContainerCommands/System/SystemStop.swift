@@ -95,7 +95,11 @@ extension Application {
 
             if isRegistered {
                 log.info("stopping service", metadata: ["label": "\(fullLabel)"])
-                try? ServiceManager.deregister(fullServiceLabel: fullLabel)
+                do {
+                    try ServiceManager.deregister(fullServiceLabel: fullLabel)
+                } catch {
+                    log.warning("failed to stop service", metadata: ["label": "\(fullLabel)", "error": "\(error)"])
+                }
             }
 
             // Note: The assumption here is that we would have registered the launchd services
@@ -107,7 +111,11 @@ extension Application {
                 .map { "\(launchdDomainString)/\($0)" }
                 .forEach {
                     log.info("stopping service", metadata: ["label": "\($0)"])
-                    try? ServiceManager.deregister(fullServiceLabel: $0)
+                    do {
+                        try ServiceManager.deregister(fullServiceLabel: $0)
+                    } catch {
+                        log.warning("failed to stop service", metadata: ["label": "\($0)", "error": "\(error)"])
+                    }
                 }
         }
     }

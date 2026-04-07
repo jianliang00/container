@@ -18,6 +18,9 @@ import ContainerizationError
 import Foundation
 
 public struct ServiceManager {
+    private static let bootoutPollIntervalSeconds = 0.1
+    private static let bootoutTimeoutSeconds = 5.0
+
     private struct LaunchctlCommandResult {
         let status: Int32
         let stdout: String
@@ -96,7 +99,23 @@ public struct ServiceManager {
 
     /// Deregister a service by a launchd label.
     public static func deregister(fullServiceLabel label: String) throws {
-        try runLaunchctlCommandChecked(args: ["bootout", label])
+        let result = try runLaunchctlCommand(args: ["bootout", label], captureOutput: true)
+        if result.status == 0 {
+            try waitForServiceToDisappear(fullServiceLabel: label)
+            return
+        }
+
+        let output = result.combinedOutput
+        if result.status == 3 && output.contains("No such process") {
+            return
+        }
+
+        let command = "launchctl bootout \(label)"
+        let details = output.isEmpty ? "" : ", output: \(output)"
+        throw ContainerizationError(
+            .internalError,
+            message: "command `\(command)` failed with status \(result.status)\(details)"
+        )
     }
 
     /// Restart a service by a launchd label.
@@ -183,5 +202,22 @@ public struct ServiceManager {
         default:
             throw ContainerizationError(.internalError, message: "unsupported session type \(currentSessionType)")
         }
+    }
+
+    private static func waitForServiceToDisappear(fullServiceLabel label: String) throws {
+        let launchdLabel = String(label.split(separator: "/").last ?? Substring(label))
+        let deadline = Date().addingTimeInterval(Self.bootoutTimeoutSeconds)
+
+        while Date() < deadline {
+            if try !Self.isRegistered(fullServiceLabel: launchdLabel) {
+                return
+            }
+            Thread.sleep(forTimeInterval: Self.bootoutPollIntervalSeconds)
+        }
+
+        throw ContainerizationError(
+            .timeout,
+            message: "timed out waiting for launchd to remove service `\(launchdLabel)`"
+        )
     }
 }

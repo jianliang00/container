@@ -648,10 +648,14 @@ private final class RecordingSidecarServer: @unchecked Sendable {
                 }
                 clientFD.withLock { $0 = accepted }
                 defer {
-                    clientFD.withLock { fd in
-                        if fd == accepted { fd = nil }
+                    let ownedClientFD = clientFD.withLock { fd -> Int32? in
+                        guard fd == accepted else {
+                            return nil
+                        }
+                        fd = nil
+                        return accepted
                     }
-                    Darwin.close(accepted)
+                    closeIfValid(ownedClientFD)
                 }
 
                 while true {
@@ -700,12 +704,14 @@ private final class RecordingSidecarServer: @unchecked Sendable {
             fd = nil
             return current
         }
-        clientFD.withLock { fd in
-            if let fd, fd >= 0 {
-                _ = Darwin.shutdown(fd, SHUT_RDWR)
-                Darwin.close(fd)
-            }
+        let clientFDToClose = clientFD.withLock { fd -> Int32? in
+            let current = fd
             fd = nil
+            return current
+        }
+        if let clientFDToClose, clientFDToClose >= 0 {
+            _ = Darwin.shutdown(clientFDToClose, SHUT_RDWR)
+            Darwin.close(clientFDToClose)
         }
         if let listeningFD {
             _ = Darwin.shutdown(listeningFD, SHUT_RDWR)
@@ -798,5 +804,12 @@ private func writeResponse(_ response: MacOSSidecarResponse, to fd: Int32) throw
 
 private func writeEvent(_ event: MacOSSidecarEvent, to fd: Int32) throws {
     try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.event(event), fd: fd)
+}
+
+private func closeIfValid(_ fd: Int32?) {
+    guard let fd, fd >= 0 else {
+        return
+    }
+    Darwin.close(fd)
 }
 #endif

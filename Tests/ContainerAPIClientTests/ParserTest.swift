@@ -16,6 +16,7 @@
 
 import ContainerizationError
 import ContainerizationExtras
+import Dispatch
 import Foundation
 import SystemPackage
 import Testing
@@ -805,15 +806,16 @@ struct ParserTest {
         defer { try? FileManager.default.removeItem(at: pipePath) }
 
         let group = DispatchGroup()
+        let writerError = LockedValue<Error?>(nil)
 
         group.enter()
-        DispatchQueue.global().async {
+        DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let handle = try FileHandle(forWritingTo: pipePath)
                 try handle.write(contentsOf: "SECRET_KEY=value123\n".data(using: .utf8)!)
                 try handle.close()
             } catch {
-                Issue.record(error)
+                writerError.withLock { $0 = error }
             }
             group.leave()
         }
@@ -822,7 +824,10 @@ struct ParserTest {
         let lines = try Parser.envFile(path: pipePath.path)
 
         // Wait for write to complete
-        group.wait()
+        #expect(group.wait(timeout: .now() + .seconds(1)) == .success)
+        if let error = writerError.withLock({ $0 }) {
+            throw error
+        }
 
         #expect(lines == ["SECRET_KEY=value123"])
     }
@@ -1406,5 +1411,20 @@ struct ParserTest {
         let envs = (0..<50).map { "USER_VAR\($0)=value\($0)" }
         let result = try Parser.allEnv(imageEnvs: imageEnvs, envFiles: [], envs: envs)
         #expect(result.count == 100)
+    }
+}
+
+private final class LockedValue<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+
+    init(_ value: T) {
+        self.value = value
+    }
+
+    func withLock<R>(_ body: (inout T) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
     }
 }

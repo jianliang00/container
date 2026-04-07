@@ -238,6 +238,11 @@ public actor MacOSSandboxService {
         let client: MacOSSidecarClient
     }
 
+    struct SessionWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<ExitStatus, Never>
+    }
+
     let root: URL
     private let connection: xpc_connection_t?
     let log: Logger
@@ -249,7 +254,7 @@ public actor MacOSSandboxService {
     private var workloads: [String: WorkloadRecord] = [:]
     private var workloadSessions: [String: String] = [:]
     private var externalProcessIDs: Set<String> = []
-    private var waiters: [String: [CheckedContinuation<ExitStatus, Never>]] = [:]
+    private var waiters: [String: [SessionWaiter]] = [:]
     var guestMountsPrepared = false
     var readOnlyInjectionsPrepared = false
     private var guestAgentLogCaptureProcessID: String?
@@ -2451,22 +2456,70 @@ extension MacOSSandboxService {
         guard sessions[sessionID] != nil else {
             throw ContainerizationError(.notFound, message: "session \(sessionID) not found")
         }
-        return await withCheckedContinuation { continuation in
-            addWaiter(id: sessionID, continuation: continuation)
+        try Task.checkCancellation()
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return await withCheckedContinuation { continuation in
+                if let status = sessions[sessionID]?.exitStatus {
+                    continuation.resume(returning: status)
+                    return
+                }
+                guard sessions[sessionID] != nil else {
+                    continuation.resume(returning: ExitStatus(exitCode: 255, exitedAt: Date()))
+                    return
+                }
+                if Task.isCancelled {
+                    continuation.resume(returning: ExitStatus(exitCode: 255, exitedAt: Date()))
+                    return
+                }
+                addWaiter(id: sessionID, waiterID: waiterID, continuation: continuation)
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: sessionID, waiterID: waiterID, reason: "wait_cancelled") }
         }
     }
 
-    private func addWaiter(id: String, continuation: CheckedContinuation<ExitStatus, Never>) {
+    private func addWaiter(id: String, waiterID: UUID, continuation: CheckedContinuation<ExitStatus, Never>) {
         var current = waiters[id] ?? []
-        current.append(continuation)
+        current.append(SessionWaiter(id: waiterID, continuation: continuation))
         waiters[id] = current
         writeContainerLog(Data(("waiter added for \(id); total=\(current.count)\n").utf8))
     }
 
     private func removeWaiters(for id: String) -> [CheckedContinuation<ExitStatus, Never>] {
-        let continuations = waiters[id] ?? []
+        let continuations = waiters[id]?.map(\.continuation) ?? []
         waiters[id] = []
         return continuations
+    }
+
+    private func removeWaiter(
+        for id: String,
+        waiterID: UUID
+    ) -> CheckedContinuation<ExitStatus, Never>? {
+        guard var current = waiters[id] else {
+            return nil
+        }
+        guard let index = current.firstIndex(where: { $0.id == waiterID }) else {
+            return nil
+        }
+
+        let continuation = current.remove(at: index).continuation
+        waiters[id] = current
+        return continuation
+    }
+
+    private func cancelWaiter(id: String, waiterID: UUID, reason: String) {
+        guard let continuation = removeWaiter(for: id, waiterID: waiterID) else {
+            return
+        }
+
+        let status = sessions[id]?.exitStatus ?? ExitStatus(exitCode: 255, exitedAt: Date())
+        writeContainerLog(
+            Data(("cancelling waiter for \(id) code=\(status.exitCode) reason=\(reason)\n").utf8)
+        )
+        continuation.resume(returning: status)
     }
 
     private func resumeWaiters(
@@ -2567,11 +2620,6 @@ extension MacOSSandboxService {
                 return value
             } catch {
                 group.cancelAll()
-                resumeWaiters(
-                    for: sessionID,
-                    fallbackStatus: ExitStatus(exitCode: 255, exitedAt: Date()),
-                    reason: "wait_timeout_or_cancelled"
-                )
                 throw error
             }
         }

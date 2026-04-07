@@ -28,6 +28,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
 
     private let socketPath: String
     private let log: Logger
+    private let requestTimeoutSeconds: TimeInterval
     private let stateLock = NSLock()
     private let writeLock = NSLock()
 
@@ -37,9 +38,10 @@ final class MacOSSidecarClient: @unchecked Sendable {
     private var lastControlError: Error?
     private var eventHandler: (@Sendable (MacOSSidecarEvent) -> Void)?
 
-    init(socketPath: String, log: Logger) {
+    init(socketPath: String, log: Logger, requestTimeoutSeconds: TimeInterval = 10.0) {
         self.socketPath = socketPath
         self.log = log
+        self.requestTimeoutSeconds = requestTimeoutSeconds
     }
 
     deinit {
@@ -186,7 +188,16 @@ final class MacOSSidecarClient: @unchecked Sendable {
             throw error
         }
 
-        waiter.semaphore.wait()
+        let timeoutResult = waiter.semaphore.wait(timeout: .now() + requestTimeoutSeconds)
+        if timeoutResult == .timedOut {
+            let timeoutError = ContainerizationError(
+                .timeout,
+                message: "sidecar request \(request.method.rawValue) timed out after \(requestTimeoutSeconds) seconds"
+            )
+            removePending(requestID: request.requestID)
+            handleReaderFailure(timeoutError)
+            throw timeoutError
+        }
         switch waiter.result {
         case .success(let response)?:
             try validate(response: response, expectedRequestID: request.requestID)
@@ -288,6 +299,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
         stateLock.unlock()
 
         if fd >= 0 {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
         }
         if !shouldHandle && pendingToFail.isEmpty {

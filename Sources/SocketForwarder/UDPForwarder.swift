@@ -137,6 +137,10 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
                 context.proxy.write(data: inbound.data)
             } else {
                 self.log?.trace("frontend - creating backend")
+                guard self.channelTracker.beginPendingOperation() else {
+                    self.log?.trace("frontend - forwarder is closing, skipping backend creation")
+                    return
+                }
                 let proxy = UDPProxyBackend(
                     clientAddress: inbound.remoteAddress,
                     serverAddress: self.serverAddress,
@@ -146,7 +150,7 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
                 let proxyAddress = try SocketAddress(ipAddress: "0.0.0.0", port: 0)
                 let loopBoundProxy = NIOLoopBound(proxy, eventLoop: context.eventLoop)
                 let channelTracker = self.channelTracker
-                let proxyToServerFuture = DatagramBootstrap(group: context.eventLoop)
+                let proxyBindFuture = DatagramBootstrap(group: context.eventLoop)
                     .channelInitializer { [log] channel in
                         log?.trace("frontend - initializing backend")
                         return channel.eventLoop.makeCompletedFuture {
@@ -154,11 +158,16 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
                         }
                     }
                     .bind(to: proxyAddress)
+                let proxyToServerFuture =
+                    proxyBindFuture
                     .map { channel in
                         channelTracker.register(channel)
                         return channel.closeFuture
                     }
                     .flatMap { $0 }
+                proxyBindFuture.whenComplete { _ in
+                    channelTracker.endPendingOperation()
+                }
                 let context = ProxyContext(proxy: proxy, closeFuture: proxyToServerFuture)
                 if let (_, evictedContext) = proxies.put(key: key, value: context) {
                     self.log?.trace("frontend - closing evicted backend")

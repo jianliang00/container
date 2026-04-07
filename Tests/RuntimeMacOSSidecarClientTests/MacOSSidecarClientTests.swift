@@ -308,6 +308,50 @@ struct MacOSSidecarClientTests {
     }
 
     @Test
+    func pendingRequestTimesOutWhenSidecarStopsResponding() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+
+            let begin = try readRequest(from: clientFD)
+            #expect(begin.method == .fsBegin)
+            usleep(300_000)
+        }
+
+        let client = MacOSSidecarClient(
+            socketPath: socketPath,
+            log: Logger(label: "MacOSSidecarClientTests"),
+            requestTimeoutSeconds: 0.1
+        )
+        defer { client.closeControlConnection() }
+        try client.bootstrapStart(socketConnectRetries: 3)
+
+        do {
+            try client.fsBegin(
+                port: 27000,
+                request: .init(
+                    txID: "tx-timeout",
+                    op: .writeFile,
+                    path: "/tmp/timeout.txt",
+                    inlineData: Data("payload".utf8),
+                    autoCommit: true
+                )
+            )
+            Issue.record("expected fsBegin to time out when the sidecar stops responding")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .timeout)
+            #expect(error.message.contains("fs.begin"))
+        }
+
+        try server.waitForCompletion()
+    }
+
+    @Test
     func sidecarEventPumpPreservesEventOrder() async {
         let pump = SidecarEventPump()
         let recorder = EventRecorder()
@@ -373,10 +417,14 @@ private final class FakeUnixSidecarTestServer: @unchecked Sendable {
                 }
                 activeClientFD.withLock { $0 = clientFD }
                 defer {
-                    activeClientFD.withLock { fd in
-                        if fd == clientFD { fd = nil }
+                    let ownedClientFD = activeClientFD.withLock { fd -> Int32? in
+                        guard fd == clientFD else {
+                            return nil
+                        }
+                        fd = nil
+                        return clientFD
                     }
-                    Darwin.close(clientFD)
+                    closeIfValid(ownedClientFD)
                 }
                 try handler(clientFD)
             } catch {
@@ -401,12 +449,14 @@ private final class FakeUnixSidecarTestServer: @unchecked Sendable {
         self.listenFD = -1
         stateLock.unlock()
 
-        activeClientFD.withLock { fd in
-            if let fd, fd >= 0 {
-                _ = Darwin.shutdown(fd, SHUT_RDWR)
-                Darwin.close(fd)
-            }
+        let clientFDToClose = activeClientFD.withLock { fd -> Int32? in
+            let current = fd
             fd = nil
+            return current
+        }
+        if let clientFDToClose, clientFDToClose >= 0 {
+            _ = Darwin.shutdown(clientFDToClose, SHUT_RDWR)
+            Darwin.close(clientFDToClose)
         }
         if listenFD >= 0 {
             _ = Darwin.shutdown(listenFD, SHUT_RDWR)

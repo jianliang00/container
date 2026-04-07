@@ -275,14 +275,17 @@ final class AgentConnection: @unchecked Sendable {
 
         let terminal = frame.terminal == true
         let explicitIdentity = try GuestAgentExecIdentity.resolve(from: frame)
-        if terminal || explicitIdentity != nil {
+        let spawnedIdentity = explicitIdentity.flatMap { identity in
+            identity.requiresSpawnedSession() ? identity : nil
+        }
+        if terminal || spawnedIdentity != nil {
             let session = try SpawnedProcessSession.spawn(
                 executable: executable,
                 arguments: frame.arguments ?? [],
                 environment: frame.environment ?? [],
                 workingDirectory: frame.workingDirectory,
                 terminal: terminal,
-                identity: explicitIdentity ?? .currentProcess(),
+                identity: spawnedIdentity ?? .currentProcess(),
                 connection: self
             )
             self.session = session
@@ -592,6 +595,10 @@ struct GuestAgentExecIdentity {
 
     static func currentProcess() -> Self {
         .init(uid: geteuid(), gid: getegid(), supplementalGroups: [])
+    }
+
+    func requiresSpawnedSession(relativeTo currentIdentity: Self = .currentProcess()) -> Bool {
+        uid != currentIdentity.uid || gid != currentIdentity.gid || !supplementalGroups.isEmpty
     }
 
     static func resolve(from frame: GuestAgentFrame) throws -> Self? {
@@ -1203,7 +1210,13 @@ private final class ProcessSession: GuestAgentProcessSession, @unchecked Sendabl
             self?.flushOutputAndSendExit(process.terminationStatus)
         }
 
-        try process.run()
+        do {
+            try process.run()
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            throw POSIXError(.ENOENT)
+        } catch {
+            throw error
+        }
     }
 
     func writeStdin(_ data: Data) throws {

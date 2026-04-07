@@ -17,9 +17,16 @@
 import ContainerResource
 import ContainerizationError
 import Darwin
+import Dispatch
 import Foundation
 
 enum ExecSyncRunner {
+    private static let blockingIOQueue = DispatchQueue(
+        label: "com.apple.container.exec-sync-runner.blocking-io",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+
     static func run(
         timeout: Duration? = nil,
         standardInput: Data? = nil,
@@ -36,17 +43,15 @@ enum ExecSyncRunner {
         let stderrRead = stderrPipe.fileHandleForReading
         let stderrWrite = stderrPipe.fileHandleForWriting
 
-        let stdoutReader = Task<Data, Error> {
-            try stdoutRead.readToEnd() ?? Data()
-        }
-        let stderrReader = Task<Data, Error> {
-            try stderrRead.readToEnd() ?? Data()
-        }
+        let stdoutReader = Task<Data, Error> { try await readToEnd(stdoutRead) }
+        let stderrReader = Task<Data, Error> { try await readToEnd(stderrRead) }
 
         let stdinWriter = standardInput.map { input in
             Task<Void, Never> {
-                defer { try? stdinWrite?.close() }
-                try? stdinWrite?.write(contentsOf: input)
+                guard let stdinWrite else {
+                    return
+                }
+                await write(input, to: stdinWrite)
             }
         }
 
@@ -129,6 +134,45 @@ enum ExecSyncRunner {
                 .timeout,
                 message: "timed out waiting for exec process \(process.id)"
             )
+        }
+    }
+
+    private static func readToEnd(_ handle: FileHandle) async throws -> Data {
+        try await runBlockingIO {
+            defer { try? handle.close() }
+            return try handle.readToEnd() ?? Data()
+        }
+    }
+
+    private static func write(_ data: Data, to handle: FileHandle) async {
+        await runBlockingIOIgnoringErrors {
+            defer { try? handle.close() }
+            try handle.write(contentsOf: data)
+        }
+    }
+
+    private static func runBlockingIO<T: Sendable>(
+        _ operation: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            blockingIOQueue.async {
+                do {
+                    continuation.resume(returning: try operation())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private static func runBlockingIOIgnoringErrors(
+        _ operation: @escaping @Sendable () throws -> Void
+    ) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            blockingIOQueue.async {
+                defer { continuation.resume() }
+                _ = try? operation()
+            }
         }
     }
 }

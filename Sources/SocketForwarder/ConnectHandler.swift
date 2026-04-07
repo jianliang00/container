@@ -76,14 +76,20 @@ extension ConnectHandler: RemovableChannelHandler {
 extension ConnectHandler {
     private func connectToServer(context: ChannelHandlerContext) {
         self.log?.trace("backend - connecting")
+        if let channelTracker, !channelTracker.beginPendingOperation() {
+            self.log?.trace("backend - forwarder is closing, skipping backend connect")
+            context.close(promise: nil)
+            return
+        }
 
         ClientBootstrap(group: context.eventLoop)
             .connect(to: serverAddress)
             .assumeIsolatedUnsafeUnchecked()
-            .whenComplete { result in
+            .whenComplete { [channelTracker = self.channelTracker] result in
+                defer { channelTracker?.endPendingOperation() }
                 switch result {
                 case .success(let channel):
-                    self.channelTracker?.register(channel)
+                    channelTracker?.register(channel)
                     guard context.channel.isActive else {
                         self.log?.trace("backend - frontend channel closed, closing backend connection")
                         channel.close(mode: .all, promise: nil)

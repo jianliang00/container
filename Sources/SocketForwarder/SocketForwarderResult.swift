@@ -20,6 +20,7 @@ import NIO
 final class ForwarderChannelTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var channels: [ObjectIdentifier: any Channel] = [:]
+    private var pendingOperations = 0
     private var waiters: [EventLoopPromise<Void>] = []
     private var isClosing = false
 
@@ -43,6 +44,38 @@ final class ForwarderChannelTracker: @unchecked Sendable {
         }
     }
 
+    func beginPendingOperation() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !isClosing else {
+            return false
+        }
+
+        pendingOperations += 1
+        return true
+    }
+
+    func endPendingOperation() {
+        let waitersToWake: [EventLoopPromise<Void>]
+
+        lock.lock()
+        if pendingOperations > 0 {
+            pendingOperations -= 1
+        }
+        if isClosing && channels.isEmpty && pendingOperations == 0 {
+            waitersToWake = waiters
+            waiters.removeAll()
+        } else {
+            waitersToWake = []
+        }
+        lock.unlock()
+
+        for waiter in waitersToWake {
+            waiter.succeed(())
+        }
+    }
+
     func closeAll() {
         let channelsToClose: [any Channel]
         let waitersToWake: [EventLoopPromise<Void>]
@@ -50,7 +83,7 @@ final class ForwarderChannelTracker: @unchecked Sendable {
         lock.lock()
         isClosing = true
         channelsToClose = Array(channels.values)
-        if channelsToClose.isEmpty {
+        if channelsToClose.isEmpty && pendingOperations == 0 {
             waitersToWake = waiters
             waiters.removeAll()
         } else {
@@ -70,7 +103,7 @@ final class ForwarderChannelTracker: @unchecked Sendable {
 
     func waitForDrain(on eventLoop: any EventLoop) -> EventLoopFuture<Void> {
         lock.lock()
-        if channels.isEmpty {
+        if channels.isEmpty && pendingOperations == 0 {
             lock.unlock()
             return eventLoop.makeSucceededFuture(())
         }
@@ -86,7 +119,7 @@ final class ForwarderChannelTracker: @unchecked Sendable {
 
         lock.lock()
         channels.removeValue(forKey: identifier)
-        if isClosing && channels.isEmpty {
+        if isClosing && channels.isEmpty && pendingOperations == 0 {
             waitersToWake = waiters
             waiters.removeAll()
         } else {
@@ -124,8 +157,14 @@ public struct SocketForwarderResult: Sendable {
 
     public func wait() async throws {
         try await self.channel.closeFuture.get()
+        try await waitForEventLoopQuiescence(on: self.channel.eventLoop)
         if let tracker = self.tracker {
             try await tracker.waitForDrain(on: self.channel.eventLoop).get()
         }
+        try await waitForEventLoopQuiescence(on: self.channel.eventLoop)
     }
+}
+
+private func waitForEventLoopQuiescence(on eventLoop: any EventLoop) async throws {
+    try await eventLoop.submit {}.get()
 }

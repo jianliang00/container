@@ -19,7 +19,33 @@ import ContainerResource
 import ContainerSandboxServiceClient
 import ContainerXPC
 import ContainerizationError
+import ContainerizationExtras
 import Foundation
+
+public struct SandboxNetworkControl: Sendable {
+    let allocate: @Sendable (_ network: String, _ hostname: String, _ macAddress: MACAddress?) async throws -> Attachment
+    let lookup: @Sendable (_ network: String, _ hostname: String) async throws -> Attachment?
+    let deallocate: @Sendable (_ network: String, _ hostname: String) async throws -> Void
+
+    public static let live = SandboxNetworkControl(
+        allocate: { network, hostname, macAddress in
+            let client = NetworkClient(id: network)
+            let (attachment, _) = try await client.allocate(
+                hostname: hostname,
+                macAddress: macAddress
+            )
+            return attachment
+        },
+        lookup: { network, hostname in
+            let client = NetworkClient(id: network)
+            return try await client.lookup(hostname: hostname)
+        },
+        deallocate: { network, hostname in
+            let client = NetworkClient(id: network)
+            try await client.deallocate(hostname: hostname)
+        }
+    )
+}
 
 extension MacOSSandboxService {
     private struct GuestNetworkReleaseTarget {
@@ -70,10 +96,10 @@ extension MacOSSandboxService {
         var attachments: [Attachment] = []
         do {
             for request in containerConfig.macOSGuestNetworkRequests() {
-                let client = NetworkClient(id: request.network)
-                let (attachment, _) = try await client.allocate(
-                    hostname: request.hostname,
-                    macAddress: request.macAddress
+                let attachment = try await networkControl.allocate(
+                    request.network,
+                    request.hostname,
+                    request.macAddress
                 )
                 attachments.append(attachment)
             }
@@ -89,8 +115,10 @@ extension MacOSSandboxService {
             return SandboxNetworkState(attachments: projectedAttachments)
         } catch {
             for attachment in attachments {
-                let client = NetworkClient(id: attachment.network)
-                try? await client.deallocate(hostname: attachment.hostname)
+                try? await networkControl.deallocate(
+                    attachment.network,
+                    attachment.hostname
+                )
             }
             try? MacOSGuestNetworkLeaseStore.remove(from: root)
             throw error
@@ -110,9 +138,13 @@ extension MacOSSandboxService {
 
         var attachments: [Attachment] = []
         for request in containerConfig.macOSGuestNetworkRequests() {
-            let client = NetworkClient(id: request.network)
             do {
-                guard let attachment = try await client.lookup(hostname: request.hostname) else {
+                guard
+                    let attachment = try await networkControl.lookup(
+                        request.network,
+                        request.hostname
+                    )
+                else {
                     continue
                 }
                 attachments.append(attachment)
@@ -149,9 +181,11 @@ extension MacOSSandboxService {
 
         var releaseFailed = false
         for target in releaseTargets {
-            let client = NetworkClient(id: target.network)
             do {
-                try await client.deallocate(hostname: target.hostname)
+                try await networkControl.deallocate(
+                    target.network,
+                    target.hostname
+                )
                 writeContainerLog(
                     Data(
                         ("released guest network allocation network=\(target.network) hostname=\(target.hostname)\n").utf8

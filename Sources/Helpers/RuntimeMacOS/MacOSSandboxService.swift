@@ -247,6 +247,7 @@ public actor MacOSSandboxService {
     private let connection: xpc_connection_t?
     let log: Logger
     private let contentStore: any ContentStore
+    let networkControl: SandboxNetworkControl
 
     private var sandboxState: State = .created
     var configuration: ContainerConfiguration?
@@ -269,12 +270,14 @@ public actor MacOSSandboxService {
         root: URL,
         connection: xpc_connection_t? = nil,
         log: Logger,
-        contentStore: any ContentStore = RemoteContentStoreClient()
+        contentStore: any ContentStore = RemoteContentStoreClient(),
+        networkControl: SandboxNetworkControl = .live
     ) {
         self.root = root
         self.connection = connection
         self.log = log
         self.contentStore = contentStore
+        self.networkControl = networkControl
     }
 
     private var layout: MacOSSandboxLayout {

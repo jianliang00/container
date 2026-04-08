@@ -71,6 +71,82 @@ public struct ClientImage: Sendable {
         return try content.decode()
     }
 
+    /// Exports a macOS sandbox image into a runnable local VM image directory.
+    public func exportMacOSImageDirectory(
+        to outputDirectory: URL,
+        platform: Platform = Platform(arch: "arm64", os: "darwin"),
+        overwriteExisting: Bool = false
+    ) async throws {
+        let fm = FileManager.default
+        let destination = outputDirectory.standardizedFileURL
+
+        if fm.fileExists(atPath: destination.path) {
+            guard overwriteExisting else {
+                throw ContainerizationError(.exists, message: "output directory already exists: \(destination.path)")
+            }
+            try fm.removeItem(at: destination)
+        }
+
+        let manifestDescriptor = try await manifestDescriptor(for: platform)
+        guard let manifestContent: Content = try await contentStore.get(digest: manifestDescriptor.digest) else {
+            throw ContainerizationError(.notFound, message: "content with digest \(manifestDescriptor.digest)")
+        }
+        let manifest: Manifest = try manifestContent.decode()
+        try MacOSImageContract.validateSandboxImage(
+            descriptorAnnotations: manifestDescriptor.annotations,
+            manifest: manifest
+        )
+        let imageLayers = try MacOSImageLayers(manifest: manifest)
+
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        var completed = false
+        defer {
+            if !completed {
+                try? fm.removeItem(at: destination)
+            }
+        }
+
+        let sandboxLayout = MacOSSandboxLayout(root: destination)
+        let hardwareModelContent = try await requiredContent(digest: imageLayers.hardwareModel.digest)
+        let auxiliaryStorageContent = try await requiredContent(digest: imageLayers.auxiliaryStorage.digest)
+
+        try FilesystemClone.cloneOrCopyItem(
+            at: hardwareModelContent.path,
+            to: sandboxLayout.hardwareModelURL
+        )
+        try FilesystemClone.cloneOrCopyItem(
+            at: auxiliaryStorageContent.path,
+            to: sandboxLayout.auxiliaryStorageURL
+        )
+
+        let diskImageSource: URL
+        switch imageLayers {
+        case .v0(_, _, let diskImageDescriptor):
+            diskImageSource = try await requiredContent(digest: diskImageDescriptor.digest).path
+        case .v1:
+            guard let chunkedDiskSource = try await self.macOSChunkedDiskSource(for: platform) else {
+                throw ContainerizationError(
+                    .internalError,
+                    message: "failed to resolve rebuilt Disk.img for macOS image \(reference)"
+                )
+            }
+            guard let resolvedDiskImagePath = chunkedDiskSource.diskImagePath else {
+                throw ContainerizationError(
+                    .internalError,
+                    message: "resolved macOS image \(reference) does not include a rebuilt Disk.img path"
+                )
+            }
+            diskImageSource = resolvedDiskImagePath
+        }
+
+        try FilesystemClone.cloneOrCopyItem(
+            at: diskImageSource,
+            to: sandboxLayout.diskImageURL
+        )
+
+        completed = true
+    }
+
     /// Returns the resolved v1 chunked macOS disk source for the specified platform.
     /// Returns nil when the image uses the legacy single-disk layout.
     public func macOSChunkedDiskSource(for platform: Platform) async throws -> MacOSChunkedDiskSource? {
@@ -132,6 +208,13 @@ public struct ClientImage: Sendable {
             throw ContainerizationError(.unsupported, message: "platform \(platform.description)")
         }
         return desc
+    }
+
+    private func requiredContent(digest: String) async throws -> Content {
+        guard let content: Content = try await contentStore.get(digest: digest) else {
+            throw ContainerizationError(.notFound, message: "content with digest \(digest)")
+        }
+        return content
     }
 
     private func resolveMacOSChunkedDiskImage(

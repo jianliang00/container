@@ -157,6 +157,218 @@ struct ClientImageMacOSPrewarmTests {
         #expect(FileManager.default.fileExists(atPath: cachePath.path))
         #expect(try Data(contentsOf: cachePath) == expectedDiskBytes)
     }
+
+    @Test
+    func exportMacOSImageDirectoryRebuildsChunkedSandboxImage() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let manifestDigest = "sha256:manifest-\(UUID().uuidString)"
+        let cachePath = MacOSDiskRebuilder.rebuildCachePath(
+            cacheDir: MacOSGuestCache.rebuildCacheDirectory(),
+            manifestDigest: manifestDigest
+        )
+        defer { try? FileManager.default.removeItem(at: cachePath.deletingLastPathComponent()) }
+
+        let platform = try Platform(from: "darwin/arm64")
+        let chunkDigest = "sha256:chunk-\(UUID().uuidString)"
+        let layoutDigest = "sha256:layout-\(UUID().uuidString)"
+        let indexDigest = "sha256:index-\(UUID().uuidString)"
+        let hardwareDigest = "sha256:hardware-\(UUID().uuidString)"
+        let auxiliaryDigest = "sha256:aux-\(UUID().uuidString)"
+
+        let hardwareData = Data("hardware".utf8)
+        let auxiliaryData = Data("aux".utf8)
+        let expectedDiskBytes = Data([0, 97, 98, 99, 0, 0, 0, 0, 89, 90, 0, 0])
+        let chunkLength: Int64 = Int64(expectedDiskBytes.count)
+
+        let chunkURL = tempDirectory.appendingPathComponent("chunk.tar.zst")
+        try Self.writeCompressedSparseChunk(
+            at: chunkURL,
+            chunkLength: chunkLength,
+            extents: [
+                (offset: Int64(1), length: Int64(3), data: Data("abc".utf8)),
+                (offset: Int64(8), length: Int64(2), data: Data("YZ".utf8)),
+            ]
+        )
+        let chunkSize = Int64(try Data(contentsOf: chunkURL).count)
+
+        let layout = DiskLayout(
+            logicalSize: chunkLength,
+            chunkSize: chunkLength,
+            chunks: [
+                .init(
+                    index: 0,
+                    offset: 0,
+                    length: chunkLength,
+                    layerDigest: chunkDigest,
+                    layerSize: chunkSize,
+                    rawDigest: "sha256:raw-\(UUID().uuidString)",
+                    rawLength: chunkLength
+                )
+            ]
+        )
+        let manifest = Manifest(
+            config: Descriptor(
+                mediaType: MediaTypes.imageConfig,
+                digest: "sha256:config-\(UUID().uuidString)",
+                size: 2
+            ),
+            layers: [
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.hardwareModel,
+                    digest: hardwareDigest,
+                    size: Int64(hardwareData.count)
+                ),
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage,
+                    digest: auxiliaryDigest,
+                    size: Int64(auxiliaryData.count)
+                ),
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.diskLayout,
+                    digest: layoutDigest,
+                    size: 1
+                ),
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.diskChunk,
+                    digest: chunkDigest,
+                    size: chunkSize,
+                    annotations: [
+                        "org.apple.container.macos.chunk.index": "0",
+                        MacOSImageContract.roleAnnotation: MacOSImageRole.sandbox.rawValue,
+                    ]
+                ),
+            ],
+            annotations: MacOSImageContract.annotations(for: .sandbox)
+        )
+        let index = Index(
+            manifests: [
+                Descriptor(
+                    mediaType: MediaTypes.imageManifest,
+                    digest: manifestDigest,
+                    size: 1,
+                    annotations: MacOSImageContract.annotations(for: .sandbox),
+                    platform: platform
+                )
+            ]
+        )
+
+        let hardwareURL = tempDirectory.appendingPathComponent("HardwareModel.bin")
+        let auxiliaryURL = tempDirectory.appendingPathComponent("AuxiliaryStorage")
+        try hardwareData.write(to: hardwareURL)
+        try auxiliaryData.write(to: auxiliaryURL)
+
+        let store = MockContentStore(
+            entries: [
+                indexDigest: try Self.writeJSON(index, named: "index.json", in: tempDirectory),
+                manifestDigest: try Self.writeJSON(manifest, named: "manifest.json", in: tempDirectory),
+                layoutDigest: try Self.writeJSON(layout, named: "layout.json", in: tempDirectory),
+                chunkDigest: chunkURL,
+                hardwareDigest: hardwareURL,
+                auxiliaryDigest: auxiliaryURL,
+            ]
+        )
+        let image = ClientImage(
+            description: ImageDescription(
+                reference: "registry.local/macos-base:chunked",
+                descriptor: Descriptor(mediaType: MediaTypes.index, digest: indexDigest, size: 1)
+            ),
+            contentStore: store
+        )
+
+        let outputDirectory = tempDirectory.appendingPathComponent("exported")
+        try await image.exportMacOSImageDirectory(to: outputDirectory)
+
+        let exportedLayout = MacOSSandboxLayout(root: outputDirectory)
+        #expect(try Data(contentsOf: exportedLayout.diskImageURL) == expectedDiskBytes)
+        #expect(try Data(contentsOf: exportedLayout.auxiliaryStorageURL) == auxiliaryData)
+        #expect(try Data(contentsOf: exportedLayout.hardwareModelURL) == hardwareData)
+    }
+
+    @Test
+    func exportMacOSImageDirectoryCopiesLegacySandboxImage() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let platform = try Platform(from: "darwin/arm64")
+        let indexDigest = "sha256:index-\(UUID().uuidString)"
+        let manifestDigest = "sha256:manifest-\(UUID().uuidString)"
+        let hardwareDigest = "sha256:hardware-\(UUID().uuidString)"
+        let auxiliaryDigest = "sha256:aux-\(UUID().uuidString)"
+        let diskDigest = "sha256:disk-\(UUID().uuidString)"
+
+        let hardwareData = Data("legacy-hardware".utf8)
+        let auxiliaryData = Data("legacy-aux".utf8)
+        let diskData = Data("legacy-disk".utf8)
+
+        let hardwareURL = tempDirectory.appendingPathComponent("HardwareModel.bin")
+        let auxiliaryURL = tempDirectory.appendingPathComponent("AuxiliaryStorage")
+        let diskURL = tempDirectory.appendingPathComponent("Disk.img")
+        try hardwareData.write(to: hardwareURL)
+        try auxiliaryData.write(to: auxiliaryURL)
+        try diskData.write(to: diskURL)
+
+        let manifest = Manifest(
+            config: Descriptor(
+                mediaType: MediaTypes.imageConfig,
+                digest: "sha256:config-\(UUID().uuidString)",
+                size: 2
+            ),
+            layers: [
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.hardwareModel,
+                    digest: hardwareDigest,
+                    size: Int64(hardwareData.count)
+                ),
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage,
+                    digest: auxiliaryDigest,
+                    size: Int64(auxiliaryData.count)
+                ),
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.diskImage,
+                    digest: diskDigest,
+                    size: Int64(diskData.count)
+                ),
+            ]
+        )
+        let index = Index(
+            manifests: [
+                Descriptor(
+                    mediaType: MediaTypes.imageManifest,
+                    digest: manifestDigest,
+                    size: 1,
+                    platform: platform
+                )
+            ]
+        )
+
+        let store = MockContentStore(
+            entries: [
+                indexDigest: try Self.writeJSON(index, named: "index.json", in: tempDirectory),
+                manifestDigest: try Self.writeJSON(manifest, named: "manifest.json", in: tempDirectory),
+                hardwareDigest: hardwareURL,
+                auxiliaryDigest: auxiliaryURL,
+                diskDigest: diskURL,
+            ]
+        )
+        let image = ClientImage(
+            description: ImageDescription(
+                reference: "registry.local/macos-base:legacy",
+                descriptor: Descriptor(mediaType: MediaTypes.index, digest: indexDigest, size: 1)
+            ),
+            contentStore: store
+        )
+
+        let outputDirectory = tempDirectory.appendingPathComponent("exported")
+        try await image.exportMacOSImageDirectory(to: outputDirectory)
+
+        let exportedLayout = MacOSSandboxLayout(root: outputDirectory)
+        #expect(try Data(contentsOf: exportedLayout.diskImageURL) == diskData)
+        #expect(try Data(contentsOf: exportedLayout.auxiliaryStorageURL) == auxiliaryData)
+        #expect(try Data(contentsOf: exportedLayout.hardwareModelURL) == hardwareData)
+    }
 }
 
 extension ClientImageMacOSPrewarmTests {

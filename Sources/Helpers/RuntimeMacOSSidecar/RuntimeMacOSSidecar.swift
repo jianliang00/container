@@ -54,6 +54,8 @@ struct RuntimeMacOSSidecar: @preconcurrency ParsableCommand {
 
         log.info("starting sidecar", metadata: ["root": "\(root)", "control_socket": "\(controlSocket)"])
         let app = NSApplication.shared
+        let appDelegate = SidecarApplicationDelegate()
+        app.delegate = appDelegate
         app.setActivationPolicy(.prohibited)
         log.info("host context", metadata: Self.hostContextMetadata())
 
@@ -68,7 +70,9 @@ struct RuntimeMacOSSidecar: @preconcurrency ParsableCommand {
                 NSApplication.shared.terminate(nil)
             }
         }
-        app.run()
+        withExtendedLifetime(appDelegate) {
+            app.run()
+        }
         server.stop()
         log.info("sidecar stopped")
     }
@@ -109,6 +113,12 @@ struct RuntimeMacOSSidecar: @preconcurrency ParsableCommand {
     }
 }
 
+private final class SidecarApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
 private final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     private let log: Logging.Logger
 
@@ -122,6 +132,20 @@ private final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         log.error("vm stopped with error", metadata: ["error": "\(error)"])
+    }
+}
+
+private final class GUIWindowDelegate: NSObject, NSWindowDelegate {
+    private let onClose: @MainActor @Sendable () -> Void
+
+    init(onClose: @escaping @MainActor @Sendable () -> Void) {
+        self.onClose = onClose
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        Task { @MainActor in
+            onClose()
+        }
     }
 }
 
@@ -372,6 +396,7 @@ actor MacOSSidecarService {
     private var vmDelegate: VMDelegate?
     private var vmWindow: UnsafeSendableBox<NSWindow>?
     private var vmWindowView: UnsafeSendableBox<VZVirtualMachineView>?
+    private var vmWindowDelegate: UnsafeSendableBox<GUIWindowDelegate>?
     private var networkLease: MacOSGuestNetworkLease?
     private var ownedVMNetNetworks: [ManagedVMNetNetwork] = []
     private var state: State = .created
@@ -746,10 +771,21 @@ actor MacOSSidecarService {
     private func presentGUIWindowOnMain(vm: VZVirtualMachine, containerID: String) async throws {
         let vmBox = UnsafeSendableBox(vm)
         let title = "Container macOS Guest (\(String(containerID.prefix(12))))"
+        let service = self
         let created = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<(UnsafeSendableBox<NSWindow>, UnsafeSendableBox<VZVirtualMachineView>), Error>) in
+            (
+                continuation: CheckedContinuation<
+                    (
+                        UnsafeSendableBox<NSWindow>,
+                        UnsafeSendableBox<VZVirtualMachineView>,
+                        UnsafeSendableBox<GUIWindowDelegate>
+                    ),
+                    Error
+                >
+            ) in
             DispatchQueue.main.async {
                 let app = NSApplication.shared
+                let previousFrontmostApp = NSWorkspace.shared.frontmostApplication.map(UnsafeSendableBox.init)
                 guard app.setActivationPolicy(.regular) else {
                     continuation.resume(
                         throwing: ContainerizationError(.internalError, message: "failed to enable GUI activation policy")
@@ -774,28 +810,58 @@ actor MacOSSidecarService {
                 vmView.autoresizingMask = [.width, .height]
 
                 window.contentView = vmView
+                let delegate = GUIWindowDelegate {
+                    Task {
+                        await service.handleManualGUIWindowClose(previousFrontmostApp: previousFrontmostApp)
+                    }
+                }
+                window.delegate = delegate
                 window.makeKeyAndOrderFront(nil)
                 app.activate(ignoringOtherApps: true)
-                continuation.resume(returning: (UnsafeSendableBox(window), UnsafeSendableBox(vmView)))
+                continuation.resume(
+                    returning: (
+                        UnsafeSendableBox(window),
+                        UnsafeSendableBox(vmView),
+                        UnsafeSendableBox(delegate)
+                    )
+                )
             }
         }
         vmWindow = created.0
         vmWindowView = created.1
+        vmWindowDelegate = created.2
     }
 
     private func closeGUIWindowOnMain() async {
         let windowBox = vmWindow
         vmWindow = nil
         vmWindowView = nil
+        vmWindowDelegate = nil
         guard let windowBox else { return }
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.main.async {
+                windowBox.value.delegate = nil
                 windowBox.value.orderOut(nil)
                 windowBox.value.contentView = nil
                 windowBox.value.close()
                 _ = NSApplication.shared.setActivationPolicy(.prohibited)
                 continuation.resume()
+            }
+        }
+    }
+
+    private func handleManualGUIWindowClose(
+        previousFrontmostApp: UnsafeSendableBox<NSRunningApplication>?
+    ) async {
+        vmWindow = nil
+        vmWindowView = nil
+        vmWindowDelegate = nil
+
+        await MainActor.run {
+            _ = NSApplication.shared.setActivationPolicy(.prohibited)
+            if let previousFrontmostApp, !previousFrontmostApp.value.isTerminated {
+                _ = previousFrontmostApp.value.activate(options: [])
             }
         }
     }

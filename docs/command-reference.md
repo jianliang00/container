@@ -324,9 +324,30 @@ container create [<options>] <image> [<arguments> ...]
 
 *   `--scheme <scheme>`: Scheme to use when connecting to the container registry. One of (http, https, auto) (default: auto)
 
-**Image Fetch Options**
+### `container commit`
 
-*   `--max-concurrent-downloads <max-concurrent-downloads>`: Maximum number of concurrent downloads (default: 3)
+Commits a macOS guest container into a local macOS sandbox image. Stopped source containers are packaged in place. Running source containers are stopped briefly, cloned into a temporary commit source, and restarted by default before packaging continues.
+
+**Usage**
+
+```bash
+container commit [--leave-stopped] [--debug] <container-id> <target-reference>
+```
+
+**Arguments**
+
+*   `<container-id>`: Existing macOS guest container ID or name
+*   `<target-reference>`: Target image reference to create
+
+**Options**
+
+*   `--leave-stopped`: Leave a running source container stopped after commit instead of restarting it
+
+**Notes**
+
+*   Only `darwin/arm64` macOS guest containers are supported in the first version.
+*   The committed image is imported into the local image store and tagged with `<target-reference>`.
+*   Linux container commit is not supported in the first version.
 
 ### `container start`
 

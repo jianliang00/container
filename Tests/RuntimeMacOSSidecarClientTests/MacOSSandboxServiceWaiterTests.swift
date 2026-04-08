@@ -115,6 +115,43 @@ struct MacOSSandboxServiceWaiterTests {
     }
 
     @Test
+    func unexpectedSidecarDisconnectResumesOutstandingWaiters() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-disconnect",
+            config: baseProcessConfiguration(),
+            started: true
+        )
+
+        let socketPath = "/tmp/ctr-sidecar-disconnect-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingExecSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start()
+
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+        try await service.testingSignalWorkload("exec-disconnect", signal: SIGUSR1)
+
+        let waitTask = Task {
+            try await service.testingWaitForProcess("exec-disconnect")
+        }
+        try await waitUntilWaiterRegistered(service: service, id: "exec-disconnect")
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let status = try await waitTask.value
+        #expect(status.exitCode == 255)
+        #expect(await service.testingWaiterCount(for: "exec-disconnect") == 0)
+
+        let snapshot = try await service.testingInspectWorkload("exec-disconnect")
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.exitCode == 255)
+    }
+
+    @Test
     func workloadSnapshotReportsStatusExitCodeAndLogPaths() async throws {
         let tempRoot = makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }

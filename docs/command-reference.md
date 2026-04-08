@@ -618,6 +618,31 @@ container image save [--arch <arch>] [--os <os>] --output <output> [--platform <
 *   `-o, --output <output>`: Pathname for the saved image
 *   `--platform <platform>`: Platform for the saved image (format: os/arch[/variant], takes precedence over --os and --arch)
 
+### `container image export`
+
+Exports a macOS sandbox image from the local image store into a runnable VM image directory containing `Disk.img`, `AuxiliaryStorage`, and `HardwareModel.bin`.
+
+**Usage**
+
+```bash
+container image export --output <output-dir> [--platform <platform>] [--overwrite] <reference>
+```
+
+**Arguments**
+
+*   `<reference>`: Image reference to export
+
+**Options**
+
+*   `-o, --output <output-dir>`: Destination directory for the exported VM image
+*   `--platform <platform>`: Platform to export (format: os/arch[/variant], default: `darwin/arm64`)
+*   `--overwrite`: Replace the output directory if it already exists
+
+**Notes**
+
+*   This command currently exports macOS `sandbox image`s only.
+*   The exported directory is suitable for `container macos start-vm --image <output-dir>`.
+
 ### `container image load`
 
 Loads images from a tar archive created by `image save`. The tar file must be specified via `--input`.

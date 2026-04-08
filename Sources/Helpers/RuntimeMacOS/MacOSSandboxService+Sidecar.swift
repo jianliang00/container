@@ -104,6 +104,12 @@ extension MacOSSandboxService {
         client.setEventHandler { event in
             eventPump.yield(event)
         }
+        client.setDisconnectHandler { [weak self] error in
+            guard let self else { return }
+            Task {
+                await self.handleUnexpectedSidecarDisconnect(error)
+            }
+        }
         sidecarEventPump = eventPump
         sidecarEventPumpTask = eventPumpTask
         do {
@@ -117,6 +123,7 @@ extension MacOSSandboxService {
         } catch {
             writeContainerLog(Data(("sidecar vm bootstrap failed [label=\(launchLabel)] error=\(String(describing: error))\n").utf8))
             client.setEventHandler(nil)
+            client.setDisconnectHandler(nil)
             eventPump.finish()
             eventPumpTask.cancel()
             sidecarEventPump = nil
@@ -147,6 +154,7 @@ extension MacOSSandboxService {
             writeContainerLog(Data(("sidecar bootout failed [label=\(handle.launchLabel)] error=\(String(describing: error))\n").utf8))
         }
         handle.client.setEventHandler(nil)
+        handle.client.setDisconnectHandler(nil)
         handle.client.closeControlConnection()
         sidecarEventPump?.finish()
         sidecarEventPumpTask?.cancel()

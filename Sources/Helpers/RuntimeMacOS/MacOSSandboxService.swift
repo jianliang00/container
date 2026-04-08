@@ -3197,7 +3197,30 @@ extension MacOSSandboxService {
                 await self.handleSidecarEvent(event)
             }
         }
+        client.setDisconnectHandler { [weak self] error in
+            guard let self else { return }
+            Task {
+                await self.handleUnexpectedSidecarDisconnect(error)
+            }
+        }
         sidecarHandle = SidecarHandle(launchLabel: launchLabel, client: client)
+    }
+
+    func handleUnexpectedSidecarDisconnect(_ error: ContainerizationError) {
+        guard sidecarHandle != nil else {
+            return
+        }
+
+        writeContainerLog(Data(("sidecar disconnected unexpectedly: \(error.message)\n").utf8))
+        sidecarHandle?.client.setEventHandler(nil)
+        sidecarHandle?.client.setDisconnectHandler(nil)
+        sidecarEventPump?.finish()
+        sidecarEventPumpTask?.cancel()
+        sidecarEventPump = nil
+        sidecarEventPumpTask = nil
+        sidecarHandle = nil
+        closeAllSessions()
+        sandboxState = .stopped(255)
     }
 
     func testingAttachWorkload(

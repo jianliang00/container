@@ -37,6 +37,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
     private var pending: [String: PendingResponse] = [:]
     private var lastControlError: Error?
     private var eventHandler: (@Sendable (MacOSSidecarEvent) -> Void)?
+    private var disconnectHandler: (@Sendable (ContainerizationError) -> Void)?
 
     init(socketPath: String, log: Logger, requestTimeoutSeconds: TimeInterval = 10.0) {
         self.socketPath = socketPath
@@ -51,6 +52,12 @@ final class MacOSSidecarClient: @unchecked Sendable {
     func setEventHandler(_ handler: (@Sendable (MacOSSidecarEvent) -> Void)?) {
         stateLock.lock()
         eventHandler = handler
+        stateLock.unlock()
+    }
+
+    func setDisconnectHandler(_ handler: (@Sendable (ContainerizationError) -> Void)?) {
+        stateLock.lock()
+        disconnectHandler = handler
         stateLock.unlock()
     }
 
@@ -288,6 +295,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
 
     private func handleReaderFailure(_ error: Error) {
         let pendingToFail: [PendingResponse]
+        let disconnectHandler: (@Sendable (ContainerizationError) -> Void)?
         stateLock.lock()
         let shouldHandle = controlFD >= 0
         let fd = controlFD
@@ -296,6 +304,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
         lastControlError = error
         pendingToFail = Array(pending.values)
         pending.removeAll()
+        disconnectHandler = self.disconnectHandler
         stateLock.unlock()
 
         if fd >= 0 {
@@ -315,6 +324,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
             waiter.semaphore.signal()
         }
         log.error("sidecar control reader failed", metadata: ["error": "\(error)"])
+        disconnectHandler?(wrapped)
     }
 
     private func validate(response: MacOSSidecarResponse, expectedRequestID: String) throws {

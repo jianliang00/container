@@ -45,10 +45,10 @@ Related design docs:
 
 ### Exit Criteria
 
-- [ ] Single-NIC, single-network, IPv4-first sandbox startup is reliable.
+- [x] Single-NIC, single-network, IPv4-first sandbox startup is reliable.
 - [x] External and same-node connectivity work with real reported network state.
-- [ ] Network lifecycle can be prepared, inspected, released, and recovered without manual cleanup.
-- [ ] The darwin `--network` flow is a thin wrapper over the internal network control path.
+- [x] Network lifecycle can be prepared, inspected, released, and recovered without manual cleanup.
+- [x] The darwin `--network` flow is a thin wrapper over the internal network control path.
 
 ## 2. P2: Sandbox and Workload Runtime
 
@@ -164,7 +164,7 @@ Related design docs:
     - `pkg`-driven system installs captured as workload payload
     - whole-guest diff capture
   - [x] stabilize the real-guest `RUN` path in workload-build mode
-- [ ] Add focused coverage for the mixed sandbox/workload flow.
+- [x] Add focused coverage for the mixed sandbox/workload flow.
   - [x] one sandbox image can host multiple workload images
   - [x] workload images can be packed, pushed, pulled, validated, unpacked, and injected
   - [x] workload-start defaults come from OCI config and can be overridden at runtime

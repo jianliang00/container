@@ -26,6 +26,7 @@ import CryptoKit
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
+import TerminalProgress
 
 enum MacOSBuildMode: String, Sendable {
     case sandbox
@@ -56,6 +57,7 @@ struct MacOSBuildEngine {
         let quiet: Bool
         let buildMode: MacOSBuildMode
         let buildSandboxImage: String?
+        let disableTTYProgress: Bool
         let target: String
         let tags: [String]
         let exports: [Builder.BuildExport]
@@ -315,7 +317,12 @@ struct MacOSBuildEngine {
             .appendingPathComponent(input.buildID)
             .appendingPathComponent("copy-from-cache")
 
+        if !input.quiet {
+            writeStderrLine("Planning macOS build (\(plan.executionStages.count) stage(s))")
+        }
+
         let workloadSandboxImage: ClientImage?
+        let workloadSandboxConfig: ContainerizationOCI.Image?
         if input.buildMode == .workload {
             guard let buildSandboxImage = input.buildSandboxImage, !buildSandboxImage.isEmpty else {
                 throw ContainerizationError(
@@ -323,16 +330,26 @@ struct MacOSBuildEngine {
                     message: "macOS workload builds require --build-sandbox-image"
                 )
             }
-            workloadSandboxImage = try await resolveBaseImage(reference: buildSandboxImage, pull: input.pull)
+            let preparedSandbox = try await prepareBaseImage(
+                reference: buildSandboxImage,
+                pull: input.pull,
+                quiet: input.quiet,
+                disableTTYProgress: input.disableTTYProgress,
+                context: "workload build sandbox"
+            )
+            workloadSandboxImage = preparedSandbox.image
+            workloadSandboxConfig = preparedSandbox.config
         } else {
             workloadSandboxImage = nil
+            workloadSandboxConfig = nil
         }
-        let workloadSandboxConfig = try await workloadSandboxImage?.config(for: buildPlatform)
 
         var stageRuntimeBaseImages: [Int: ClientImage] = [:]
         var stageRuntimeConfigs: [Int: ContainerizationOCI.Image] = [:]
         var stageImageBaseConfigs: [Int: ContainerizationOCI.Image] = [:]
+        var preparedBaseImages: [String: (image: ClientImage, config: ContainerizationOCI.Image)] = [:]
         for stage in plan.executionStages {
+            let stageLabel = stageDisplayName(name: stage.name, index: stage.index)
             if input.buildMode == .workload {
                 guard let workloadSandboxImage, let workloadSandboxConfig else {
                     throw ContainerizationError(.internalError, message: "missing workload build sandbox image/config")
@@ -341,8 +358,25 @@ struct MacOSBuildEngine {
                 stageRuntimeConfigs[stage.index] = workloadSandboxConfig
                 stageImageBaseConfigs[stage.index] = workloadImageBaseConfig()
             } else {
-                let baseImage = try await resolveBaseImage(reference: stage.baseImage, pull: input.pull)
-                let baseConfig = try await baseImage.config(for: buildPlatform)
+                let preparedBase = try await {
+                    if let cached = preparedBaseImages[stage.baseImage] {
+                        if !input.quiet {
+                            writeStderrLine("Reusing prepared macOS base image \(stage.baseImage) for stage \(stageLabel)")
+                        }
+                        return cached
+                    }
+                    let prepared = try await prepareBaseImage(
+                        reference: stage.baseImage,
+                        pull: input.pull,
+                        quiet: input.quiet,
+                        disableTTYProgress: input.disableTTYProgress,
+                        context: "stage \(stageLabel)"
+                    )
+                    preparedBaseImages[stage.baseImage] = prepared
+                    return prepared
+                }()
+                let baseImage = preparedBase.image
+                let baseConfig = preparedBase.config
                 stageRuntimeBaseImages[stage.index] = baseImage
                 stageRuntimeConfigs[stage.index] = baseConfig
                 stageImageBaseConfigs[stage.index] = baseConfig
@@ -362,6 +396,7 @@ struct MacOSBuildEngine {
         var exportedStageSources: [Int: [String: CachedStageSourceEntry]] = [:]
 
         for stage in plan.executionStages {
+            let stageLabel = stageDisplayName(name: stage.name, index: stage.index)
             guard
                 let runtimeBaseImage = stageRuntimeBaseImages[stage.index],
                 let runtimeBaseConfig = stageRuntimeConfigs[stage.index],
@@ -382,7 +417,8 @@ struct MacOSBuildEngine {
                 hostPayloadRoot = nil
             }
             if !input.quiet {
-                writeStderrLine("Building macOS stage \(stage.name ?? "#\(stage.index)")")
+                writeStderrLine("Building macOS stage \(stageLabel)")
+                writeStderrLine("Starting macOS build guest for stage \(stageLabel)")
             }
             let runtime = try await StageRuntime.start(
                 appRoot: input.appRoot,
@@ -391,8 +427,12 @@ struct MacOSBuildEngine {
                 stageIndex: stage.index,
                 cpus: input.cpus,
                 memory: input.memory,
-                hostPayloadRoot: hostPayloadRoot
+                hostPayloadRoot: hostPayloadRoot,
+                startupMessage: input.quiet ? nil : "Waiting for macOS build guest for stage \(stageLabel)..."
             )
+            if !input.quiet {
+                writeStderrLine("macOS build guest ready for stage \(stageLabel)")
+            }
 
             do {
                 let transport = FileTransport(
@@ -419,11 +459,17 @@ struct MacOSBuildEngine {
 
                 if stage.index != targetStage.index {
                     if let requestedSources = plannedExports[stage.index], !requestedSources.isEmpty {
+                        if !input.quiet {
+                            writeStderrLine("Caching stage \(stageLabel) outputs for later COPY --from")
+                        }
                         exportedStageSources[stage.index] = try await exportStageSources(
                             requestedSources,
                             from: runtime,
                             cacheRoot: exportRoot.appendingPathComponent("stage-\(stage.index)")
                         )
+                    }
+                    if !input.quiet {
+                        writeStderrLine("Stopping macOS build guest for stage \(stageLabel)")
                     }
                     let runtimeStopStartedAt = Date()
                     try await runtime.stop()
@@ -434,6 +480,9 @@ struct MacOSBuildEngine {
                     continue
                 }
 
+                if !input.quiet {
+                    writeStderrLine("Stopping macOS build guest for stage \(stageLabel)")
+                }
                 let runtimeStopStartedAt = Date()
                 try await runtime.stop()
                 MacOSExportProfiler.log(
@@ -556,14 +605,133 @@ struct MacOSBuildEngine {
         return exported
     }
 
-    private static func resolveBaseImage(reference: String, pull: Bool) async throws -> ClientImage {
+    private static func loadBaseImage(reference: String, pull: Bool, progressUpdate: ProgressUpdateHandler?) async throws -> ClientImage {
         if reference == "scratch" {
             throw ContainerizationError(.unsupported, message: "darwin builds do not support FROM scratch")
         }
         if pull {
-            return try await ClientImage.pull(reference: reference, platform: buildPlatform)
+            return try await ClientImage.pull(reference: reference, platform: buildPlatform, progressUpdate: progressUpdate)
         }
-        return try await ClientImage.fetch(reference: reference, platform: buildPlatform)
+        return try await ClientImage.fetch(reference: reference, platform: buildPlatform, progressUpdate: progressUpdate)
+    }
+
+    private static func prepareBaseImage(
+        reference: String,
+        pull: Bool,
+        quiet: Bool,
+        disableTTYProgress: Bool,
+        context: String?
+    ) async throws -> (image: ClientImage, config: ContainerizationOCI.Image) {
+        if !quiet {
+            writeStderrLine(baseImageResolveMessage(reference: reference, pull: pull, context: context))
+        }
+
+        let fetchProgress = try makeProgressBar(
+            description: pull ? "Pulling \(reference)" : "Resolving \(reference)",
+            subDescription: pull ? "" : "pulling if missing locally",
+            itemsName: "blobs",
+            quiet: quiet,
+            disableTTYProgress: disableTTYProgress,
+            showItems: true,
+            showSize: true,
+            showSpeed: true,
+            ignoreSmallSize: true
+        )
+        defer { fetchProgress?.finish() }
+
+        let image = try await loadBaseImage(
+            reference: reference,
+            pull: pull,
+            progressUpdate: fetchProgress?.handler
+        )
+
+        if !quiet {
+            writeStderrLine(baseImagePrepareMessage(reference: reference, context: context))
+        }
+
+        _ = try await image.macOSChunkedDiskSource(for: buildPlatform)
+        let config = try await image.config(for: buildPlatform)
+
+        if !quiet {
+            writeStderrLine(baseImagePreparedMessage(reference: reference, context: context))
+        }
+
+        return (image, config)
+    }
+
+    private static func makeProgressBar(
+        description: String,
+        subDescription: String = "",
+        itemsName: String,
+        quiet: Bool,
+        disableTTYProgress: Bool,
+        showItems: Bool,
+        showSize: Bool,
+        showSpeed: Bool,
+        ignoreSmallSize: Bool
+    ) throws -> ProgressBar? {
+        guard !quiet, !disableTTYProgress else {
+            return nil
+        }
+
+        let progressConfig = try ProgressConfig(
+            description: description,
+            subDescription: subDescription,
+            itemsName: itemsName,
+            showPercent: true,
+            showProgressBar: true,
+            showItems: showItems,
+            showSize: showSize,
+            showSpeed: showSpeed,
+            ignoreSmallSize: ignoreSmallSize,
+            disableProgressUpdates: disableTTYProgress
+        )
+        let progress = ProgressBar(config: progressConfig)
+        progress.start()
+        return progress
+    }
+
+    static func stageDisplayName(name: String?, index: Int) -> String {
+        if let name, !name.isEmpty {
+            return "\(name) (#\(index))"
+        }
+        return "#\(index)"
+    }
+
+    static func fileTransferDescription(
+        keyword: String,
+        sources: [String],
+        destination: String,
+        fromStage: String?
+    ) -> String {
+        let sourceList = sources.joined(separator: " ")
+        if let fromStage {
+            return "\(keyword) --from=\(fromStage) \(sourceList) \(destination)"
+        }
+        return "\(keyword) \(sourceList) \(destination)"
+    }
+
+    private static func baseImageResolveMessage(reference: String, pull: Bool, context: String?) -> String {
+        let prefix = pull ? "Pulling macOS base image \(reference)" : "Resolving macOS base image \(reference)"
+        let suffix = pull ? "" : " (pulling if missing locally)"
+        if let context, !context.isEmpty {
+            return "\(prefix) for \(context)\(suffix)"
+        }
+        return "\(prefix)\(suffix)"
+    }
+
+    private static func baseImagePrepareMessage(reference: String, context: String?) -> String {
+        if let context, !context.isEmpty {
+            return "Preparing macOS base disk cache from \(reference) for \(context)"
+        }
+        return "Preparing macOS base disk cache from \(reference)"
+    }
+
+    private static func baseImagePreparedMessage(reference: String, context: String?) -> String {
+        if let context, !context.isEmpty {
+            return "Prepared macOS base image \(reference) for \(context)"
+        }
+        return "Prepared macOS base image \(reference)"
     }
 
     private static func stageContainerID(buildID: String, stageIndex: Int) -> String {
@@ -880,6 +1048,16 @@ struct MacOSBuildEngine {
                     try VariableExpander.expand($0, variables: state.variables)
                 }
                 let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
+                if !quiet {
+                    writeStderrLine(
+                        fileTransferDescription(
+                            keyword: "COPY",
+                            sources: expandedSources,
+                            destination: expandedDestination,
+                            fromStage: fileInstruction.fromStage
+                        )
+                    )
+                }
                 let resolvedDestination = state.resolvedGuestPath(
                     for: expandedDestination,
                     preserveTrailingSlash: expandedDestination.hasSuffix("/")
@@ -914,6 +1092,16 @@ struct MacOSBuildEngine {
                     try VariableExpander.expand($0, variables: state.variables)
                 }
                 let expandedDestination = try VariableExpander.expand(fileInstruction.destination, variables: state.variables)
+                if !quiet {
+                    writeStderrLine(
+                        fileTransferDescription(
+                            keyword: "ADD",
+                            sources: expandedSources,
+                            destination: expandedDestination,
+                            fromStage: nil
+                        )
+                    )
+                }
                 try await transport.copy(
                     sources: expandedSources,
                     destination: state.resolvedGuestPath(for: expandedDestination, preserveTrailingSlash: expandedDestination.hasSuffix("/")),
@@ -2369,7 +2557,8 @@ extension MacOSBuildEngine {
             stageIndex: Int,
             cpus: Int64,
             memory: String,
-            hostPayloadRoot: URL? = nil
+            hostPayloadRoot: URL? = nil,
+            startupMessage: String? = nil
         ) async throws -> StageRuntime {
             let containerClient = ContainerClient()
             let containerID = MacOSBuildEngine.stageContainerID(buildID: buildID, stageIndex: stageIndex)
@@ -2401,7 +2590,7 @@ extension MacOSBuildEngine {
                 let process = try await containerClient.bootstrap(id: containerID, stdio: [nil, nil, nil])
                 try await ProcessIO.startProcess(
                     process: process,
-                    startupMessage: "Waiting for macOS build guest..."
+                    startupMessage: startupMessage
                 )
                 let sandboxClient = try await SandboxClient.create(id: containerID, runtime: MacOSBuildEngine.runtimeName)
                 try await waitForContainerStatus(client: containerClient, id: containerID, status: .running, timeoutSeconds: 180)

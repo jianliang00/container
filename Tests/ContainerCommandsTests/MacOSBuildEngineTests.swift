@@ -160,6 +160,24 @@ struct MacOSBuildEngineTests {
     }
 
     @Test
+    func stageDisplayNameIncludesAliasAndIndex() {
+        #expect(MacOSBuildEngine.stageDisplayName(name: "build", index: 2) == "build (#2)")
+        #expect(MacOSBuildEngine.stageDisplayName(name: nil, index: 1) == "#1")
+    }
+
+    @Test
+    func fileTransferDescriptionIncludesCopyFromStage() {
+        let description = MacOSBuildEngine.fileTransferDescription(
+            keyword: "COPY",
+            sources: ["/tmp/out/", "/tmp/bin/tool"],
+            destination: "/opt/copied/",
+            fromStage: "build"
+        )
+
+        #expect(description == "COPY --from=build /tmp/out/ /tmp/bin/tool /opt/copied/")
+    }
+
+    @Test
     func plannerRejectsMalformedUserInstruction() throws {
         let dockerfile = Data(
             """

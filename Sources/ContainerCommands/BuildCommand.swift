@@ -255,6 +255,7 @@ extension Application {
                     }
 
                 case .macOS:
+                    let disableTTYProgress = progress == .plain
                     try await withThrowingTaskGroup(of: Void.self) { group in
                         defer {
                             group.cancelAll()
@@ -275,7 +276,7 @@ extension Application {
                         group.addTask {
                             [
                                 buildArg, label, cpus, memory, noCache, pull, quiet, target, contextDir, systemHealth, buildID, buildFileData, imageNames, exports, log,
-                                macOSBuildMode, buildSandboxImage
+                                macOSBuildMode, buildSandboxImage, disableTTYProgress
                             ] in
                             let contextURL = URL(fileURLWithPath: contextDir, relativeTo: .currentDirectory()).absoluteURL
                             let engineInput = MacOSBuildEngine.Input(
@@ -292,6 +293,7 @@ extension Application {
                                 quiet: quiet,
                                 buildMode: macOSBuildMode,
                                 buildSandboxImage: buildSandboxImage,
+                                disableTTYProgress: disableTTYProgress,
                                 target: target,
                                 tags: imageNames,
                                 exports: exports,

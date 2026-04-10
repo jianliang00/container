@@ -172,6 +172,41 @@ struct MacOSSandboxServiceNetworkTests {
         #expect(await recorder.lookupCalls().isEmpty)
         #expect(await recorder.deallocateCalls().isEmpty)
     }
+
+    @Test
+    func socketForwarderLifecycleCreatesAndReleasesEventLoopGroup() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-forwarder-lifecycle")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let attachment = try makeAttachment(
+            network: "default",
+            hostname: "sandbox-host",
+            address: "192.168.64.2",
+            gateway: "192.168.64.1"
+        )
+        let publishedPort = PublishPort(
+            hostAddress: try IPAddress("127.0.0.1"),
+            hostPort: 0,
+            containerPort: 8080,
+            proto: .tcp,
+            count: 1
+        )
+
+        #expect(await service.testingHasSocketForwarderEventLoopGroup() == false)
+
+        try await service.testingStartSocketForwarders(
+            attachments: [attachment],
+            publishedPorts: [publishedPort]
+        )
+
+        #expect(await service.testingHasSocketForwarderEventLoopGroup() == true)
+
+        await service.testingStopSocketForwarders()
+
+        #expect(await service.testingHasSocketForwarderEventLoopGroup() == false)
+    }
 }
 
 private actor RecordingSandboxNetworkControl {

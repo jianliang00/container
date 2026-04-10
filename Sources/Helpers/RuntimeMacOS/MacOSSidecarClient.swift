@@ -21,7 +21,7 @@ import Logging
 import RuntimeMacOSSidecarShared
 
 final class MacOSSidecarClient: @unchecked Sendable {
-    private static let defaultBootstrapStartTimeoutSeconds: TimeInterval = 30.0
+    private static let defaultBootstrapStartTimeoutSeconds: TimeInterval = 120.0
 
     private final class PendingResponse: @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)

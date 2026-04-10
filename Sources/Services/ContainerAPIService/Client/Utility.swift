@@ -146,9 +146,6 @@ public struct Utility {
             if management.initImage != nil {
                 throw ContainerizationError(.unsupported, message: "--init-image is not supported for --os darwin")
             }
-            if !management.publishPorts.isEmpty {
-                throw ContainerizationError(.unsupported, message: "--publish is not supported for --os darwin")
-            }
             if !management.publishSockets.isEmpty {
                 throw ContainerizationError(.unsupported, message: "--publish-socket is not supported for --os darwin")
             }
@@ -346,18 +343,18 @@ public struct Utility {
 
         config.labels = try Parser.labels(management.labels)
 
+        config.publishedPorts = try Parser.publishPorts(management.publishPorts)
+        guard config.publishedPorts.count <= publishedPortCountLimit else {
+            throw ContainerizationError(.invalidArgument, message: "cannot exceed more than \(publishedPortCountLimit) port publish descriptors")
+        }
+        guard !config.publishedPorts.hasOverlaps() else {
+            throw ContainerizationError(.invalidArgument, message: "host ports for different publish port specs may not overlap")
+        }
+
         if isMacOSRuntime {
-            config.publishedPorts = []
+            try validateMacOSPublishedPorts(config.publishedPorts)
             config.publishedSockets = []
         } else {
-            config.publishedPorts = try Parser.publishPorts(management.publishPorts)
-            guard config.publishedPorts.count <= publishedPortCountLimit else {
-                throw ContainerizationError(.invalidArgument, message: "cannot exceed more than \(publishedPortCountLimit) port publish descriptors")
-            }
-            guard !config.publishedPorts.hasOverlaps() else {
-                throw ContainerizationError(.invalidArgument, message: "host ports for different publish port specs may not overlap")
-            }
-
             // Parse --publish-socket arguments and add to container configuration
             // to enable socket forwarding from container to host.
             config.publishedSockets = try Parser.publishSockets(management.publishSockets)
@@ -410,8 +407,9 @@ public struct Utility {
             || management.dns.domain != nil
             || !management.dns.searchDomains.isEmpty
             || !management.dns.options.isEmpty
+        let requiresHostVisibleNetworking = !management.publishPorts.isEmpty
 
-        guard !management.networks.isEmpty || hasExplicitDNS else {
+        guard !management.networks.isEmpty || hasExplicitDNS || requiresHostVisibleNetworking else {
             return nil
         }
 
@@ -555,6 +553,18 @@ public struct Utility {
 
         return darwinArm64
     }
+
+    static func validateMacOSPublishedPorts(_ publishedPorts: [PublishPort]) throws {
+        for publishedPort in publishedPorts {
+            guard case .v4 = publishedPort.hostAddress else {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "--publish for --os darwin currently supports IPv4 host bindings only"
+                )
+            }
+        }
+    }
+
     static func getAttachmentConfigurations(
         containerId: String,
         builtinNetworkId: String?,

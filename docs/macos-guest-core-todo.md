@@ -41,7 +41,8 @@ Related design docs:
 - [x] Re-enable limited darwin CLI networking.
   - [x] support only `--network <id>[,mac=...]`
   - [x] support only basic DNS parameters backed by `ContainerConfiguration.dns`
-  - [x] keep `--publish` and `--publish-socket` out of scope
+  - [x] support `--publish` on the host-visible single-network path
+  - [x] keep `--publish-socket` out of scope
 
 ### Exit Criteria
 

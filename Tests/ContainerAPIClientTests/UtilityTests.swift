@@ -297,6 +297,32 @@ struct UtilityTests {
         #expect(dns.nameservers == ["9.9.9.9"])
     }
 
+    @Test("macOS guest networking uses default network when publish is specified")
+    func testResolveMacOSGuestNetworkingUsesDefaultNetworkForPublishedPorts() throws {
+        var management = try Flags.Management.parse([])
+        management.publishPorts = ["127.0.0.1:8080:80"]
+
+        let maybeResolved = try Utility.resolveMacOSGuestNetworking(
+            containerID: "macos-guest",
+            management: management,
+            override: nil
+        )
+        let resolved = try #require(maybeResolved)
+
+        #expect(resolved.networks.count == 1)
+        #expect(resolved.networks[0].network == ClientNetwork.defaultNetworkName)
+        #expect(resolved.dns?.nameservers.isEmpty ?? true)
+    }
+
+    @Test("macOS published ports reject IPv6 host bindings")
+    func testValidateMacOSPublishedPortsRejectIPv6() throws {
+        let publishedPorts = try Parser.publishPorts(["[::1]:8080:80"])
+
+        #expect(throws: ContainerizationError.self) {
+            try Utility.validateMacOSPublishedPorts(publishedPorts)
+        }
+    }
+
     @Test("macOS guest networking rejects unsupported DNS options")
     func testResolveMacOSGuestNetworkingRejectsDNSOptions() throws {
         var management = try Flags.Management.parse([])

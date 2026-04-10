@@ -121,6 +121,38 @@ final class TestCLIMacOSGuestNetwork: CLITest {
         #expect(!output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
+    @Test
+    func macOSGuestPublishedPortUsesHostVisibleDefaultNetwork() throws {
+        let guestName = uniqueEntityName(prefix: "macos-publish")
+        let guestPort = 18081
+        let hostPort = Int.random(in: 46000..<47000)
+        let responseBody = "macos-publish-ok"
+        let serverScript = """
+            while true; do
+              printf 'HTTP/1.1 200 OK\\r\\nConnection: close\\r\\nContent-Length: \(responseBody.utf8.count)\\r\\n\\r\\n\(responseBody)' | /usr/bin/nc -l \(guestPort)
+            done
+            """
+
+        try doLongRun(
+            name: guestName,
+            image: macOSBaseReference,
+            args: ["--os", "darwin", "--publish", "127.0.0.1:\(hostPort):\(guestPort)"],
+            containerArgs: ["/bin/sh", "-lc", serverScript],
+            waitForRunning: false
+        )
+        defer { try? doStop(name: guestName) }
+
+        try waitForContainerRunning(guestName, 300)
+        let inspect = try waitForContainerNetworks(guestName, totalAttempts: 180)
+
+        #expect(inspect.configuration.macosGuest?.networkBackend == .vmnetShared)
+        #expect(inspect.networks.count == 1)
+        #expect(inspect.networks[0].network == MacOSGuestNetworkRequest.defaultNetworkID)
+
+        let output = try waitForHostHTTPResponse(url: "http://127.0.0.1:\(hostPort)")
+        #expect(output.trimmingCharacters(in: .whitespacesAndNewlines) == responseBody)
+    }
+
     private func runDarwinGuest(name: String, network: String) throws -> CLITest.inspectOutput {
         try doLongRun(
             name: name,
@@ -153,6 +185,58 @@ final class TestCLIMacOSGuestNetwork: CLITest {
         }
 
         throw lastError ?? CLITest.CLIError.executionFailed("guest command failed without an error")
+    }
+
+    private func waitForHostHTTPResponse(
+        url: String,
+        attempts: Int = 10,
+        retryDelaySeconds: UInt32 = 3
+    ) throws -> String {
+        var lastError = ""
+        for attempt in 0..<attempts {
+            let (output, error, status) = try runHostProcess(
+                executable: "/usr/bin/curl",
+                arguments: [
+                    "--fail",
+                    "--silent",
+                    "--show-error",
+                    "--max-time",
+                    "5",
+                    url,
+                ]
+            )
+            if status == 0 {
+                return output
+            }
+            lastError = error
+            guard attempt < attempts - 1 else {
+                break
+            }
+            sleep(retryDelaySeconds)
+        }
+
+        throw CLITest.CLIError.executionFailed("host fetch failed: \(lastError)")
+    }
+
+    private func runHostProcess(
+        executable: String,
+        arguments: [String]
+    ) throws -> (output: String, error: String, status: Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let error = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return (output, error, process.terminationStatus)
     }
 
     private func deleteNetworkEventually(name: String, attempts: Int = 10, retryDelaySeconds: UInt32 = 2) throws {

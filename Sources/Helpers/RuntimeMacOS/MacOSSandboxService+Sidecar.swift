@@ -21,7 +21,7 @@ import Foundation
 import RuntimeMacOSSidecarShared
 
 extension MacOSSandboxService {
-    private static let sidecarBootstrapStartTimeoutSeconds: TimeInterval = 30.0
+    private static let sidecarBootstrapStartTimeoutSeconds: TimeInterval = 120.0
 
     func sidecarSocketPath(config: ContainerConfiguration) -> URL {
         URL(fileURLWithPath: "/tmp/ctrm-sidecar-\(config.id).sock")

@@ -267,7 +267,7 @@ public actor MacOSSandboxService {
     var sidecarHandle: SidecarHandle?
     var sidecarEventPump: SidecarEventPump?
     var sidecarEventPumpTask: Task<Void, Never>?
-    private let eventLoopGroup: MultiThreadedEventLoopGroup
+    private var eventLoopGroup: MultiThreadedEventLoopGroup?
     private var socketForwarders: [SocketForwarderResult] = []
 
     public init(
@@ -282,11 +282,15 @@ public actor MacOSSandboxService {
         self.log = log
         self.contentStore = contentStore
         self.networkControl = networkControl
-        self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
     deinit {
-        try? eventLoopGroup.syncShutdownGracefully()
+        for forwarder in socketForwarders {
+            forwarder.close()
+        }
+        if let eventLoopGroup {
+            try? eventLoopGroup.syncShutdownGracefully()
+        }
     }
 
     private var layout: MacOSSandboxLayout {
@@ -582,7 +586,7 @@ extension MacOSSandboxService {
         attachments: [ContainerResource.Attachment],
         publishedPorts: [PublishPort]
     ) async throws {
-        closeSocketForwarders()
+        await stopSocketForwarders()
         guard !publishedPorts.isEmpty else {
             return
         }
@@ -599,92 +603,104 @@ extension MacOSSandboxService {
             )
         }
 
+        let eventLoopGroup = socketForwarderEventLoopGroup()
         var forwarders: [SocketForwarderResult] = []
-        try await withThrowingTaskGroup(of: SocketForwarderResult.self) { group in
-            for publishedPort in publishedPorts {
-                guard case .v4 = publishedPort.hostAddress else {
-                    throw ContainerizationError(
-                        .unsupported,
-                        message: "--publish for --os darwin currently supports IPv4 host bindings only"
-                    )
-                }
-                for index in 0..<publishedPort.count {
-                    let proxyAddress = try SocketAddress(
-                        ipAddress: publishedPort.hostAddress.description,
-                        port: Int(publishedPort.hostPort + index)
-                    )
-                    let serverAddress = try SocketAddress(
-                        ipAddress: attachment.ipv4Address.address.description,
-                        port: Int(publishedPort.containerPort + index)
-                    )
-                    log.info(
-                        "creating macOS guest forwarder",
-                        metadata: [
-                            "proxy": "\(proxyAddress)",
-                            "server": "\(serverAddress)",
-                            "protocol": "\(publishedPort.proto)",
-                        ]
-                    )
-                    group.addTask { [eventLoopGroup, log] in
-                        let forwarder: SocketForwarder
-                        switch publishedPort.proto {
-                        case .tcp:
-                            forwarder = try TCPForwarder(
-                                proxyAddress: proxyAddress,
-                                serverAddress: serverAddress,
-                                eventLoopGroup: eventLoopGroup,
-                                log: log
-                            )
-                        case .udp:
-                            forwarder = try UDPForwarder(
-                                proxyAddress: proxyAddress,
-                                serverAddress: serverAddress,
-                                eventLoopGroup: eventLoopGroup,
-                                log: log
-                            )
-                        }
-                        do {
-                            return try await forwarder.run().get()
-                        } catch let error as IOError where error.errnoCode == EACCES {
-                            if let port = proxyAddress.port, port < 1024 {
-                                throw ContainerizationError(
-                                    .invalidArgument,
-                                    message: "Permission denied while binding to host port \(port). Binding to ports below 1024 requires root privileges."
+        do {
+            try await withThrowingTaskGroup(of: SocketForwarderResult.self) { group in
+                for publishedPort in publishedPorts {
+                    guard case .v4 = publishedPort.hostAddress else {
+                        throw ContainerizationError(
+                            .unsupported,
+                            message: "--publish for --os darwin currently supports IPv4 host bindings only"
+                        )
+                    }
+                    for index in 0..<publishedPort.count {
+                        let proxyAddress = try SocketAddress(
+                            ipAddress: publishedPort.hostAddress.description,
+                            port: Int(publishedPort.hostPort + index)
+                        )
+                        let serverAddress = try SocketAddress(
+                            ipAddress: attachment.ipv4Address.address.description,
+                            port: Int(publishedPort.containerPort + index)
+                        )
+                        log.info(
+                            "creating macOS guest forwarder",
+                            metadata: [
+                                "proxy": "\(proxyAddress)",
+                                "server": "\(serverAddress)",
+                                "protocol": "\(publishedPort.proto)",
+                            ]
+                        )
+                        group.addTask { [eventLoopGroup, log] in
+                            let forwarder: SocketForwarder
+                            switch publishedPort.proto {
+                            case .tcp:
+                                forwarder = try TCPForwarder(
+                                    proxyAddress: proxyAddress,
+                                    serverAddress: serverAddress,
+                                    eventLoopGroup: eventLoopGroup,
+                                    log: log
+                                )
+                            case .udp:
+                                forwarder = try UDPForwarder(
+                                    proxyAddress: proxyAddress,
+                                    serverAddress: serverAddress,
+                                    eventLoopGroup: eventLoopGroup,
+                                    log: log
                                 )
                             }
-                            throw error
+                            do {
+                                return try await forwarder.run().get()
+                            } catch let error as IOError where error.errnoCode == EACCES {
+                                if let port = proxyAddress.port, port < 1024 {
+                                    throw ContainerizationError(
+                                        .invalidArgument,
+                                        message: "Permission denied while binding to host port \(port). Binding to ports below 1024 requires root privileges."
+                                    )
+                                }
+                                throw error
+                            }
                         }
                     }
                 }
-            }
-            do {
                 for try await result in group {
                     forwarders.append(result)
                 }
-            } catch {
-                for forwarder in forwarders {
-                    forwarder.close()
-                }
-                throw error
             }
+        } catch {
+            for forwarder in forwarders {
+                forwarder.close()
+            }
+            for forwarder in forwarders {
+                try? await forwarder.wait()
+            }
+            shutdownSocketForwarderEventLoopGroup()
+            throw error
         }
 
         socketForwarders = forwarders
     }
 
-    private func closeSocketForwarders() {
-        guard !socketForwarders.isEmpty else {
+    private func socketForwarderEventLoopGroup() -> MultiThreadedEventLoopGroup {
+        if let eventLoopGroup {
+            return eventLoopGroup
+        }
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        self.eventLoopGroup = eventLoopGroup
+        return eventLoopGroup
+    }
+
+    private func shutdownSocketForwarderEventLoopGroup() {
+        guard let eventLoopGroup else {
             return
         }
-        let forwarders = socketForwarders
-        socketForwarders = []
-        for forwarder in forwarders {
-            forwarder.close()
-        }
+        self.eventLoopGroup = nil
+        try? eventLoopGroup.syncShutdownGracefully()
     }
 
     private func stopSocketForwarders() async {
         guard !socketForwarders.isEmpty else {
+            shutdownSocketForwarderEventLoopGroup()
             return
         }
         log.info("closing forwarders")
@@ -696,6 +712,7 @@ extension MacOSSandboxService {
         for forwarder in forwarders {
             try? await forwarder.wait()
         }
+        shutdownSocketForwarderEventLoopGroup()
         log.info("closed forwarders")
     }
 
@@ -824,7 +841,7 @@ extension MacOSSandboxService {
             throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
             #endif
         } catch {
-            closeSocketForwarders()
+            await stopSocketForwarders()
             #if arch(arm64)
             await stopAndQuitSidecarIfPresent()
             #endif
@@ -3036,7 +3053,7 @@ extension MacOSSandboxService {
         )
     }
 
-    func handleSidecarEvent(_ event: MacOSSidecarEvent) {
+    func handleSidecarEvent(_ event: MacOSSidecarEvent) async {
         let processID = event.processID
         guard var session = sessions[processID] else {
             return
@@ -3086,7 +3103,7 @@ extension MacOSSandboxService {
             }
             completeProcess(id: processID, status: status)
             if workloadID(forSession: processID) == configuration?.id {
-                closeSocketForwarders()
+                await stopSocketForwarders()
                 sandboxState = .stopped(status.exitCode)
             }
             return
@@ -3354,7 +3371,7 @@ extension MacOSSandboxService {
         sidecarHandle = SidecarHandle(launchLabel: launchLabel, client: client)
     }
 
-    func handleUnexpectedSidecarDisconnect(_ error: ContainerizationError) {
+    func handleUnexpectedSidecarDisconnect(_ error: ContainerizationError) async {
         guard sidecarHandle != nil else {
             return
         }
@@ -3367,7 +3384,7 @@ extension MacOSSandboxService {
         sidecarEventPump = nil
         sidecarEventPumpTask = nil
         sidecarHandle = nil
-        closeSocketForwarders()
+        await stopSocketForwarders()
         closeAllSessions()
         sandboxState = .stopped(255)
     }
@@ -3491,6 +3508,21 @@ extension MacOSSandboxService {
 
     func testingStop(_ options: ContainerStopOptions = .default) async throws {
         try await stopSandbox(stopOptions: options)
+    }
+
+    func testingStartSocketForwarders(
+        attachments: [ContainerResource.Attachment],
+        publishedPorts: [PublishPort]
+    ) async throws {
+        try await startSocketForwarders(attachments: attachments, publishedPorts: publishedPorts)
+    }
+
+    func testingStopSocketForwarders() async {
+        await stopSocketForwarders()
+    }
+
+    func testingHasSocketForwarderEventLoopGroup() -> Bool {
+        eventLoopGroup != nil
     }
 
     func testingWorkloadConfiguration(_ workloadID: String) -> WorkloadConfiguration? {

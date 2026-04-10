@@ -414,6 +414,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIO", package: "swift-nio"),
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
@@ -423,6 +424,7 @@ let package = Package(
                 "ContainerResource",
                 "ContainerSandboxServiceClient",
                 "RuntimeMacOSSidecarShared",
+                "SocketForwarder",
                 "ContainerVersion",
                 "ContainerXPC",
             ],

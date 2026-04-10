@@ -87,11 +87,14 @@ The darwin CLI network surface is:
   - `--dns`
   - `--dns-domain`
   - `--dns-search`
+- `--publish <spec>`
+  - enables host port forwarding on the host-visible `vmnetShared` runtime path
+  - currently supports IPv4 host bindings only
+  - if no explicit `--network` is provided, the runtime uses the builtin `default` network
 
 The darwin path does not support:
 
 - `--dns-option`
-- `--publish`
 - `--publish-socket`
 - multi-network semantics in the first iteration
 

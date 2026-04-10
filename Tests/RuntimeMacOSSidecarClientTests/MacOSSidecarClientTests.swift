@@ -352,6 +352,53 @@ struct MacOSSidecarClientTests {
     }
 
     @Test
+    func bootstrapStartUsesDedicatedTimeoutBudget() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            usleep(250_000)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+
+            let begin = try readRequest(from: clientFD)
+            #expect(begin.method == .fsBegin)
+            usleep(250_000)
+        }
+
+        let client = MacOSSidecarClient(
+            socketPath: socketPath,
+            log: Logger(label: "MacOSSidecarClientTests"),
+            requestTimeoutSeconds: 0.1,
+            bootstrapStartTimeoutSeconds: 0.6
+        )
+        defer { client.closeControlConnection() }
+
+        try client.bootstrapStart(socketConnectRetries: 3)
+
+        do {
+            try client.fsBegin(
+                port: 27000,
+                request: .init(
+                    txID: "tx-bootstrap-timeout",
+                    op: .writeFile,
+                    path: "/tmp/bootstrap-timeout.txt",
+                    inlineData: Data("payload".utf8),
+                    autoCommit: true
+                )
+            )
+            Issue.record("expected fsBegin to keep using the default request timeout")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .timeout)
+            #expect(error.message.contains("fs.begin"))
+        }
+
+        try server.waitForCompletion()
+    }
+
+    @Test
     func sidecarEventPumpPreservesEventOrder() async {
         let pump = SidecarEventPump()
         let recorder = EventRecorder()

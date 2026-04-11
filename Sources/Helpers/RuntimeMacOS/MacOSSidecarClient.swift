@@ -21,6 +21,8 @@ import Logging
 import RuntimeMacOSSidecarShared
 
 final class MacOSSidecarClient: @unchecked Sendable {
+    private static let defaultBootstrapStartTimeoutSeconds: TimeInterval = 30.0
+
     private final class PendingResponse: @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
         var result: Result<MacOSSidecarResponse, Error>?
@@ -29,6 +31,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
     private let socketPath: String
     private let log: Logger
     private let requestTimeoutSeconds: TimeInterval
+    private let bootstrapStartTimeoutSeconds: TimeInterval
     private let stateLock = NSLock()
     private let writeLock = NSLock()
 
@@ -39,10 +42,18 @@ final class MacOSSidecarClient: @unchecked Sendable {
     private var eventHandler: (@Sendable (MacOSSidecarEvent) -> Void)?
     private var disconnectHandler: (@Sendable (ContainerizationError) -> Void)?
 
-    init(socketPath: String, log: Logger, requestTimeoutSeconds: TimeInterval = 10.0) {
+    init(
+        socketPath: String,
+        log: Logger,
+        requestTimeoutSeconds: TimeInterval = 10.0,
+        bootstrapStartTimeoutSeconds: TimeInterval? = nil
+    ) {
         self.socketPath = socketPath
         self.log = log
         self.requestTimeoutSeconds = requestTimeoutSeconds
+        self.bootstrapStartTimeoutSeconds =
+            bootstrapStartTimeoutSeconds
+            ?? max(requestTimeoutSeconds, Self.defaultBootstrapStartTimeoutSeconds)
     }
 
     deinit {
@@ -62,7 +73,11 @@ final class MacOSSidecarClient: @unchecked Sendable {
     }
 
     func bootstrapStart(socketConnectRetries: Int = 120) throws {
-        _ = try request(method: .vmBootstrapStart, socketConnectRetries: socketConnectRetries)
+        _ = try request(
+            method: .vmBootstrapStart,
+            timeoutSeconds: bootstrapStartTimeoutSeconds,
+            socketConnectRetries: socketConnectRetries
+        )
     }
 
     func stopVM() throws {
@@ -173,13 +188,27 @@ final class MacOSSidecarClient: @unchecked Sendable {
         }
     }
 
-    private func request(method: MacOSSidecarMethod, port: UInt32? = nil, socketConnectRetries: Int = 1) throws -> MacOSSidecarResponse {
-        try requestResponse(MacOSSidecarRequest(method: method, port: port), socketConnectRetries: socketConnectRetries)
+    private func request(
+        method: MacOSSidecarMethod,
+        port: UInt32? = nil,
+        timeoutSeconds: TimeInterval? = nil,
+        socketConnectRetries: Int = 1
+    ) throws -> MacOSSidecarResponse {
+        try requestResponse(
+            MacOSSidecarRequest(method: method, port: port),
+            timeoutSeconds: timeoutSeconds ?? requestTimeoutSeconds,
+            socketConnectRetries: socketConnectRetries
+        )
     }
 
-    private func requestResponse(_ request: MacOSSidecarRequest, socketConnectRetries: Int) throws -> MacOSSidecarResponse {
+    private func requestResponse(
+        _ request: MacOSSidecarRequest,
+        timeoutSeconds: TimeInterval? = nil,
+        socketConnectRetries: Int
+    ) throws -> MacOSSidecarResponse {
         let waiter = PendingResponse()
         let fd = try ensureControlConnection(retries: socketConnectRetries)
+        let effectiveTimeoutSeconds = timeoutSeconds ?? requestTimeoutSeconds
 
         stateLock.lock()
         pending[request.requestID] = waiter
@@ -195,11 +224,11 @@ final class MacOSSidecarClient: @unchecked Sendable {
             throw error
         }
 
-        let timeoutResult = waiter.semaphore.wait(timeout: .now() + requestTimeoutSeconds)
+        let timeoutResult = waiter.semaphore.wait(timeout: .now() + effectiveTimeoutSeconds)
         if timeoutResult == .timedOut {
             let timeoutError = ContainerizationError(
                 .timeout,
-                message: "sidecar request \(request.method.rawValue) timed out after \(requestTimeoutSeconds) seconds"
+                message: "sidecar request \(request.method.rawValue) timed out after \(effectiveTimeoutSeconds) seconds"
             )
             removePending(requestID: request.requestID)
             handleReaderFailure(timeoutError)

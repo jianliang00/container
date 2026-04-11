@@ -31,6 +31,10 @@ import Foundation
 import Logging
 import SystemPackage
 
+private struct SendableXPCEndpoint: @unchecked Sendable {
+    let value: xpc_endpoint_t?
+}
+
 public actor ContainersService {
     private static let macOSRuntimeName = "container-runtime-macos"
 
@@ -411,8 +415,9 @@ public actor ContainersService {
     }
 
     /// Bootstrap the init process of the container.
-    public func bootstrap(id: String, stdio: [FileHandle?]) async throws {
+    public func bootstrap(id: String, stdio: [FileHandle?], progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
         self.log.debug("\(#function)")
+        let progressUpdateEndpoint = SendableXPCEndpoint(value: progressUpdateEndpoint)
 
         let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
             var state = try await self.getContainerState(id: id, context: context)
@@ -454,7 +459,7 @@ public actor ContainersService {
                     configuration: config,
                     existingClient: nil
                 )
-                try await sandboxClient.bootstrap(stdio: stdio)
+                try await sandboxClient.bootstrap(stdio: stdio, progressUpdateEndpoint: progressUpdateEndpoint.value)
                 return sandboxClient
             }
 
@@ -502,8 +507,9 @@ public actor ContainersService {
     }
 
     /// Start the sandbox guest without starting any workloads.
-    public func startSandbox(id: String) async throws {
+    public func startSandbox(id: String, progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
         self.log.debug("\(#function)")
+        let progressUpdateEndpoint = SendableXPCEndpoint(value: progressUpdateEndpoint)
 
         let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
             var state = try await self.getContainerState(id: id, context: context)
@@ -527,7 +533,7 @@ public actor ContainersService {
                     existingClient: existingClient
                 )
                 try await sandboxClient.createSandbox()
-                try await sandboxClient.startSandbox(stdio: [nil, nil, nil])
+                try await sandboxClient.startSandbox(stdio: [nil, nil, nil], progressUpdateEndpoint: progressUpdateEndpoint.value)
                 return sandboxClient
             }
 

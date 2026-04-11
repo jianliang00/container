@@ -418,6 +418,7 @@ let package = Package(
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
+                "ContainerAPIClient",
                 "ContainerImagesServiceClient",
                 "ContainerNetworkServiceClient",
                 "ContainerLog",
@@ -427,6 +428,7 @@ let package = Package(
                 "SocketForwarder",
                 "ContainerVersion",
                 "ContainerXPC",
+                "TerminalProgress",
             ],
             path: "Sources/Helpers/RuntimeMacOS"
         ),

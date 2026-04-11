@@ -28,8 +28,10 @@ public enum RuntimeKeys: String {
     case fd
     /// Options for stopping a container key.
     case stopOptions
-    /// An endpoint to talk to the runtime service.
-    case runtimeServiceEndpoint
+    /// An endpoint to talk to a sandbox service.
+    case sandboxServiceEndpoint
+    /// An endpoint for sending progress updates back to a client.
+    case progressUpdateEndpoint
 
     /// Process request keys.
     case signal

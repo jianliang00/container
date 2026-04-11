@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerImagesServiceClient
 import ContainerResource
 import ContainerSandboxServiceClient
@@ -29,6 +30,7 @@ import Logging
 import NIO
 import RuntimeMacOSSidecarShared
 import SocketForwarder
+import TerminalProgress
 
 final class SidecarEventPump: @unchecked Sendable {
     let stream: AsyncStream<MacOSSidecarEvent>
@@ -320,7 +322,8 @@ extension MacOSSandboxService {
 
     @Sendable
     public func startSandbox(_ message: XPCMessage) async throws -> XPCMessage {
-        try await startSandboxIfNeeded(stdio: message.stdio())
+        let progressUpdateService = ProgressUpdateService(message: message)
+        try await startSandboxIfNeeded(stdio: message.stdio(), progressUpdate: progressUpdateService?.handler)
         return message.reply()
     }
 
@@ -329,8 +332,9 @@ extension MacOSSandboxService {
         guard case .created = sandboxState else {
             throw ContainerizationError(.invalidState, message: "container expected to be in created state, got: \(sandboxState)")
         }
-        let config = try await prepareSandboxIfNeeded()
-        try await startSandboxIfNeeded(stdio: message.stdio())
+        let progressUpdateService = ProgressUpdateService(message: message)
+        let config = try await prepareSandboxIfNeeded(progressUpdate: progressUpdateService?.handler)
+        try await startSandboxIfNeeded(stdio: message.stdio(), progressUpdate: progressUpdateService?.handler)
         try await startWorkloadIfNeeded(workloadID: config.id)
         return message.reply()
     }
@@ -793,7 +797,7 @@ extension MacOSSandboxService {
 // MARK: - Bundle and VM setup
 
 extension MacOSSandboxService {
-    private func prepareSandboxIfNeeded() async throws -> ContainerConfiguration {
+    private func prepareSandboxIfNeeded(progressUpdate: ProgressUpdateHandler? = nil) async throws -> ContainerConfiguration {
         if let configuration {
             try restorePersistedWorkloadsIfNeeded(containerConfig: configuration)
             if shouldResetImageBackedWorkloadsForRecovery() {
@@ -802,7 +806,7 @@ extension MacOSSandboxService {
             return configuration
         }
 
-        let config = try await createBundleIfNeeded()
+        let config = try await createBundleIfNeeded(progressUpdate: progressUpdate)
         self.configuration = config
         try persistSandboxMetadata(for: config)
         try restorePersistedWorkloadsIfNeeded(containerConfig: config)
@@ -812,7 +816,7 @@ extension MacOSSandboxService {
         return config
     }
 
-    private func startSandboxIfNeeded(stdio: [FileHandle?]) async throws {
+    private func startSandboxIfNeeded(stdio: [FileHandle?], progressUpdate: ProgressUpdateHandler? = nil) async throws {
         if case .booted = sandboxState {
             return
         }
@@ -823,7 +827,7 @@ extension MacOSSandboxService {
             throw ContainerizationError(.invalidState, message: "cannot start sandbox from state \(sandboxState)")
         }
 
-        let config = try await prepareSandboxIfNeeded()
+        let config = try await prepareSandboxIfNeeded(progressUpdate: progressUpdate)
         try openLogsIfNeeded()
         try writeBootLog("bootstrapping container \(config.id)")
         _ = try ensureWorkloadSessionIfNeeded(workloadID: config.id, stdio: stdio)
@@ -2074,7 +2078,7 @@ extension MacOSSandboxService {
         try? logHandle?.write(contentsOf: data)
     }
 
-    private func createBundleIfNeeded() async throws -> ContainerConfiguration {
+    private func createBundleIfNeeded(progressUpdate: ProgressUpdateHandler? = nil) async throws -> ContainerConfiguration {
         let fm = FileManager.default
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
 
@@ -2094,7 +2098,7 @@ extension MacOSSandboxService {
             try JSONEncoder().encode(options).write(to: optionsPath())
         }
 
-        let layers = try await resolveTemplateLayers(containerConfig: config)
+        let layers = try await resolveTemplateLayers(containerConfig: config, progressUpdate: progressUpdate)
         _ = try FilesystemClone.cloneOrCopyItem(at: layers.hardwareModel, to: hardwareModelPath())
         _ = try FilesystemClone.cloneOrCopyItem(at: layers.auxiliaryStorage, to: auxiliaryStoragePath())
         _ = try FilesystemClone.cloneOrCopyItem(at: layers.diskImage, to: diskImagePath())
@@ -2107,7 +2111,7 @@ extension MacOSSandboxService {
         let diskImage: URL
     }
 
-    private func resolveTemplateLayers(containerConfig: ContainerConfiguration) async throws -> LayerPaths {
+    private func resolveTemplateLayers(containerConfig: ContainerConfiguration, progressUpdate: ProgressUpdateHandler? = nil) async throws -> LayerPaths {
         guard let indexContent: Content = try await contentStore.get(digest: containerConfig.image.digest) else {
             throw ContainerizationError(.notFound, message: "missing index blob \(containerConfig.image.digest)")
         }
@@ -2152,7 +2156,8 @@ extension MacOSSandboxService {
                 store: contentStore,
                 manifestDigest: manifestDescriptor.digest,
                 diskLayoutDescriptor: diskLayoutDesc,
-                diskChunks: diskChunks
+                diskChunks: diskChunks,
+                progressUpdate: progressUpdate
             )
         }
 
@@ -2168,7 +2173,8 @@ extension MacOSSandboxService {
         store: any ContentStore,
         manifestDigest: String,
         diskLayoutDescriptor: Descriptor,
-        diskChunks: [Descriptor]
+        diskChunks: [Descriptor],
+        progressUpdate: ProgressUpdateHandler? = nil
     ) async throws -> URL {
         // Load disk layout
         guard let layoutContent: Content = try await store.get(digest: diskLayoutDescriptor.digest) else {
@@ -2194,14 +2200,59 @@ extension MacOSSandboxService {
             chunkBlobPaths[chunk.digest] = content.path
         }
 
-        // Perform rebuild
-        try MacOSDiskRebuilder.rebuild(
-            layout: layout,
-            chunkBlobPaths: chunkBlobPaths,
-            outputPath: cachedPath
+        let progressReporter = await makeMacOSDiskRebuildProgressReporter(
+            totalChunks: layout.chunkCount,
+            progressUpdate: progressUpdate
         )
 
+        // Perform rebuild
+        do {
+            try MacOSDiskRebuilder.rebuild(
+                layout: layout,
+                chunkBlobPaths: chunkBlobPaths,
+                outputPath: cachedPath,
+                progressHandler: progressReporter.handler
+            )
+        } catch {
+            await progressReporter.finish()
+            throw error
+        }
+        await progressReporter.finish()
+        if let progressUpdate {
+            await progressUpdate([
+                .setSubDescription("Booting macOS guest")
+            ])
+        }
+
         return cachedPath
+    }
+
+    private func makeMacOSDiskRebuildProgressReporter(
+        totalChunks: Int,
+        progressUpdate: ProgressUpdateHandler?
+    ) async -> (handler: ((Int, Int) -> Void)?, finish: () async -> Void) {
+        guard let progressUpdate else {
+            return (nil, {})
+        }
+
+        let (stream, continuation) = AsyncStream.makeStream(of: [ProgressUpdateEvent].self)
+        let progressTask = Task {
+            for await events in stream {
+                await progressUpdate(events)
+            }
+        }
+
+        let handler: (Int, Int) -> Void = { completedChunks, totalChunks in
+            let chunkName = totalChunks == 1 ? "chunk" : "chunks"
+            continuation.yield([
+                .setSubDescription("Rebuilding macOS disk image (\(completedChunks) of \(totalChunks) \(chunkName))")
+            ])
+        }
+        let finish = {
+            continuation.finish()
+            await progressTask.value
+        }
+        return (handler, finish)
     }
 
     /// Get the rebuild cache directory path.

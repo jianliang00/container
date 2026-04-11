@@ -137,12 +137,7 @@ extension Application {
                     try? io.close()
                 }
 
-                var dynamicEnv: [String: String] = [:]
-                if let sshAuthSock = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] {
-                    dynamicEnv["SSH_AUTH_SOCK"] = sshAuthSock
-                }
-
-                let process = try await client.bootstrap(id: id, stdio: io.stdio, dynamicEnv: dynamicEnv)
+                let process = try await client.bootstrap(id: id, stdio: io.stdio, progressUpdate: progress.handler)
                 progress.finish()
                 let startupMessage =
                     configuration.macosGuest == nil

@@ -23,6 +23,8 @@ import TerminalProgress
 public actor ProgressUpdateClient {
     private var endpointConnection: xpc_connection_t?
     private var endpoint: xpc_endpoint_t?
+    private var updateContinuation: AsyncStream<[ProgressUpdateEvent]>.Continuation?
+    private var updateDeliveryTask: Task<Void, Never>?
 
     /// Creates a new client for receiving progress updates from a service.
     /// - Parameters:
@@ -36,6 +38,14 @@ public actor ProgressUpdateClient {
     /// Performs a connection setup for receiving progress updates.
     /// - Parameter progressUpdate: The handler to invoke when progress updates are received.
     private func createEndpoint(for progressUpdate: @escaping ProgressUpdateHandler) {
+        let (stream, continuation) = AsyncStream.makeStream(of: [ProgressUpdateEvent].self)
+        updateContinuation = continuation
+        updateDeliveryTask = Task {
+            for await events in stream {
+                await progressUpdate(events)
+            }
+        }
+
         let endpointConnection = xpc_connection_create(nil, nil)
         // Access to `reversedConnection` is protected by a lock
         nonisolated(unsafe) var reversedConnection: xpc_connection_t?
@@ -46,7 +56,9 @@ public actor ProgressUpdateClient {
                 case XPC_TYPE_CONNECTION:
                     reversedConnection = connectionMessage
                     xpc_connection_set_event_handler(connectionMessage) { updateMessage in
-                        Self.handleProgressUpdate(updateMessage, progressUpdate: progressUpdate)
+                        if let events = Self.progressUpdateEvents(from: updateMessage) {
+                            continuation.yield(events)
+                        }
                     }
                     xpc_connection_activate(connectionMessage)
                 case XPC_TYPE_ERROR:
@@ -75,27 +87,32 @@ public actor ProgressUpdateClient {
     }
 
     /// Performs cleanup of the created connection.
-    public func finish() {
+    public func finish() async {
+        updateContinuation?.finish()
+        updateContinuation = nil
+        if let updateDeliveryTask {
+            await updateDeliveryTask.value
+        }
+        updateDeliveryTask = nil
         if let endpointConnection {
             xpc_connection_cancel(endpointConnection)
             self.endpointConnection = nil
         }
     }
 
-    private static func handleProgressUpdate(_ message: xpc_object_t, progressUpdate: @escaping ProgressUpdateHandler) {
+    private static func progressUpdateEvents(from message: xpc_object_t) -> [ProgressUpdateEvent]? {
         switch xpc_get_type(message) {
         case XPC_TYPE_DICTIONARY:
             let message = XPCMessage(object: message)
-            handleProgressUpdate(message, progressUpdate: progressUpdate)
+            return progressUpdateEvents(from: message)
         case XPC_TYPE_ERROR:
-            break
+            return nil
         default:
             fatalError("unhandled xpc object type: \(xpc_get_type(message))")
-            break
         }
     }
 
-    private static func handleProgressUpdate(_ message: XPCMessage, progressUpdate: @escaping ProgressUpdateHandler) {
+    private static func progressUpdateEvents(from message: XPCMessage) -> [ProgressUpdateEvent] {
         var events = [ProgressUpdateEvent]()
 
         if let description = message.string(key: .progressUpdateSetDescription) {
@@ -156,8 +173,6 @@ public actor ProgressUpdateClient {
             events.append(.setTotalSize(totalSize))
         }
 
-        Task {
-            await progressUpdate(events)
-        }
+        return events
     }
 }

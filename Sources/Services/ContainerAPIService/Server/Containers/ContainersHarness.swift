@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerResource
 import ContainerSandboxServiceClient
 import ContainerXPC
@@ -56,7 +57,11 @@ public struct ContainersHarness: Sendable {
             )
         }
         let stdio = message.stdio()
-        try await service.bootstrap(id: id, stdio: stdio)
+        try await service.bootstrap(
+            id: id,
+            stdio: stdio,
+            progressUpdateEndpoint: message.endpoint(key: .progressUpdateEndpoint)
+        )
         return message.reply()
     }
 
@@ -65,7 +70,7 @@ public struct ContainersHarness: Sendable {
         guard let id = message.string(key: .id) else {
             throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
         }
-        try await service.startSandbox(id: id)
+        try await service.startSandbox(id: id, progressUpdateEndpoint: message.endpoint(key: .progressUpdateEndpoint))
         return message.reply()
     }
 

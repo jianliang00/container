@@ -21,6 +21,8 @@ import Foundation
 import RuntimeMacOSSidecarShared
 
 extension MacOSSandboxService {
+    private static let sidecarBootstrapStartTimeoutSeconds: TimeInterval = 30.0
+
     func sidecarSocketPath(config: ContainerConfiguration) -> URL {
         URL(fileURLWithPath: "/tmp/ctrm-sidecar-\(config.id).sock")
     }
@@ -93,7 +95,11 @@ extension MacOSSandboxService {
 
         try bootstrapLaunchAgent(plistURL: plistURL)
 
-        let client = MacOSSidecarClient(socketPath: socketURL.path, log: log)
+        let client = MacOSSidecarClient(
+            socketPath: socketURL.path,
+            log: log,
+            bootstrapStartTimeoutSeconds: Self.sidecarBootstrapStartTimeoutSeconds
+        )
         let eventPump = SidecarEventPump()
         let eventPumpTask = Task { [weak self] in
             guard let self else { return }

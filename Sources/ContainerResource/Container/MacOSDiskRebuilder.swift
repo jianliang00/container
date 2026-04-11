@@ -48,7 +48,7 @@ public enum MacOSDiskRebuilder {
     ///   - layout: The DiskLayout describing the chunks
     ///   - chunkBlobPaths: Map from chunk layerDigest to the local file path of the blob
     ///   - outputPath: Where to write the rebuilt Disk.img
-    ///   - progressHandler: Optional callback for reporting progress (chunkIndex, totalChunks)
+    ///   - progressHandler: Optional callback for reporting progress (completedChunks, totalChunks)
     public static func rebuild(
         layout: DiskLayout,
         chunkBlobPaths: [String: URL],
@@ -102,7 +102,7 @@ public enum MacOSDiskRebuilder {
                             blobPath: blobPath,
                             outFd: outFd
                         )
-                        progress.report(chunkIndex: chunk.index)
+                        progress.reportCompletedChunk()
                     } catch {
                         state.withLock { current in
                             if current.firstError == nil {
@@ -327,16 +327,18 @@ private final class ProgressReporter: @unchecked Sendable {
     private let lock = NSLock()
     private let totalChunks: Int
     private let handler: ((Int, Int) -> Void)?
+    private var completedChunks = 0
 
     init(totalChunks: Int, handler: ((Int, Int) -> Void)?) {
         self.totalChunks = totalChunks
         self.handler = handler
     }
 
-    func report(chunkIndex: Int) {
+    func reportCompletedChunk() {
         lock.lock()
         defer { lock.unlock() }
-        handler?(chunkIndex, totalChunks)
+        completedChunks += 1
+        handler?(completedChunks, totalChunks)
     }
 }
 

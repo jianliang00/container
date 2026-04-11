@@ -45,7 +45,8 @@ extension Application {
             var exitCode: Int32 = 127
 
             let progressConfig = try ProgressConfig(
-                description: "Starting container"
+                description: "Starting container",
+                showItems: true
             )
             let progress = ProgressBar(config: progressConfig)
             defer {
@@ -102,7 +103,7 @@ extension Application {
                         log: log
                     )
                 } else {
-                    let process = try await client.bootstrap(id: container.id, stdio: io.stdio)
+                    let process = try await client.bootstrap(id: container.id, stdio: io.stdio, progressUpdate: progress.handler)
                     progress.finish()
                     let startupMessage =
                         container.configuration.macosGuest == nil

@@ -138,7 +138,7 @@ extension Application {
                     try? io.close()
                 }
 
-                let process = try await client.bootstrap(id: id, stdio: io.stdio)
+                let process = try await client.bootstrap(id: id, stdio: io.stdio, progressUpdate: progress.handler)
                 progress.finish()
                 let startupMessage =
                     configuration.macosGuest == nil

@@ -110,6 +110,8 @@ struct ZstdCodecTests {
             [90, 0, 89, 0, 88, 0, 87, 0, 86, 0, 85, 0, 84, 0, 83, 0],
         ]
         let outputURL = tempDirectory.appendingPathComponent("Disk.img")
+        let progressLock = NSLock()
+        var progressUpdates: [(completed: Int, total: Int)] = []
 
         var chunks: [DiskLayout.ChunkInfo] = []
         var blobPaths: [String: URL] = [:]
@@ -145,12 +147,19 @@ struct ZstdCodecTests {
             layout: layout,
             chunkBlobPaths: blobPaths,
             outputPath: outputURL,
+            progressHandler: { completed, total in
+                progressLock.withLock {
+                    progressUpdates.append((completed, total))
+                }
+            },
             maxConcurrentChunks: 2
         )
 
         let rebuilt = try Data(contentsOf: outputURL)
         let expected = Data(chunkPayloads.flatMap { $0 })
         #expect(rebuilt == expected)
+        #expect(progressUpdates.map(\.completed) == [1, 2, 3])
+        #expect(progressUpdates.map(\.total) == [3, 3, 3])
     }
 
     private static func compressZstd(_ data: Data, level: Int32 = 3) throws -> Data {

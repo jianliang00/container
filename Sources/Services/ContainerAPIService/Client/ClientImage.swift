@@ -149,7 +149,7 @@ public struct ClientImage: Sendable {
 
     /// Returns the resolved v1 chunked macOS disk source for the specified platform.
     /// Returns nil when the image uses the legacy single-disk layout.
-    public func macOSChunkedDiskSource(for platform: Platform) async throws -> MacOSChunkedDiskSource? {
+    public func macOSChunkedDiskSource(for platform: Platform, progressUpdate: ProgressUpdateHandler? = nil) async throws -> MacOSChunkedDiskSource? {
         let manifestDescriptor = try await manifestDescriptor(for: platform)
         guard let manifestContent: Content = try await contentStore.get(digest: manifestDescriptor.digest) else {
             throw ContainerizationError(.notFound, message: "content with digest \(manifestDescriptor.digest)")
@@ -173,10 +173,11 @@ public struct ClientImage: Sendable {
             chunkBlobPaths[chunk.digest] = content.path
         }
 
-        let diskImagePath = try resolveMacOSChunkedDiskImage(
+        let diskImagePath = try await resolveMacOSChunkedDiskImage(
             manifestDigest: manifestDescriptor.digest,
             layout: layout,
-            chunkBlobPaths: chunkBlobPaths
+            chunkBlobPaths: chunkBlobPaths,
+            progressUpdate: progressUpdate
         )
         return MacOSChunkedDiskSource(layout: layout, chunkBlobPaths: chunkBlobPaths, diskImagePath: diskImagePath)
     }
@@ -220,20 +221,60 @@ public struct ClientImage: Sendable {
     private func resolveMacOSChunkedDiskImage(
         manifestDigest: String,
         layout: DiskLayout,
-        chunkBlobPaths: [String: URL]
-    ) throws -> URL {
+        chunkBlobPaths: [String: URL],
+        progressUpdate: ProgressUpdateHandler? = nil
+    ) async throws -> URL {
         let cacheDir = MacOSGuestCache.rebuildCacheDirectory()
         let cachedPath = MacOSDiskRebuilder.rebuildCachePath(cacheDir: cacheDir, manifestDigest: manifestDigest)
         if MacOSDiskRebuilder.cacheExists(at: cachedPath) {
             return cachedPath
         }
 
-        try MacOSDiskRebuilder.rebuild(
-            layout: layout,
-            chunkBlobPaths: chunkBlobPaths,
-            outputPath: cachedPath
+        let progressReporter = await makeMacOSDiskRebuildProgressReporter(
+            totalChunks: layout.chunkCount,
+            progressUpdate: progressUpdate
         )
+        do {
+            try MacOSDiskRebuilder.rebuild(
+                layout: layout,
+                chunkBlobPaths: chunkBlobPaths,
+                outputPath: cachedPath,
+                progressHandler: progressReporter.handler
+            )
+        } catch {
+            await progressReporter.finish()
+            throw error
+        }
+        await progressReporter.finish()
         return cachedPath
+    }
+
+    private func makeMacOSDiskRebuildProgressReporter(
+        totalChunks: Int,
+        progressUpdate: ProgressUpdateHandler?
+    ) async -> (handler: ((Int, Int) -> Void)?, finish: () async -> Void) {
+        guard let progressUpdate else {
+            return (nil, {})
+        }
+
+        let (stream, continuation) = AsyncStream.makeStream(of: [ProgressUpdateEvent].self)
+        let progressTask = Task {
+            for await events in stream {
+                await progressUpdate(events)
+            }
+        }
+
+        let handler: (Int, Int) -> Void = { completedChunks, totalChunks in
+            let chunkName = totalChunks == 1 ? "chunk" : "chunks"
+            continuation.yield([
+                .setSubDescription("Rebuilding macOS disk image (\(completedChunks) of \(totalChunks) \(chunkName))")
+            ])
+        }
+        let finish = {
+            continuation.finish()
+            await progressTask.value
+        }
+        return (handler, finish)
     }
 }
 
@@ -590,7 +631,7 @@ extension ClientImage {
                     .setSubDescription("for platform \(platform.description) (rebuilding macOS disk cache)")
                 ])
             }
-            _ = try await self.macOSChunkedDiskSource(for: platform)
+            _ = try await self.macOSChunkedDiskSource(for: platform, progressUpdate: progressUpdate)
         }
     }
 

@@ -89,8 +89,11 @@ extension SandboxClient {
         }
     }
 
-    public func startSandbox(stdio: [FileHandle?]) async throws {
+    public func startSandbox(stdio: [FileHandle?], progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
         let request = XPCMessage(route: SandboxRoutes.startSandbox.rawValue)
+        if let progressUpdateEndpoint {
+            request.set(key: SandboxKeys.progressUpdateEndpoint.rawValue, value: progressUpdateEndpoint)
+        }
 
         for (i, h) in stdio.enumerated() {
             let key: SandboxKeys = try {
@@ -119,8 +122,11 @@ extension SandboxClient {
         }
     }
 
-    public func bootstrap(stdio: [FileHandle?]) async throws {
+    public func bootstrap(stdio: [FileHandle?], progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
         let request = XPCMessage(route: SandboxRoutes.bootstrap.rawValue)
+        if let progressUpdateEndpoint {
+            request.set(key: SandboxKeys.progressUpdateEndpoint.rawValue, value: progressUpdateEndpoint)
+        }
 
         for (i, h) in stdio.enumerated() {
             let key: SandboxKeys = try {

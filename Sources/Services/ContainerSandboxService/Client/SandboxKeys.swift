@@ -30,6 +30,8 @@ public enum SandboxKeys: String {
     case stopOptions
     /// An endpoint to talk to a sandbox service.
     case sandboxServiceEndpoint
+    /// An endpoint for sending progress updates back to a client.
+    case progressUpdateEndpoint
 
     /// Process request keys.
     case signal

@@ -19,6 +19,8 @@ test_results/
 *.pid
 *.log
 *.zip
+*.xip
+*.ipsw
 *.o
 *.ext4
 *.pkg

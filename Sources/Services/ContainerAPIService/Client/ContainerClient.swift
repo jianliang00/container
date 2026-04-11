@@ -21,6 +21,7 @@ import Containerization
 import ContainerizationError
 import ContainerizationOCI
 import Foundation
+import TerminalProgress
 
 /// A client for interacting with the container API server.
 ///
@@ -136,11 +137,7 @@ public struct ContainerClient: Sendable {
     }
 
     /// Bootstrap the container's init process.
-    public func bootstrap(
-        id: String,
-        stdio: [FileHandle?],
-        dynamicEnv: [String: String] = [:]
-    ) async throws -> ClientProcess {
+    public func bootstrap(id: String, stdio: [FileHandle?], progressUpdate: ProgressUpdateHandler? = nil) async throws -> ClientProcess {
         let request = XPCMessage(route: .containerBootstrap)
 
         for (i, h) in stdio.enumerated() {
@@ -164,7 +161,12 @@ public struct ContainerClient: Sendable {
             request.set(key: .dynamicEnv, value: dynamicEnv)
 
             request.set(key: .id, value: id)
+            var progressUpdateClient: ProgressUpdateClient?
+            if let progressUpdate {
+                progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
+            }
             try await xpcClient.send(request)
+            await progressUpdateClient?.finish()
             return ClientProcessImpl(containerId: id, xpcClient: xpcClient)
         } catch {
             throw ContainerizationError(
@@ -176,12 +178,17 @@ public struct ContainerClient: Sendable {
     }
 
     /// Start a sandbox guest without starting a workload.
-    public func startSandbox(id: String) async throws {
+    public func startSandbox(id: String, progressUpdate: ProgressUpdateHandler? = nil) async throws {
         let request = XPCMessage(route: .containerStartSandbox)
         request.set(key: .id, value: id)
 
         do {
+            var progressUpdateClient: ProgressUpdateClient?
+            if let progressUpdate {
+                progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
+            }
             try await xpcClient.send(request)
+            await progressUpdateClient?.finish()
         } catch {
             throw ContainerizationError(
                 .internalError,

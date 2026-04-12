@@ -127,6 +127,52 @@ struct SandboxNetworkPolicyTests {
         #expect(decoded == event)
     }
 
+    @Test
+    func hostRuleRendererExpandsACLsAndDefaultRules() throws {
+        let policy = makePolicy()
+        let state = try makeState(policy: policy)
+
+        let ruleSet = SandboxNetworkHostRuleRenderer.render(state)
+
+        #expect(ruleSet.sandboxID == "sandbox-1")
+        #expect(ruleSet.networkID == "default")
+        #expect(ruleSet.generation == 1)
+        #expect(ruleSet.rules.count == 6)
+
+        let ingressRule = try #require(ruleSet.rules.first { $0.policyRuleID == "ingress-web" })
+        #expect(ingressRule.direction == .ingress)
+        #expect(ingressRule.action == .allow)
+        #expect(ingressRule.proto == .tcp)
+        #expect(ingressRule.sandboxIPv4Address.description == "192.168.64.2")
+        #expect(ingressRule.sandboxMACAddress?.description == "02:42:ac:11:00:02")
+        #expect(ingressRule.endpoint == .ipv4CIDR(try CIDRv4("10.0.0.0/24")))
+        #expect(ingressRule.portRange == .single(443))
+        #expect(!ingressRule.isDefault)
+
+        let defaultRules = ruleSet.rules.filter(\.isDefault)
+        #expect(defaultRules.count == 4)
+        #expect(defaultRules.allSatisfy { $0.action == .deny })
+        #expect(defaultRules.contains { $0.direction == .ingress && $0.proto == .tcp })
+        #expect(defaultRules.contains { $0.direction == .ingress && $0.proto == .udp })
+        #expect(defaultRules.contains { $0.direction == .egress && $0.proto == .tcp })
+        #expect(defaultRules.contains { $0.direction == .egress && $0.proto == .udp })
+    }
+
+    @Test
+    func hostRuleStoreRoundTripsRuleSet() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let ruleSet = try SandboxNetworkHostRuleRenderer.render(makeState(policy: makePolicy()))
+
+        try MacOSGuestHostNetworkPolicyStore.save(ruleSet, in: root)
+        #expect(try MacOSGuestHostNetworkPolicyStore.load(from: root) == ruleSet)
+
+        try MacOSGuestHostNetworkPolicyStore.remove(from: root)
+        #expect(try MacOSGuestHostNetworkPolicyStore.load(from: root) == nil)
+    }
+
     private func makePolicy() -> SandboxNetworkPolicy {
         SandboxNetworkPolicy(
             sandboxID: "sandbox-1",

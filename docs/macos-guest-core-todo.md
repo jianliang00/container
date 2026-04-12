@@ -217,7 +217,125 @@ Related design docs:
 - [x] External integrations can use only the control APIs and do not need to call the CLI or read internal state files.
 - [x] `exec`, `attach`, `logs`, and `port-forward` have stable core-side contracts.
 
-## 5. Later Enhancements
+## 5. P5: L4 Network Policy and Audit
+
+### TODO
+
+- [x] Add sandbox-scoped L4 policy resource types.
+  - [x] policy generation
+  - [x] ingress ACL
+  - [x] egress ACL
+  - [x] IPv4 CIDR and single-host endpoints
+  - [x] TCP and UDP protocols
+  - [x] single ports and port ranges
+  - [x] allow and deny actions
+  - [x] default action
+  - [x] audit mode
+- [x] Persist applied policy state with sandbox network state.
+  - [x] sandbox ID
+  - [x] network ID
+  - [x] IPv4 address
+  - [x] MAC address
+  - [x] policy generation
+  - [x] rendered host rule identifiers
+  - [x] last apply result
+- [x] Add network policy control APIs.
+  - [x] `ApplySandboxPolicy(sandboxID, generation, ingressACL, egressACL)`
+  - [x] `RemoveSandboxPolicy(sandboxID)`
+  - [x] `InspectSandboxPolicy(sandboxID)`
+- [x] Add XPC client and server routes for policy control.
+  - [x] `SandboxRoutes.applyNetworkPolicy`
+  - [x] `SandboxRoutes.removeNetworkPolicy`
+  - [x] `SandboxRoutes.inspectNetworkPolicy`
+  - [x] `SandboxClient.applySandboxPolicy`
+  - [x] `SandboxClient.removeSandboxPolicy`
+  - [x] `SandboxClient.inspectSandboxPolicy`
+- [x] Add API service wrappers for external integrations.
+  - [x] `ClientNetwork.applySandboxPolicy`
+  - [x] `ClientNetwork.removeSandboxPolicy`
+  - [x] `ClientNetwork.inspectSandboxPolicy`
+  - [x] `ContainerKit.applySandboxPolicy`
+  - [x] `ContainerKit.removeSandboxPolicy`
+  - [x] `ContainerKit.inspectSandboxPolicy`
+- [x] Add policy preflight validation.
+  - [x] accept policies for `vmnetShared` sandbox leases
+  - [x] return unsupported errors for `virtualizationNAT`
+  - [x] return invalid-state errors for missing leases
+  - [x] return invalid-argument errors for non-IPv4 endpoints
+  - [x] reject stale generations
+- [ ] Add a host packet policy controller.
+  - [ ] render ingress rules by sandbox IPv4 and MAC
+  - [ ] render egress rules by sandbox IPv4 and MAC
+  - [ ] render TCP and UDP port rules
+  - [ ] apply rules idempotently by sandbox ID and generation
+  - [ ] replace rules atomically for a new generation
+  - [ ] remove rules during policy removal
+  - [ ] remove rules during network release and sandbox shutdown
+  - [ ] expose apply, replace, remove, and status operations
+- [ ] Add published-port policy enforcement.
+  - [ ] evaluate inbound TCP connections before backend connect
+  - [ ] evaluate inbound UDP datagrams before backend write
+  - [ ] map published host ports to guest ports during policy evaluation
+  - [ ] close denied TCP connections
+  - [ ] drop denied UDP datagrams
+  - [ ] emit audit events for allowed and denied published-port traffic
+- [ ] Add structured network audit events.
+  - [ ] timestamp
+  - [ ] sandbox ID
+  - [ ] network ID
+  - [ ] policy generation
+  - [ ] direction
+  - [ ] protocol
+  - [ ] source IP
+  - [ ] source port
+  - [ ] destination IP
+  - [ ] destination port
+  - [ ] action
+  - [ ] rule ID
+  - [ ] enforcement source
+- [ ] Add an audit event sink.
+  - [ ] append audit events to the sandbox event log
+  - [ ] expose audit event paths in sandbox inspect output
+  - [ ] rotate audit logs with existing sandbox log retention behavior
+  - [ ] include policy generation in inspect snapshots
+- [ ] Add host packet audit ingestion.
+  - [ ] collect allowed and denied ingress events from host rules
+  - [ ] collect allowed and denied egress events from host rules
+  - [ ] normalize host rule events into the structured audit schema
+  - [ ] attach sandbox identity from persisted policy state
+- [ ] Add recovery behavior.
+  - [ ] reload persisted policy state during helper restart
+  - [ ] reapply host rules after helper restart
+  - [ ] reconcile missing host rules with persisted generations
+  - [ ] remove orphaned host rules for deleted sandboxes
+- [ ] Add unit coverage.
+  - [x] policy model encoding and decoding
+  - [ ] ACL validation
+  - [ ] generation conflict handling
+  - [ ] host rule rendering
+  - [ ] published-port TCP allow, deny, and audit
+  - [ ] published-port UDP allow, deny, and audit
+  - [ ] policy persistence and recovery
+  - [ ] policy removal cleanup
+- [ ] Add integration coverage.
+  - [ ] same-node sandbox ingress allow and deny
+  - [ ] external egress allow and deny
+  - [ ] published TCP port allow and deny
+  - [ ] published UDP port allow and deny
+  - [ ] audit events for each enforced path
+  - [ ] policy reapply after helper restart
+  - [ ] rule cleanup after sandbox removal
+
+### Exit Criteria
+
+- [ ] A `vmnetShared` sandbox accepts, replaces, inspects, and removes L4 policy by generation.
+- [ ] Host-side rules enforce IPv4 ingress and egress ACLs for TCP and UDP at the sandbox boundary.
+- [ ] Published TCP and UDP ports apply the same policy decision model as host packet rules.
+- [ ] Allowed and denied L4 traffic emits structured audit events with sandbox identity and policy generation.
+- [ ] Policy state and host rules recover across helper restart.
+- [ ] Network release and sandbox removal clean up persisted policy state, host rules, and audit handles.
+
+## 6. Later Enhancements
 
 - [ ] `HostPort`
 - [ ] multiple network attachments

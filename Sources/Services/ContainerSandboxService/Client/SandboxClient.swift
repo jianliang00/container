@@ -554,6 +554,50 @@ extension SandboxClient {
             )
         }
     }
+
+    public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
+        let request = XPCMessage(route: SandboxRoutes.applyNetworkPolicy.rawValue)
+        request.set(key: SandboxKeys.networkPolicy.rawValue, value: try JSONEncoder().encode(policy))
+        let response: XPCMessage
+        do {
+            response = try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to apply sandbox network policy for container \(self.id)",
+                cause: error
+            )
+        }
+        return try response.sandboxNetworkPolicyState()
+    }
+
+    public func removeSandboxPolicy() async throws {
+        let request = XPCMessage(route: SandboxRoutes.removeNetworkPolicy.rawValue)
+        do {
+            _ = try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to remove sandbox network policy for container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
+    public func inspectSandboxPolicy() async throws -> SandboxNetworkPolicyState? {
+        let request = XPCMessage(route: SandboxRoutes.inspectNetworkPolicy.rawValue)
+        let response: XPCMessage
+        do {
+            response = try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to inspect sandbox network policy for container \(self.id)",
+                cause: error
+            )
+        }
+        return try response.optionalSandboxNetworkPolicyState()
+    }
 }
 
 extension XPCMessage {
@@ -588,6 +632,24 @@ extension XPCMessage {
             )
         }
         return try JSONDecoder().decode(SandboxNetworkState.self, from: data)
+    }
+
+    func optionalSandboxNetworkPolicyState() throws -> SandboxNetworkPolicyState? {
+        guard let data = self.dataNoCopy(key: SandboxKeys.networkPolicyState.rawValue) else {
+            return nil
+        }
+        return try JSONDecoder().decode(SandboxNetworkPolicyState.self, from: data)
+    }
+
+    func sandboxNetworkPolicyState() throws -> SandboxNetworkPolicyState {
+        let data = self.dataNoCopy(key: SandboxKeys.networkPolicyState.rawValue)
+        guard let data else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "no sandbox network policy state data returned"
+            )
+        }
+        return try JSONDecoder().decode(SandboxNetworkPolicyState.self, from: data)
     }
 
     public func setWorkloadSnapshot(_ snapshot: WorkloadSnapshot) throws {

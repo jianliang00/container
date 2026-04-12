@@ -87,6 +87,40 @@ extension ClientNetwork {
         try await client.send(request)
     }
 
+    @discardableResult
+    public static func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
+        let client = Self.newClient()
+        let request = XPCMessage(route: .networkApplySandboxPolicy)
+        request.set(key: .id, value: policy.sandboxID)
+        request.set(key: .networkPolicy, value: try JSONEncoder().encode(policy))
+
+        let response = try await xpcSend(client: client, message: request)
+        let responseData = response.dataNoCopy(key: .networkPolicyState)
+        guard let responseData else {
+            throw ContainerizationError(.invalidArgument, message: "network policy state not received")
+        }
+        return try JSONDecoder().decode(SandboxNetworkPolicyState.self, from: responseData)
+    }
+
+    public static func removeSandboxPolicy(sandboxID: String) async throws {
+        let client = Self.newClient()
+        let request = XPCMessage(route: .networkRemoveSandboxPolicy)
+        request.set(key: .id, value: sandboxID)
+        _ = try await xpcSend(client: client, message: request)
+    }
+
+    public static func inspectSandboxPolicy(sandboxID: String) async throws -> SandboxNetworkPolicyState? {
+        let client = Self.newClient()
+        let request = XPCMessage(route: .networkInspectSandboxPolicy)
+        request.set(key: .id, value: sandboxID)
+
+        let response = try await xpcSend(client: client, message: request)
+        guard let responseData = response.dataNoCopy(key: .networkPolicyState) else {
+            return nil
+        }
+        return try JSONDecoder().decode(SandboxNetworkPolicyState.self, from: responseData)
+    }
+
     /// Retrieve the builtin network.
     public static var builtin: NetworkState? {
         get async throws {

@@ -71,4 +71,10 @@ public enum SandboxRoutes: String {
     case inspectNetwork = "com.apple.container.sandbox/inspectNetwork"
     /// Release sandbox networking and remove persisted lease state.
     case releaseNetwork = "com.apple.container.sandbox/releaseNetwork"
+    /// Apply sandbox network policy state.
+    case applyNetworkPolicy = "com.apple.container.sandbox/applyNetworkPolicy"
+    /// Remove sandbox network policy state.
+    case removeNetworkPolicy = "com.apple.container.sandbox/removeNetworkPolicy"
+    /// Inspect sandbox network policy state.
+    case inspectNetworkPolicy = "com.apple.container.sandbox/inspectNetworkPolicy"
 }

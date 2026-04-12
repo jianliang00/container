@@ -103,6 +103,8 @@ public enum XPCKeys: String {
     case networkConfig
     case networkState
     case networkStates
+    case networkPolicy
+    case networkPolicyState
 
     /// Kernel
     case kernel
@@ -172,6 +174,9 @@ public enum XPCRoute: String {
     case networkCreate
     case networkDelete
     case networkList
+    case networkApplySandboxPolicy
+    case networkRemoveSandboxPolicy
+    case networkInspectSandboxPolicy
 
     case volumeCreate
     case volumeDelete

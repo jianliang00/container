@@ -648,6 +648,65 @@ public actor ContainersService {
         return Self.makeSandboxLogPaths(root: root)
     }
 
+    public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
+        self.log.debug("\(#function)")
+
+        let id = policy.sandboxID
+        let (config, existingClient) = try await self.lock.withLock { context -> (ContainerConfiguration, SandboxClient?) in
+            let state = try await self.getContainerState(id: id, context: context)
+            try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+            let path = self.containerRoot.appendingPathComponent(id)
+            return (try Self.getContainerConfiguration(at: path), state.client)
+        }
+
+        let client = try await self.makeSandboxClient(
+            id: id,
+            configuration: config,
+            existingClient: existingClient
+        )
+        let policyState = try await client.applySandboxPolicy(policy)
+
+        if existingClient == nil {
+            try await self.lock.withLock { context in
+                var state = try await self.getContainerState(id: id, context: context)
+                state.client = client
+                await self.setContainerState(id, state, context: context)
+            }
+        }
+        return policyState
+    }
+
+    public func removeSandboxPolicy(sandboxID: String) async throws {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: sandboxID)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        if let client = state.client {
+            try await client.removeSandboxPolicy()
+            return
+        }
+
+        let root = self.containerRoot.appendingPathComponent(sandboxID)
+        try MacOSGuestNetworkPolicyStore.remove(from: root)
+    }
+
+    public func inspectSandboxPolicy(sandboxID: String) async throws -> SandboxNetworkPolicyState? {
+        self.log.debug("\(#function)")
+
+        let state = try self._getContainerState(id: sandboxID)
+        try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        if let task = state.bootstrapTask ?? state.sandboxStartTask {
+            let client = try await task.value
+            return try await client.inspectSandboxPolicy()
+        }
+        if let client = state.client {
+            return try await client.inspectSandboxPolicy()
+        }
+
+        let root = self.containerRoot.appendingPathComponent(sandboxID)
+        return try MacOSGuestNetworkPolicyStore.load(from: root)
+    }
+
     /// Create a new process in the container.
     public func createProcess(
         id: String,

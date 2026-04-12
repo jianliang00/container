@@ -53,6 +53,10 @@ public enum SandboxKeys: String {
 
     /// Sandbox network state payload.
     case networkState
+    /// Sandbox network policy request payload.
+    case networkPolicy
+    /// Sandbox network policy state payload.
+    case networkPolicyState
     /// Workload snapshot payload.
     case workloadSnapshot
 }

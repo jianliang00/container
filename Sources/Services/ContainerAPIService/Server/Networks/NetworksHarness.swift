@@ -67,4 +67,38 @@ public struct NetworksHarness: Sendable {
 
         return message.reply()
     }
+
+    @Sendable
+    public func applySandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let data = message.dataNoCopy(key: .networkPolicy) else {
+            throw ContainerizationError(.invalidArgument, message: "network policy cannot be empty")
+        }
+        let policy = try JSONDecoder().decode(SandboxNetworkPolicy.self, from: data)
+        let state = try await service.applySandboxPolicy(policy)
+        let reply = message.reply()
+        reply.set(key: .networkPolicyState, value: try JSONEncoder().encode(state))
+        return reply
+    }
+
+    @Sendable
+    public func removeSandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        try await service.removeSandboxPolicy(sandboxID: id)
+        return message.reply()
+    }
+
+    @Sendable
+    public func inspectSandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        let state = try await service.inspectSandboxPolicy(sandboxID: id)
+        let reply = message.reply()
+        if let state {
+            reply.set(key: .networkPolicyState, value: try JSONEncoder().encode(state))
+        }
+        return reply
+    }
 }

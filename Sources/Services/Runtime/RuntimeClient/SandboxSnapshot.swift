@@ -28,6 +28,8 @@ public struct SandboxSnapshot: Codable, Sendable {
     public var containers: [ContainerSnapshot]
     /// Workloads running inside the sandbox.
     public var workloads: [WorkloadSnapshot]
+    /// Applied sandbox network policy state, if available.
+    public var networkPolicy: SandboxNetworkPolicyState?
 
     enum CodingKeys: String, CodingKey {
         case configuration
@@ -35,6 +37,7 @@ public struct SandboxSnapshot: Codable, Sendable {
         case networks
         case containers
         case workloads
+        case networkPolicy
     }
 
     public init(
@@ -42,13 +45,15 @@ public struct SandboxSnapshot: Codable, Sendable {
         status: RuntimeStatus,
         networks: [Attachment],
         containers: [ContainerSnapshot],
-        workloads: [WorkloadSnapshot] = []
+        workloads: [WorkloadSnapshot] = [],
+        networkPolicy: SandboxNetworkPolicyState? = nil
     ) {
         self.configuration = configuration
         self.status = status
         self.networks = networks
         self.containers = containers
         self.workloads = workloads
+        self.networkPolicy = networkPolicy
     }
 
     public init(from decoder: Decoder) throws {
@@ -57,6 +62,7 @@ public struct SandboxSnapshot: Codable, Sendable {
         networks = try container.decode([Attachment].self, forKey: .networks)
         containers = try container.decode([ContainerSnapshot].self, forKey: .containers)
         workloads = try container.decodeIfPresent([WorkloadSnapshot].self, forKey: .workloads) ?? []
+        networkPolicy = try container.decodeIfPresent(SandboxNetworkPolicyState.self, forKey: .networkPolicy)
         configuration =
             try container.decodeIfPresent(SandboxConfiguration.self, forKey: .configuration)
             ?? containers.first.map { SandboxConfiguration(containerConfiguration: $0.configuration) }
@@ -69,5 +75,6 @@ public struct SandboxSnapshot: Codable, Sendable {
         try container.encode(networks, forKey: .networks)
         try container.encode(containers, forKey: .containers)
         try container.encode(workloads, forKey: .workloads)
+        try container.encodeIfPresent(networkPolicy, forKey: .networkPolicy)
     }
 }

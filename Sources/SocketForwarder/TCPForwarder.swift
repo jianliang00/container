@@ -28,16 +28,20 @@ public struct TCPForwarder: SocketForwarder {
 
     private let log: Logger?
 
+    private let policyEvaluator: SocketForwarderPolicyEvaluator?
+
     public init(
         proxyAddress: SocketAddress,
         serverAddress: SocketAddress,
         eventLoopGroup: any EventLoopGroup,
-        log: Logger? = nil
+        log: Logger? = nil,
+        policyEvaluator: SocketForwarderPolicyEvaluator? = nil
     ) throws {
         self.proxyAddress = proxyAddress
         self.serverAddress = serverAddress
         self.eventLoopGroup = eventLoopGroup
         self.log = log
+        self.policyEvaluator = policyEvaluator
     }
 
     public func run() throws -> EventLoopFuture<SocketForwarderResult> {
@@ -48,6 +52,21 @@ public struct TCPForwarder: SocketForwarder {
             .serverChannelOption(ChannelOptions.socket(.init(SOL_SOCKET), .init(SO_REUSEADDR)), value: 1)
             .childChannelOption(ChannelOptions.socket(.init(SOL_SOCKET), .init(SO_REUSEADDR)), value: 1)
             .childChannelInitializer { channel in
+                if let policyEvaluator = self.policyEvaluator,
+                    let sourceAddress = channel.remoteAddress
+                {
+                    let decision = policyEvaluator(
+                        SocketForwarderPolicyEvaluation(
+                            proto: .tcp,
+                            sourceAddress: sourceAddress,
+                            destinationAddress: self.serverAddress
+                        )
+                    )
+                    guard decision.action == .allow else {
+                        self.log?.trace("frontend - closing TCP connection denied by policy")
+                        return channel.close()
+                    }
+                }
                 tracker.register(channel)
                 return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(

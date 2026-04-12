@@ -22,6 +22,7 @@ import ContainerXPC
 import Containerization
 import ContainerizationArchive
 import ContainerizationError
+import ContainerizationExtras
 import ContainerizationOCI
 import Darwin
 import Dispatch
@@ -297,6 +298,17 @@ public actor MacOSSandboxService {
 
     private var layout: MacOSSandboxLayout {
         MacOSSandboxLayout(root: root)
+    }
+}
+
+extension SocketForwarderProtocol {
+    fileprivate var publishProtocol: PublishProtocol {
+        switch self {
+        case .tcp:
+            return .tcp
+        case .udp:
+            return .udp
+        }
     }
 }
 
@@ -608,6 +620,7 @@ extension MacOSSandboxService {
         }
 
         let eventLoopGroup = socketForwarderEventLoopGroup()
+        let policyEvaluator = makePublishedPortPolicyEvaluator()
         var forwarders: [SocketForwarderResult] = []
         do {
             try await withThrowingTaskGroup(of: SocketForwarderResult.self) { group in
@@ -635,7 +648,7 @@ extension MacOSSandboxService {
                                 "protocol": "\(publishedPort.proto)",
                             ]
                         )
-                        group.addTask { [eventLoopGroup, log] in
+                        group.addTask { [eventLoopGroup, log, policyEvaluator] in
                             let forwarder: SocketForwarder
                             switch publishedPort.proto {
                             case .tcp:
@@ -643,14 +656,16 @@ extension MacOSSandboxService {
                                     proxyAddress: proxyAddress,
                                     serverAddress: serverAddress,
                                     eventLoopGroup: eventLoopGroup,
-                                    log: log
+                                    log: log,
+                                    policyEvaluator: policyEvaluator
                                 )
                             case .udp:
                                 forwarder = try UDPForwarder(
                                     proxyAddress: proxyAddress,
                                     serverAddress: serverAddress,
                                     eventLoopGroup: eventLoopGroup,
-                                    log: log
+                                    log: log,
+                                    policyEvaluator: policyEvaluator
                                 )
                             }
                             do {
@@ -683,6 +698,61 @@ extension MacOSSandboxService {
         }
 
         socketForwarders = forwarders
+    }
+
+    private func makePublishedPortPolicyEvaluator() -> SocketForwarderPolicyEvaluator {
+        let root = self.root
+        let auditWriter = MacOSGuestNetworkAuditLogWriter(logURL: layout.networkAuditLogURL)
+        return { evaluation in
+            guard let policyState = try? MacOSGuestNetworkPolicyStore.load(from: root),
+                let source = Self.networkEndpoint(from: evaluation.sourceAddress),
+                let destination = Self.networkEndpoint(from: evaluation.destinationAddress)
+            else {
+                return .allow
+            }
+
+            let proto = evaluation.proto.publishProtocol
+            let policyDecision = policyState.policy.evaluate(
+                direction: .ingress,
+                proto: proto,
+                endpoint: source.ip,
+                port: destination.port
+            )
+            let auditEvent = SandboxNetworkAuditEvent(
+                timestamp: Date(),
+                sandboxID: policyState.sandboxID,
+                networkID: policyState.networkID,
+                policyGeneration: policyState.generation,
+                direction: .ingress,
+                proto: proto,
+                sourceIP: source.ip,
+                sourcePort: source.port,
+                destinationIP: destination.ip,
+                destinationPort: destination.port,
+                action: policyDecision.action,
+                ruleID: policyDecision.ruleID,
+                enforcementSource: .publishedPort
+            )
+            auditWriter.append(auditEvent, auditMode: policyState.policy.auditMode)
+
+            switch policyDecision.action {
+            case .allow:
+                return .allow
+            case .deny:
+                return .deny
+            }
+        }
+    }
+
+    private static func networkEndpoint(from socketAddress: SocketAddress) -> (ip: IPAddress, port: UInt16)? {
+        guard let ipAddress = socketAddress.ipAddress,
+            let port = socketAddress.port,
+            let parsedPort = UInt16(exactly: port),
+            let parsedIP = try? IPAddress(ipAddress)
+        else {
+            return nil
+        }
+        return (parsedIP, parsedPort)
     }
 
     private func socketForwarderEventLoopGroup() -> MultiThreadedEventLoopGroup {
@@ -732,6 +802,7 @@ extension MacOSSandboxService {
             default: .stopped
             }
         let networks = await inspectSandboxNetworkState(containerConfig: configuration).attachments
+        let networkPolicy = try MacOSGuestNetworkPolicyStore.load(from: root)
 
         let snapshot = SandboxSnapshot(
             configuration: try sandboxConfigurationSnapshot(),
@@ -745,7 +816,8 @@ extension MacOSSandboxService {
                     startedDate: workloads[configuration.id]?.startedAt
                 )
             ],
-            workloads: workloadSnapshots()
+            workloads: workloadSnapshots(),
+            networkPolicy: networkPolicy
         )
         let reply = message.reply()
         try reply.setState(snapshot)
@@ -3351,6 +3423,33 @@ extension MacOSSandboxService {
         try openLogsIfNeeded()
     }
 
+    func testingEvaluatePublishedPortPolicy(
+        proto: PublishProtocol,
+        sourceIP: String,
+        sourcePort: UInt16,
+        destinationIP: String,
+        destinationPort: UInt16
+    ) throws -> SandboxNetworkPolicyAction {
+        let socketProto: SocketForwarderProtocol =
+            switch proto {
+            case .tcp: .tcp
+            case .udp: .udp
+            }
+        let decision = makePublishedPortPolicyEvaluator()(
+            SocketForwarderPolicyEvaluation(
+                proto: socketProto,
+                sourceAddress: try SocketAddress(ipAddress: sourceIP, port: Int(sourcePort)),
+                destinationAddress: try SocketAddress(ipAddress: destinationIP, port: Int(destinationPort))
+            )
+        )
+        switch decision.action {
+        case .allow:
+            return .allow
+        case .deny:
+            return .deny
+        }
+    }
+
     func testingStateSnapshot() async throws -> SandboxSnapshot {
         guard let configuration else {
             throw ContainerizationError(.invalidState, message: "container not bootstrapped")
@@ -3363,6 +3462,7 @@ extension MacOSSandboxService {
             default: .stopped
             }
         let networks = await inspectSandboxNetworkState(containerConfig: configuration).attachments
+        let networkPolicy = try MacOSGuestNetworkPolicyStore.load(from: root)
 
         return SandboxSnapshot(
             configuration: try sandboxConfigurationSnapshot(),
@@ -3376,7 +3476,8 @@ extension MacOSSandboxService {
                     startedDate: workloads[configuration.id]?.startedAt
                 )
             ],
-            workloads: workloadSnapshots()
+            workloads: workloadSnapshots(),
+            networkPolicy: networkPolicy
         )
     }
 

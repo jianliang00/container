@@ -26,16 +26,20 @@ public struct SandboxLogPaths: Sendable, Codable, Equatable {
     public var guestAgentLogPath: String?
     /// Host path to the mirrored guest-agent stderr log, if present.
     public var guestAgentStderrLogPath: String?
+    /// Host path to the sandbox network audit log, if present.
+    public var networkAuditLogPath: String?
 
     public init(
         eventLogPath: String,
         bootLogPath: String,
         guestAgentLogPath: String? = nil,
-        guestAgentStderrLogPath: String? = nil
+        guestAgentStderrLogPath: String? = nil,
+        networkAuditLogPath: String? = nil
     ) {
         self.eventLogPath = eventLogPath
         self.bootLogPath = bootLogPath
         self.guestAgentLogPath = guestAgentLogPath
         self.guestAgentStderrLogPath = guestAgentStderrLogPath
+        self.networkAuditLogPath = networkAuditLogPath
     }
 }

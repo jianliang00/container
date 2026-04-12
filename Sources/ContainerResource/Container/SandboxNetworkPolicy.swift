@@ -88,6 +88,26 @@ public struct SandboxNetworkPolicyRule: Codable, Sendable, Equatable {
         self.endpoints = endpoints
         self.ports = ports
     }
+
+    public func matches(proto: PublishProtocol, endpoint: IPAddress, port: UInt16) -> Bool {
+        guard protocols.contains(proto) else {
+            return false
+        }
+
+        if !endpoints.isEmpty {
+            guard endpoints.contains(where: { $0.contains(endpoint) }) else {
+                return false
+            }
+        }
+
+        if !ports.isEmpty {
+            guard ports.contains(where: { $0.contains(port) }) else {
+                return false
+            }
+        }
+
+        return true
+    }
 }
 
 public struct SandboxNetworkPolicy: Codable, Sendable, Equatable {
@@ -116,6 +136,25 @@ public struct SandboxNetworkPolicy: Codable, Sendable, Equatable {
 
     public var rules: [SandboxNetworkPolicyRule] {
         ingressACL + egressACL
+    }
+
+    public func evaluate(
+        direction: SandboxNetworkPolicyDirection,
+        proto: PublishProtocol,
+        endpoint: IPAddress,
+        port: UInt16
+    ) -> SandboxNetworkPolicyDecision {
+        let rules =
+            switch direction {
+            case .ingress: ingressACL
+            case .egress: egressACL
+            }
+
+        for rule in rules where rule.matches(proto: proto, endpoint: endpoint, port: port) {
+            return SandboxNetworkPolicyDecision(action: rule.action, ruleID: rule.id)
+        }
+
+        return SandboxNetworkPolicyDecision(action: defaultAction, ruleID: nil)
     }
 }
 
@@ -152,6 +191,87 @@ public struct SandboxNetworkPolicyState: Codable, Sendable, Equatable {
         self.policy = policy
         self.renderedHostRuleIdentifiers = renderedHostRuleIdentifiers
         self.lastApplyResult = lastApplyResult
+    }
+}
+
+public struct SandboxNetworkPolicyDecision: Codable, Sendable, Equatable {
+    public let action: SandboxNetworkPolicyAction
+    public let ruleID: String?
+
+    public init(action: SandboxNetworkPolicyAction, ruleID: String?) {
+        self.action = action
+        self.ruleID = ruleID
+    }
+}
+
+public enum SandboxNetworkAuditEnforcementSource: String, Codable, Sendable, Equatable {
+    case publishedPort
+    case hostPacket
+}
+
+public struct SandboxNetworkAuditEvent: Codable, Sendable, Equatable {
+    public let timestamp: Date
+    public let sandboxID: String
+    public let networkID: String
+    public let policyGeneration: UInt64
+    public let direction: SandboxNetworkPolicyDirection
+    public let proto: PublishProtocol
+    public let sourceIP: IPAddress
+    public let sourcePort: UInt16?
+    public let destinationIP: IPAddress
+    public let destinationPort: UInt16?
+    public let action: SandboxNetworkPolicyAction
+    public let ruleID: String?
+    public let enforcementSource: SandboxNetworkAuditEnforcementSource
+
+    public init(
+        timestamp: Date,
+        sandboxID: String,
+        networkID: String,
+        policyGeneration: UInt64,
+        direction: SandboxNetworkPolicyDirection,
+        proto: PublishProtocol,
+        sourceIP: IPAddress,
+        sourcePort: UInt16?,
+        destinationIP: IPAddress,
+        destinationPort: UInt16?,
+        action: SandboxNetworkPolicyAction,
+        ruleID: String?,
+        enforcementSource: SandboxNetworkAuditEnforcementSource
+    ) {
+        self.timestamp = timestamp
+        self.sandboxID = sandboxID
+        self.networkID = networkID
+        self.policyGeneration = policyGeneration
+        self.direction = direction
+        self.proto = proto
+        self.sourceIP = sourceIP
+        self.sourcePort = sourcePort
+        self.destinationIP = destinationIP
+        self.destinationPort = destinationPort
+        self.action = action
+        self.ruleID = ruleID
+        self.enforcementSource = enforcementSource
+    }
+}
+
+extension SandboxNetworkPolicyEndpoint {
+    public func contains(_ address: IPAddress) -> Bool {
+        switch self {
+        case .ipv4CIDR(let cidr):
+            guard let ipv4 = address.ipv4 else {
+                return false
+            }
+            return cidr.contains(ipv4)
+        case .ipv4Host(let host):
+            return host == address
+        }
+    }
+}
+
+extension SandboxNetworkPortRange {
+    public func contains(_ port: UInt16) -> Bool {
+        lower <= port && port <= upper
     }
 }
 

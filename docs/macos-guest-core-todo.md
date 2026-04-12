@@ -272,51 +272,51 @@ Related design docs:
   - [ ] remove rules during policy removal
   - [ ] remove rules during network release and sandbox shutdown
   - [ ] expose apply, replace, remove, and status operations
-- [ ] Add published-port policy enforcement.
-  - [ ] evaluate inbound TCP connections before backend connect
-  - [ ] evaluate inbound UDP datagrams before backend write
-  - [ ] map published host ports to guest ports during policy evaluation
-  - [ ] close denied TCP connections
-  - [ ] drop denied UDP datagrams
-  - [ ] emit audit events for allowed and denied published-port traffic
-- [ ] Add structured network audit events.
-  - [ ] timestamp
-  - [ ] sandbox ID
-  - [ ] network ID
-  - [ ] policy generation
-  - [ ] direction
-  - [ ] protocol
-  - [ ] source IP
-  - [ ] source port
-  - [ ] destination IP
-  - [ ] destination port
-  - [ ] action
-  - [ ] rule ID
-  - [ ] enforcement source
+- [x] Add published-port policy enforcement.
+  - [x] evaluate inbound TCP connections before backend connect
+  - [x] evaluate inbound UDP datagrams before backend write
+  - [x] map published host ports to guest ports during policy evaluation
+  - [x] close denied TCP connections
+  - [x] drop denied UDP datagrams
+  - [x] emit audit events for allowed and denied published-port traffic
+- [x] Add structured network audit events.
+  - [x] timestamp
+  - [x] sandbox ID
+  - [x] network ID
+  - [x] policy generation
+  - [x] direction
+  - [x] protocol
+  - [x] source IP
+  - [x] source port
+  - [x] destination IP
+  - [x] destination port
+  - [x] action
+  - [x] rule ID
+  - [x] enforcement source
 - [ ] Add an audit event sink.
-  - [ ] append audit events to the sandbox event log
-  - [ ] expose audit event paths in sandbox inspect output
+  - [x] append audit events to the sandbox event log
+  - [x] expose audit event paths in sandbox inspect output
   - [ ] rotate audit logs with existing sandbox log retention behavior
-  - [ ] include policy generation in inspect snapshots
+  - [x] include policy generation in inspect snapshots
 - [ ] Add host packet audit ingestion.
   - [ ] collect allowed and denied ingress events from host rules
   - [ ] collect allowed and denied egress events from host rules
   - [ ] normalize host rule events into the structured audit schema
   - [ ] attach sandbox identity from persisted policy state
 - [ ] Add recovery behavior.
-  - [ ] reload persisted policy state during helper restart
+  - [x] reload persisted policy state during helper restart
   - [ ] reapply host rules after helper restart
   - [ ] reconcile missing host rules with persisted generations
   - [ ] remove orphaned host rules for deleted sandboxes
 - [ ] Add unit coverage.
   - [x] policy model encoding and decoding
   - [ ] ACL validation
-  - [ ] generation conflict handling
+  - [x] generation conflict handling
   - [ ] host rule rendering
-  - [ ] published-port TCP allow, deny, and audit
-  - [ ] published-port UDP allow, deny, and audit
+  - [x] published-port TCP allow, deny, and audit
+  - [x] published-port UDP allow, deny, and audit
   - [ ] policy persistence and recovery
-  - [ ] policy removal cleanup
+  - [x] policy removal cleanup
 - [ ] Add integration coverage.
   - [ ] same-node sandbox ingress allow and deny
   - [ ] external egress allow and deny

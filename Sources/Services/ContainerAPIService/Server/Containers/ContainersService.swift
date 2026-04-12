@@ -1370,6 +1370,7 @@ public actor ContainersService {
     ) throws -> SandboxSnapshot {
         let networks = (try MacOSGuestNetworkLeaseStore.load(from: root))?.attachments ?? containerNetworks
         let workloads = try loadPersistedWorkloadSnapshots(root: root, configuration: configuration)
+        let networkPolicy = try MacOSGuestNetworkPolicyStore.load(from: root)
         return SandboxSnapshot(
             configuration: SandboxConfiguration(containerConfiguration: configuration),
             status: containerStatus,
@@ -1382,7 +1383,8 @@ public actor ContainersService {
                     startedDate: startedDate
                 )
             ],
-            workloads: workloads
+            workloads: workloads,
+            networkPolicy: networkPolicy
         )
     }
 
@@ -1438,7 +1440,8 @@ public actor ContainersService {
             eventLogPath: layout.stdioLogURL.path,
             bootLogPath: layout.bootLogURL.path,
             guestAgentLogPath: layout.guestAgentHostLogURL.path,
-            guestAgentStderrLogPath: layout.guestAgentHostStderrLogURL.path
+            guestAgentStderrLogPath: layout.guestAgentHostStderrLogURL.path,
+            networkAuditLogPath: layout.networkAuditLogURL.path
         )
     }
 

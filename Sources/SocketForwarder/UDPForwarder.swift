@@ -102,6 +102,7 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
     private let serverAddress: SocketAddress
     private let channelTracker: ForwarderChannelTracker
     private let log: Logger?
+    private let policyEvaluator: SocketForwarderPolicyEvaluator?
 
     private var proxies: LRUCache<String, ProxyContext>
 
@@ -109,13 +110,15 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
         proxyAddress: SocketAddress,
         serverAddress: SocketAddress,
         channelTracker: ForwarderChannelTracker,
-        log: Logger? = nil
+        log: Logger? = nil,
+        policyEvaluator: SocketForwarderPolicyEvaluator? = nil
     ) {
         self.proxyAddress = proxyAddress
         self.serverAddress = serverAddress
         self.channelTracker = channelTracker
         self.proxies = LRUCache(size: maxProxies)
         self.log = log
+        self.policyEvaluator = policyEvaluator
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -129,6 +132,20 @@ private final class UDPProxyFrontend: ChannelInboundHandler {
         guard let clientPort = inbound.remoteAddress.port else {
             log?.error("frontend - no client port in inbound payload")
             return
+        }
+
+        if let policyEvaluator {
+            let decision = policyEvaluator(
+                SocketForwarderPolicyEvaluation(
+                    proto: .udp,
+                    sourceAddress: inbound.remoteAddress,
+                    destinationAddress: self.serverAddress
+                )
+            )
+            guard decision.action == .allow else {
+                self.log?.trace("frontend - dropping UDP datagram denied by policy")
+                return
+            }
         }
 
         let key = "\(clientIP):\(clientPort)"
@@ -192,16 +209,20 @@ public struct UDPForwarder: SocketForwarder {
 
     private let log: Logger?
 
+    private let policyEvaluator: SocketForwarderPolicyEvaluator?
+
     public init(
         proxyAddress: SocketAddress,
         serverAddress: SocketAddress,
         eventLoopGroup: any EventLoopGroup,
-        log: Logger? = nil
+        log: Logger? = nil,
+        policyEvaluator: SocketForwarderPolicyEvaluator? = nil
     ) throws {
         self.proxyAddress = proxyAddress
         self.serverAddress = serverAddress
         self.eventLoopGroup = eventLoopGroup
         self.log = log
+        self.policyEvaluator = policyEvaluator
     }
 
     public func run() throws -> EventLoopFuture<SocketForwarderResult> {
@@ -214,7 +235,8 @@ public struct UDPForwarder: SocketForwarder {
                     proxyAddress: proxyAddress,
                     serverAddress: serverAddress,
                     channelTracker: tracker,
-                    log: log
+                    log: log,
+                    policyEvaluator: self.policyEvaluator
                 )
                 return serverChannel.eventLoop.makeCompletedFuture {
                     try serverChannel.pipeline.syncOperations.addHandler(proxyToServerHandler)

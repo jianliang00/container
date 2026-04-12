@@ -55,6 +55,78 @@ struct SandboxNetworkPolicyTests {
         #expect(!SandboxNetworkPolicyEndpoint.ipv4Host(try IPAddress("fe80::1")).isIPv4)
     }
 
+    @Test
+    func policyEvaluationMatchesFirstApplicableRule() throws {
+        let policy = makePolicy()
+
+        let allowed = policy.evaluate(
+            direction: .ingress,
+            proto: .tcp,
+            endpoint: try IPAddress("10.0.0.25"),
+            port: 443
+        )
+        #expect(allowed.action == .allow)
+        #expect(allowed.ruleID == "ingress-web")
+
+        let denied = policy.evaluate(
+            direction: .ingress,
+            proto: .tcp,
+            endpoint: try IPAddress("10.0.1.25"),
+            port: 443
+        )
+        #expect(denied.action == .deny)
+        #expect(denied.ruleID == nil)
+    }
+
+    @Test
+    func policyEvaluationUsesGuestPortForPublishedIngress() throws {
+        let policy = makePolicy()
+
+        let hostPortOnly = policy.evaluate(
+            direction: .ingress,
+            proto: .tcp,
+            endpoint: try IPAddress("10.0.0.25"),
+            port: 8443
+        )
+        #expect(hostPortOnly.action == .deny)
+
+        let guestPort = policy.evaluate(
+            direction: .ingress,
+            proto: .tcp,
+            endpoint: try IPAddress("10.0.0.25"),
+            port: 443
+        )
+        #expect(guestPort.action == .allow)
+    }
+
+    @Test
+    func auditEventRoundTripsThroughCodable() throws {
+        let event = SandboxNetworkAuditEvent(
+            timestamp: Date(timeIntervalSince1970: 1_776_000_000),
+            sandboxID: "sandbox-1",
+            networkID: "default",
+            policyGeneration: 7,
+            direction: .ingress,
+            proto: .tcp,
+            sourceIP: try IPAddress("10.0.0.25"),
+            sourcePort: 50000,
+            destinationIP: try IPAddress("192.168.64.2"),
+            destinationPort: 443,
+            action: .deny,
+            ruleID: "block-web",
+            enforcementSource: .publishedPort
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(event)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(SandboxNetworkAuditEvent.self, from: data)
+
+        #expect(decoded == event)
+    }
+
     private func makePolicy() -> SandboxNetworkPolicy {
         SandboxNetworkPolicy(
             sandboxID: "sandbox-1",

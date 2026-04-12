@@ -258,6 +258,88 @@ struct MacOSSandboxServiceNetworkTests {
     }
 
     @Test
+    func publishedPortPolicyEvaluatesGuestPortAndWritesAuditEvents() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-policy-audit")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
+        _ = try await service.prepareSandboxNetworkState(containerConfig: config)
+        _ = try await service.testingApplySandboxPolicyState(
+            try makePolicy(sandboxID: config.id, generation: 7),
+            containerConfig: config
+        )
+
+        let allowed = try await service.testingEvaluatePublishedPortPolicy(
+            proto: .tcp,
+            sourceIP: "10.0.0.25",
+            sourcePort: 50000,
+            destinationIP: "192.168.64.2",
+            destinationPort: 443
+        )
+        let denied = try await service.testingEvaluatePublishedPortPolicy(
+            proto: .udp,
+            sourceIP: "10.0.1.25",
+            sourcePort: 50001,
+            destinationIP: "192.168.64.2",
+            destinationPort: 443
+        )
+
+        #expect(allowed == .allow)
+        #expect(denied == .deny)
+
+        let logURL = MacOSSandboxLayout(root: root).networkAuditLogURL
+        let lines = try String(contentsOf: logURL, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        #expect(lines.count == 2)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let firstEvent = try decoder.decode(SandboxNetworkAuditEvent.self, from: Data(lines[0].utf8))
+        let secondEvent = try decoder.decode(SandboxNetworkAuditEvent.self, from: Data(lines[1].utf8))
+
+        #expect(firstEvent.sandboxID == config.id)
+        #expect(firstEvent.networkID == "default")
+        #expect(firstEvent.policyGeneration == 7)
+        #expect(firstEvent.direction == .ingress)
+        #expect(firstEvent.proto == .tcp)
+        #expect(firstEvent.sourceIP.description == "10.0.0.25")
+        #expect(firstEvent.sourcePort == 50000)
+        #expect(firstEvent.destinationIP.description == "192.168.64.2")
+        #expect(firstEvent.destinationPort == 443)
+        #expect(firstEvent.action == .allow)
+        #expect(firstEvent.ruleID == "ingress-web")
+        #expect(firstEvent.enforcementSource == .publishedPort)
+
+        #expect(secondEvent.proto == .udp)
+        #expect(secondEvent.action == .deny)
+        #expect(secondEvent.ruleID == nil)
+    }
+
+    @Test
+    func sandboxStateSnapshotIncludesAppliedPolicyGeneration() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-policy-snapshot")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
+        try await service.testingPrepareSandbox(config)
+        _ = try await service.prepareSandboxNetworkState(containerConfig: config)
+        _ = try await service.testingApplySandboxPolicyState(
+            try makePolicy(sandboxID: config.id, generation: 3),
+            containerConfig: config
+        )
+
+        let snapshot = try await service.testingStateSnapshot()
+
+        #expect(snapshot.networkPolicy?.sandboxID == config.id)
+        #expect(snapshot.networkPolicy?.generation == 3)
+    }
+
+    @Test
     func socketForwarderLifecycleCreatesAndReleasesEventLoopGroup() async throws {
         let root = try makeTemporaryDirectory(prefix: "macos-sandbox-forwarder-lifecycle")
         defer { try? FileManager.default.removeItem(at: root) }

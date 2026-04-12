@@ -77,6 +77,10 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
         root.appendingPathComponent("guest-agent.stderr.log")
     }
 
+    public var networkAuditLogURL: URL {
+        root.appendingPathComponent("network-audit.log")
+    }
+
     public var temporaryDirectoryURL: URL {
         stateRootURL.appendingPathComponent("tmp")
     }

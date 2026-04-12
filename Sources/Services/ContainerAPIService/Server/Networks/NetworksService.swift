@@ -266,6 +266,18 @@ public actor NetworksService {
         self.networkStates.removeValue(forKey: id)
     }
 
+    public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
+        try await containersService.applySandboxPolicy(policy)
+    }
+
+    public func removeSandboxPolicy(sandboxID: String) async throws {
+        try await containersService.removeSandboxPolicy(sandboxID: sandboxID)
+    }
+
+    public func inspectSandboxPolicy(sandboxID: String) async throws -> SandboxNetworkPolicyState? {
+        try await containersService.inspectSandboxPolicy(sandboxID: sandboxID)
+    }
+
     /// Perform a hostname lookup on all networks.
     public func lookup(hostname: String) async throws -> Attachment? {
         for id in networkStates.keys {

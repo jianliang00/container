@@ -17,6 +17,7 @@
 #if os(macOS)
 import ContainerResource
 import Containerization
+import ContainerizationError
 import ContainerizationExtras
 import Foundation
 import Logging
@@ -171,6 +172,89 @@ struct MacOSSandboxServiceNetworkTests {
         #expect(await recorder.allocateCalls().isEmpty)
         #expect(await recorder.lookupCalls().isEmpty)
         #expect(await recorder.deallocateCalls().isEmpty)
+    }
+
+    @Test
+    func applySandboxPolicyPersistsPolicyState() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-policy")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
+        _ = try await service.prepareSandboxNetworkState(containerConfig: config)
+
+        let policy = try makePolicy(sandboxID: config.id, generation: 1)
+        let state = try await service.testingApplySandboxPolicyState(policy, containerConfig: config)
+
+        #expect(state.sandboxID == config.id)
+        #expect(state.networkID == "default")
+        #expect(state.ipv4Address.description == "192.168.64.2")
+        #expect(state.macAddress?.description == "02:42:ac:11:00:02")
+        #expect(state.generation == 1)
+        #expect(state.policy == policy)
+        #expect(state.renderedHostRuleIdentifiers.isEmpty)
+        #expect(state.lastApplyResult == .stored)
+        #expect(try MacOSGuestNetworkPolicyStore.load(from: root) == state)
+    }
+
+    @Test
+    func applySandboxPolicyRejectsStaleGeneration() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-policy-stale")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
+        _ = try await service.prepareSandboxNetworkState(containerConfig: config)
+
+        _ = try await service.testingApplySandboxPolicyState(
+            try makePolicy(sandboxID: config.id, generation: 2),
+            containerConfig: config
+        )
+
+        await #expect(throws: ContainerizationError.self) {
+            _ = try await service.testingApplySandboxPolicyState(
+                try makePolicy(sandboxID: config.id, generation: 1),
+                containerConfig: config
+            )
+        }
+    }
+
+    @Test
+    func applySandboxPolicyRejectsVirtualizationNAT() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-policy-nat")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration(backend: .virtualizationNAT)
+
+        await #expect(throws: ContainerizationError.self) {
+            _ = try await service.testingApplySandboxPolicyState(
+                try makePolicy(sandboxID: config.id, generation: 1),
+                containerConfig: config
+            )
+        }
+    }
+
+    @Test
+    func releaseSandboxNetworkRemovesPolicyState() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-policy-release")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
+        _ = try await service.prepareSandboxNetworkState(containerConfig: config)
+        _ = try await service.testingApplySandboxPolicyState(
+            try makePolicy(sandboxID: config.id, generation: 1),
+            containerConfig: config
+        )
+
+        try await service.releaseSandboxNetworkState(containerConfig: config)
+
+        #expect(try MacOSGuestNetworkPolicyStore.load(from: root) == nil)
     }
 
     @Test
@@ -374,6 +458,41 @@ private func makeAttachment(
         ipv6Address: nil,
         macAddress: resolvedMACAddress,
         dns: dns
+    )
+}
+
+private func makePolicy(sandboxID: String, generation: UInt64) throws -> SandboxNetworkPolicy {
+    SandboxNetworkPolicy(
+        sandboxID: sandboxID,
+        generation: generation,
+        ingressACL: [
+            SandboxNetworkPolicyRule(
+                id: "ingress-web",
+                action: .allow,
+                protocols: [.tcp],
+                endpoints: [
+                    .ipv4CIDR(try CIDRv4("10.0.0.0/24"))
+                ],
+                ports: [
+                    .single(443)
+                ]
+            )
+        ],
+        egressACL: [
+            SandboxNetworkPolicyRule(
+                id: "egress-dns",
+                action: .allow,
+                protocols: [.udp],
+                endpoints: [
+                    .ipv4Host(try IPAddress("9.9.9.9"))
+                ],
+                ports: [
+                    .single(53)
+                ]
+            )
+        ],
+        defaultAction: .deny,
+        auditMode: .all
     )
 }
 

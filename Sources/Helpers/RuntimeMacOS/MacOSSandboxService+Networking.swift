@@ -78,6 +78,30 @@ extension MacOSSandboxService {
         return message.reply()
     }
 
+    @Sendable
+    func applySandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
+        let config = try loadContainerConfigurationForNetworkControl()
+        let policy = try message.sandboxNetworkPolicy()
+        let policyState = try applySandboxPolicyState(policy, containerConfig: config)
+        let reply = message.reply()
+        try reply.setSandboxNetworkPolicyState(policyState)
+        return reply
+    }
+
+    @Sendable
+    func removeSandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
+        try MacOSGuestNetworkPolicyStore.remove(from: root)
+        return message.reply()
+    }
+
+    @Sendable
+    func inspectSandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
+        let policyState = try MacOSGuestNetworkPolicyStore.load(from: root)
+        let reply = message.reply()
+        try reply.setSandboxNetworkPolicyState(policyState)
+        return reply
+    }
+
     func prepareSandboxNetworkState(
         containerConfig: ContainerConfiguration
     ) async throws -> SandboxNetworkState {
@@ -85,6 +109,7 @@ extension MacOSSandboxService {
 
         guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
             try? MacOSGuestNetworkLeaseStore.remove(from: root)
+            try? MacOSGuestNetworkPolicyStore.remove(from: root)
             return SandboxNetworkState(attachments: [])
         }
 
@@ -164,6 +189,7 @@ extension MacOSSandboxService {
     ) async throws {
         guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
             try? MacOSGuestNetworkLeaseStore.remove(from: root)
+            try? MacOSGuestNetworkPolicyStore.remove(from: root)
             return
         }
 
@@ -203,6 +229,7 @@ extension MacOSSandboxService {
 
         if !releaseFailed {
             try MacOSGuestNetworkLeaseStore.remove(from: root)
+            try MacOSGuestNetworkPolicyStore.remove(from: root)
             return
         }
 
@@ -228,6 +255,13 @@ extension MacOSSandboxService {
         }
     }
 
+    func testingApplySandboxPolicyState(
+        _ policy: SandboxNetworkPolicy,
+        containerConfig: ContainerConfiguration
+    ) throws -> SandboxNetworkPolicyState {
+        try applySandboxPolicyState(policy, containerConfig: containerConfig)
+    }
+
     private func loadContainerConfigurationForNetworkControl() throws -> ContainerConfiguration {
         if let configuration {
             return configuration
@@ -247,5 +281,97 @@ extension MacOSSandboxService {
         }
         self.configuration = config
         return config
+    }
+
+    private func applySandboxPolicyState(
+        _ policy: SandboxNetworkPolicy,
+        containerConfig: ContainerConfiguration
+    ) throws -> SandboxNetworkPolicyState {
+        guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "sandbox network policy requires the vmnetShared network backend"
+            )
+        }
+        guard policy.sandboxID == containerConfig.id else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "network policy sandbox id \(policy.sandboxID) does not match container id \(containerConfig.id)"
+            )
+        }
+        try validate(policy)
+
+        guard let lease = try MacOSGuestNetworkLeaseStore.load(from: root),
+            let attachment = lease.attachments.first
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "sandbox network policy requires a prepared sandbox network lease"
+            )
+        }
+
+        if let existing = try MacOSGuestNetworkPolicyStore.load(from: root),
+            policy.generation < existing.generation
+        {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "network policy generation \(policy.generation) is older than current generation \(existing.generation)"
+            )
+        }
+
+        let state = SandboxNetworkPolicyState(
+            sandboxID: policy.sandboxID,
+            networkID: attachment.network,
+            ipv4Address: try IPAddress(attachment.ipv4Address.address.description),
+            macAddress: attachment.macAddress,
+            generation: policy.generation,
+            policy: policy,
+            renderedHostRuleIdentifiers: [],
+            lastApplyResult: .stored
+        )
+        try MacOSGuestNetworkPolicyStore.save(state, in: root)
+        return state
+    }
+
+    private func validate(_ policy: SandboxNetworkPolicy) throws {
+        guard policy.generation > 0 else {
+            throw ContainerizationError(.invalidArgument, message: "network policy generation must be greater than zero")
+        }
+
+        var ids = Set<String>()
+        for rule in policy.rules {
+            guard !rule.id.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "network policy rule id cannot be empty")
+            }
+            guard ids.insert(rule.id).inserted else {
+                throw ContainerizationError(.invalidArgument, message: "duplicate network policy rule id \(rule.id)")
+            }
+            guard !rule.protocols.isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "network policy rule \(rule.id) must include at least one protocol")
+            }
+            for endpoint in rule.endpoints where !endpoint.isIPv4 {
+                throw ContainerizationError(.invalidArgument, message: "network policy rule \(rule.id) contains a non-IPv4 endpoint")
+            }
+            for port in rule.ports where !port.isValid {
+                throw ContainerizationError(.invalidArgument, message: "network policy rule \(rule.id) contains an invalid port range")
+            }
+        }
+    }
+}
+
+extension XPCMessage {
+    fileprivate func sandboxNetworkPolicy() throws -> SandboxNetworkPolicy {
+        guard let data = self.dataNoCopy(key: SandboxKeys.networkPolicy.rawValue) else {
+            throw ContainerizationError(.invalidArgument, message: "missing sandbox network policy payload")
+        }
+        return try JSONDecoder().decode(SandboxNetworkPolicy.self, from: data)
+    }
+
+    fileprivate func setSandboxNetworkPolicyState(_ state: SandboxNetworkPolicyState?) throws {
+        guard let state else {
+            return
+        }
+        let data = try JSONEncoder().encode(state)
+        self.set(key: SandboxKeys.networkPolicyState.rawValue, value: data)
     }
 }

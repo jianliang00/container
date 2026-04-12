@@ -339,27 +339,8 @@ extension MacOSSandboxService {
     }
 
     private func validate(_ policy: SandboxNetworkPolicy) throws {
-        guard policy.generation > 0 else {
-            throw ContainerizationError(.invalidArgument, message: "network policy generation must be greater than zero")
-        }
-
-        var ids = Set<String>()
-        for rule in policy.rules {
-            guard !rule.id.isEmpty else {
-                throw ContainerizationError(.invalidArgument, message: "network policy rule id cannot be empty")
-            }
-            guard ids.insert(rule.id).inserted else {
-                throw ContainerizationError(.invalidArgument, message: "duplicate network policy rule id \(rule.id)")
-            }
-            guard !rule.protocols.isEmpty else {
-                throw ContainerizationError(.invalidArgument, message: "network policy rule \(rule.id) must include at least one protocol")
-            }
-            for endpoint in rule.endpoints where !endpoint.isIPv4 {
-                throw ContainerizationError(.invalidArgument, message: "network policy rule \(rule.id) contains a non-IPv4 endpoint")
-            }
-            for port in rule.ports where !port.isValid {
-                throw ContainerizationError(.invalidArgument, message: "network policy rule \(rule.id) contains an invalid port range")
-            }
+        if let issue = policy.validationIssues.first {
+            throw ContainerizationError(.invalidArgument, message: issue)
         }
     }
 }

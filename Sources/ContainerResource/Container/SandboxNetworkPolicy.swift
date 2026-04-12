@@ -275,6 +275,159 @@ extension SandboxNetworkPortRange {
     }
 }
 
+public struct SandboxNetworkHostRule: Codable, Sendable, Equatable {
+    public let id: String
+    public let direction: SandboxNetworkPolicyDirection
+    public let action: SandboxNetworkPolicyAction
+    public let proto: PublishProtocol
+    public let sandboxIPv4Address: IPAddress
+    public let sandboxMACAddress: MACAddress?
+    public let endpoint: SandboxNetworkPolicyEndpoint?
+    public let portRange: SandboxNetworkPortRange?
+    public let policyRuleID: String?
+    public let isDefault: Bool
+
+    public init(
+        id: String,
+        direction: SandboxNetworkPolicyDirection,
+        action: SandboxNetworkPolicyAction,
+        proto: PublishProtocol,
+        sandboxIPv4Address: IPAddress,
+        sandboxMACAddress: MACAddress?,
+        endpoint: SandboxNetworkPolicyEndpoint?,
+        portRange: SandboxNetworkPortRange?,
+        policyRuleID: String?,
+        isDefault: Bool
+    ) {
+        self.id = id
+        self.direction = direction
+        self.action = action
+        self.proto = proto
+        self.sandboxIPv4Address = sandboxIPv4Address
+        self.sandboxMACAddress = sandboxMACAddress
+        self.endpoint = endpoint
+        self.portRange = portRange
+        self.policyRuleID = policyRuleID
+        self.isDefault = isDefault
+    }
+}
+
+public struct SandboxNetworkHostRuleSet: Codable, Sendable, Equatable {
+    public let sandboxID: String
+    public let networkID: String
+    public let generation: UInt64
+    public let rules: [SandboxNetworkHostRule]
+
+    public init(
+        sandboxID: String,
+        networkID: String,
+        generation: UInt64,
+        rules: [SandboxNetworkHostRule]
+    ) {
+        self.sandboxID = sandboxID
+        self.networkID = networkID
+        self.generation = generation
+        self.rules = rules
+    }
+}
+
+public enum SandboxNetworkHostRuleRenderer {
+    public static func render(_ state: SandboxNetworkPolicyState) -> SandboxNetworkHostRuleSet {
+        var rules: [SandboxNetworkHostRule] = []
+        rules.append(contentsOf: renderACL(state, direction: .ingress, acl: state.policy.ingressACL))
+        rules.append(contentsOf: renderACL(state, direction: .egress, acl: state.policy.egressACL))
+        rules.append(contentsOf: renderDefaultRules(state, direction: .ingress))
+        rules.append(contentsOf: renderDefaultRules(state, direction: .egress))
+        return SandboxNetworkHostRuleSet(
+            sandboxID: state.sandboxID,
+            networkID: state.networkID,
+            generation: state.generation,
+            rules: rules
+        )
+    }
+
+    private static func renderACL(
+        _ state: SandboxNetworkPolicyState,
+        direction: SandboxNetworkPolicyDirection,
+        acl: [SandboxNetworkPolicyRule]
+    ) -> [SandboxNetworkHostRule] {
+        var rendered: [SandboxNetworkHostRule] = []
+        for rule in acl {
+            let endpoints = rule.endpoints.map(Optional.some).ifEmpty([nil])
+            let ports = rule.ports.map(Optional.some).ifEmpty([nil])
+            for proto in rule.protocols {
+                for endpoint in endpoints {
+                    for port in ports {
+                        rendered.append(
+                            SandboxNetworkHostRule(
+                                id: makeRuleID(
+                                    sandboxID: state.sandboxID,
+                                    generation: state.generation,
+                                    direction: direction,
+                                    proto: proto,
+                                    policyRuleID: rule.id,
+                                    index: rendered.count
+                                ),
+                                direction: direction,
+                                action: rule.action,
+                                proto: proto,
+                                sandboxIPv4Address: state.ipv4Address,
+                                sandboxMACAddress: state.macAddress,
+                                endpoint: endpoint,
+                                portRange: port,
+                                policyRuleID: rule.id,
+                                isDefault: false
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        return rendered
+    }
+
+    private static func renderDefaultRules(
+        _ state: SandboxNetworkPolicyState,
+        direction: SandboxNetworkPolicyDirection
+    ) -> [SandboxNetworkHostRule] {
+        [PublishProtocol.tcp, .udp].map { proto in
+            SandboxNetworkHostRule(
+                id: makeRuleID(
+                    sandboxID: state.sandboxID,
+                    generation: state.generation,
+                    direction: direction,
+                    proto: proto,
+                    policyRuleID: "default",
+                    index: 0
+                ),
+                direction: direction,
+                action: state.policy.defaultAction,
+                proto: proto,
+                sandboxIPv4Address: state.ipv4Address,
+                sandboxMACAddress: state.macAddress,
+                endpoint: nil,
+                portRange: nil,
+                policyRuleID: nil,
+                isDefault: true
+            )
+        }
+    }
+
+    private static func makeRuleID(
+        sandboxID: String,
+        generation: UInt64,
+        direction: SandboxNetworkPolicyDirection,
+        proto: PublishProtocol,
+        policyRuleID: String,
+        index: Int
+    ) -> String {
+        let raw = "\(sandboxID)-g\(generation)-\(direction.rawValue)-\(proto.rawValue)-\(policyRuleID)-\(index)"
+        return raw.map { character in
+            character.isLetter || character.isNumber || character == "-" ? character : "-"
+        }.reduce(into: "") { $0.append($1) }
+    }
+}
+
 public enum MacOSGuestNetworkPolicyStore {
     public static let filename = "macos-guest-network-policy.json"
 
@@ -293,7 +446,7 @@ public enum MacOSGuestNetworkPolicyStore {
 
     public static func save(_ state: SandboxNetworkPolicyState, in root: URL) throws {
         let data = try JSONEncoder().encode(state)
-        try data.write(to: fileURL(root: root))
+        try data.write(to: fileURL(root: root), options: .atomic)
     }
 
     public static func remove(from root: URL) throws {
@@ -302,5 +455,41 @@ public enum MacOSGuestNetworkPolicyStore {
             return
         }
         try FileManager.default.removeItem(at: policyURL)
+    }
+}
+
+public enum MacOSGuestHostNetworkPolicyStore {
+    public static let filename = "macos-guest-host-network-policy.json"
+
+    public static func fileURL(root: URL) -> URL {
+        root.appendingPathComponent(filename)
+    }
+
+    public static func load(from root: URL) throws -> SandboxNetworkHostRuleSet? {
+        let ruleSetURL = fileURL(root: root)
+        guard FileManager.default.fileExists(atPath: ruleSetURL.path) else {
+            return nil
+        }
+        let data = try Data(contentsOf: ruleSetURL)
+        return try JSONDecoder().decode(SandboxNetworkHostRuleSet.self, from: data)
+    }
+
+    public static func save(_ ruleSet: SandboxNetworkHostRuleSet, in root: URL) throws {
+        let data = try JSONEncoder().encode(ruleSet)
+        try data.write(to: fileURL(root: root), options: .atomic)
+    }
+
+    public static func remove(from root: URL) throws {
+        let ruleSetURL = fileURL(root: root)
+        guard FileManager.default.fileExists(atPath: ruleSetURL.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: ruleSetURL)
+    }
+}
+
+extension Array {
+    fileprivate func ifEmpty(_ fallback: @autoclosure () -> [Element]) -> [Element] {
+        isEmpty ? fallback() : self
     }
 }

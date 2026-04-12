@@ -90,6 +90,7 @@ extension MacOSSandboxService {
 
     @Sendable
     func removeSandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
+        try MacOSGuestHostPacketPolicyController(root: root).remove()
         try MacOSGuestNetworkPolicyStore.remove(from: root)
         return message.reply()
     }
@@ -110,6 +111,7 @@ extension MacOSSandboxService {
         guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
             try? MacOSGuestNetworkLeaseStore.remove(from: root)
             try? MacOSGuestNetworkPolicyStore.remove(from: root)
+            try? MacOSGuestHostPacketPolicyController(root: root).remove()
             return SandboxNetworkState(attachments: [])
         }
 
@@ -190,6 +192,7 @@ extension MacOSSandboxService {
         guard containerConfig.macosGuest?.networkBackend == .vmnetShared else {
             try? MacOSGuestNetworkLeaseStore.remove(from: root)
             try? MacOSGuestNetworkPolicyStore.remove(from: root)
+            try? MacOSGuestHostPacketPolicyController(root: root).remove()
             return
         }
 
@@ -230,6 +233,7 @@ extension MacOSSandboxService {
         if !releaseFailed {
             try MacOSGuestNetworkLeaseStore.remove(from: root)
             try MacOSGuestNetworkPolicyStore.remove(from: root)
+            try MacOSGuestHostPacketPolicyController(root: root).remove()
             return
         }
 
@@ -329,8 +333,9 @@ extension MacOSSandboxService {
             renderedHostRuleIdentifiers: [],
             lastApplyResult: .stored
         )
-        try MacOSGuestNetworkPolicyStore.save(state, in: root)
-        return state
+        let renderedState = try MacOSGuestHostPacketPolicyController(root: root).replace(with: state)
+        try MacOSGuestNetworkPolicyStore.save(renderedState, in: root)
+        return renderedState
     }
 
     private func validate(_ policy: SandboxNetworkPolicy) throws {

@@ -263,15 +263,15 @@ Related design docs:
   - [x] return invalid-state errors for missing leases
   - [x] return invalid-argument errors for non-IPv4 endpoints
   - [x] reject stale generations
-- [ ] Add a host packet policy controller.
-  - [ ] render ingress rules by sandbox IPv4 and MAC
-  - [ ] render egress rules by sandbox IPv4 and MAC
-  - [ ] render TCP and UDP port rules
-  - [ ] apply rules idempotently by sandbox ID and generation
-  - [ ] replace rules atomically for a new generation
-  - [ ] remove rules during policy removal
-  - [ ] remove rules during network release and sandbox shutdown
-  - [ ] expose apply, replace, remove, and status operations
+- [x] Add a host packet policy controller.
+  - [x] render ingress rules by sandbox IPv4 and MAC
+  - [x] render egress rules by sandbox IPv4 and MAC
+  - [x] render TCP and UDP port rules
+  - [x] apply rules idempotently by sandbox ID and generation
+  - [x] replace rules atomically for a new generation
+  - [x] remove rules during policy removal
+  - [x] remove rules during network release and sandbox shutdown
+  - [x] expose apply, replace, remove, and status operations
 - [x] Add published-port policy enforcement.
   - [x] evaluate inbound TCP connections before backend connect
   - [x] evaluate inbound UDP datagrams before backend write
@@ -312,10 +312,10 @@ Related design docs:
   - [x] policy model encoding and decoding
   - [ ] ACL validation
   - [x] generation conflict handling
-  - [ ] host rule rendering
+  - [x] host rule rendering
   - [x] published-port TCP allow, deny, and audit
   - [x] published-port UDP allow, deny, and audit
-  - [ ] policy persistence and recovery
+  - [x] policy persistence and recovery
   - [x] policy removal cleanup
 - [ ] Add integration coverage.
   - [ ] same-node sandbox ingress allow and deny

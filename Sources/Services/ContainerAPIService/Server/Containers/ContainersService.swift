@@ -687,6 +687,7 @@ public actor ContainersService {
         }
 
         let root = self.containerRoot.appendingPathComponent(sandboxID)
+        try MacOSGuestHostNetworkPolicyStore.remove(from: root)
         try MacOSGuestNetworkPolicyStore.remove(from: root)
     }
 

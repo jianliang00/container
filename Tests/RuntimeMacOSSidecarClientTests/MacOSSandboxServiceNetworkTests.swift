@@ -193,9 +193,13 @@ struct MacOSSandboxServiceNetworkTests {
         #expect(state.macAddress?.description == "02:42:ac:11:00:02")
         #expect(state.generation == 1)
         #expect(state.policy == policy)
-        #expect(state.renderedHostRuleIdentifiers.isEmpty)
+        #expect(state.renderedHostRuleIdentifiers.count == 6)
         #expect(state.lastApplyResult == .stored)
         #expect(try MacOSGuestNetworkPolicyStore.load(from: root) == state)
+
+        let maybeHostRuleSet = try MacOSGuestHostNetworkPolicyStore.load(from: root)
+        let hostRuleSet = try #require(maybeHostRuleSet)
+        #expect(hostRuleSet.rules.map(\.id) == state.renderedHostRuleIdentifiers)
     }
 
     @Test
@@ -255,6 +259,7 @@ struct MacOSSandboxServiceNetworkTests {
         try await service.releaseSandboxNetworkState(containerConfig: config)
 
         #expect(try MacOSGuestNetworkPolicyStore.load(from: root) == nil)
+        #expect(try MacOSGuestHostNetworkPolicyStore.load(from: root) == nil)
     }
 
     @Test
@@ -337,6 +342,32 @@ struct MacOSSandboxServiceNetworkTests {
 
         #expect(snapshot.networkPolicy?.sandboxID == config.id)
         #expect(snapshot.networkPolicy?.generation == 3)
+    }
+
+    @Test
+    func publishedPortPolicyReloadsPersistedStateAcrossServiceRestart() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-policy-recovery")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
+        _ = try await service.prepareSandboxNetworkState(containerConfig: config)
+        _ = try await service.testingApplySandboxPolicyState(
+            try makePolicy(sandboxID: config.id, generation: 5),
+            containerConfig: config
+        )
+
+        let recoveredService = makeService(root: root, recorder: recorder)
+        let action = try await recoveredService.testingEvaluatePublishedPortPolicy(
+            proto: .tcp,
+            sourceIP: "10.0.0.25",
+            sourcePort: 50000,
+            destinationIP: "192.168.64.2",
+            destinationPort: 443
+        )
+
+        #expect(action == .allow)
     }
 
     @Test

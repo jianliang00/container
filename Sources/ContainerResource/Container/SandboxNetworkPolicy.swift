@@ -138,6 +138,49 @@ public struct SandboxNetworkPolicy: Codable, Sendable, Equatable {
         ingressACL + egressACL
     }
 
+    public var validationIssues: [String] {
+        var issues: [String] = []
+
+        if sandboxID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            issues.append("network policy sandbox id cannot be empty")
+        }
+
+        if generation == 0 {
+            issues.append("network policy generation must be greater than zero")
+        }
+
+        var ids = Set<String>()
+        for rule in rules {
+            let ruleID = rule.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayRuleID = ruleID.isEmpty ? "<empty>" : ruleID
+
+            if ruleID.isEmpty {
+                issues.append("network policy rule id cannot be empty")
+            } else if !ids.insert(ruleID).inserted {
+                issues.append("duplicate network policy rule id \(ruleID)")
+            }
+
+            if rule.protocols.isEmpty {
+                issues.append("network policy rule \(displayRuleID) must include at least one protocol")
+            }
+
+            let protocolNames = rule.protocols.map(\.rawValue)
+            if Set(protocolNames).count != protocolNames.count {
+                issues.append("network policy rule \(displayRuleID) contains duplicate protocols")
+            }
+
+            for endpoint in rule.endpoints where !endpoint.isIPv4 {
+                issues.append("network policy rule \(displayRuleID) contains a non-IPv4 endpoint")
+            }
+
+            for port in rule.ports where !port.isValid {
+                issues.append("network policy rule \(displayRuleID) contains an invalid port range")
+            }
+        }
+
+        return issues
+    }
+
     public func evaluate(
         direction: SandboxNetworkPolicyDirection,
         proto: PublishProtocol,

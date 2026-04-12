@@ -310,7 +310,7 @@ Related design docs:
   - [ ] remove orphaned host rules for deleted sandboxes
 - [ ] Add unit coverage.
   - [x] policy model encoding and decoding
-  - [ ] ACL validation
+  - [x] ACL validation
   - [x] generation conflict handling
   - [x] host rule rendering
   - [x] published-port TCP allow, deny, and audit

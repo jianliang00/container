@@ -100,6 +100,60 @@ struct SandboxNetworkPolicyTests {
     }
 
     @Test
+    func policyValidationReportsACLIssues() throws {
+        let policy = SandboxNetworkPolicy(
+            sandboxID: " ",
+            generation: 0,
+            ingressACL: [
+                SandboxNetworkPolicyRule(
+                    id: "",
+                    action: .allow,
+                    protocols: [],
+                    endpoints: [
+                        .ipv4Host(try IPAddress("fe80::1"))
+                    ],
+                    ports: [
+                        SandboxNetworkPortRange(lower: 10, upper: 1)
+                    ]
+                ),
+                SandboxNetworkPolicyRule(
+                    id: "dupe",
+                    action: .allow,
+                    protocols: [.tcp, .tcp],
+                    endpoints: [],
+                    ports: [
+                        .single(80)
+                    ]
+                ),
+            ],
+            egressACL: [
+                SandboxNetworkPolicyRule(
+                    id: "dupe",
+                    action: .deny,
+                    protocols: [.udp],
+                    endpoints: [],
+                    ports: [
+                        .single(0)
+                    ]
+                )
+            ],
+            defaultAction: .deny,
+            auditMode: .all
+        )
+
+        let issues = policy.validationIssues
+        #expect(issues.contains("network policy sandbox id cannot be empty"))
+        #expect(issues.contains("network policy generation must be greater than zero"))
+        #expect(issues.contains("network policy rule id cannot be empty"))
+        #expect(issues.contains("network policy rule <empty> must include at least one protocol"))
+        #expect(issues.contains("network policy rule <empty> contains a non-IPv4 endpoint"))
+        #expect(issues.contains("network policy rule <empty> contains an invalid port range"))
+        #expect(issues.contains("network policy rule dupe contains duplicate protocols"))
+        #expect(issues.contains("duplicate network policy rule id dupe"))
+        #expect(issues.contains("network policy rule dupe contains an invalid port range"))
+    }
+
+    @Test
     func auditEventRoundTripsThroughCodable() throws {
         let event = SandboxNetworkAuditEvent(
             timestamp: Date(timeIntervalSince1970: 1_776_000_000),

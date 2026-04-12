@@ -33,4 +33,16 @@ extension ContainerKit {
     public func deleteNetwork(id: String) async throws {
         try await ClientNetwork.delete(id: id)
     }
+
+    public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
+        try await ClientNetwork.applySandboxPolicy(policy)
+    }
+
+    public func removeSandboxPolicy(sandboxID: String) async throws {
+        try await ClientNetwork.removeSandboxPolicy(sandboxID: sandboxID)
+    }
+
+    public func inspectSandboxPolicy(sandboxID: String) async throws -> SandboxNetworkPolicyState? {
+        try await ClientNetwork.inspectSandboxPolicy(sandboxID: sandboxID)
+    }
 }

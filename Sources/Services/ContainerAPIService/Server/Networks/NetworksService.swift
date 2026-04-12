@@ -299,6 +299,18 @@ public actor NetworksService {
         }
     }
 
+    public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
+        try await containersService.applySandboxPolicy(policy)
+    }
+
+    public func removeSandboxPolicy(sandboxID: String) async throws {
+        try await containersService.removeSandboxPolicy(sandboxID: sandboxID)
+    }
+
+    public func inspectSandboxPolicy(sandboxID: String) async throws -> SandboxNetworkPolicyState? {
+        try await containersService.inspectSandboxPolicy(sandboxID: sandboxID)
+    }
+
     /// Perform a hostname lookup on all networks.
     ///
     /// - Parameter hostname: A canonical DNS hostname with a trailing dot (e.g. `"example.com."`).

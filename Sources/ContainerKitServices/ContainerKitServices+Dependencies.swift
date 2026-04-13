@@ -14,7 +14,9 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerKit
+import ContainerPersistence
 import ContainerPlugin
 import Foundation
 
@@ -27,6 +29,8 @@ struct ContainerKitServicesDependencies: Sendable {
     let isServiceRegistered: @Sendable (String) throws -> Bool
     let domainString: @Sendable () throws -> String
     let healthCheck: @Sendable (Duration?) async throws -> SystemHealth
+    let defaultKernelExists: @Sendable () async throws -> Bool
+    let installRecommendedKernel: @Sendable () async throws -> Void
     let listContainers: @Sendable () async throws -> [ContainerSnapshot]
     let stopContainer: @Sendable (String, ContainerStopOptions) async throws -> Void
     let sleep: @Sendable (Duration) async throws -> Void
@@ -64,6 +68,17 @@ extension ContainerKitServicesDependencies {
             },
             healthCheck: { timeout in
                 try await kit.health(timeout: timeout)
+            },
+            defaultKernelExists: {
+                (try? await ClientKernel.getDefaultKernel(for: .current)) != nil
+            },
+            installRecommendedKernel: {
+                try await ClientKernel.installKernelFromTar(
+                    tarFile: DefaultsStore.get(key: .defaultKernelURL),
+                    kernelFilePath: DefaultsStore.get(key: .defaultKernelBinaryPath),
+                    platform: .current,
+                    force: true
+                )
             },
             listContainers: {
                 try await kit.listContainers()

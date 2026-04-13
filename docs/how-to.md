@@ -61,6 +61,14 @@ let services = ContainerKitServices(installation: installation)
 try await services.ensureRunning()
 ```
 
+If the embedding app creates Linux containers or sandboxes from its own app root,
+ask the service layer to install the recommended default kernel after the
+apiserver is reachable:
+
+```swift
+try await services.ensureRunning(installDefaultKernel: true)
+```
+
 ## Configure memory and CPUs for your containers
 
 Since the containers created by `container` are lightweight virtual machines, consider the needs of your containerized application when you use `container run`.  The `--memory` and `--cpus` options allow you to override the default memory and CPU limits for the virtual machine. The default values are 1 gigabyte of RAM and 4 CPUs. You can use abbreviations for memory units; for example, to run a container for image `big` with 8 CPUs and 32 GiBytes of memory, use:

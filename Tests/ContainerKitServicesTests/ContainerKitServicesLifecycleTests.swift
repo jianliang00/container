@@ -65,6 +65,38 @@ struct ContainerKitServicesLifecycleTests {
     }
 
     @Test
+    func startInstallsRecommendedKernelWhenRequestedAndMissing() async throws {
+        let installation = try makeInstallation()
+        let defaultKernelChecks = LockedBox(0)
+        let kernelInstallCalls = LockedBox(0)
+
+        let services = ContainerKitServices(
+            appRoot: installation.appRoot,
+            installation: installation.containerInstallation,
+            dependencies: makeDependencies(
+                healthCheck: { _ in
+                    makeSystemHealth(
+                        appRoot: installation.appRoot,
+                        installRoot: installation.installRoot
+                    )
+                },
+                defaultKernelExists: {
+                    defaultKernelChecks.withValue { $0 += 1 }
+                    return false
+                },
+                installRecommendedKernel: {
+                    kernelInstallCalls.withValue { $0 += 1 }
+                }
+            )
+        )
+
+        try await services.start(timeout: .seconds(7), installDefaultKernel: true)
+
+        #expect(defaultKernelChecks.snapshot() == 1)
+        #expect(kernelInstallCalls.snapshot() == 1)
+    }
+
+    @Test
     func startWrapsHealthFailureWithDiagnostics() async throws {
         let installation = try makeInstallation()
         let services = ContainerKitServices(
@@ -196,6 +228,41 @@ struct ContainerKitServicesLifecycleTests {
         #expect(deregisteredLabels.snapshot() == ["gui/501/com.apple.container.apiserver"])
         #expect(registeredPaths.snapshot() == [expectedPlistPath])
         #expect(healthResults.snapshot().isEmpty)
+    }
+
+    @Test
+    func ensureRunningInstallsRecommendedKernelForOwnedHealthyService() async throws {
+        let installation = try makeInstallation()
+        let registeredPaths = LockedBox<[String]>([])
+        let kernelInstallCalls = LockedBox(0)
+
+        let services = ContainerKitServices(
+            appRoot: installation.appRoot,
+            installation: installation.containerInstallation,
+            dependencies: makeDependencies(
+                registerService: { path in
+                    registeredPaths.withValue { $0.append(path) }
+                },
+                isServiceRegistered: { _ in true },
+                healthCheck: { _ in
+                    makeSystemHealth(
+                        appRoot: installation.appRoot,
+                        installRoot: installation.installRoot
+                    )
+                },
+                defaultKernelExists: {
+                    false
+                },
+                installRecommendedKernel: {
+                    kernelInstallCalls.withValue { $0 += 1 }
+                }
+            )
+        )
+
+        try await services.ensureRunning(timeout: Duration.seconds(3), installDefaultKernel: true)
+
+        #expect(registeredPaths.snapshot().isEmpty)
+        #expect(kernelInstallCalls.snapshot() == 1)
     }
 
     @Test
@@ -345,6 +412,8 @@ private func makeDependencies(
     healthCheck: @escaping @Sendable (Duration?) async throws -> SystemHealth = { _ in
         makeSystemHealth()
     },
+    defaultKernelExists: @escaping @Sendable () async throws -> Bool = { true },
+    installRecommendedKernel: @escaping @Sendable () async throws -> Void = {},
     listContainers: @escaping @Sendable () async throws -> [ContainerSnapshot] = { [] },
     stopContainer: @escaping @Sendable (String, ContainerStopOptions) async throws -> Void = { _, _ in },
     sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in },
@@ -361,6 +430,8 @@ private func makeDependencies(
         isServiceRegistered: isServiceRegistered,
         domainString: domainString,
         healthCheck: healthCheck,
+        defaultKernelExists: defaultKernelExists,
+        installRecommendedKernel: installRecommendedKernel,
         listContainers: listContainers,
         stopContainer: stopContainer,
         sleep: sleep,

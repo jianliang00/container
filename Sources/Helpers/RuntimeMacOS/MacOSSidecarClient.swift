@@ -72,12 +72,17 @@ final class MacOSSidecarClient: @unchecked Sendable {
         stateLock.unlock()
     }
 
-    func bootstrapStart(socketConnectRetries: Int = 120) throws {
+    func bootstrapStart(presentGUI: Bool = true, socketConnectRetries: Int = 120) throws {
         _ = try request(
             method: .vmBootstrapStart,
+            presentGUI: presentGUI,
             timeoutSeconds: bootstrapStartTimeoutSeconds,
             socketConnectRetries: socketConnectRetries
         )
+    }
+
+    func showGUI() throws {
+        _ = try request(method: .vmShowGUI)
     }
 
     func stopVM() throws {
@@ -162,6 +167,44 @@ final class MacOSSidecarClient: @unchecked Sendable {
         )
     }
 
+    func fsReadBegin(port: UInt32, request payload: MacOSSidecarFSReadBeginRequestPayload) throws -> MacOSSidecarFSReadBeginResponsePayload {
+        let response = try requestResponse(
+            MacOSSidecarRequest(method: .fsReadBegin, port: port, fsReadBegin: payload),
+            socketConnectRetries: 1
+        )
+        guard let data = response.data else {
+            throw ContainerizationError(.internalError, message: "sidecar fsReadBegin response missing data")
+        }
+        return try JSONDecoder().decode(MacOSSidecarFSReadBeginResponsePayload.self, from: data)
+    }
+
+    func fsReadChunk(request payload: MacOSSidecarFSReadChunkRequestPayload) throws -> Data? {
+        let response = try requestResponse(
+            MacOSSidecarRequest(method: .fsReadChunk, fsReadChunk: payload),
+            socketConnectRetries: 1
+        )
+        return response.data
+    }
+
+    func fsReadEnd(txID: String) throws {
+        _ = try requestResponse(
+            MacOSSidecarRequest(method: .fsReadEnd, processID: txID),
+            socketConnectRetries: 1
+        )
+    }
+
+    func fsListDir(port: UInt32, path: String, txID: String) throws -> [MacOSSidecarFSListDirEntry] {
+        let payload = MacOSSidecarFSListDirRequestPayload(txID: txID, path: path)
+        let response = try requestResponse(
+            MacOSSidecarRequest(method: .fsListDir, port: port, fsListDir: payload),
+            socketConnectRetries: 1
+        )
+        guard let data = response.data else {
+            throw ContainerizationError(.internalError, message: "sidecar fsListDir response missing data")
+        }
+        return try JSONDecoder().decode([MacOSSidecarFSListDirEntry].self, from: data)
+    }
+
     func closeControlConnection() {
         let pendingToFail: [PendingResponse]
         stateLock.lock()
@@ -190,12 +233,13 @@ final class MacOSSidecarClient: @unchecked Sendable {
 
     private func request(
         method: MacOSSidecarMethod,
+        presentGUI: Bool? = nil,
         port: UInt32? = nil,
         timeoutSeconds: TimeInterval? = nil,
         socketConnectRetries: Int = 1
     ) throws -> MacOSSidecarResponse {
         try requestResponse(
-            MacOSSidecarRequest(method: method, port: port),
+            MacOSSidecarRequest(method: method, presentGUI: presentGUI, port: port),
             timeoutSeconds: timeoutSeconds ?? requestTimeoutSeconds,
             socketConnectRetries: socketConnectRetries
         )

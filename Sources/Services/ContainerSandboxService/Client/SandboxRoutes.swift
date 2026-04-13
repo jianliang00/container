@@ -21,6 +21,8 @@ public enum SandboxRoutes: String {
     case createSandbox = "com.apple.container.sandbox/createSandbox"
     /// Start the sandbox guest runtime without starting workloads.
     case startSandbox = "com.apple.container.sandbox/startSandbox"
+    /// Present the macOS guest GUI window for a running sandbox.
+    case showGUI = "com.apple.container.sandbox/showGUI"
     /// Bootstrap the sandbox instance and create the init process.
     case bootstrap = "com.apple.container.sandbox/bootstrap"
     /// Create a workload in the sandbox.
@@ -61,6 +63,14 @@ public enum SandboxRoutes: String {
     case fsChunk = "com.apple.container.sandbox/fsChunk"
     /// End a filesystem transaction in the sandbox guest.
     case fsEnd = "com.apple.container.sandbox/fsEnd"
+    /// Begin a filesystem read operation in the sandbox guest.
+    case fsReadBegin = "com.apple.container.sandbox/fsReadBegin"
+    /// Read a chunk from a filesystem read operation in the sandbox guest.
+    case fsReadChunk = "com.apple.container.sandbox/fsReadChunk"
+    /// End a filesystem read operation in the sandbox guest.
+    case fsReadEnd = "com.apple.container.sandbox/fsReadEnd"
+    /// List a directory in the sandbox guest.
+    case fsListDir = "com.apple.container.sandbox/fsListDir"
     /// Shutdown the sandbox service process.
     case shutdown = "com.apple.container.sandbox/shutdown"
     /// Get statistics for the sandbox.

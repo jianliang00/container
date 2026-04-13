@@ -52,6 +52,7 @@ public struct Application: AsyncLoggableCommand {
                 name: "Container",
                 subcommands: [
                     ContainerCommit.self,
+                    ContainerCopy.self,
                     ContainerCreate.self,
                     ContainerDelete.self,
                     ContainerExec.self,

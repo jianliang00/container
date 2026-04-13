@@ -239,6 +239,7 @@ extension APIServer {
             routes[XPCRoute.containerSandboxLogPaths] = harness.sandboxLogPaths
             routes[XPCRoute.containerBootstrap] = harness.bootstrap
             routes[XPCRoute.containerStartSandbox] = harness.startSandbox
+            routes[XPCRoute.containerShowSandboxGUI] = harness.showSandboxGUI
             routes[XPCRoute.containerDial] = harness.dial
             routes[XPCRoute.containerStop] = harness.stop
             routes[XPCRoute.containerCreateWorkload] = harness.createWorkload

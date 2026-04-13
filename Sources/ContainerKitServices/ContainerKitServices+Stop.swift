@@ -20,12 +20,9 @@ import Foundation
 
 extension ContainerKitServices {
     public func stop() async throws {
-        let launchdDomainString = try dependencies.domainString()
-        let fullAPIServerLabel = "\(launchdDomainString)/\(Self.apiServerServiceLabel)"
-        let isRegistered = try dependencies.isServiceRegistered(Self.apiServerServiceLabel)
-        let isHealthy = (try? await dependencies.healthCheck(.seconds(5))) != nil
+        let health = try? await dependencies.healthCheck(.seconds(5))
 
-        if isHealthy {
+        if let health, owns(health) {
             await stopRunningContainers()
 
             for _ in 0..<Self.shutdownTimeoutSeconds {
@@ -36,6 +33,16 @@ extension ContainerKitServices {
                 try await dependencies.sleep(.seconds(1))
             }
         }
+
+        try deregisterRegisteredServices()
+    }
+}
+
+extension ContainerKitServices {
+    func deregisterRegisteredServices() throws {
+        let launchdDomainString = try dependencies.domainString()
+        let fullAPIServerLabel = "\(launchdDomainString)/\(Self.apiServerServiceLabel)"
+        let isRegistered = try dependencies.isServiceRegistered(Self.apiServerServiceLabel)
 
         if isRegistered {
             try? dependencies.deregisterService(fullAPIServerLabel)

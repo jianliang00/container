@@ -165,6 +165,12 @@ extension XPCMessage {
         }
     }
 
+    public func contains(key: String) -> Bool {
+        lock.withLock {
+            xpc_dictionary_get_value(self.object, key) != nil
+        }
+    }
+
     public func bool(key: String) -> Bool {
         lock.withLock {
             xpc_dictionary_get_bool(self.object, key)

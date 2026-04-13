@@ -19,6 +19,7 @@ import Foundation
 
 public enum MacOSSidecarMethod: String, Codable, Sendable {
     case vmBootstrapStart = "vm.bootstrapStart"
+    case vmShowGUI = "vm.showGUI"
     case vmConnectVsock = "vm.connectVsock"
     case processStart = "process.start"
     case processStdin = "process.stdin"
@@ -28,6 +29,10 @@ public enum MacOSSidecarMethod: String, Codable, Sendable {
     case fsBegin = "fs.begin"
     case fsChunk = "fs.chunk"
     case fsEnd = "fs.end"
+    case fsReadBegin = "fs.read.begin"
+    case fsReadChunk = "fs.read.chunk"
+    case fsReadEnd = "fs.read.end"
+    case fsListDir = "fs.listdir"
     case vmStop = "vm.stop"
     case sidecarQuit = "sidecar.quit"
 }
@@ -75,6 +80,7 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
 public struct MacOSSidecarRequest: Codable, Sendable {
     public let requestID: String
     public let method: MacOSSidecarMethod
+    public let presentGUI: Bool?
     public let port: UInt32?
     public let processID: String?
     public let exec: MacOSSidecarExecRequestPayload?
@@ -85,10 +91,14 @@ public struct MacOSSidecarRequest: Codable, Sendable {
     public let fsBegin: MacOSSidecarFSBeginRequestPayload?
     public let fsChunk: MacOSSidecarFSChunkRequestPayload?
     public let fsEnd: MacOSSidecarFSEndRequestPayload?
+    public let fsReadBegin: MacOSSidecarFSReadBeginRequestPayload?
+    public let fsReadChunk: MacOSSidecarFSReadChunkRequestPayload?
+    public let fsListDir: MacOSSidecarFSListDirRequestPayload?
 
     public init(
         requestID: String = UUID().uuidString,
         method: MacOSSidecarMethod,
+        presentGUI: Bool? = nil,
         port: UInt32? = nil,
         processID: String? = nil,
         exec: MacOSSidecarExecRequestPayload? = nil,
@@ -98,10 +108,14 @@ public struct MacOSSidecarRequest: Codable, Sendable {
         height: UInt16? = nil,
         fsBegin: MacOSSidecarFSBeginRequestPayload? = nil,
         fsChunk: MacOSSidecarFSChunkRequestPayload? = nil,
-        fsEnd: MacOSSidecarFSEndRequestPayload? = nil
+        fsEnd: MacOSSidecarFSEndRequestPayload? = nil,
+        fsReadBegin: MacOSSidecarFSReadBeginRequestPayload? = nil,
+        fsReadChunk: MacOSSidecarFSReadChunkRequestPayload? = nil,
+        fsListDir: MacOSSidecarFSListDirRequestPayload? = nil
     ) {
         self.requestID = requestID
         self.method = method
+        self.presentGUI = presentGUI
         self.port = port
         self.processID = processID
         self.exec = exec
@@ -112,6 +126,9 @@ public struct MacOSSidecarRequest: Codable, Sendable {
         self.fsBegin = fsBegin
         self.fsChunk = fsChunk
         self.fsEnd = fsEnd
+        self.fsReadBegin = fsReadBegin
+        self.fsReadChunk = fsReadChunk
+        self.fsListDir = fsListDir
     }
 }
 
@@ -132,24 +149,28 @@ public struct MacOSSidecarResponse: Codable, Sendable {
     public let ok: Bool
     public let fdAttached: Bool?
     public let error: MacOSSidecarErrorPayload?
+    public let data: Data?
 
     public init(
         requestID: String,
         ok: Bool,
         fdAttached: Bool? = nil,
-        error: MacOSSidecarErrorPayload? = nil
+        error: MacOSSidecarErrorPayload? = nil,
+        data: Data? = nil
     ) {
         self.requestID = requestID
         self.ok = ok
         self.fdAttached = fdAttached
         self.error = error
+        self.data = data
     }
 
     public static func success(
         requestID: String,
-        fdAttached: Bool? = nil
+        fdAttached: Bool? = nil,
+        data: Data? = nil
     ) -> Self {
-        .init(requestID: requestID, ok: true, fdAttached: fdAttached, error: nil)
+        .init(requestID: requestID, ok: true, fdAttached: fdAttached, error: nil, data: data)
     }
 
     public static func failure(requestID: String, code: String, message: String, details: String? = nil) -> Self {

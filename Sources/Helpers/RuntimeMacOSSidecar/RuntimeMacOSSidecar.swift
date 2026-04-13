@@ -161,6 +161,10 @@ struct SidecarGuestAgentFrame: Codable {
         case fsBegin
         case fsChunk
         case fsEnd
+        case fsReadBegin
+        case fsReadChunk
+        case fsReadEnd
+        case fsListDir
         case ack
         case stdout
         case stderr
@@ -197,6 +201,7 @@ struct SidecarGuestAgentFrame: Codable {
     let offset: UInt64?
     let action: MacOSSidecarFSEndAction?
     let digest: String?
+    let maxLength: Int?
 
     init(
         type: FrameType,
@@ -226,7 +231,8 @@ struct SidecarGuestAgentFrame: Codable {
         autoCommit: Bool? = nil,
         offset: UInt64? = nil,
         action: MacOSSidecarFSEndAction? = nil,
-        digest: String? = nil
+        digest: String? = nil,
+        maxLength: Int? = nil
     ) {
         self.type = type
         self.id = id
@@ -256,6 +262,7 @@ struct SidecarGuestAgentFrame: Codable {
         self.offset = offset
         self.action = action
         self.digest = digest
+        self.maxLength = maxLength
     }
 
     static func exec(
@@ -335,6 +342,22 @@ struct SidecarGuestAgentFrame: Codable {
         .init(type: .fsEnd, id: payload.txID, action: payload.action, digest: payload.digest)
     }
 
+    static func fsReadBegin(_ payload: MacOSSidecarFSReadBeginRequestPayload) -> Self {
+        .init(type: .fsReadBegin, id: payload.txID, path: payload.path)
+    }
+
+    static func fsReadChunk(_ payload: MacOSSidecarFSReadChunkRequestPayload) -> Self {
+        .init(type: .fsReadChunk, id: payload.txID, offset: payload.offset, maxLength: payload.maxLength)
+    }
+
+    static func fsReadEnd(txID: String) -> Self {
+        .init(type: .fsReadEnd, id: txID)
+    }
+
+    static func fsListDir(txID: String, path: String) -> Self {
+        .init(type: .fsListDir, id: txID, path: path)
+    }
+
     static func ack(id: String) -> Self {
         .init(type: .ack, id: id)
     }
@@ -406,9 +429,11 @@ actor MacOSSidecarService {
         self.log = log
     }
 
-    func bootstrapStart() async throws {
+    func bootstrapStart(presentGUI: Bool = true) async throws {
         if state == .running, vm != nil {
-            log.info("bootstrapStart skipped; vm already running")
+            log.info(
+                "bootstrapStart skipped; vm already running",
+                metadata: ["present_gui": "\(presentGUI)"])
             return
         }
 
@@ -431,10 +456,22 @@ actor MacOSSidecarService {
             let vm = created.vm
             self.vmDelegate = created.delegate
             self.vm = vm
-            if guiEnabled {
+            log.info(
+                "bootstrapStart: GUI presentation decision",
+                metadata: [
+                    "gui_enabled": "\(guiEnabled)",
+                    "present_gui": "\(presentGUI)",
+                    "will_present_gui": "\(guiEnabled && presentGUI)",
+                ])
+            if guiEnabled && presentGUI {
                 try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
             }
-            log.info("bootstrapStart: starting vm", metadata: ["gui_enabled": "\(guiEnabled)"])
+            log.info(
+                "bootstrapStart: starting vm",
+                metadata: [
+                    "gui_enabled": "\(guiEnabled)",
+                    "present_gui": "\(presentGUI)",
+                ])
             let agentPort = config.macosGuest?.agentPort ?? 27000
             try await startVirtualMachine(vm)
             try await validateSocketDeviceAvailable(on: vm)
@@ -457,6 +494,7 @@ actor MacOSSidecarService {
     }
 
     func stopVM() async throws {
+        log.info("stopVM requested", metadata: ["state": "\(state.rawValue)", "has_window": "\(vmWindow != nil)"])
         guard let vm else {
             discardPreparedNetworkResources()
             state = .stopped
@@ -470,6 +508,24 @@ actor MacOSSidecarService {
         self.vmDelegate = nil
         state = .stopped
         log.info("vm stopped", metadata: ["state": "\(state.rawValue)"])
+    }
+
+    func showGUIWindow() async throws {
+        let config = try loadContainerConfiguration()
+        log.info(
+            "showGUIWindow requested",
+            metadata: [
+                "id": "\(config.id)",
+                "state": "\(state.rawValue)",
+                "has_window": "\(vmWindow != nil)",
+            ])
+        guard config.macosGuest?.guiEnabled == true else {
+            throw ContainerizationError(.unsupported, message: "macOS guest GUI is not enabled for this sandbox")
+        }
+        guard state == .running, let vm else {
+            throw ContainerizationError(.invalidState, message: "cannot show GUI window while VM is not running")
+        }
+        try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
     }
 
     func connectVsock(port: UInt32) async throws -> Int32 {
@@ -619,7 +675,8 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest network configuration stream exited unexpectedly (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .ack, .stdout, .stderr, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd:
+            case .ready, .ack, .stdout, .stderr, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                .fsListDir:
                 continue
             }
         }
@@ -635,6 +692,7 @@ actor MacOSSidecarService {
     }
 
     func prepareForQuit() async {
+        log.info("prepareForQuit requested", metadata: ["state": "\(state.rawValue)", "has_window": "\(vmWindow != nil)"])
         do {
             try await stopVM()
         } catch {
@@ -769,9 +827,24 @@ actor MacOSSidecarService {
     }
 
     private func presentGUIWindowOnMain(vm: VZVirtualMachine, containerID: String) async throws {
+        if let windowBox = vmWindow {
+            log.info("presentGUIWindow: reusing existing GUI window", metadata: ["id": "\(containerID)"])
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async {
+                    let app = NSApplication.shared
+                    _ = app.setActivationPolicy(.regular)
+                    windowBox.value.makeKeyAndOrderFront(nil)
+                    app.activate(ignoringOtherApps: true)
+                    continuation.resume()
+                }
+            }
+            return
+        }
+
         let vmBox = UnsafeSendableBox(vm)
         let title = "Container macOS Guest (\(String(containerID.prefix(12))))"
         let service = self
+        log.info("presentGUIWindow: creating GUI window", metadata: ["id": "\(containerID)"])
         let created = try await withCheckedThrowingContinuation {
             (
                 continuation: CheckedContinuation<
@@ -837,7 +910,11 @@ actor MacOSSidecarService {
         vmWindow = nil
         vmWindowView = nil
         vmWindowDelegate = nil
-        guard let windowBox else { return }
+        guard let windowBox else {
+            log.info("closeGUIWindow skipped; no GUI window", metadata: ["state": "\(state.rawValue)"])
+            return
+        }
+        log.info("closeGUIWindow closing GUI window", metadata: ["state": "\(state.rawValue)"])
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.main.async {
@@ -854,6 +931,7 @@ actor MacOSSidecarService {
     private func handleManualGUIWindowClose(
         previousFrontmostApp: UnsafeSendableBox<NSRunningApplication>?
     ) async {
+        log.info("manual GUI window close", metadata: ["state": "\(state.rawValue)", "vm_present": "\(vm != nil)"])
         vmWindow = nil
         vmWindowView = nil
         vmWindowDelegate = nil
@@ -1001,7 +1079,8 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
-            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
+            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
+                .fsReadEnd, .fsListDir:
                 continue
             }
         }
@@ -1045,6 +1124,23 @@ final class SidecarControlServer: @unchecked Sendable {
         }
     }
 
+    private final class FSReadSession: @unchecked Sendable {
+        let txID: String
+        let fd: Int32
+        let ownerClientFD: Int32
+        let path: String
+        let writeLock = NSLock()
+        let stateLock = NSLock()
+        var closed = false
+
+        init(txID: String, fd: Int32, ownerClientFD: Int32, path: String) {
+            self.txID = txID
+            self.fd = fd
+            self.ownerClientFD = ownerClientFD
+            self.path = path
+        }
+    }
+
     private let socketPath: String
     private let service: MacOSSidecarService
     private let log: Logging.Logger
@@ -1053,11 +1149,13 @@ final class SidecarControlServer: @unchecked Sendable {
     private let eventWriteLock = NSLock()
     private let processLock = NSLock()
     private let fsLock = NSLock()
+    private let fsReadLock = NSLock()
     private var listenFD: Int32 = -1
     private var stopping = false
     private var eventClientFD: Int32 = -1
     private var processSessions: [String: ProcessStreamSession] = [:]
     private var fsSessions: [String: FSTransferSession] = [:]
+    private var fsReadSessions: [String: FSReadSession] = [:]
 
     init(socketPath: String, service: MacOSSidecarService, log: Logging.Logger) {
         self.socketPath = socketPath
@@ -1131,6 +1229,7 @@ final class SidecarControlServer: @unchecked Sendable {
         clearEventClient()
         closeAllProcessSessions()
         closeAllFSSessions()
+        closeAllFSReadSessions()
         _ = unlink(socketPath)
     }
 
@@ -1170,6 +1269,7 @@ final class SidecarControlServer: @unchecked Sendable {
         defer {
             clearEventClientIfMatches(clientFD)
             closeOwnedFSSessions(clientFD: clientFD)
+            closeOwnedFSReadSessions(clientFD: clientFD)
             Darwin.close(clientFD)
         }
 
@@ -1370,6 +1470,82 @@ final class SidecarControlServer: @unchecked Sendable {
         Darwin.close(session.fd)
     }
 
+    // MARK: - FSReadSession management
+
+    private func registerFSReadSession(_ session: FSReadSession) throws {
+        fsReadLock.lock()
+        defer { fsReadLock.unlock() }
+        guard fsReadSessions[session.txID] == nil else {
+            throw ContainerizationError(.exists, message: "filesystem read transaction \(session.txID) already exists in sidecar")
+        }
+        fsReadSessions[session.txID] = session
+    }
+
+    private func fsReadSession(for txID: String) throws -> FSReadSession {
+        fsReadLock.lock()
+        let session = fsReadSessions[txID]
+        fsReadLock.unlock()
+        guard let session else {
+            throw ContainerizationError(.notFound, message: "filesystem read transaction \(txID) not found in sidecar")
+        }
+        return session
+    }
+
+    private func removeFSReadSession(_ txID: String) -> FSReadSession? {
+        fsReadLock.lock()
+        let removed = fsReadSessions.removeValue(forKey: txID)
+        fsReadLock.unlock()
+        return removed
+    }
+
+    private func closeOwnedFSReadSessions(clientFD: Int32) {
+        let sessions: [FSReadSession]
+        fsReadLock.lock()
+        let txIDs = fsReadSessions.values.filter { $0.ownerClientFD == clientFD }.map(\.txID)
+        sessions = txIDs.compactMap { fsReadSessions.removeValue(forKey: $0) }
+        fsReadLock.unlock()
+
+        for session in sessions {
+            closeFSReadSession(session, reason: "owner client disconnected")
+        }
+    }
+
+    private func closeAllFSReadSessions() {
+        let sessions: [FSReadSession]
+        fsReadLock.lock()
+        sessions = Array(fsReadSessions.values)
+        fsReadSessions.removeAll()
+        fsReadLock.unlock()
+
+        for session in sessions {
+            closeFSReadSession(session, reason: "sidecar shutdown")
+        }
+    }
+
+    private func closeFSReadSession(_ session: FSReadSession, reason: String? = nil) {
+        session.stateLock.lock()
+        let shouldClose = !session.closed
+        session.closed = true
+        session.stateLock.unlock()
+        guard shouldClose else { return }
+        log.info(
+            "filesystem read session closing",
+            metadata: [
+                "tx_id": "\(session.txID)",
+                "path": "\(session.path)",
+                "reason": "\(reason ?? "normal")",
+            ]
+        )
+        _ = Darwin.shutdown(session.fd, SHUT_RDWR)
+        Darwin.close(session.fd)
+    }
+
+    private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: FSReadSession) throws {
+        session.writeLock.lock()
+        defer { session.writeLock.unlock() }
+        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: session.fd)
+    }
+
     func _testRegisterFSSession(
         txID: String,
         fd: Int32,
@@ -1524,6 +1700,107 @@ final class SidecarControlServer: @unchecked Sendable {
         try waitForFSAck(fd: session.fd, expectedID: payload.txID)
     }
 
+    // MARK: - Read direction operations
+
+    private func startFSRead(port: UInt32, clientFD: Int32, payload: MacOSSidecarFSReadBeginRequestPayload) throws -> MacOSSidecarFSReadBeginResponsePayload {
+        log.info(
+            "filesystem read begin",
+            metadata: [
+                "tx_id": "\(payload.txID)",
+                "path": "\(payload.path)",
+                "port": "\(port)",
+                "owner_client_fd": "\(clientFD)",
+            ]
+        )
+        let fd = try syncValue {
+            try await self.service.connectVsock(port: port)
+        }
+
+        do {
+            try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.fsReadBegin(payload), fd: fd)
+            let responseData = try waitForFSAckWithData(fd: fd, expectedID: payload.txID)
+            guard let responseData else {
+                throw ContainerizationError(.internalError, message: "filesystem read begin ack missing response data for \(payload.txID)")
+            }
+            let meta = try JSONDecoder().decode(MacOSSidecarFSReadBeginResponsePayload.self, from: responseData)
+
+            let session = FSReadSession(
+                txID: payload.txID,
+                fd: fd,
+                ownerClientFD: clientFD,
+                path: payload.path
+            )
+            try registerFSReadSession(session)
+            log.info("filesystem read session registered", metadata: ["tx_id": "\(payload.txID)", "path": "\(payload.path)", "file_type": "\(meta.fileType.rawValue)"])
+            return meta
+        } catch {
+            log.error("filesystem read begin failed", metadata: ["tx_id": "\(payload.txID)", "path": "\(payload.path)", "error": "\(error)"])
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+            throw error
+        }
+    }
+
+    private func sendFSReadChunk(_ payload: MacOSSidecarFSReadChunkRequestPayload) throws -> Data? {
+        let session = try fsReadSession(for: payload.txID)
+        do {
+            log.info(
+                "filesystem read chunk",
+                metadata: [
+                    "tx_id": "\(payload.txID)",
+                    "offset": "\(payload.offset)",
+                    "max_length": "\(payload.maxLength)",
+                ]
+            )
+            try sendFrame(.fsReadChunk(payload), to: session)
+            return try waitForFSAckWithData(fd: session.fd, expectedID: payload.txID)
+        } catch {
+            log.error("filesystem read chunk failed", metadata: ["tx_id": "\(payload.txID)", "error": "\(error)"])
+            closeFSReadSession(session, reason: "chunk read failed")
+            _ = removeFSReadSession(payload.txID)
+            throw error
+        }
+    }
+
+    private func finishFSRead(txID: String) throws {
+        guard let session = removeFSReadSession(txID) else {
+            // Session may have already been closed; not an error
+            log.info("filesystem read end: session not found (may be already closed)", metadata: ["tx_id": "\(txID)"])
+            return
+        }
+        defer {
+            closeFSReadSession(session, reason: "read finished")
+        }
+        log.info("filesystem read end", metadata: ["tx_id": "\(txID)", "path": "\(session.path)"])
+        try sendFrame(.fsReadEnd(txID: txID), to: session)
+        try waitForFSAck(fd: session.fd, expectedID: txID)
+    }
+
+    private func listDir(port: UInt32, path: String, txID: String) throws -> [MacOSSidecarFSListDirEntry] {
+        log.info("filesystem listdir", metadata: ["tx_id": "\(txID)", "path": "\(path)", "port": "\(port)"])
+        let fd = try syncValue {
+            try await self.service.connectVsock(port: port)
+        }
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+
+        do {
+            try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.fsListDir(txID: txID, path: path), fd: fd)
+            let responseData = try waitForFSAckWithData(fd: fd, expectedID: txID)
+            guard let responseData else {
+                throw ContainerizationError(.internalError, message: "filesystem listdir ack missing response data for \(txID)")
+            }
+            return try JSONDecoder().decode([MacOSSidecarFSListDirEntry].self, from: responseData)
+        } catch {
+            log.error("filesystem listdir failed", metadata: ["tx_id": "\(txID)", "path": "\(path)", "error": "\(error)"])
+            throw error
+        }
+    }
+
     private func startProcessStream(port: UInt32, processID: String, exec: MacOSSidecarExecRequestPayload) throws {
         let fd = try syncValue {
             try await self.service.connectVsock(port: port)
@@ -1610,7 +1887,8 @@ final class SidecarControlServer: @unchecked Sendable {
                     pendingExitCode = frame.exitCode ?? 1
                 case .ready:
                     continue
-                case .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
+                case .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                    .fsListDir:
                     continue
                 }
             }
@@ -1689,7 +1967,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 bufferedFrames.append(frame)
             case .ready:
                 continue
-            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
+            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
         }
@@ -1746,7 +2024,39 @@ final class SidecarControlServer: @unchecked Sendable {
                 )
             case .ready, .stdout, .stderr, .networkResult:
                 continue
-            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd:
+            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+                continue
+            }
+        }
+    }
+
+    /// Like waitForFSAck but also returns the data payload from the ack frame.
+    /// Returns nil data if the ack frame has no data (e.g. EOF for fsReadChunk).
+    private func waitForFSAckWithData(fd: Int32, expectedID: String) throws -> Data? {
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .ack:
+                guard frame.id == expectedID else {
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "filesystem ack transaction ID mismatch (expected=\(expectedID) actual=\(frame.id ?? "nil"))"
+                    )
+                }
+                return frame.data
+            case .error:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent filesystem error for transaction \(expectedID): \(frame.message ?? "unknown error")"
+                )
+            case .exit:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest-agent filesystem stream exited for transaction \(expectedID) (code=\(frame.exitCode ?? 1))"
+                )
+            case .ready, .stdout, .stderr, .networkResult:
+                continue
+            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
         }
@@ -1790,7 +2100,8 @@ final class SidecarControlServer: @unchecked Sendable {
                         throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
                     case .exit:
                         throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
-                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd:
+                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
+                        .fsReadEnd, .fsListDir:
                         continue
                     }
                 }
@@ -1844,8 +2155,20 @@ final class SidecarControlServer: @unchecked Sendable {
         let requestID = request.requestID
         switch request.method {
         case .vmBootstrapStart:
+            log.info(
+                "sidecar control vmBootstrapStart request",
+                metadata: [
+                    "request_id": "\(requestID)",
+                    "present_gui": "\(request.presentGUI ?? true)",
+                ])
             return try sync(requestID: requestID) {
-                try await service.bootstrapStart()
+                try await service.bootstrapStart(presentGUI: request.presentGUI ?? true)
+                return .success(requestID: requestID)
+            }
+        case .vmShowGUI:
+            log.info("sidecar control vmShowGUI request", metadata: ["request_id": "\(requestID)"])
+            return try sync(requestID: requestID) {
+                try await service.showGUIWindow()
                 return .success(requestID: requestID)
             }
         case .vmConnectVsock:
@@ -1992,17 +2315,65 @@ final class SidecarControlServer: @unchecked Sendable {
             } catch {
                 return failureResponse(requestID: requestID, error: error)
             }
+        case .fsReadBegin:
+            guard let payload = request.fsReadBegin else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem read begin payload")
+            }
+            let port = request.port ?? 27000
+            do {
+                let meta = try startFSRead(port: port, clientFD: clientFD, payload: payload)
+                let data = try JSONEncoder().encode(meta)
+                return .success(requestID: requestID, data: data)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .fsReadChunk:
+            guard let payload = request.fsReadChunk else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem read chunk payload")
+            }
+            do {
+                let chunkData = try sendFSReadChunk(payload)
+                return .success(requestID: requestID, data: chunkData)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .fsReadEnd:
+            guard let txID = request.processID, !txID.isEmpty else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing txID for filesystem read end")
+            }
+            do {
+                try finishFSRead(txID: txID)
+                return .success(requestID: requestID)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .fsListDir:
+            guard let payload = request.fsListDir else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem listdir payload")
+            }
+            let port = request.port ?? 27000
+            do {
+                let entries = try listDir(port: port, path: payload.path, txID: payload.txID)
+                let data = try JSONEncoder().encode(entries)
+                return .success(requestID: requestID, data: data)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
         case .vmStop:
+            log.info("sidecar control vmStop request", metadata: ["request_id": "\(requestID)"])
             return try sync(requestID: requestID) {
                 self.closeAllProcessSessions()
                 self.closeAllFSSessions()
+                self.closeAllFSReadSessions()
                 try await service.stopVM()
                 return .success(requestID: requestID)
             }
         case .sidecarQuit:
+            log.info("sidecar control sidecarQuit request", metadata: ["request_id": "\(requestID)"])
             let response: MacOSSidecarResponse = try sync(requestID: requestID) {
                 self.closeAllProcessSessions()
                 self.closeAllFSSessions()
+                self.closeAllFSReadSessions()
                 await service.prepareForQuit()
                 return .success(requestID: requestID)
             }

@@ -59,6 +59,68 @@ extension SandboxClient {
         }
     }
 
+    public func fsReadBegin(_ payload: MacOSSidecarFSReadBeginRequestPayload) async throws -> MacOSSidecarFSReadBeginResponsePayload {
+        let request = XPCMessage(route: SandboxRoutes.fsReadBegin.rawValue)
+        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        do {
+            let response = try await client.send(request)
+            guard let data = response.dataNoCopy(key: SandboxKeys.fsPayload.rawValue) else {
+                throw ContainerizationError(.internalError, message: "missing filesystem read begin response payload")
+            }
+            return try JSONDecoder().decode(MacOSSidecarFSReadBeginResponsePayload.self, from: data)
+        } catch {
+            throw wrapFileSystemError(
+                error,
+                message: "failed to begin filesystem read for \(payload.path) in container \(id)"
+            )
+        }
+    }
+
+    public func fsReadChunk(_ payload: MacOSSidecarFSReadChunkRequestPayload) async throws -> Data? {
+        let request = XPCMessage(route: SandboxRoutes.fsReadChunk.rawValue)
+        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        do {
+            let response = try await client.send(request)
+            // nil data means EOF
+            return response.data(key: SandboxKeys.fsPayload.rawValue)
+        } catch {
+            throw wrapFileSystemError(
+                error,
+                message: "failed to read filesystem chunk for transaction \(payload.txID) in container \(id)"
+            )
+        }
+    }
+
+    public func fsReadEnd(txID: String) async throws {
+        let request = XPCMessage(route: SandboxRoutes.fsReadEnd.rawValue)
+        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(["txID": txID]))
+        do {
+            try await client.send(request)
+        } catch {
+            throw wrapFileSystemError(
+                error,
+                message: "failed to end filesystem read for transaction \(txID) in container \(id)"
+            )
+        }
+    }
+
+    public func fsListDir(_ payload: MacOSSidecarFSListDirRequestPayload) async throws -> [MacOSSidecarFSListDirEntry] {
+        let request = XPCMessage(route: SandboxRoutes.fsListDir.rawValue)
+        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        do {
+            let response = try await client.send(request)
+            guard let data = response.dataNoCopy(key: SandboxKeys.fsPayload.rawValue) else {
+                throw ContainerizationError(.internalError, message: "missing filesystem list dir response payload")
+            }
+            return try JSONDecoder().decode([MacOSSidecarFSListDirEntry].self, from: data)
+        } catch {
+            throw wrapFileSystemError(
+                error,
+                message: "failed to list directory \(payload.path) in container \(id)"
+            )
+        }
+    }
+
     private func wrapFileSystemError(_ error: any Error, message: String) -> ContainerizationError {
         if let containerError = error as? ContainerizationError {
             return ContainerizationError(

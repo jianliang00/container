@@ -335,7 +335,30 @@ extension MacOSSandboxService {
     @Sendable
     public func startSandbox(_ message: XPCMessage) async throws -> XPCMessage {
         let progressUpdateService = ProgressUpdateService(message: message)
-        try await startSandboxIfNeeded(stdio: message.stdio(), progressUpdate: progressUpdateService?.handler)
+        let hasPresentGUI = message.contains(key: SandboxKeys.presentGUI.rawValue)
+        let presentGUI =
+            hasPresentGUI
+            ? message.bool(key: SandboxKeys.presentGUI.rawValue)
+            : true
+        log.info(
+            "macOS runtime startSandbox request",
+            metadata: [
+                "has_present_gui": "\(hasPresentGUI)",
+                "present_gui": "\(presentGUI)",
+                "state": "\(sandboxState)",
+            ])
+        try await startSandboxIfNeeded(
+            stdio: message.stdio(),
+            presentGUI: presentGUI,
+            progressUpdate: progressUpdateService?.handler
+        )
+        return message.reply()
+    }
+
+    @Sendable
+    public func showGUI(_ message: XPCMessage) async throws -> XPCMessage {
+        log.info("macOS runtime showGUI request", metadata: ["state": "\(sandboxState)"])
+        try await showGUIWindowViaSidecar()
         return message.reply()
     }
 
@@ -346,7 +369,24 @@ extension MacOSSandboxService {
         }
         let progressUpdateService = ProgressUpdateService(message: message)
         let config = try await prepareSandboxIfNeeded(progressUpdate: progressUpdateService?.handler)
-        try await startSandboxIfNeeded(stdio: message.stdio(), progressUpdate: progressUpdateService?.handler)
+        let hasPresentGUI = message.contains(key: SandboxKeys.presentGUI.rawValue)
+        let presentGUI =
+            hasPresentGUI
+            ? message.bool(key: SandboxKeys.presentGUI.rawValue)
+            : true
+        log.info(
+            "macOS runtime bootstrap request",
+            metadata: [
+                "id": "\(config.id)",
+                "has_present_gui": "\(hasPresentGUI)",
+                "present_gui": "\(presentGUI)",
+                "state": "\(sandboxState)",
+            ])
+        try await startSandboxIfNeeded(
+            stdio: message.stdio(),
+            presentGUI: presentGUI,
+            progressUpdate: progressUpdateService?.handler
+        )
         try await startWorkloadIfNeeded(workloadID: config.id)
         return message.reply()
     }
@@ -888,7 +928,11 @@ extension MacOSSandboxService {
         return config
     }
 
-    private func startSandboxIfNeeded(stdio: [FileHandle?], progressUpdate: ProgressUpdateHandler? = nil) async throws {
+    private func startSandboxIfNeeded(
+        stdio: [FileHandle?],
+        presentGUI: Bool = true,
+        progressUpdate: ProgressUpdateHandler? = nil
+    ) async throws {
         if case .booted = sandboxState {
             return
         }
@@ -902,12 +946,20 @@ extension MacOSSandboxService {
         let config = try await prepareSandboxIfNeeded(progressUpdate: progressUpdate)
         try openLogsIfNeeded()
         try writeBootLog("bootstrapping container \(config.id)")
+        try writeBootLog("startSandboxIfNeeded presentGUI=\(presentGUI) state=\(sandboxState)")
+        log.info(
+            "macOS runtime startSandboxIfNeeded",
+            metadata: [
+                "id": "\(config.id)",
+                "present_gui": "\(presentGUI)",
+                "state": "\(sandboxState)",
+            ])
         _ = try ensureWorkloadSessionIfNeeded(workloadID: config.id, stdio: stdio)
 
         do {
             let networkState = try await prepareSandboxNetworkState(containerConfig: config)
             #if arch(arm64)
-            try await startOrRestoreVirtualMachine(config: config)
+            try await startOrRestoreVirtualMachine(config: config, presentGUI: presentGUI)
             await startGuestAgentLogCaptureIfPossible(containerConfig: config)
             try await startSocketForwarders(
                 attachments: networkState.attachments,
@@ -2334,8 +2386,14 @@ extension MacOSSandboxService {
     }
 
     #if arch(arm64)
-    private func startOrRestoreVirtualMachine(config: ContainerConfiguration) async throws {
-        try await startVirtualMachineViaSidecar(config: config)
+    private func startOrRestoreVirtualMachine(config: ContainerConfiguration, presentGUI: Bool = true) async throws {
+        log.info(
+            "macOS runtime startOrRestoreVirtualMachine",
+            metadata: [
+                "id": "\(config.id)",
+                "present_gui": "\(presentGUI)",
+            ])
+        try await startVirtualMachineViaSidecar(config: config, presentGUI: presentGUI)
     }
     #endif
 }

@@ -50,6 +50,14 @@ public struct ContainerKitServices: Sendable {
     let installation: ContainerInstallation
     let dependencies: ContainerKitServicesDependencies
 
+    public var appRootURL: URL {
+        appRoot
+    }
+
+    public var installRootURL: URL {
+        installation.installRoot
+    }
+
     public init(
         appRoot: URL = ApplicationRoot.defaultURL,
         installation: ContainerInstallation

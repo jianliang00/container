@@ -71,7 +71,7 @@ extension MacOSSandboxService {
         )
     }
 
-    func startVirtualMachineViaSidecar(config: ContainerConfiguration) async throws {
+    func startVirtualMachineViaSidecar(config: ContainerConfiguration, presentGUI: Bool = true) async throws {
         let launchLabel = sidecarLaunchLabel(config: config)
         let plistURL = sidecarPlistPath()
         let socketURL = sidecarSocketPath(config: config)
@@ -119,8 +119,15 @@ extension MacOSSandboxService {
         sidecarEventPump = eventPump
         sidecarEventPumpTask = eventPumpTask
         do {
-            writeContainerLog(Data(("sidecar bootstrap start [label=\(launchLabel)] [socket=\(socketURL.path)]\n").utf8))
-            try client.bootstrapStart(socketConnectRetries: 120)
+            log.info(
+                "macOS sidecar bootstrap start",
+                metadata: [
+                    "id": "\(config.id)",
+                    "label": "\(launchLabel)",
+                    "present_gui": "\(presentGUI)",
+                ])
+            writeContainerLog(Data(("sidecar bootstrap start [label=\(launchLabel)] [socket=\(socketURL.path)] [presentGUI=\(presentGUI)]\n").utf8))
+            try client.bootstrapStart(presentGUI: presentGUI, socketConnectRetries: 120)
             sidecarHandle = SidecarHandle(
                 launchLabel: launchLabel,
                 client: client
@@ -139,6 +146,15 @@ extension MacOSSandboxService {
             sidecarHandle = nil
             throw error
         }
+    }
+
+    func showGUIWindowViaSidecar() async throws {
+        guard let handle = sidecarHandle else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        log.info("macOS sidecar show GUI request", metadata: ["label": "\(handle.launchLabel)"])
+        writeContainerLog(Data(("sidecar show GUI request [label=\(handle.launchLabel)]\n").utf8))
+        try handle.client.showGUI()
     }
 
     func stopAndQuitSidecarIfPresent() async {

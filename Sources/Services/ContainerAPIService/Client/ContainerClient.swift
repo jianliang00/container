@@ -137,7 +137,12 @@ public struct ContainerClient: Sendable {
     }
 
     /// Bootstrap the container's init process.
-    public func bootstrap(id: String, stdio: [FileHandle?], progressUpdate: ProgressUpdateHandler? = nil) async throws -> ClientProcess {
+    public func bootstrap(
+        id: String,
+        stdio: [FileHandle?],
+        presentGUI: Bool = true,
+        progressUpdate: ProgressUpdateHandler? = nil
+    ) async throws -> ClientProcess {
         let request = XPCMessage(route: .containerBootstrap)
 
         for (i, h) in stdio.enumerated() {
@@ -161,6 +166,7 @@ public struct ContainerClient: Sendable {
             request.set(key: .dynamicEnv, value: dynamicEnv)
 
             request.set(key: .id, value: id)
+            request.set(key: .presentGUI, value: presentGUI)
             var progressUpdateClient: ProgressUpdateClient?
             if let progressUpdate {
                 progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
@@ -178,9 +184,14 @@ public struct ContainerClient: Sendable {
     }
 
     /// Start a sandbox guest without starting a workload.
-    public func startSandbox(id: String, progressUpdate: ProgressUpdateHandler? = nil) async throws {
+    public func startSandbox(
+        id: String,
+        presentGUI: Bool = true,
+        progressUpdate: ProgressUpdateHandler? = nil
+    ) async throws {
         let request = XPCMessage(route: .containerStartSandbox)
         request.set(key: .id, value: id)
+        request.set(key: .presentGUI, value: presentGUI)
 
         do {
             var progressUpdateClient: ProgressUpdateClient?
@@ -193,6 +204,22 @@ public struct ContainerClient: Sendable {
             throw ContainerizationError(
                 .internalError,
                 message: "failed to start sandbox",
+                cause: error
+            )
+        }
+    }
+
+    /// Present the desktop window for a running macOS sandbox guest.
+    public func showSandboxGUI(id: String) async throws {
+        let request = XPCMessage(route: .containerShowSandboxGUI)
+        request.set(key: .id, value: id)
+
+        do {
+            try await xpcClient.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to show sandbox GUI",
                 cause: error
             )
         }

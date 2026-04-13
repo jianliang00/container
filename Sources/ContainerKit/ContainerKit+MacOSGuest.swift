@@ -29,8 +29,12 @@ extension ContainerKit {
         )
     }
 
-    public func startSandbox(id: String) async throws {
-        try await containerClient.startSandbox(id: id)
+    public func startSandbox(id: String, presentGUI: Bool = true) async throws {
+        try await containerClient.startSandbox(id: id, presentGUI: presentGUI)
+    }
+
+    public func showSandboxGUI(id: String) async throws {
+        try await containerClient.showSandboxGUI(id: id)
     }
 
     public func inspectSandbox(id: String) async throws -> SandboxSnapshot {

@@ -51,6 +51,8 @@ public enum XPCKeys: String {
     case logs
     /// Options for stopping a container key.
     case stopOptions
+    /// Whether a macOS guest GUI window should be presented during startup.
+    case presentGUI
     /// Whether to force stop a container when deleting.
     case forceDelete
     /// Plugins
@@ -156,6 +158,7 @@ public enum XPCRoute: String {
     case containerList
     case containerCreate
     case containerBootstrap
+    case containerShowSandboxGUI
     case containerCreateProcess
     case containerCreateWorkload
     case containerAttachWorkload
@@ -229,6 +232,10 @@ extension XPCMessage {
 
     public func set(key: XPCKeys, value: String) {
         set(key: key.rawValue, value: value)
+    }
+
+    public func contains(key: XPCKeys) -> Bool {
+        contains(key: key.rawValue)
     }
 
     public func bool(key: XPCKeys) -> Bool {

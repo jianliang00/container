@@ -57,9 +57,19 @@ public struct ContainersHarness: Sendable {
             )
         }
         let stdio = message.stdio()
+        let hasPresentGUI = message.contains(key: .presentGUI)
+        let presentGUI = hasPresentGUI ? message.bool(key: .presentGUI) : true
+        log.info(
+            "container API bootstrap request",
+            metadata: [
+                "id": "\(id)",
+                "has_present_gui": "\(hasPresentGUI)",
+                "present_gui": "\(presentGUI)",
+            ])
         try await service.bootstrap(
             id: id,
             stdio: stdio,
+            presentGUI: presentGUI,
             progressUpdateEndpoint: message.endpoint(key: .progressUpdateEndpoint)
         )
         return message.reply()
@@ -70,7 +80,30 @@ public struct ContainersHarness: Sendable {
         guard let id = message.string(key: .id) else {
             throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
         }
-        try await service.startSandbox(id: id, progressUpdateEndpoint: message.endpoint(key: .progressUpdateEndpoint))
+        let hasPresentGUI = message.contains(key: .presentGUI)
+        let presentGUI = hasPresentGUI ? message.bool(key: .presentGUI) : true
+        log.info(
+            "container API startSandbox request",
+            metadata: [
+                "id": "\(id)",
+                "has_present_gui": "\(hasPresentGUI)",
+                "present_gui": "\(presentGUI)",
+            ])
+        try await service.startSandbox(
+            id: id,
+            presentGUI: presentGUI,
+            progressUpdateEndpoint: message.endpoint(key: .progressUpdateEndpoint)
+        )
+        return message.reply()
+    }
+
+    @Sendable
+    public func showSandboxGUI(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        log.info("container API showSandboxGUI request", metadata: ["id": "\(id)"])
+        try await service.showSandboxGUI(id: id)
         return message.reply()
     }
 

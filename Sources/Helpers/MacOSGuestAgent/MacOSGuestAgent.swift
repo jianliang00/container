@@ -500,11 +500,7 @@ final class AgentConnection: @unchecked Sendable {
 
         var linkTarget: String? = nil
         if fileType == .symlink {
-            var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
-            let len = readlink(path, &buf, buf.count - 1)
-            if len >= 0 {
-                linkTarget = String(cString: buf)
-            }
+            linkTarget = readSymbolicLinkTarget(atPath: path)
         }
 
         let size: UInt64? = fileType == .file ? UInt64(st.st_size) : nil
@@ -613,11 +609,7 @@ final class AgentConnection: @unchecked Sendable {
 
                 var linkTarget: String? = nil
                 if entryType == .symlink {
-                    var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
-                    let len = readlink(childPath, &buf, buf.count - 1)
-                    if len >= 0 {
-                        linkTarget = String(cString: buf)
-                    }
+                    linkTarget = readSymbolicLinkTarget(atPath: childPath)
                 }
 
                 let size: UInt64? = entryType == .file ? UInt64(st.st_size) : nil
@@ -1689,6 +1681,17 @@ private func configureGuestAgentSignals() {
 private func describeError(_ error: Error) -> String {
     let nsError = error as NSError
     return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
+}
+
+private func readSymbolicLinkTarget(atPath path: String) -> String? {
+    var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+    let length = readlink(path, &buffer, buffer.count)
+    guard length >= 0 else {
+        return nil
+    }
+    return buffer.withUnsafeBytes { rawBuffer in
+        String(decoding: rawBuffer.prefix(Int(length)), as: UTF8.self)
+    }
 }
 
 private func logAgentStartupContext() {

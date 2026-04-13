@@ -599,8 +599,10 @@ let package = Package(
         .target(
             name: "ContainerKitServices",
             dependencies: [
+                "ContainerAPIClient",
                 "ContainerKit",
                 "ContainerPlugin",
+                "ContainerPersistence",
             ]
         ),
         .testTarget(

@@ -187,8 +187,9 @@ into an executable checklist. It assumes the current tree does not yet contain
 - [x] `ContainerKitServices` requires explicit helper installation inputs
       instead of assuming CLI-style colocated binaries.
 - [x] Phase 1 exclusions remain out of scope:
-      kernel installation, base image installation, plugin installation, and
-      interactive confirmation.
+      base image installation, plugin installation, and interactive
+      confirmation. Recommended kernel installation is available only through
+      an explicit `ContainerKitServices` opt-in.
 
 ## 4. Phase 3: Documentation and Consumer Guidance
 
@@ -258,7 +259,7 @@ into an executable checklist. It assumes the current tree does not yet contain
 - [ ] helper embedding or helper auto-install flows
 - [ ] automatic launchd bootstrap inside `ContainerKit`
 - [ ] custom progress abstractions
-- [ ] DNS, packet filter, kernel, or provisioning helper APIs
+- [ ] DNS, packet filter, or broader provisioning helper APIs
 - [ ] interactive stdio orchestration and other advanced CLI flows
 - [ ] broad facade coverage for every API currently exposed by
       `ContainerAPIClient`

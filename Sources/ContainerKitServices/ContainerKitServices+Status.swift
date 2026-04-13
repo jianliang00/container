@@ -29,16 +29,22 @@ extension ContainerKitServices {
         return ServiceStatus(isRegistered: true, health: health)
     }
 
-    public func ensureRunning(timeout: Duration = .seconds(10)) async throws {
+    public func ensureRunning(
+        timeout: Duration = .seconds(10),
+        installDefaultKernel: Bool = false
+    ) async throws {
         let currentStatus = try await status()
         if let health = currentStatus.health, owns(health) {
+            if installDefaultKernel {
+                try await ensureDefaultKernelInstalled()
+            }
             return
         }
 
         if currentStatus.isRegistered {
             try? deregisterRegisteredServices()
         }
-        try await start(timeout: timeout)
+        try await start(timeout: timeout, installDefaultKernel: installDefaultKernel)
 
         let health = try await dependencies.healthCheck(.seconds(5))
         guard owns(health) else {

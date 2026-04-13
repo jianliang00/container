@@ -28,6 +28,8 @@ public enum SandboxKeys: String {
     case fd
     /// Options for stopping a container key.
     case stopOptions
+    /// Whether a macOS guest GUI window should be presented during startup.
+    case presentGUI
     /// An endpoint to talk to a sandbox service.
     case sandboxServiceEndpoint
     /// An endpoint for sending progress updates back to a client.

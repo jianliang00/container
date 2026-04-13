@@ -79,6 +79,7 @@ extension RuntimeMacOSHelper {
                     routes: [
                         SandboxRoutes.createSandbox.rawValue: service.createSandbox,
                         SandboxRoutes.startSandbox.rawValue: service.startSandbox,
+                        SandboxRoutes.showGUI.rawValue: service.showGUI,
                         SandboxRoutes.bootstrap.rawValue: service.bootstrap,
                         SandboxRoutes.createWorkload.rawValue: service.createWorkload,
                         SandboxRoutes.startWorkload.rawValue: service.startWorkload,
@@ -98,6 +99,10 @@ extension RuntimeMacOSHelper {
                         SandboxRoutes.fsBegin.rawValue: service.fsBegin,
                         SandboxRoutes.fsChunk.rawValue: service.fsChunk,
                         SandboxRoutes.fsEnd.rawValue: service.fsEnd,
+                        SandboxRoutes.fsReadBegin.rawValue: service.fsReadBegin,
+                        SandboxRoutes.fsReadChunk.rawValue: service.fsReadChunk,
+                        SandboxRoutes.fsReadEnd.rawValue: service.fsReadEnd,
+                        SandboxRoutes.fsListDir.rawValue: service.fsListDir,
                         SandboxRoutes.prepareNetwork.rawValue: service.prepareSandboxNetwork,
                         SandboxRoutes.inspectNetwork.rawValue: service.inspectSandboxNetwork,
                         SandboxRoutes.releaseNetwork.rawValue: service.releaseSandboxNetwork,

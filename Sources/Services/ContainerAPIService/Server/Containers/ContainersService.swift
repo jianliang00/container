@@ -343,8 +343,19 @@ public actor ContainersService {
     }
 
     /// Bootstrap the init process of the container.
-    public func bootstrap(id: String, stdio: [FileHandle?], progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
+    public func bootstrap(
+        id: String,
+        stdio: [FileHandle?],
+        presentGUI: Bool = true,
+        progressUpdateEndpoint: xpc_endpoint_t? = nil
+    ) async throws {
         self.log.debug("\(#function)")
+        self.log.info(
+            "container service bootstrap request",
+            metadata: [
+                "id": "\(id)",
+                "present_gui": "\(presentGUI)",
+            ])
         let progressUpdateEndpoint = SendableXPCEndpoint(value: progressUpdateEndpoint)
 
         let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
@@ -387,7 +398,11 @@ public actor ContainersService {
                     configuration: config,
                     existingClient: nil
                 )
-                try await sandboxClient.bootstrap(stdio: stdio, progressUpdateEndpoint: progressUpdateEndpoint.value)
+                try await sandboxClient.bootstrap(
+                    stdio: stdio,
+                    presentGUI: presentGUI,
+                    progressUpdateEndpoint: progressUpdateEndpoint.value
+                )
                 return sandboxClient
             }
 
@@ -435,8 +450,18 @@ public actor ContainersService {
     }
 
     /// Start the sandbox guest without starting any workloads.
-    public func startSandbox(id: String, progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
+    public func startSandbox(
+        id: String,
+        presentGUI: Bool = true,
+        progressUpdateEndpoint: xpc_endpoint_t? = nil
+    ) async throws {
         self.log.debug("\(#function)")
+        self.log.info(
+            "container service startSandbox request",
+            metadata: [
+                "id": "\(id)",
+                "present_gui": "\(presentGUI)",
+            ])
         let progressUpdateEndpoint = SendableXPCEndpoint(value: progressUpdateEndpoint)
 
         let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
@@ -461,7 +486,11 @@ public actor ContainersService {
                     existingClient: existingClient
                 )
                 try await sandboxClient.createSandbox()
-                try await sandboxClient.startSandbox(stdio: [nil, nil, nil], progressUpdateEndpoint: progressUpdateEndpoint.value)
+                try await sandboxClient.startSandbox(
+                    stdio: [nil, nil, nil],
+                    presentGUI: presentGUI,
+                    progressUpdateEndpoint: progressUpdateEndpoint.value
+                )
                 return sandboxClient
             }
 
@@ -491,6 +520,18 @@ public actor ContainersService {
             }
             throw error
         }
+    }
+
+    /// Present the desktop window for a running macOS sandbox guest.
+    public func showSandboxGUI(id: String) async throws {
+        self.log.info("container service showSandboxGUI request", metadata: ["id": "\(id)"])
+        let client = try await self.lock.withLock { context -> SandboxClient in
+            let state = try await self.getContainerState(id: id, context: context)
+            try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+            return try state.getClient()
+        }
+
+        try await client.showGUI()
     }
 
     public func inspectSandbox(id: String) async throws -> SandboxSnapshot {

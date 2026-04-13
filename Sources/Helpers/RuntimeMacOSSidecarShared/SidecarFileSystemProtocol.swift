@@ -93,3 +93,102 @@ public struct MacOSSidecarFSEndRequestPayload: Codable, Sendable {
         self.digest = digest
     }
 }
+
+// MARK: - Read direction types
+
+public enum MacOSSidecarFSFileType: String, Codable, Sendable {
+    case file
+    case directory
+    case symlink
+}
+
+public struct MacOSSidecarFSReadBeginRequestPayload: Codable, Sendable {
+    public let txID: String
+    public let path: String
+
+    public init(txID: String, path: String) {
+        self.txID = txID
+        self.path = path
+    }
+}
+
+public struct MacOSSidecarFSReadBeginResponsePayload: Codable, Sendable {
+    public let fileType: MacOSSidecarFSFileType
+    public let size: UInt64?
+    public let mode: UInt32?
+    public let uid: UInt32?
+    public let gid: UInt32?
+    public let mtime: Int64?
+    public let linkTarget: String?
+
+    public init(
+        fileType: MacOSSidecarFSFileType,
+        size: UInt64? = nil,
+        mode: UInt32? = nil,
+        uid: UInt32? = nil,
+        gid: UInt32? = nil,
+        mtime: Int64? = nil,
+        linkTarget: String? = nil
+    ) {
+        self.fileType = fileType
+        self.size = size
+        self.mode = mode
+        self.uid = uid
+        self.gid = gid
+        self.mtime = mtime
+        self.linkTarget = linkTarget
+    }
+}
+
+public struct MacOSSidecarFSReadChunkRequestPayload: Codable, Sendable {
+    public let txID: String
+    public let offset: UInt64
+    public let maxLength: Int
+
+    public init(txID: String, offset: UInt64, maxLength: Int) {
+        self.txID = txID
+        self.offset = offset
+        self.maxLength = maxLength
+    }
+}
+
+public struct MacOSSidecarFSListDirRequestPayload: Codable, Sendable {
+    public let txID: String
+    public let path: String
+
+    public init(txID: String, path: String) {
+        self.txID = txID
+        self.path = path
+    }
+}
+
+public struct MacOSSidecarFSListDirEntry: Codable, Sendable {
+    public let name: String
+    public let fileType: MacOSSidecarFSFileType
+    public let size: UInt64?
+    public let mode: UInt32?
+    public let uid: UInt32?
+    public let gid: UInt32?
+    public let mtime: Int64?
+    public let linkTarget: String?
+
+    public init(
+        name: String,
+        fileType: MacOSSidecarFSFileType,
+        size: UInt64? = nil,
+        mode: UInt32? = nil,
+        uid: UInt32? = nil,
+        gid: UInt32? = nil,
+        mtime: Int64? = nil,
+        linkTarget: String? = nil
+    ) {
+        self.name = name
+        self.fileType = fileType
+        self.size = size
+        self.mode = mode
+        self.uid = uid
+        self.gid = gid
+        self.mtime = mtime
+        self.linkTarget = linkTarget
+    }
+}

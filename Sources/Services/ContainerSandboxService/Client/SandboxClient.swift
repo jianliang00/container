@@ -89,8 +89,13 @@ extension SandboxClient {
         }
     }
 
-    public func startSandbox(stdio: [FileHandle?], progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
+    public func startSandbox(
+        stdio: [FileHandle?],
+        presentGUI: Bool = true,
+        progressUpdateEndpoint: xpc_endpoint_t? = nil
+    ) async throws {
         let request = XPCMessage(route: SandboxRoutes.startSandbox.rawValue)
+        request.set(key: SandboxKeys.presentGUI.rawValue, value: presentGUI)
         if let progressUpdateEndpoint {
             request.set(key: SandboxKeys.progressUpdateEndpoint.rawValue, value: progressUpdateEndpoint)
         }
@@ -122,8 +127,26 @@ extension SandboxClient {
         }
     }
 
-    public func bootstrap(stdio: [FileHandle?], progressUpdateEndpoint: xpc_endpoint_t? = nil) async throws {
+    public func showGUI() async throws {
+        let request = XPCMessage(route: SandboxRoutes.showGUI.rawValue)
+        do {
+            try await self.client.send(request)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to show GUI for container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
+    public func bootstrap(
+        stdio: [FileHandle?],
+        presentGUI: Bool = true,
+        progressUpdateEndpoint: xpc_endpoint_t? = nil
+    ) async throws {
         let request = XPCMessage(route: SandboxRoutes.bootstrap.rawValue)
+        request.set(key: SandboxKeys.presentGUI.rawValue, value: presentGUI)
         if let progressUpdateEndpoint {
             request.set(key: SandboxKeys.progressUpdateEndpoint.rawValue, value: progressUpdateEndpoint)
         }

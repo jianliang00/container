@@ -119,6 +119,7 @@ final class AgentConnection: @unchecked Sendable {
     private var buffer = Data()
     private var session: (any GuestAgentProcessSession)?
     private var fileTransactions: [String: GuestAgentFileTransferTransaction] = [:]
+    private var fileReadTransactions: [String: FileHandle] = [:]
 
     init(fd: Int32) {
         self.fd = fd
@@ -152,6 +153,11 @@ final class AgentConnection: @unchecked Sendable {
             transaction.abort()
         }
         fileTransactions.removeAll()
+        for (txID, handle) in fileReadTransactions {
+            logAgentInfo("connection fd=\(fd): closing outstanding read transaction tx_id=\(txID) reason=connection_closed")
+            try? handle.close()
+        }
+        fileReadTransactions.removeAll()
         try? socketHandle.close()
     }
 
@@ -229,6 +235,14 @@ final class AgentConnection: @unchecked Sendable {
             try appendFileTransaction(frame: frame)
         case .fsEnd:
             try finishFileTransaction(frame: frame)
+        case .fsReadBegin:
+            try handleFsReadBegin(frame: frame)
+        case .fsReadChunk:
+            try handleFsReadChunk(frame: frame)
+        case .fsReadEnd:
+            try handleFsReadEnd(frame: frame)
+        case .fsListDir:
+            try handleFsListDir(frame: frame)
         case .stdout, .stderr, .exit, .error, .ready, .ack, .networkResult:
             break
         }
@@ -452,6 +466,183 @@ final class AgentConnection: @unchecked Sendable {
         } catch {
             transaction.abort()
             throw filesystemError(transaction.request, stage: "end(\(action.rawValue))", error: error)
+        }
+    }
+
+    private func handleFsReadBegin(frame: GuestAgentFrame) throws {
+        guard let txID = frame.id, !txID.isEmpty else {
+            throw POSIXError(.EINVAL)
+        }
+        guard let path = frame.path else {
+            throw POSIXError(.EINVAL)
+        }
+        logAgentInfo("connection fd=\(fd): filesystem read begin tx_id=\(txID) path=\(path)")
+
+        // stat the path to determine file type and metadata
+        var st = stat()
+        guard lstat(path, &st) == 0 else {
+            let code = errno
+            let message = "failed to stat path \(path): \(String(cString: strerror(code)))"
+            logAgentError(message)
+            try send(frame: .error(message))
+            return
+        }
+
+        let fileType: MacOSSidecarFSFileType
+        let fileMode = st.st_mode
+        if fileMode & UInt16(S_IFMT) == UInt16(S_IFLNK) {
+            fileType = .symlink
+        } else if fileMode & UInt16(S_IFMT) == UInt16(S_IFDIR) {
+            fileType = .directory
+        } else {
+            fileType = .file
+        }
+
+        var linkTarget: String? = nil
+        if fileType == .symlink {
+            var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+            let len = readlink(path, &buf, buf.count - 1)
+            if len >= 0 {
+                linkTarget = String(cString: buf)
+            }
+        }
+
+        let size: UInt64? = fileType == .file ? UInt64(st.st_size) : nil
+        let mode = UInt32(fileMode & ~UInt16(S_IFMT))
+        let mtime = Int64(st.st_mtimespec.tv_sec)
+
+        let meta = MacOSSidecarFSReadBeginResponsePayload(
+            fileType: fileType,
+            size: size,
+            mode: mode,
+            uid: UInt32(st.st_uid),
+            gid: UInt32(st.st_gid),
+            mtime: mtime,
+            linkTarget: linkTarget
+        )
+
+        if fileType == .file {
+            // Open the file and store handle for subsequent chunk reads
+            guard let handle = FileHandle(forReadingAtPath: path) else {
+                let message = "failed to open file for reading: \(path)"
+                logAgentError(message)
+                try send(frame: .error(message))
+                return
+            }
+            fileReadTransactions[txID] = handle
+        }
+
+        let responseData = try JSONEncoder().encode(meta)
+        try send(frame: .ack(id: txID, data: responseData))
+        logAgentInfo("connection fd=\(fd): filesystem read begin ack sent tx_id=\(txID) file_type=\(fileType.rawValue)")
+    }
+
+    private func handleFsReadChunk(frame: GuestAgentFrame) throws {
+        guard let txID = frame.id, !txID.isEmpty else {
+            throw POSIXError(.EINVAL)
+        }
+        guard let offset = frame.offset else {
+            throw POSIXError(.EINVAL)
+        }
+        let maxLength = frame.maxLength ?? (256 * 1024)
+
+        guard let handle = fileReadTransactions[txID] else {
+            let message = "filesystem read chunk: no open transaction for tx_id=\(txID)"
+            logAgentError(message)
+            try send(frame: .error(message))
+            return
+        }
+
+        logAgentInfo("connection fd=\(fd): filesystem read chunk tx_id=\(txID) offset=\(offset) max_length=\(maxLength)")
+
+        do {
+            try handle.seek(toOffset: offset)
+            guard let data = try handle.read(upToCount: maxLength), !data.isEmpty else {
+                try send(frame: .ack(id: txID))
+                return
+            }
+            try send(frame: .ack(id: txID, data: data))
+        } catch {
+            let message = "filesystem read chunk failed tx_id=\(txID): \(describeError(error))"
+            logAgentError(message)
+            try? handle.close()
+            fileReadTransactions.removeValue(forKey: txID)
+            try send(frame: .error(message))
+        }
+    }
+
+    private func handleFsReadEnd(frame: GuestAgentFrame) throws {
+        guard let txID = frame.id, !txID.isEmpty else {
+            throw POSIXError(.EINVAL)
+        }
+        logAgentInfo("connection fd=\(fd): filesystem read end tx_id=\(txID)")
+
+        if let handle = fileReadTransactions.removeValue(forKey: txID) {
+            try? handle.close()
+        }
+        try send(frame: .ack(id: txID))
+    }
+
+    private func handleFsListDir(frame: GuestAgentFrame) throws {
+        guard let txID = frame.id, !txID.isEmpty else {
+            throw POSIXError(.EINVAL)
+        }
+        guard let path = frame.path else {
+            throw POSIXError(.EINVAL)
+        }
+        logAgentInfo("connection fd=\(fd): filesystem listdir tx_id=\(txID) path=\(path)")
+
+        do {
+            let names = try FileManager.default.contentsOfDirectory(atPath: path)
+            var entries: [MacOSSidecarFSListDirEntry] = []
+            for name in names {
+                let childPath = (path as NSString).appendingPathComponent(name)
+                var st = stat()
+                guard lstat(childPath, &st) == 0 else {
+                    continue
+                }
+                let fileMode = st.st_mode
+                let entryType: MacOSSidecarFSFileType
+                if fileMode & UInt16(S_IFMT) == UInt16(S_IFLNK) {
+                    entryType = .symlink
+                } else if fileMode & UInt16(S_IFMT) == UInt16(S_IFDIR) {
+                    entryType = .directory
+                } else {
+                    entryType = .file
+                }
+
+                var linkTarget: String? = nil
+                if entryType == .symlink {
+                    var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
+                    let len = readlink(childPath, &buf, buf.count - 1)
+                    if len >= 0 {
+                        linkTarget = String(cString: buf)
+                    }
+                }
+
+                let size: UInt64? = entryType == .file ? UInt64(st.st_size) : nil
+                let mode = UInt32(fileMode & ~UInt16(S_IFMT))
+                let mtime = Int64(st.st_mtimespec.tv_sec)
+
+                entries.append(
+                    MacOSSidecarFSListDirEntry(
+                        name: name,
+                        fileType: entryType,
+                        size: size,
+                        mode: mode,
+                        uid: UInt32(st.st_uid),
+                        gid: UInt32(st.st_gid),
+                        mtime: mtime,
+                        linkTarget: linkTarget
+                    ))
+            }
+            let responseData = try JSONEncoder().encode(entries)
+            try send(frame: .ack(id: txID, data: responseData))
+            logAgentInfo("connection fd=\(fd): filesystem listdir ack sent tx_id=\(txID) count=\(entries.count)")
+        } catch {
+            let message = "filesystem listdir failed tx_id=\(txID) path=\(path): \(describeError(error))"
+            logAgentError(message)
+            try send(frame: .error(message))
         }
     }
 
@@ -1336,6 +1527,10 @@ struct GuestAgentFrame: Codable {
         case fsBegin
         case fsChunk
         case fsEnd
+        case fsReadBegin
+        case fsReadChunk
+        case fsReadEnd
+        case fsListDir
         case ack
         case stdout
         case stderr
@@ -1372,6 +1567,7 @@ struct GuestAgentFrame: Codable {
     let offset: UInt64?
     let action: MacOSSidecarFSEndAction?
     let digest: String?
+    let maxLength: Int?
 
     init(
         type: FrameType,
@@ -1401,7 +1597,8 @@ struct GuestAgentFrame: Codable {
         autoCommit: Bool? = nil,
         offset: UInt64? = nil,
         action: MacOSSidecarFSEndAction? = nil,
-        digest: String? = nil
+        digest: String? = nil,
+        maxLength: Int? = nil
     ) {
         self.type = type
         self.id = id
@@ -1431,6 +1628,7 @@ struct GuestAgentFrame: Codable {
         self.offset = offset
         self.action = action
         self.digest = digest
+        self.maxLength = maxLength
     }
 
     static let ready = GuestAgentFrame(
@@ -1453,8 +1651,8 @@ struct GuestAgentFrame: Codable {
         .init(type: .error, message: message)
     }
 
-    static func ack(id: String) -> Self {
-        .init(type: .ack, id: id)
+    static func ack(id: String, data: Data? = nil) -> Self {
+        .init(type: .ack, id: id, data: data)
     }
 
     static func networkResult(_ payload: MacOSGuestNetworkConfigurationResult) throws -> Self {

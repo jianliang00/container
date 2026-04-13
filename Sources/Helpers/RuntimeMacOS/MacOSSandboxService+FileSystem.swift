@@ -63,6 +63,76 @@ extension MacOSSandboxService {
         try client.fsEnd(request: payload)
     }
 
+    @Sendable
+    public func fsReadBegin(_ message: XPCMessage) async throws -> XPCMessage {
+        let payload = try message.fsReadBeginRequest()
+        let result = try sendFSReadBegin(payload)
+        let reply = message.reply()
+        reply.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(result))
+        return reply
+    }
+
+    @Sendable
+    public func fsReadChunk(_ message: XPCMessage) async throws -> XPCMessage {
+        let payload = try message.fsReadChunkRequest()
+        let data = try sendFSReadChunk(payload)
+        let reply = message.reply()
+        if let data {
+            reply.set(key: SandboxKeys.fsPayload.rawValue, value: data)
+        }
+        return reply
+    }
+
+    @Sendable
+    public func fsReadEnd(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let data = message.dataNoCopy(key: SandboxKeys.fsPayload.rawValue) else {
+            throw ContainerizationError(.invalidArgument, message: "missing filesystem payload")
+        }
+        let decoded = try JSONDecoder().decode([String: String].self, from: data)
+        guard let txID = decoded["txID"] else {
+            throw ContainerizationError(.invalidArgument, message: "missing txID in filesystem read end payload")
+        }
+        try sendFSReadEnd(txID: txID)
+        return message.reply()
+    }
+
+    @Sendable
+    public func fsListDir(_ message: XPCMessage) async throws -> XPCMessage {
+        let payload = try message.fsListDirRequest()
+        let entries = try sendFSListDir(payload)
+        let reply = message.reply()
+        reply.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(entries))
+        return reply
+    }
+
+    func sendFSReadBegin(_ payload: MacOSSidecarFSReadBeginRequestPayload) throws -> MacOSSidecarFSReadBeginResponsePayload {
+        guard let client = sidecarHandle?.client else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        return try client.fsReadBegin(port: guestAgentPort(), request: payload)
+    }
+
+    func sendFSReadChunk(_ payload: MacOSSidecarFSReadChunkRequestPayload) throws -> Data? {
+        guard let client = sidecarHandle?.client else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        return try client.fsReadChunk(request: payload)
+    }
+
+    func sendFSReadEnd(txID: String) throws {
+        guard let client = sidecarHandle?.client else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        try client.fsReadEnd(txID: txID)
+    }
+
+    func sendFSListDir(_ payload: MacOSSidecarFSListDirRequestPayload) throws -> [MacOSSidecarFSListDirEntry] {
+        guard let client = sidecarHandle?.client else {
+            throw ContainerizationError(.invalidState, message: "macOS sidecar is not initialized")
+        }
+        return try client.fsListDir(port: guestAgentPort(), path: payload.path, txID: payload.txID)
+    }
+
     func guestAgentPort() throws -> UInt32 {
         guard let configuration else {
             throw ContainerizationError(.invalidState, message: "container not bootstrapped")
@@ -82,6 +152,18 @@ extension XPCMessage {
 
     fileprivate func fsEndRequest() throws -> MacOSSidecarFSEndRequestPayload {
         try decodePayload(MacOSSidecarFSEndRequestPayload.self)
+    }
+
+    fileprivate func fsReadBeginRequest() throws -> MacOSSidecarFSReadBeginRequestPayload {
+        try decodePayload(MacOSSidecarFSReadBeginRequestPayload.self)
+    }
+
+    fileprivate func fsReadChunkRequest() throws -> MacOSSidecarFSReadChunkRequestPayload {
+        try decodePayload(MacOSSidecarFSReadChunkRequestPayload.self)
+    }
+
+    fileprivate func fsListDirRequest() throws -> MacOSSidecarFSListDirRequestPayload {
+        try decodePayload(MacOSSidecarFSListDirRequestPayload.self)
     }
 
     private func decodePayload<T: Decodable>(_ type: T.Type) throws -> T {

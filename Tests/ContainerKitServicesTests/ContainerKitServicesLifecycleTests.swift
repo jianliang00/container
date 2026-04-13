@@ -144,7 +144,11 @@ struct ContainerKitServicesLifecycleTests {
         let installation = try makeInstallation()
         let healthResults = LockedBox<[HealthResult]>([
             .failure(TestError(message: "status sees unhealthy service")),
-            .failure(TestError(message: "stop sees unhealthy service")),
+            .success(
+                makeSystemHealth(
+                    appRoot: installation.appRoot,
+                    installRoot: installation.installRoot
+                )),
             .success(
                 makeSystemHealth(
                     appRoot: installation.appRoot,
@@ -191,6 +195,74 @@ struct ContainerKitServicesLifecycleTests {
 
         #expect(deregisteredLabels.snapshot() == ["gui/501/com.apple.container.apiserver"])
         #expect(registeredPaths.snapshot() == [expectedPlistPath])
+        #expect(healthResults.snapshot().isEmpty)
+    }
+
+    @Test
+    func ensureRunningReplacesMismatchedServiceWithoutStoppingItsContainers() async throws {
+        let installation = try makeInstallation()
+        let healthResults = LockedBox<[HealthResult]>([
+            .success(
+                makeSystemHealth(
+                    appRoot: URL(filePath: "/tmp/other-container-app"),
+                    installRoot: URL(filePath: "/tmp/other-container-install")
+                )),
+            .success(
+                makeSystemHealth(
+                    appRoot: installation.appRoot,
+                    installRoot: installation.installRoot
+                )),
+            .success(
+                makeSystemHealth(
+                    appRoot: installation.appRoot,
+                    installRoot: installation.installRoot
+                )),
+        ])
+        let deregisteredLabels = LockedBox<[String]>([])
+        let registeredPaths = LockedBox<[String]>([])
+        let stoppedContainers = LockedBox<[String]>([])
+
+        let expectedPlistPath = installation.appRoot
+            .appending(path: "apiserver")
+            .appending(path: "apiserver.plist")
+            .path(percentEncoded: false)
+
+        let services = ContainerKitServices(
+            appRoot: installation.appRoot,
+            installation: installation.containerInstallation,
+            dependencies: makeDependencies(
+                registerService: { path in
+                    registeredPaths.withValue { $0.append(path) }
+                },
+                deregisterService: { label in
+                    deregisteredLabels.withValue { $0.append(label) }
+                },
+                enumerateServices: {
+                    [ContainerKitServices.apiServerServiceLabel]
+                },
+                isServiceRegistered: { _ in true },
+                healthCheck: { _ in
+                    let result = healthResults.withValue { values -> HealthResult in
+                        values.removeFirst()
+                    }
+                    switch result {
+                    case .success(let health):
+                        return health
+                    case .failure(let error):
+                        throw error
+                    }
+                },
+                stopContainer: { id, _ in
+                    stoppedContainers.withValue { $0.append(id) }
+                }
+            )
+        )
+
+        try await services.ensureRunning(timeout: Duration.seconds(3))
+
+        #expect(deregisteredLabels.snapshot() == ["gui/501/com.apple.container.apiserver"])
+        #expect(registeredPaths.snapshot() == [expectedPlistPath])
+        #expect(stoppedContainers.snapshot().isEmpty)
         #expect(healthResults.snapshot().isEmpty)
     }
 }

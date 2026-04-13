@@ -31,13 +31,39 @@ extension ContainerKitServices {
 
     public func ensureRunning(timeout: Duration = .seconds(10)) async throws {
         let currentStatus = try await status()
-        guard !currentStatus.isRegistered || currentStatus.health == nil else {
+        if let health = currentStatus.health, owns(health) {
             return
         }
 
         if currentStatus.isRegistered {
-            try? await stop()
+            try? deregisterRegisteredServices()
         }
         try await start(timeout: timeout)
+
+        let health = try await dependencies.healthCheck(.seconds(5))
+        guard owns(health) else {
+            throw NSError(
+                domain: "ContainerKitServices",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: """
+                    apiserver is running from an unexpected container installation.
+                    expected appRoot: \(appRoot.path(percentEncoded: false))
+                    actual appRoot: \(health.appRoot.path(percentEncoded: false))
+                    expected installRoot: \(installation.installRoot.path(percentEncoded: false))
+                    actual installRoot: \(health.installRoot.path(percentEncoded: false))
+                    """
+                ]
+            )
+        }
+    }
+
+    public func owns(_ health: SystemHealth) -> Bool {
+        sameFileURL(health.appRoot, appRoot)
+            && sameFileURL(health.installRoot, installation.installRoot)
+    }
+
+    private func sameFileURL(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.standardizedFileURL.path == rhs.standardizedFileURL.path
     }
 }

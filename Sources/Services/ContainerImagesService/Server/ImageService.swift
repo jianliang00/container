@@ -228,6 +228,9 @@ extension ImagesService {
         if let authentication {
             return try await body(authentication)
         }
+        guard Self.shouldUseKeychainAuthentication() else {
+            return try await body(nil)
+        }
         let keychain = KeychainHelper(securityDomain: Constants.keychainID)
         authentication = try Self.keychainAuthentication(host: host) {
             try keychain.lookup(hostname: host)
@@ -246,6 +249,12 @@ extension ImagesService {
             }
             throw err
         }
+    }
+
+    static func shouldUseKeychainAuthentication(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment["CONTAINER_REGISTRY_KEYCHAIN_DISABLED"] != "1"
     }
 
     private static func authenticationFromEnv(host: String) -> Authentication? {

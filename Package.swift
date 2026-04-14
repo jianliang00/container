@@ -237,6 +237,13 @@ let package = Package(
                 "ContainerKit"
             ]
         ),
+        .testTarget(
+            name: "ContainerImagesServiceTests",
+            dependencies: [
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                "ContainerImagesService",
+            ]
+        ),
         .executableTarget(
             name: "container-core-images",
             dependencies: [

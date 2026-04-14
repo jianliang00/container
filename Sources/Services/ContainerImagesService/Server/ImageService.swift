@@ -229,12 +229,8 @@ extension ImagesService {
             return try await body(authentication)
         }
         let keychain = KeychainHelper(securityDomain: Constants.keychainID)
-        do {
-            authentication = try keychain.lookup(hostname: host)
-        } catch let err as KeychainHelper.Error {
-            guard case .keyNotFound = err else {
-                throw ContainerizationError(.internalError, message: "error querying keychain for \(host)", cause: err)
-            }
+        authentication = try Self.keychainAuthentication(host: host) {
+            try keychain.lookup(hostname: host)
         }
         do {
             return try await body(authentication)
@@ -261,6 +257,19 @@ extension ImagesService {
             return nil
         }
         return BasicAuthentication(username: user, password: password)
+    }
+
+    static func keychainAuthentication(
+        host: String,
+        lookup: () throws -> Authentication
+    ) throws -> Authentication? {
+        do {
+            return try lookup()
+        } catch is KeychainHelper.Error {
+            return nil
+        } catch {
+            throw ContainerizationError(.internalError, message: "error querying keychain for \(host)", cause: error)
+        }
     }
 }
 

@@ -62,11 +62,11 @@ try await services.ensureRunning()
 ```
 
 If the embedding app creates Linux containers or sandboxes from its own app root,
-ask the service layer to install the recommended default kernel after the
-apiserver is reachable:
+prepare the recommended default kernel on demand before the first Linux container
+creation path:
 
 ```swift
-try await services.ensureRunning(installDefaultKernel: true)
+try await services.ensureDefaultKernelInstalled()
 ```
 
 ## Configure memory and CPUs for your containers

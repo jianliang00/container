@@ -65,7 +65,7 @@ struct ContainerKitServicesLifecycleTests {
     }
 
     @Test
-    func startInstallsRecommendedKernelWhenRequestedAndMissing() async throws {
+    func ensureRunningDoesNotPrepareDefaultKernel() async throws {
         let installation = try makeInstallation()
         let defaultKernelChecks = LockedBox(0)
         let kernelInstallCalls = LockedBox(0)
@@ -90,8 +90,46 @@ struct ContainerKitServicesLifecycleTests {
             )
         )
 
-        try await services.start(timeout: .seconds(7), installDefaultKernel: true)
+        try await services.ensureRunning(timeout: .seconds(7))
 
+        #expect(defaultKernelChecks.snapshot() == 0)
+        #expect(kernelInstallCalls.snapshot() == 0)
+    }
+
+    @Test
+    func ensureDefaultKernelInstalledInstallsRecommendedKernelWhenMissing() async throws {
+        let installation = try makeInstallation()
+        let registeredPaths = LockedBox<[String]>([])
+        let defaultKernelChecks = LockedBox(0)
+        let kernelInstallCalls = LockedBox(0)
+
+        let services = ContainerKitServices(
+            appRoot: installation.appRoot,
+            installation: installation.containerInstallation,
+            dependencies: makeDependencies(
+                registerService: { path in
+                    registeredPaths.withValue { $0.append(path) }
+                },
+                isServiceRegistered: { _ in true },
+                healthCheck: { _ in
+                    makeSystemHealth(
+                        appRoot: installation.appRoot,
+                        installRoot: installation.installRoot
+                    )
+                },
+                defaultKernelExists: {
+                    defaultKernelChecks.withValue { $0 += 1 }
+                    return false
+                },
+                installRecommendedKernel: {
+                    kernelInstallCalls.withValue { $0 += 1 }
+                }
+            )
+        )
+
+        try await services.ensureDefaultKernelInstalled(timeout: .seconds(7))
+
+        #expect(registeredPaths.snapshot().isEmpty)
         #expect(defaultKernelChecks.snapshot() == 1)
         #expect(kernelInstallCalls.snapshot() == 1)
     }
@@ -231,9 +269,10 @@ struct ContainerKitServicesLifecycleTests {
     }
 
     @Test
-    func ensureRunningInstallsRecommendedKernelForOwnedHealthyService() async throws {
+    func ensureDefaultKernelInstalledSkipsInstallWhenDefaultKernelExists() async throws {
         let installation = try makeInstallation()
         let registeredPaths = LockedBox<[String]>([])
+        let defaultKernelChecks = LockedBox(0)
         let kernelInstallCalls = LockedBox(0)
 
         let services = ContainerKitServices(
@@ -251,7 +290,8 @@ struct ContainerKitServicesLifecycleTests {
                     )
                 },
                 defaultKernelExists: {
-                    false
+                    defaultKernelChecks.withValue { $0 += 1 }
+                    return true
                 },
                 installRecommendedKernel: {
                     kernelInstallCalls.withValue { $0 += 1 }
@@ -259,10 +299,11 @@ struct ContainerKitServicesLifecycleTests {
             )
         )
 
-        try await services.ensureRunning(timeout: Duration.seconds(3), installDefaultKernel: true)
+        try await services.ensureDefaultKernelInstalled(timeout: Duration.seconds(3))
 
         #expect(registeredPaths.snapshot().isEmpty)
-        #expect(kernelInstallCalls.snapshot() == 1)
+        #expect(defaultKernelChecks.snapshot() == 1)
+        #expect(kernelInstallCalls.snapshot() == 0)
     }
 
     @Test

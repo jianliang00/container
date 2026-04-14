@@ -28,4 +28,17 @@ struct ImagesServiceAuthenticationTests {
 
         #expect(authentication == nil)
     }
+
+    @Test
+    func keychainAuthenticationCanBeDisabledForAnonymousPulls() {
+        #expect(ImagesService.shouldUseKeychainAuthentication(environment: [:]))
+        #expect(
+            ImagesService.shouldUseKeychainAuthentication(environment: [
+                "CONTAINER_REGISTRY_KEYCHAIN_DISABLED": "0"
+            ]))
+        #expect(
+            !ImagesService.shouldUseKeychainAuthentication(environment: [
+                "CONTAINER_REGISTRY_KEYCHAIN_DISABLED": "1"
+            ]))
+    }
 }

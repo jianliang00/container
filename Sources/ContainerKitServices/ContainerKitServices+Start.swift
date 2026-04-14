@@ -19,10 +19,7 @@ import ContainerPlugin
 import Foundation
 
 extension ContainerKitServices {
-    public func start(
-        timeout: Duration = .seconds(10),
-        installDefaultKernel: Bool = false
-    ) async throws {
+    public func start(timeout: Duration = .seconds(10)) async throws {
         let plan = try registrationPlan()
 
         try dependencies.createDirectory(plan.plistURL.deletingLastPathComponent())
@@ -42,19 +39,6 @@ extension ContainerKitServices {
         } catch {
             throw diagnosticsError(
                 action: "failed to get a response from apiserver",
-                error: error
-            )
-        }
-
-        guard installDefaultKernel else {
-            return
-        }
-
-        do {
-            try await ensureDefaultKernelInstalled()
-        } catch {
-            throw diagnosticsError(
-                action: "failed to install default kernel",
                 error: error
             )
         }
@@ -91,11 +75,20 @@ extension ContainerKitServices {
         )
     }
 
-    func ensureDefaultKernelInstalled() async throws {
-        guard try await !dependencies.defaultKernelExists() else {
-            return
+    public func ensureDefaultKernelInstalled(timeout: Duration = .seconds(10)) async throws {
+        try await ensureRunning(timeout: timeout)
+
+        do {
+            guard try await !dependencies.defaultKernelExists() else {
+                return
+            }
+            try await dependencies.installRecommendedKernel()
+        } catch {
+            throw diagnosticsError(
+                action: "failed to install default kernel",
+                error: error
+            )
         }
-        try await dependencies.installRecommendedKernel()
     }
 
     func diagnosticsError(action: String, error: any Error) -> NSError {

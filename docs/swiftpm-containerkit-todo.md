@@ -188,8 +188,8 @@ into an executable checklist. It assumes the current tree does not yet contain
       instead of assuming CLI-style colocated binaries.
 - [x] Phase 1 exclusions remain out of scope:
       base image installation, plugin installation, and interactive
-      confirmation. Recommended kernel installation is available only through
-      an explicit `ContainerKitServices` opt-in.
+      confirmation. Recommended kernel installation is available through an
+      explicit on-demand `ContainerKitServices` method.
 
 ## 4. Phase 3: Documentation and Consumer Guidance
 

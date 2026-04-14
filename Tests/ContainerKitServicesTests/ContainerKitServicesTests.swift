@@ -37,7 +37,10 @@ struct ContainerKitServicesTests {
             installation: ContainerInstallation(
                 installRoot: installRoot,
                 apiServerExecutableURL: executableURL
-            )
+            ),
+            environment: [
+                "CONTAINER_REGISTRY_KEYCHAIN_DISABLED": "1"
+            ]
         )
 
         let plan = try services.registrationPlan()
@@ -45,12 +48,15 @@ struct ContainerKitServicesTests {
         #expect(plan.arguments == [executableURL.path(percentEncoded: false), "start"])
         #expect(plan.environment[ApplicationRoot.environmentName] == appRoot.path(percentEncoded: false))
         #expect(plan.environment[InstallRoot.environmentName] == installRoot.path(percentEncoded: false))
+        #expect(plan.environment["CONTAINER_REGISTRY_KEYCHAIN_DISABLED"] == "1")
 
         let plist = try #require(
             PropertyListSerialization.propertyList(from: plan.plistData, format: nil) as? [String: Any]
         )
         #expect(plist["Label"] as? String == "com.apple.container.apiserver")
         #expect(plist["ProgramArguments"] as? [String] == [executableURL.path(percentEncoded: false), "start"])
+        let environmentVariables = try #require(plist["EnvironmentVariables"] as? [String: String])
+        #expect(environmentVariables["CONTAINER_REGISTRY_KEYCHAIN_DISABLED"] == "1")
         #expect((plist["MachServices"] as? [String: Bool])?["com.apple.container.apiserver"] == true)
     }
 

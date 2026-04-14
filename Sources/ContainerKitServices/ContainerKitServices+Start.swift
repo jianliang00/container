@@ -57,6 +57,9 @@ extension ContainerKitServices {
         var env = PluginLoader.filterEnvironment()
         env[ApplicationRoot.environmentName] = appRoot.path(percentEncoded: false)
         env[InstallRoot.environmentName] = installation.installRoot.path(percentEncoded: false)
+        environment.forEach { key, value in
+            env[key] = value
+        }
 
         let plist = LaunchPlist(
             label: Self.apiServerServiceLabel,

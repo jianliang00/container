@@ -165,7 +165,7 @@ struct CNIRequestTests {
         let plan = MacvmnetOperationPlan(request: request)
 
         #expect(plan.command == .delete)
-        #expect(plan.networkName == "kind")
+        #expect(plan.networkName == "default")
         #expect(plan.interfaceName == "eth0")
         #expect(plan.sandbox?.rawValue == "macvmnet://sandbox/sandbox-1")
     }

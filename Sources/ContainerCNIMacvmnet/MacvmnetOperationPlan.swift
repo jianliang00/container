@@ -17,13 +17,15 @@
 public struct MacvmnetOperationPlan: Equatable {
     public var command: CNICommand
     public var networkName: String
+    public var containerID: String?
     public var interfaceName: String?
     public var sandbox: CNISandboxURI?
     public var previousResult: CNIResult?
 
     public init(request: CNIRequest) {
         command = request.environment.command
-        networkName = request.config.name
+        networkName = request.config.networkName
+        containerID = request.environment.containerID
         interfaceName = request.environment.ifName
         sandbox = request.sandbox
         previousResult = request.config.prevResult

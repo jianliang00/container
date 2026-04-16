@@ -31,21 +31,7 @@ struct CRIShimMacOS: AsyncParsableCommand {
     func run() async throws {
         let configURL = URL(fileURLWithPath: config)
         let shimConfig = try CRIShimConfig.load(from: configURL)
-        try shimConfig.validate()
-
-        throw CRIShimStartupError.unimplemented(
-            "configuration validated for \(shimConfig.normalizedRuntimeEndpoint ?? "<unknown>"); CRI server startup is not implemented yet because generated CRI protobuf and gRPC bindings have not been added"
-        )
-    }
-}
-
-enum CRIShimStartupError: Error, CustomStringConvertible {
-    case unimplemented(String)
-
-    var description: String {
-        switch self {
-        case .unimplemented(let message):
-            return message
-        }
+        let runner = CRIShimRunner(config: shimConfig, serverFactory: DefaultCRIShimServerFactory())
+        try await runner.run()
     }
 }

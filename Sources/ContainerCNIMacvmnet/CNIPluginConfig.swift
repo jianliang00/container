@@ -75,6 +75,17 @@ public struct CNIPluginConfig: Codable, Equatable {
         extra = decodedExtra
     }
 
+    public var networkName: String {
+        stringValue(for: "network") ?? CNISpec.defaultNetworkName
+    }
+
+    public func stringValue(for key: String) -> String? {
+        guard case .string(let value) = extra[key] else {
+            return nil
+        }
+        return value
+    }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(cniVersion, forKey: .cniVersion)

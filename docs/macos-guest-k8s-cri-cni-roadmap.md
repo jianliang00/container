@@ -10,6 +10,8 @@ Related design docs:
 - [`macos-guest-networkpolicy-design.md`](./macos-guest-networkpolicy-design.md)
 - [`macos-guest-workload-image-design.md`](./macos-guest-workload-image-design.md)
 - [`macos-guest-core-todo.md`](./macos-guest-core-todo.md)
+- [`macos-guest-k8s-cri-cni-implementation-plan.md`](./macos-guest-k8s-cri-cni-implementation-plan.md)
+- [`macos-guest-k8s-cri-cni-todo.md`](./macos-guest-k8s-cri-cni-todo.md)
 
 ## 1. Solution Summary
 
@@ -26,6 +28,7 @@ Related design docs:
   - single NIC
   - single network
   - IPv4-first
+  - node label `kubernetes.io/os=darwin`
 
 ## 2. Current Foundation in `container core`
 
@@ -40,7 +43,7 @@ Related design docs:
 | CRI shim | planned | external adapter layer |
 | CNI plugin | planned | external adapter layer |
 | Single-node kubelet validation | planned | end-to-end integration |
-| Later expansion | planned | `HostPort`, IPv6, multi-network, `NetworkPolicy`, stronger isolation, metrics |
+| Current Kubernetes adapter | planned | CRI shim, CNI plugin, local kubelet validation, and node-local `NetworkPolicy` |
 
 ## 3. Architecture
 
@@ -50,7 +53,8 @@ Related design docs:
 | --- | --- |
 | `kubelet` | drives Pod lifecycle through CRI |
 | `container-cri-shim-macos` | exposes CRI gRPC, translates Kubernetes objects into core sandbox/workload operations, invokes the CNI plugin |
-| `plugins/cni/macvmnet` | handles `ADD` / `DEL` / `CHECK`, prepares sandbox network state, returns CNI results |
+| `plugins/cni/macvmnet` | handles CNI `1.1.0` `ADD` / `DEL` / `CHECK` / `STATUS` / `VERSION` / `GC`, prepares sandbox network state, returns CNI results |
+| `kube-proxy` | owns single-node Kubernetes Service VIP and endpoint programming |
 | `container core` | owns sandbox/workload state, guest runtime control, workload image handling, network lifecycle, logs, and streaming operations |
 | macOS runtime sidecar | boots the VM, restores prepared network attachments, brokers vsock and guest operations |
 | guest agent and guest network manager | apply guest configuration, start workloads, provide streaming and file transfer endpoints |
@@ -62,6 +66,7 @@ Related design docs:
 flowchart TD
     Kubelet["kubelet"] --> CRI["container-cri-shim-macos"]
     CRI --> CNI["plugins/cni/macvmnet"]
+    KubeProxy["kube-proxy"] --> SVC["Service VIP rules"]
     CRI --> RAPI["Runtime Control API"]
     CNI --> NAPI["Network Control API"]
     RAPI --> Core["container core"]
@@ -198,7 +203,7 @@ The sidecar recreates `VZVmnetNetworkDeviceAttachment` instances from the persis
 lease during bootstrap or recovery. The guest network manager applies the same lease
 inside the guest.
 
-### 6.3 Initial Kubernetes Networking Scope
+### 6.3 Current Kubernetes Networking Scope
 
 - single node
 - single NIC
@@ -207,14 +212,15 @@ inside the guest.
 - same-node Pod connectivity
 - external egress
 - DNS projection into the guest
+- single-node Service reachability through kube-proxy
+- node-local IPv4 TCP/UDP `NetworkPolicy`
 
-Later networking extensions:
+Removed from the current Kubernetes adapter plan:
 
 - `HostPort`
 - IPv6
 - multiple network attachments
-- multi-node and overlay networking
-- `NetworkPolicy`
+- multi-node service routing and overlay networking
 
 ## 7. Kubernetes Integration Layer
 
@@ -257,6 +263,9 @@ The shim manages:
 - `ADD`
 - `DEL`
 - `CHECK`
+- `STATUS`
+- `VERSION`
+- `GC`
 
 The plugin operates on an existing sandbox record created by the CRI shim. The
 sandbox configuration already contains:
@@ -273,6 +282,9 @@ sandbox configuration already contains:
 | `ADD` | `PrepareSandboxNetwork` | Pod IP, routes, gateway, DNS, MAC, network ID |
 | `CHECK` | `InspectSandboxNetwork` | current Pod network state |
 | `DEL` | `ReleaseSandboxNetwork` | release of Pod network allocation |
+| `STATUS` | network service readiness check | readiness or CNI error |
+| `VERSION` | local version response | supported CNI versions including `1.1.0` |
+| `GC` | result cache and lease reconciliation | stale CNI state cleanup |
 
 ### 7.3 Pod Lifecycle Sequence
 
@@ -319,7 +331,7 @@ Streaming operations are provided directly by core:
 
 ### 8.3 Volumes
 
-Initial Pod volume support maps onto existing sandbox filesystem primitives:
+Current Pod volume support maps onto existing sandbox filesystem primitives:
 
 - `emptyDir` -> sandbox-scoped temporary directories
 - `hostPath` -> existing host path mappings
@@ -357,22 +369,22 @@ Policy API extension:
 - `ApplySandboxPolicy(sandboxID, generation, ingressACL, egressACL)`
 - `RemoveSandboxPolicy(sandboxID)`
 
-Initial `NetworkPolicy` scope:
+Current `NetworkPolicy` scope:
 
 - node-local
 - IPv4
 - L3/L4 ingress and egress
 - TCP and UDP
 
-## 10. Delivery Stages
+## 10. Delivery Status
 
-| Stage | Status | Result |
+| Area | Status | Result |
 | --- | --- | --- |
 | Core foundation | complete | sandbox networking, sandbox/workload runtime, workload image model, runtime control API, network control API |
-| CRI shim MVP | planned | kubelet-facing RuntimeService and ImageService backed by core APIs |
-| CNI plugin MVP | planned | `ADD` / `DEL` / `CHECK` backed by sandbox-scoped network control APIs |
-| Single-node kubelet integration | planned | static Pod, single-container Pod, multi-container Pod, probes, logs, exec, port-forward |
-| Expansion | planned | `HostPort`, stronger crash recovery, metrics, IPv6, multiple networks, multi-node networking, `NetworkPolicy`, stronger isolation |
+| CRI shim | planned | kubelet-facing RuntimeService and ImageService backed by core APIs |
+| CNI plugin | planned | CNI `1.1.0` `ADD` / `DEL` / `CHECK` / `STATUS` / `VERSION` / `GC` backed by sandbox-scoped network control APIs |
+| NetworkPolicy controller | planned | node-local IPv4 TCP/UDP policy compiled into sandbox ACLs |
+| Single-node kubelet integration | planned | static Pod, single-container Pod, probes, logs, exec, port-forward, kube-proxy service reachability, and policy validation |
 
 ## 11. Validation Targets
 
@@ -401,4 +413,5 @@ Initial `NetworkPolicy` scope:
 - two-container Pod
 - HTTP and TCP probes
 - exec probe
-- Service reachability through Pod IP on a single node
+- direct Pod IP reachability on a single node
+- single-node Service reachability through kube-proxy

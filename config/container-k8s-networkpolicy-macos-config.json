@@ -1,0 +1,6 @@
+{
+    "enabled": true,
+    "kubeconfig": "/etc/kubernetes/kubelet.conf",
+    "nodeName": "macos-node-1",
+    "resyncSeconds": 30
+}

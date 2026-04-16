@@ -63,20 +63,29 @@ Policy evaluation needs at least:
 - DNS
 - `generation`
 
-## 6. Scope
+## 6. Current Scope
 
-The initial policy scope is:
+The current CRI/CNI integration policy scope is:
 
 - node-local
 - IPv4
 - L3/L4 ingress and egress
 - TCP and UDP
+- Pod and Namespace selector resolution in the Kubernetes integration layer
+- simple IPv4 `ipBlock.cidr` peers
+- numeric ports
 
-Out of scope for the first phase:
+Egress default-deny behavior does not include implicit allow rules for DNS,
+gateway, apiserver, or other Pod-network traffic. Pods that need those paths must
+have explicit egress rules. Runtime control traffic over host-side shim, sidecar,
+or vsock channels is outside the Pod network policy boundary.
+
+Removed from the current policy subset:
 
 - multi-node overlay networking
 - IPv6
-- full `ipBlock` edge semantics
+- SCTP
+- named ports
 - bandwidth control
 - guest-side primary firewall enforcement
 

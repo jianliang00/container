@@ -1,0 +1,10 @@
+{
+    "cniVersion": "1.1.0",
+    "name": "macvmnet",
+    "plugins": [
+        {
+            "type": "macvmnet",
+            "network": "default"
+        }
+    ]
+}

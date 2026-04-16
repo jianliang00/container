@@ -30,6 +30,10 @@ let package = Package(
     platforms: [.macOS("15")],
     products: [
         .library(name: "ContainerCommands", targets: ["ContainerCommands"]),
+        .library(name: "ContainerCRI", targets: ["ContainerCRI"]),
+        .library(name: "ContainerCRIShimMacOS", targets: ["ContainerCRIShimMacOS"]),
+        .library(name: "ContainerCNIMacvmnet", targets: ["ContainerCNIMacvmnet"]),
+        .library(name: "ContainerK8sNetworkPolicyMacOS", targets: ["ContainerK8sNetworkPolicyMacOS"]),
         .library(name: "ContainerBuild", targets: ["ContainerBuild"]),
         .library(name: "ContainerAPIService", targets: ["ContainerAPIService"]),
         .library(name: "ContainerAPIClient", targets: ["ContainerAPIClient"]),
@@ -56,6 +60,9 @@ let package = Package(
         .executable(name: "container-macos-guest-agent", targets: ["container-macos-guest-agent"]),
         .executable(name: "container-macos-image-prepare", targets: ["container-macos-image-prepare"]),
         .executable(name: "container-macos-vm-manager", targets: ["container-macos-vm-manager"]),
+        .executable(name: "container-cri-shim-macos", targets: ["container-cri-shim-macos"]),
+        .executable(name: "container-cni-macvmnet", targets: ["container-cni-macvmnet"]),
+        .executable(name: "container-k8s-networkpolicy-macos", targets: ["container-k8s-networkpolicy-macos"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
@@ -154,6 +161,82 @@ let package = Package(
             name: "ContainerBuildTests",
             dependencies: [
                 "ContainerBuild"
+            ]
+        ),
+        .target(
+            name: "ContainerCRI",
+            dependencies: [
+                .product(name: "GRPC", package: "grpc-swift"),
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+            ]
+        ),
+        .target(
+            name: "ContainerCRIShimMacOS",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+                "ContainerAPIClient",
+                "ContainerCRI",
+                "ContainerKit",
+                "ContainerResource",
+            ]
+        ),
+        .executableTarget(
+            name: "container-cri-shim-macos",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                "ContainerCRIShimMacOS",
+                "ContainerLog",
+                "ContainerVersion",
+            ],
+            path: "Sources/Helpers/CRIShimMacOS"
+        ),
+        .testTarget(
+            name: "ContainerCRIShimMacOSTests",
+            dependencies: [
+                "ContainerCRIShimMacOS"
+            ]
+        ),
+        .target(
+            name: "ContainerCNIMacvmnet",
+            dependencies: [
+                "ContainerNetworkServiceClient",
+                "ContainerResource",
+            ]
+        ),
+        .executableTarget(
+            name: "container-cni-macvmnet",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerCNIMacvmnet",
+            ],
+            path: "Sources/Helpers/CNIMacvmnet"
+        ),
+        .testTarget(
+            name: "ContainerCNIMacvmnetTests",
+            dependencies: [
+                "ContainerCNIMacvmnet"
+            ]
+        ),
+        .target(
+            name: "ContainerK8sNetworkPolicyMacOS",
+            dependencies: [
+                "ContainerKit",
+                "ContainerResource",
+            ]
+        ),
+        .executableTarget(
+            name: "container-k8s-networkpolicy-macos",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerK8sNetworkPolicyMacOS",
+            ],
+            path: "Sources/Helpers/K8sNetworkPolicyMacOS"
+        ),
+        .testTarget(
+            name: "ContainerK8sNetworkPolicyMacOSTests",
+            dependencies: [
+                "ContainerK8sNetworkPolicyMacOS"
             ]
         ),
         .testTarget(

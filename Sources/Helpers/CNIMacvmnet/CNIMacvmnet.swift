@@ -20,16 +20,16 @@ import Foundation
 
 @main
 struct CNIMacvmnet {
-    static func main() {
+    static func main() async {
         do {
-            try run()
+            try await run()
         } catch {
             writeError(error)
             exit(EXIT_FAILURE)
         }
     }
 
-    private static func run() throws {
+    private static func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         let command = try CNIEnvironment.parse(environment).command
 
@@ -40,16 +40,25 @@ struct CNIMacvmnet {
 
         let stdin = FileHandle.standardInput.readDataToEndOfFile()
         let request = try CNIRequest.parse(environment: environment, stdin: stdin)
+        let handler = MacvmnetOperationHandler(backend: MacvmnetLiveBackend())
 
         switch request.environment.command {
         case .status:
-            throw CNIError.backendUnavailable("STATUS is not ready: container network API health checks are not implemented")
+            _ = try await handle(request, handler: handler)
         case .add, .check, .delete, .garbageCollect:
-            let plan = MacvmnetOperationPlan(request: request)
-            throw CNIError.backendUnavailable("\(plan.command.rawValue) is not wired to container network APIs yet")
+            if let result = try await handle(request, handler: handler) {
+                try writeJSON(result)
+            }
         case .version:
             try writeJSON(CNIVersionResult())
         }
+    }
+
+    private static func handle(
+        _ request: CNIRequest,
+        handler: MacvmnetOperationHandler<MacvmnetLiveBackend>
+    ) async throws -> CNIResult? {
+        try await handler.handle(request)
     }
 
     private static func writeJSON<T: Encodable>(_ value: T) throws {

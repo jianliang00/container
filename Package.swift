@@ -200,6 +200,7 @@ let package = Package(
         .target(
             name: "ContainerCNIMacvmnet",
             dependencies: [
+                .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerNetworkServiceClient",
                 "ContainerResource",
             ]
@@ -215,12 +216,15 @@ let package = Package(
         .testTarget(
             name: "ContainerCNIMacvmnetTests",
             dependencies: [
-                "ContainerCNIMacvmnet"
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                "ContainerCNIMacvmnet",
+                "ContainerResource",
             ]
         ),
         .target(
             name: "ContainerK8sNetworkPolicyMacOS",
             dependencies: [
+                .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerKit",
                 "ContainerResource",
             ]
@@ -236,7 +240,9 @@ let package = Package(
         .testTarget(
             name: "ContainerK8sNetworkPolicyMacOSTests",
             dependencies: [
-                "ContainerK8sNetworkPolicyMacOS"
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                "ContainerK8sNetworkPolicyMacOS",
+                "ContainerResource",
             ]
         ),
         .testTarget(

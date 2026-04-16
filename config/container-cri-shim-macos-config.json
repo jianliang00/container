@@ -1,0 +1,38 @@
+{
+    "runtimeEndpoint": "/var/run/container-cri-macos.sock",
+    "streaming": {
+        "address": "127.0.0.1",
+        "port": 0
+    },
+    "cni": {
+        "binDir": "/opt/cni/bin",
+        "confDir": "/etc/cni/net.d",
+        "plugin": "macvmnet"
+    },
+    "defaults": {
+        "sandboxImage": "localhost/macos-sandbox:latest",
+        "workloadPlatform": {
+            "os": "darwin",
+            "architecture": "arm64"
+        },
+        "network": "default",
+        "guiEnabled": false
+    },
+    "runtimeHandlers": {
+        "macos": {
+            "sandboxImage": "localhost/macos-sandbox:latest",
+            "network": "default",
+            "guiEnabled": false
+        }
+    },
+    "networkPolicy": {
+        "enabled": true,
+        "kubeconfig": "/etc/kubernetes/kubelet.conf",
+        "nodeName": "macos-node-1",
+        "resyncSeconds": 30
+    },
+    "kubeProxy": {
+        "enabled": true,
+        "configPath": "/etc/kubernetes/kube-proxy.conf"
+    }
+}

@@ -19,6 +19,7 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
     public var sandboxImage: String
     public var workloadPlatform: WorkloadPlatform
     public var network: String
+    public var networkBackend: String
     public var guiEnabled: Bool
 
     public init(
@@ -26,12 +27,14 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
         sandboxImage: String,
         workloadPlatform: WorkloadPlatform,
         network: String,
+        networkBackend: String,
         guiEnabled: Bool
     ) {
         self.name = name
         self.sandboxImage = sandboxImage
         self.workloadPlatform = workloadPlatform
         self.network = network
+        self.networkBackend = networkBackend
         self.guiEnabled = guiEnabled
     }
 }
@@ -77,6 +80,7 @@ extension CRIShimConfig {
             let sandboxImage = override?.sandboxImage ?? defaults.sandboxImage,
             let defaultPlatform = defaults.workloadPlatform,
             let network = override?.network ?? defaults.network,
+            let networkBackend = override?.networkBackend ?? defaults.networkBackend,
             let guiEnabled = override?.guiEnabled ?? defaults.guiEnabled
         else {
             throw RuntimeHandlerResolutionError.invalidConfig(validationIssues)
@@ -92,6 +96,7 @@ extension CRIShimConfig {
             sandboxImage: sandboxImage,
             workloadPlatform: workloadPlatform,
             network: network,
+            networkBackend: networkBackend,
             guiEnabled: guiEnabled
         )
     }

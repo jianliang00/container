@@ -16,6 +16,45 @@
 
 import Foundation
 
+public enum CRIShimConfigDefaults {
+    public static let fileName = "container-cri-shim-macos-config.json"
+    public static let systemConfigURL = URL(fileURLWithPath: "/etc/container/\(fileName)")
+    public static let legacySystemConfigURL = URL(fileURLWithPath: "/etc/\(fileName)")
+    public static let userConfigURL = URL(
+        fileURLWithPath: ("~/.config/container/\(fileName)" as NSString).expandingTildeInPath
+    )
+
+    public static var defaultSearchURLs: [URL] {
+        [
+            systemConfigURL,
+            legacySystemConfigURL,
+            userConfigURL,
+        ]
+    }
+}
+
+public struct CRIShimConfigLoadResult: Equatable, Sendable {
+    public var config: CRIShimConfig
+    public var sourceURL: URL
+
+    public init(config: CRIShimConfig, sourceURL: URL) {
+        self.config = config
+        self.sourceURL = sourceURL
+    }
+}
+
+public struct CRIShimConfigLoadError: Error, Equatable, CustomStringConvertible, Sendable {
+    public var searchedPaths: [String]
+
+    public init(searchedPaths: [String]) {
+        self.searchedPaths = searchedPaths
+    }
+
+    public var description: String {
+        "CRI shim config file not found; searched: " + searchedPaths.joined(separator: ", ")
+    }
+}
+
 public struct CRIShimConfig: Codable, Equatable, Sendable {
     public var runtimeEndpoint: String?
     public var streaming: StreamingConfig?
@@ -80,6 +119,24 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         return try decoder.decode(CRIShimConfig.self, from: data)
     }
 
+    public static func loadFromSearchPath(
+        _ searchURLs: [URL] = CRIShimConfigDefaults.defaultSearchURLs,
+        fileManager: FileManager = .default,
+        decoder: JSONDecoder = JSONDecoder()
+    ) throws -> CRIShimConfigLoadResult {
+        for url in searchURLs {
+            guard fileManager.fileExists(atPath: url.path) else {
+                continue
+            }
+            return try CRIShimConfigLoadResult(
+                config: load(from: url, decoder: decoder),
+                sourceURL: url
+            )
+        }
+
+        throw CRIShimConfigLoadError(searchedPaths: searchURLs.map(\.path))
+    }
+
     public var normalizedRuntimeEndpoint: String? {
         runtimeEndpoint?.removingUnixScheme
     }
@@ -111,17 +168,20 @@ public struct RuntimeProfile: Codable, Equatable, Sendable {
     public var sandboxImage: String?
     public var workloadPlatform: WorkloadPlatform?
     public var network: String?
+    public var networkBackend: String?
     public var guiEnabled: Bool?
 
     public init(
         sandboxImage: String? = nil,
         workloadPlatform: WorkloadPlatform? = nil,
         network: String? = nil,
+        networkBackend: String? = nil,
         guiEnabled: Bool? = nil
     ) {
         self.sandboxImage = sandboxImage
         self.workloadPlatform = workloadPlatform
         self.network = network
+        self.networkBackend = networkBackend
         self.guiEnabled = guiEnabled
     }
 }

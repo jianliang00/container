@@ -107,12 +107,14 @@ private let validConfigJSON = """
           "architecture": "arm64"
         },
         "network": "default",
+        "networkBackend": "vmnetShared",
         "guiEnabled": false
       },
       "runtimeHandlers": {
         "macos": {
           "sandboxImage": "localhost/macos-sandbox:latest",
           "network": "default",
+          "networkBackend": "vmnetShared",
           "guiEnabled": false
         }
       },

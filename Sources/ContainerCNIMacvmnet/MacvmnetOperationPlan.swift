@@ -21,6 +21,7 @@ public struct MacvmnetOperationPlan: Equatable {
     public var interfaceName: String?
     public var sandbox: CNISandboxURI?
     public var previousResult: CNIResult?
+    public var validAttachments: Set<MacvmnetAttachmentIdentity>
 
     public init(request: CNIRequest) {
         command = request.environment.command
@@ -29,5 +30,13 @@ public struct MacvmnetOperationPlan: Equatable {
         interfaceName = request.environment.ifName
         sandbox = request.sandbox
         previousResult = request.config.prevResult
+        validAttachments = request.validAttachments
+    }
+
+    public var attachmentIdentity: MacvmnetAttachmentIdentity? {
+        guard let containerID, let interfaceName else {
+            return nil
+        }
+        return MacvmnetAttachmentIdentity(containerID: containerID, ifName: interfaceName)
     }
 }

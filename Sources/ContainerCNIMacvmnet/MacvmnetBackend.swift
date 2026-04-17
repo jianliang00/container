@@ -93,7 +93,10 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     }
 
     public func garbageCollect(_ plan: MacvmnetOperationPlan) async throws {
-        _ = plan
+        _ = plan.validAttachments
+        throw CNIError.backendUnavailable(
+            "GC is not connected to a persistent attachment ledger yet"
+        )
     }
 
     private func allocatedAttachment(for plan: MacvmnetOperationPlan) async throws -> Attachment {

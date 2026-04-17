@@ -183,6 +183,35 @@ struct CNIRequestTests {
         #expect(request.environment.command == .delete)
         #expect(request.sandbox == nil)
     }
+
+    @Test func parsesGarbageCollectValidAttachmentsFromStdin() throws {
+        let request = try CNIRequest.parse(
+            environment: [
+                "CNI_COMMAND": "GC",
+                "CNI_PATH": "/opt/cni/bin",
+            ],
+            stdin: Data(
+                """
+                {
+                  "cniVersion": "1.1.0",
+                  "name": "kind",
+                  "type": "macvmnet",
+                  "cni.dev/valid-attachments": [
+                    { "containerID": "sandbox-1", "ifname": "eth0" },
+                    { "containerID": "sandbox-2", "ifname": "eth1" }
+                  ]
+                }
+                """.utf8
+            )
+        )
+
+        #expect(request.environment.command == .garbageCollect)
+        #expect(
+            request.validAttachments == [
+                MacvmnetAttachmentIdentity(containerID: "sandbox-1", ifName: "eth0"),
+                MacvmnetAttachmentIdentity(containerID: "sandbox-2", ifName: "eth1"),
+            ])
+    }
 }
 
 private func minimalConfigData() -> Data {

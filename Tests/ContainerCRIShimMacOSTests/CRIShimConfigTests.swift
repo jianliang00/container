@@ -33,7 +33,9 @@ struct CRIShimConfigTests {
         #expect(config.defaults?.sandboxImage == "localhost/macos-sandbox:latest")
         #expect(config.defaults?.workloadPlatform?.os == "darwin")
         #expect(config.defaults?.workloadPlatform?.architecture == "arm64")
+        #expect(config.defaults?.networkBackend == "vmnetShared")
         #expect(config.runtimeHandlers["macos"]?.network == "default")
+        #expect(config.runtimeHandlers["macos"]?.networkBackend == "vmnetShared")
         #expect(config.networkPolicy?.enabled == true)
         #expect(config.kubeProxy?.enabled == true)
     }
@@ -55,10 +57,11 @@ struct CRIShimConfigTests {
                 sandboxImage: "",
                 workloadPlatform: WorkloadPlatform(os: "linux", architecture: ""),
                 network: nil,
+                networkBackend: "invalid",
                 guiEnabled: nil
             ),
             runtimeHandlers: [
-                " ": RuntimeProfile(network: "")
+                " ": RuntimeProfile(network: "", networkBackend: "")
             ],
             networkPolicy: NetworkPolicyConfig(enabled: true, kubeconfig: "kubelet.conf", nodeName: "", resyncSeconds: 0),
             kubeProxy: KubeProxyConfig(enabled: true, configPath: "kube-proxy.conf")
@@ -75,6 +78,7 @@ struct CRIShimConfigTests {
         #expect(issues.contains("defaults.workloadPlatform.os must be darwin"))
         #expect(issues.contains("defaults.workloadPlatform.architecture is required"))
         #expect(issues.contains("defaults.network is required"))
+        #expect(issues.contains("defaults.networkBackend must be virtualizationNAT or vmnetShared"))
         #expect(issues.contains("defaults.guiEnabled is required"))
         #expect(issues.contains("runtimeHandlers contains an empty handler name"))
         #expect(issues.contains("runtimeHandlers. .network cannot be empty"))
@@ -94,6 +98,7 @@ struct CRIShimConfigTests {
         #expect(resolved.sandboxImage == "localhost/macos-sandbox:latest")
         #expect(resolved.workloadPlatform == WorkloadPlatform(os: "darwin", architecture: "arm64"))
         #expect(resolved.network == "default")
+        #expect(resolved.networkBackend == "vmnetShared")
         #expect(resolved.guiEnabled == false)
     }
 
@@ -107,6 +112,7 @@ struct CRIShimConfigTests {
         #expect(resolved.sandboxImage == "localhost/macos-gui-sandbox:latest")
         #expect(resolved.workloadPlatform == WorkloadPlatform(os: "darwin", architecture: "arm64"))
         #expect(resolved.network == "gui")
+        #expect(resolved.networkBackend == "vmnetShared")
         #expect(resolved.guiEnabled == true)
     }
 
@@ -118,6 +124,67 @@ struct CRIShimConfigTests {
             try config.resolveRuntimeHandler("linux")
         }
     }
+
+    @Test
+    func loadsFirstExistingConfigFromSearchPath() throws {
+        let rootURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+
+        let missingURL = rootURL.appendingPathComponent("missing.json")
+        let configURL = rootURL.appendingPathComponent("config.json")
+        try Data(validConfigJSON.utf8).write(to: configURL)
+
+        let result = try CRIShimConfig.loadFromSearchPath([missingURL, configURL])
+        #expect(result.sourceURL == configURL)
+        #expect(result.config.runtimeEndpoint == "/var/run/container-cri-macos.sock")
+    }
+
+    @Test
+    func reportsSearchedPathsWhenConfigSearchMisses() throws {
+        let rootURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+
+        let missingURL = rootURL.appendingPathComponent("missing.json")
+        #expect(throws: CRIShimConfigLoadError(searchedPaths: [missingURL.path])) {
+            _ = try CRIShimConfig.loadFromSearchPath([missingURL])
+        }
+    }
+
+    @Test
+    func rejectsKubernetesIntegrationWithoutVmnetShared() {
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            cni: CNIConfig(binDir: "/opt/cni/bin", confDir: "/etc/cni/net.d", plugin: "macvmnet"),
+            defaults: RuntimeProfile(
+                sandboxImage: "localhost/macos-sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos": RuntimeProfile(networkBackend: "virtualizationNAT")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: true, kubeconfig: "/etc/kubernetes/kubelet.conf", nodeName: "node-a", resyncSeconds: 30),
+            kubeProxy: KubeProxyConfig(enabled: true, configPath: "/etc/kubernetes/kube-proxy.conf")
+        )
+
+        #expect(
+            config.validationIssues.contains(
+                "defaults.networkBackend must be vmnetShared when networkPolicy or kubeProxy is enabled"
+            ))
+        #expect(
+            config.validationIssues.contains(
+                "runtimeHandlers.macos.networkBackend must be vmnetShared when networkPolicy or kubeProxy is enabled"
+            ))
+    }
+}
+
+private func makeTemporaryDirectory() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("CRIShimConfigTests-\(UUID().uuidString)", isDirectory: true)
 }
 
 private let validConfigJSON = """
@@ -139,12 +206,14 @@ private let validConfigJSON = """
           "architecture": "arm64"
         },
         "network": "default",
+        "networkBackend": "vmnetShared",
         "guiEnabled": false
       },
       "runtimeHandlers": {
         "macos": {
           "sandboxImage": "localhost/macos-sandbox:latest",
           "network": "default",
+          "networkBackend": "vmnetShared",
           "guiEnabled": false
         }
       },
@@ -180,12 +249,14 @@ private let validConfigWithOverrideJSON = """
           "architecture": "arm64"
         },
         "network": "default",
+        "networkBackend": "vmnetShared",
         "guiEnabled": false
       },
       "runtimeHandlers": {
         "macos-gui": {
           "sandboxImage": "localhost/macos-gui-sandbox:latest",
           "network": "gui",
+          "networkBackend": "vmnetShared",
           "guiEnabled": true
         }
       },

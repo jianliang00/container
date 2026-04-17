@@ -229,12 +229,26 @@ The config owns:
 - default sandbox image
 - default workload platform
 - default network
+- default macOS guest network backend
 - runtime handler profiles
 - GUI policy for kubelet-launched macOS guests
 - policy-controller kubeconfig path
 - policy-controller node name
 - policy-controller resync interval
 - kube-proxy launch mode and config path for single-node Service validation
+
+When `--config` is omitted, `container-cri-shim-macos` searches these paths in
+order:
+
+1. `/etc/container/container-cri-shim-macos-config.json`
+2. `/etc/container-cri-shim-macos-config.json`
+3. `~/.config/container/container-cri-shim-macos-config.json`
+
+Any config that enables NetworkPolicy or kube-proxy must resolve every active
+runtime profile to `networkBackend: "vmnetShared"`. `virtualizationNAT` remains
+valid only for non-Kubernetes macOS guest usage because it does not provide the
+stable host-visible sandbox networking required by CNI, NetworkPolicy, and
+kube-proxy validation.
 
 Recommended initial shape:
 
@@ -257,12 +271,14 @@ Recommended initial shape:
       "architecture": "arm64"
     },
     "network": "default",
+    "networkBackend": "vmnetShared",
     "guiEnabled": false
   },
   "runtimeHandlers": {
     "macos": {
       "sandboxImage": "localhost/macos-sandbox:latest",
       "network": "default",
+      "networkBackend": "vmnetShared",
       "guiEnabled": false
     }
   },

@@ -1,0 +1,11 @@
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: "userspace"
+bindAddress: "127.0.0.1"
+healthzBindAddress: "127.0.0.1:10256"
+metricsBindAddress: "127.0.0.1:10249"
+clientConnection:
+  kubeconfig: "/etc/kubernetes/kubelet.conf"
+clusterCIDR: "10.244.0.0/16"
+nodePortAddresses:
+  - "127.0.0.0/8"

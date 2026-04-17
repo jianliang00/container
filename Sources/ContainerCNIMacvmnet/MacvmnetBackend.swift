@@ -44,11 +44,19 @@ public protocol MacvmnetBackend: Sendable {
 
 public struct MacvmnetLiveBackend: MacvmnetBackend {
     public typealias NetworkClientFactory = @Sendable (String) -> any MacvmnetNetworkClient
+    public typealias AttachmentLedgerFactory = @Sendable (MacvmnetOperationPlan) -> any MacvmnetAttachmentLedger
 
     private let makeNetworkClient: NetworkClientFactory
+    private let makeAttachmentLedger: AttachmentLedgerFactory
 
-    public init(makeNetworkClient: @escaping NetworkClientFactory = { NetworkClient(id: $0) }) {
+    public init(
+        makeNetworkClient: @escaping NetworkClientFactory = { NetworkClient(id: $0) },
+        makeAttachmentLedger: @escaping AttachmentLedgerFactory = {
+            FileMacvmnetAttachmentLedger(rootURL: URL(fileURLWithPath: $0.dataDirectory, isDirectory: true))
+        }
+    ) {
         self.makeNetworkClient = makeNetworkClient
+        self.makeAttachmentLedger = makeAttachmentLedger
     }
 
     public func health(networkName: String) async throws {
@@ -57,11 +65,17 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
 
     public func prepare(_ plan: MacvmnetOperationPlan) async throws -> CNIResult {
         let attachment = try await allocatedAttachment(for: plan)
-        return CNIResult(
+        let result = CNIResult(
             attachment: attachment,
             interfaceName: plan.interfaceName ?? "eth0",
             sandbox: plan.sandbox
         )
+        if let identity = plan.attachmentIdentity {
+            try makeAttachmentLedger(plan).upsert(
+                MacvmnetAttachmentRecord(identity: identity, networkName: plan.networkName, result: result)
+            )
+        }
+        return result
     }
 
     public func inspect(_ plan: MacvmnetOperationPlan) async throws {
@@ -87,16 +101,29 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
             throw CNIError.missingEnvironment("CNI_CONTAINERID")
         }
         guard try await client.lookup(hostname: hostName) != nil else {
+            if let identity = plan.attachmentIdentity {
+                try makeAttachmentLedger(plan).remove(identity: identity, networkName: plan.networkName)
+            }
             return
         }
         try await client.deallocate(hostname: hostName)
+        if let identity = plan.attachmentIdentity {
+            try makeAttachmentLedger(plan).remove(identity: identity, networkName: plan.networkName)
+        }
     }
 
     public func garbageCollect(_ plan: MacvmnetOperationPlan) async throws {
-        _ = plan.validAttachments
-        throw CNIError.backendUnavailable(
-            "GC is not connected to a persistent attachment ledger yet"
-        )
+        let ledger = makeAttachmentLedger(plan)
+        let client = makeNetworkClient(plan.networkName)
+        let staleRecords = try ledger.records(networkName: plan.networkName)
+            .filter { !plan.validAttachments.contains($0.identity) }
+
+        for record in staleRecords {
+            if try await client.lookup(hostname: record.identity.containerID) != nil {
+                try await client.deallocate(hostname: record.identity.containerID)
+            }
+            try ledger.remove(identity: record.identity, networkName: record.networkName)
+        }
     }
 
     private func allocatedAttachment(for plan: MacvmnetOperationPlan) async throws -> Attachment {

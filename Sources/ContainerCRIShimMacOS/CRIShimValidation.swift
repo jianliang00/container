@@ -108,6 +108,8 @@ extension CRIShimConfig {
             issues.append("kubeProxy is required")
         }
 
+        validateKubernetesIntegrationNetworkBackend(issues: &issues)
+
         return issues
     }
 }
@@ -124,6 +126,7 @@ private func validateRequiredRuntimeProfile(_ profile: RuntimeProfile, name: Str
         issues.append("\(name).workloadPlatform is required")
     }
     validateNonEmpty(profile.network, name: "\(name).network", issues: &issues)
+    validateNetworkBackend(profile.networkBackend, name: "\(name).networkBackend", required: true, issues: &issues)
     if profile.guiEnabled == nil {
         issues.append("\(name).guiEnabled is required")
     }
@@ -139,6 +142,7 @@ private func validateRuntimeHandlerOverride(_ profile: RuntimeProfile, name: Str
             issues.append("\(name).workloadPlatform.os must be darwin")
         }
     }
+    validateNetworkBackend(profile.networkBackend, name: "\(name).networkBackend", required: false, issues: &issues)
 }
 
 private func validatePath(_ value: String?, name: String, allowUnixScheme: Bool = false, issues: inout [String]) {
@@ -163,6 +167,49 @@ private func validateNonEmpty(_ value: String?, name: String, issues: inout [Str
 private func validateOptionalNonEmpty(_ value: String?, name: String, issues: inout [String]) {
     if let value, value.trimmed.isEmpty {
         issues.append("\(name) cannot be empty")
+    }
+}
+
+private func validateNetworkBackend(_ value: String?, name: String, required: Bool, issues: inout [String]) {
+    guard let value = value?.trimmed, !value.isEmpty else {
+        if required {
+            issues.append("\(name) is required")
+        }
+        return
+    }
+
+    guard value == "virtualizationNAT" || value == "vmnetShared" else {
+        issues.append("\(name) must be virtualizationNAT or vmnetShared")
+        return
+    }
+}
+
+extension CRIShimConfig {
+    private var kubernetesIntegrationEnabled: Bool {
+        networkPolicy?.enabled == true || kubeProxy?.enabled == true
+    }
+
+    private func validateKubernetesIntegrationNetworkBackend(issues: inout [String]) {
+        guard kubernetesIntegrationEnabled else {
+            return
+        }
+
+        guard let defaults else {
+            return
+        }
+
+        if defaults.networkBackend?.trimmed == "virtualizationNAT" {
+            issues.append("defaults.networkBackend must be vmnetShared when networkPolicy or kubeProxy is enabled")
+        }
+
+        for (handlerName, handler) in runtimeHandlers.sorted(by: { $0.key < $1.key }) {
+            let effectiveBackend = handler.networkBackend?.trimmed ?? defaults.networkBackend?.trimmed
+            if effectiveBackend == "virtualizationNAT" {
+                issues.append(
+                    "runtimeHandlers.\(handlerName).networkBackend must be vmnetShared when networkPolicy or kubeProxy is enabled"
+                )
+            }
+        }
     }
 }
 

@@ -22,9 +22,6 @@ Protocol and generated code:
 
 Configuration:
 
-- [ ] Decide config file search order and default paths.
-- [ ] Add sample kube-proxy config for single-node Service validation.
-- [ ] Reject configs that enable Kubernetes integration without `vmnetShared`.
 - [ ] Decide kube-proxy launch settings for single-node Service reachability.
 
 CRI server:

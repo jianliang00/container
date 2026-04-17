@@ -25,12 +25,16 @@ struct CRIShimMacOS: AsyncParsableCommand {
         abstract: "Kubernetes CRI shim for macOS guest containers"
     )
 
-    @Option(name: .shortAndLong, help: "Path to the CRI shim JSON config file")
-    var config: String
+    @Option(name: .shortAndLong, help: "Path to the CRI shim JSON config file. Uses the default search path when omitted.")
+    var config: String?
 
     func run() async throws {
-        let configURL = URL(fileURLWithPath: config)
-        let shimConfig = try CRIShimConfig.load(from: configURL)
+        let shimConfig =
+            if let config {
+                try CRIShimConfig.load(from: URL(fileURLWithPath: config))
+            } else {
+                try CRIShimConfig.loadFromSearchPath().config
+            }
         let runner = CRIShimRunner(config: shimConfig, serverFactory: DefaultCRIShimServerFactory())
         try await runner.run()
     }

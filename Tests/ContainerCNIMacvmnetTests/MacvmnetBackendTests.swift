@@ -37,7 +37,8 @@ struct MacvmnetBackendTests {
             stateResult: try makeNetworkState(id: "default"),
             attachmentByHostname: ["sandbox-1": attachment]
         )
-        let backend = MacvmnetLiveBackend { _ in client }
+        let ledger = FakeMacvmnetAttachmentLedger()
+        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
         let plan = try makePlan(command: .add, sandbox: "macvmnet://sandbox/sandbox-1")
 
         let result = try await backend.prepare(plan)
@@ -45,6 +46,14 @@ struct MacvmnetBackendTests {
         #expect(result == CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: plan.sandbox))
         #expect(client.lookupHostnames == ["sandbox-1"])
         #expect(client.allocatedHostnames.isEmpty)
+        #expect(
+            ledger.recordsByNetwork["default"] == [
+                MacvmnetAttachmentRecord(
+                    identity: .init(containerID: "sandbox-1", ifName: "eth0"),
+                    networkName: "default",
+                    result: result
+                )
+            ])
     }
 
     @Test func liveBackendChecksExistingAttachmentAgainstPreviousResult() async throws {
@@ -59,7 +68,8 @@ struct MacvmnetBackendTests {
             stateResult: try makeNetworkState(id: "default"),
             attachmentByHostname: ["sandbox-1": attachment]
         )
-        let backend = MacvmnetLiveBackend { _ in client }
+        let ledger = FakeMacvmnetAttachmentLedger()
+        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
         let expected = CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: try CNISandboxURI("macvmnet://sandbox/sandbox-1"))
         let plan = try makePlan(command: .check, sandbox: "macvmnet://sandbox/sandbox-1", prevResult: expected)
 
@@ -79,12 +89,23 @@ struct MacvmnetBackendTests {
             stateResult: try makeNetworkState(id: "default"),
             attachmentByHostname: ["sandbox-1": attachment]
         )
-        let backend = MacvmnetLiveBackend { _ in client }
+        let ledger = FakeMacvmnetAttachmentLedger(
+            recordsByNetwork: [
+                "default": [
+                    MacvmnetAttachmentRecord(
+                        identity: .init(containerID: "sandbox-1", ifName: "eth0"),
+                        networkName: "default",
+                        result: CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: nil)
+                    )
+                ]
+            ])
+        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
         let plan = try makePlan(command: .delete, sandbox: nil)
 
         try await backend.release(plan)
 
         #expect(client.deallocatedHostnames == ["sandbox-1"])
+        #expect(ledger.recordsByNetwork["default"]?.isEmpty == true)
     }
 
     @Test func liveBackendStatusChecksNetworkState() async throws {
@@ -98,6 +119,53 @@ struct MacvmnetBackendTests {
         try await backend.health(networkName: plan.networkName)
 
         #expect(client.stateRequests == 1)
+    }
+
+    @Test func liveBackendGarbageCollectsStaleLedgerAttachments() async throws {
+        let staleIdentity = MacvmnetAttachmentIdentity(containerID: "sandbox-stale", ifName: "eth0")
+        let liveIdentity = MacvmnetAttachmentIdentity(containerID: "sandbox-live", ifName: "eth0")
+        let staleAttachment = try makeAttachment(
+            network: "default",
+            hostname: "sandbox-stale",
+            ipv4Address: "192.168.64.21/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let liveAttachment = try makeAttachment(
+            network: "default",
+            hostname: "sandbox-live",
+            ipv4Address: "192.168.64.22/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let client = FakeMacvmnetNetworkClient(
+            stateResult: try makeNetworkState(id: "default"),
+            attachmentByHostname: [
+                "sandbox-stale": staleAttachment,
+                "sandbox-live": liveAttachment,
+            ]
+        )
+        let ledger = FakeMacvmnetAttachmentLedger(
+            recordsByNetwork: [
+                "default": [
+                    MacvmnetAttachmentRecord(
+                        identity: staleIdentity,
+                        networkName: "default",
+                        result: CNIResult(attachment: staleAttachment, interfaceName: staleIdentity.ifName, sandbox: nil)
+                    ),
+                    MacvmnetAttachmentRecord(
+                        identity: liveIdentity,
+                        networkName: "default",
+                        result: CNIResult(attachment: liveAttachment, interfaceName: liveIdentity.ifName, sandbox: nil)
+                    ),
+                ]
+            ])
+        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
+        let plan = MacvmnetOperationPlan(request: try makeGCRequest(validAttachments: [liveIdentity]))
+
+        try await backend.garbageCollect(plan)
+
+        #expect(client.lookupHostnames == ["sandbox-stale"])
+        #expect(client.deallocatedHostnames == ["sandbox-stale"])
+        #expect(ledger.recordsByNetwork["default"]?.map(\.identity) == [liveIdentity])
     }
 
     @Test func handlerDispatchesCommandsAndRequiresPrevResultForCheck() async throws {
@@ -191,6 +259,33 @@ struct MacvmnetBackendTests {
         #expect(backend.releasedIdentities == [staleIdentity])
         #expect(backend.attachment(for: staleIdentity) == nil)
         #expect(backend.attachment(for: liveIdentity) != nil)
+    }
+
+    @Test func fileAttachmentLedgerPersistsAndRemovesRecords() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileMacvmnetAttachmentLedger-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let identity = MacvmnetAttachmentIdentity(containerID: "sandbox/with/slashes", ifName: "eth0")
+        let attachment = try makeAttachment(
+            network: "default",
+            hostname: identity.containerID,
+            ipv4Address: "192.168.64.42/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let record = MacvmnetAttachmentRecord(
+            identity: identity,
+            networkName: "default",
+            result: CNIResult(attachment: attachment, interfaceName: identity.ifName, sandbox: nil)
+        )
+
+        try FileMacvmnetAttachmentLedger(rootURL: rootURL).upsert(record)
+
+        let reloaded = FileMacvmnetAttachmentLedger(rootURL: rootURL)
+        #expect(try reloaded.records(networkName: "default") == [record])
+
+        try reloaded.remove(identity: identity, networkName: "default")
+        #expect(try reloaded.records(networkName: "default").isEmpty)
     }
 }
 
@@ -307,6 +402,29 @@ private final class FakeMacvmnetSandboxBackend: MacvmnetBackend, @unchecked Send
             throw CNIError.invalidConfiguration("CNI_CONTAINERID and CNI_IFNAME are required")
         }
         return identity
+    }
+}
+
+private final class FakeMacvmnetAttachmentLedger: MacvmnetAttachmentLedger, @unchecked Sendable {
+    var recordsByNetwork: [String: [MacvmnetAttachmentRecord]]
+
+    init(recordsByNetwork: [String: [MacvmnetAttachmentRecord]] = [:]) {
+        self.recordsByNetwork = recordsByNetwork
+    }
+
+    func upsert(_ record: MacvmnetAttachmentRecord) throws {
+        var records = recordsByNetwork[record.networkName] ?? []
+        records.removeAll { $0.identity == record.identity }
+        records.append(record)
+        recordsByNetwork[record.networkName] = records
+    }
+
+    func remove(identity: MacvmnetAttachmentIdentity, networkName: String) throws {
+        recordsByNetwork[networkName]?.removeAll { $0.identity == identity }
+    }
+
+    func records(networkName: String) throws -> [MacvmnetAttachmentRecord] {
+        recordsByNetwork[networkName] ?? []
     }
 }
 

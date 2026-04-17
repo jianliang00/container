@@ -379,6 +379,11 @@ The plugin does not create or enter a Linux network namespace. The macOS VM is
 the Pod network boundary. `CNI_NETNS` is accepted for compatibility but does not
 drive Linux namespace behavior.
 
+The plugin persists CNI result metadata in `stateDir`, defaulting to
+`/var/lib/container/cni/macvmnet`. `GC` uses that ledger with
+`cni.dev/valid-attachments` to release stale macvmnet attachments and delete
+their cached CNI results.
+
 Non-netns CNI contract:
 
 - `CNI_CONTAINERID` is the CRI PodSandbox ID.

@@ -22,6 +22,7 @@ public struct MacvmnetOperationPlan: Equatable {
     public var sandbox: CNISandboxURI?
     public var previousResult: CNIResult?
     public var validAttachments: Set<MacvmnetAttachmentIdentity>
+    public var dataDirectory: String
 
     public init(request: CNIRequest) {
         command = request.environment.command
@@ -31,6 +32,9 @@ public struct MacvmnetOperationPlan: Equatable {
         sandbox = request.sandbox
         previousResult = request.config.prevResult
         validAttachments = request.validAttachments
+        dataDirectory =
+            request.config.stringValue(for: "stateDir")
+            ?? MacvmnetAttachmentLedgerDefaults.defaultRootURL.path
     }
 
     public var attachmentIdentity: MacvmnetAttachmentIdentity? {

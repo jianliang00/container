@@ -113,11 +113,18 @@ public struct CNIRequest: Equatable {
     public var environment: CNIEnvironment
     public var config: CNIPluginConfig
     public var sandbox: CNISandboxURI?
+    public var validAttachments: Set<MacvmnetAttachmentIdentity>
 
-    public init(environment: CNIEnvironment, config: CNIPluginConfig, sandbox: CNISandboxURI? = nil) {
+    public init(
+        environment: CNIEnvironment,
+        config: CNIPluginConfig,
+        sandbox: CNISandboxURI? = nil,
+        validAttachments: Set<MacvmnetAttachmentIdentity> = []
+    ) {
         self.environment = environment
         self.config = config
         self.sandbox = sandbox
+        self.validAttachments = validAttachments
     }
 
     public static func parse(
@@ -129,6 +136,15 @@ public struct CNIRequest: Equatable {
         let config = try decoder.decode(CNIPluginConfig.self, from: stdin)
         try config.validate()
         let sandbox = try parsedEnvironment.netns.map(CNISandboxURI.init)
-        return CNIRequest(environment: parsedEnvironment, config: config, sandbox: sandbox)
+        let validAttachments =
+            parsedEnvironment.command == .garbageCollect
+            ? try config.validAttachments()
+            : []
+        return CNIRequest(
+            environment: parsedEnvironment,
+            config: config,
+            sandbox: sandbox,
+            validAttachments: validAttachments
+        )
     }
 }

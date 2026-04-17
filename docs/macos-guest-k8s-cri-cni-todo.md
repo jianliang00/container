@@ -30,10 +30,11 @@ Configuration:
 CRI server:
 
 - [ ] Start a Unix socket gRPC server from `container-cri-shim-macos`.
-- [ ] Implement CRI request logging and structured error mapping.
-- [ ] Persist CRI sandbox metadata outside core.
-- [ ] Persist CRI container metadata outside core.
-- [ ] Reconcile persisted CRI metadata with core snapshots on shim startup.
+- [ ] Wire CRI request logging and structured error mapping into RPC handlers.
+- [ ] Wire CRI sandbox metadata persistence into sandbox lifecycle RPCs.
+- [ ] Wire CRI container metadata persistence into container lifecycle RPCs.
+- [ ] Execute CRI metadata reconcile plans against core snapshots on shim
+  startup.
 
 RuntimeService:
 
@@ -88,14 +89,15 @@ ImageService:
 CNI plugin:
 
 - [ ] Wire CNI `ADD` to `PrepareSandboxNetwork`.
-- [ ] Wire CNI `CHECK` to `InspectSandboxNetwork` and validate `prevResult`.
+- [ ] Wire live CNI `CHECK` to `InspectSandboxNetwork` and guest interface
+  validation.
 - [ ] Wire CNI `DEL` to `ReleaseSandboxNetwork`.
-- [ ] Wire CNI `GC` to `cni.dev/valid-attachments` cleanup.
+- [ ] Connect CNI `GC` `cni.dev/valid-attachments` cleanup to the persistent
+  attachment ledger.
 - [ ] Persist CNI result metadata needed for cleanup.
-- [ ] Verify `CNI_IFNAME` against the guest-reported interface during `CHECK`.
 - [ ] Make `ADD` idempotent for existing sandbox network leases.
 - [ ] Make `DEL` tolerate already-released or missing leases.
-- [ ] Return live CNI result data from network lease state.
+- [ ] Return live CNI result data from sandbox network lease state.
 
 Logs and exec streaming:
 
@@ -113,21 +115,23 @@ NetworkPolicy controller:
 
 - [ ] Load kubeconfig and connect to the Kubernetes API.
 - [ ] Watch `Pods`, `Namespaces`, and `NetworkPolicies`.
-- [ ] Maintain a local endpoint index for Pods scheduled to this node.
-- [ ] Join endpoint data with CRI sandbox metadata and CNI Pod IP state.
+- [ ] Wire Kubernetes watch events into the local endpoint index for Pods
+  scheduled to this node.
+- [ ] Feed CRI sandbox metadata and CNI Pod IP state into the endpoint index.
 - [ ] Apply compiled policy with `ContainerKit.applySandboxPolicy`.
 - [ ] Remove compiled policy with `ContainerKit.removeSandboxPolicy` when Pods
   or policies are deleted.
-- [ ] Reconcile policy generations after Pod, Namespace, NetworkPolicy, shim,
-  controller, kubelet, or apiserver restart.
+- [ ] Load applied policy state and execute reconcile plans after Pod,
+  Namespace, NetworkPolicy, shim, controller, kubelet, or apiserver restart.
 - [ ] Emit logs and Kubernetes events for unsupported policy fields.
 
 Tests:
 
 - [ ] Add unit tests for CRI-to-core mapping helpers.
 - [ ] Add unit tests for CRI unsupported field handling.
-- [ ] Add unit tests for CNI network API wiring and cleanup behavior.
-- [ ] Add unit tests for NetworkPolicy controller watch reconciliation.
+- [ ] Add live-adapter unit tests for CNI sandbox network API wiring and
+  cleanup behavior.
+- [ ] Add unit tests for NetworkPolicy Kubernetes watch reconciliation.
 - [ ] Add integration validation for local `crictl` lifecycle.
 - [ ] Add integration validation for local kubelet static Pod lifecycle.
 - [ ] Add integration validation for `kubectl logs`.

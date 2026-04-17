@@ -86,6 +86,30 @@ public struct CNIPluginConfig: Codable, Equatable {
         return value
     }
 
+    public func validAttachments() throws -> Set<MacvmnetAttachmentIdentity> {
+        guard let value = extra["cni.dev/valid-attachments"] else {
+            throw CNIError.invalidConfiguration("cni.dev/valid-attachments is required for GC")
+        }
+
+        guard case .array(let entries) = value else {
+            throw CNIError.invalidConfiguration("cni.dev/valid-attachments must be an array")
+        }
+
+        return try Set(
+            entries.enumerated().map { index, entry in
+                guard case .object(let object) = entry else {
+                    throw CNIError.invalidConfiguration("cni.dev/valid-attachments[\(index)] must be an object")
+                }
+                guard case .string(let containerID)? = object["containerID"], !containerID.isEmpty else {
+                    throw CNIError.invalidConfiguration("cni.dev/valid-attachments[\(index)].containerID is required")
+                }
+                guard case .string(let ifName)? = object["ifname"], !ifName.isEmpty else {
+                    throw CNIError.invalidConfiguration("cni.dev/valid-attachments[\(index)].ifname is required")
+                }
+                return MacvmnetAttachmentIdentity(containerID: containerID, ifName: ifName)
+            })
+    }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(cniVersion, forKey: .cniVersion)

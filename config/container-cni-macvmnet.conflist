@@ -4,7 +4,8 @@
     "plugins": [
         {
             "type": "macvmnet",
-            "network": "default"
+            "network": "default",
+            "stateDir": "/var/lib/container/cni/macvmnet"
         }
     ]
 }

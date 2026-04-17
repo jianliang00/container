@@ -89,11 +89,6 @@ CNI plugin:
 - [ ] Wire live CNI `CHECK` to `InspectSandboxNetwork` and guest interface
   validation.
 - [ ] Wire CNI `DEL` to `ReleaseSandboxNetwork`.
-- [ ] Connect CNI `GC` `cni.dev/valid-attachments` cleanup to the persistent
-  attachment ledger.
-- [ ] Persist CNI result metadata needed for cleanup.
-- [ ] Make `ADD` idempotent for existing sandbox network leases.
-- [ ] Make `DEL` tolerate already-released or missing leases.
 - [ ] Return live CNI result data from sandbox network lease state.
 
 Logs and exec streaming:

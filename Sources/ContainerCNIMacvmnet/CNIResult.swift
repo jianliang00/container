@@ -14,7 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-public struct CNIResult: Codable, Equatable {
+public struct CNIResult: Codable, Equatable, Sendable {
     public var cniVersion: String
     public var interfaces: [CNIInterface]?
     public var ips: [CNIIPConfig]?
@@ -36,7 +36,7 @@ public struct CNIResult: Codable, Equatable {
     }
 }
 
-public struct CNIInterface: Codable, Equatable {
+public struct CNIInterface: Codable, Equatable, Sendable {
     public var name: String
     public var mac: String?
     public var sandbox: String?
@@ -48,7 +48,7 @@ public struct CNIInterface: Codable, Equatable {
     }
 }
 
-public struct CNIIPConfig: Codable, Equatable {
+public struct CNIIPConfig: Codable, Equatable, Sendable {
     public var interface: Int?
     public var address: String
     public var gateway: String?
@@ -60,7 +60,7 @@ public struct CNIIPConfig: Codable, Equatable {
     }
 }
 
-public struct CNIRoute: Codable, Equatable {
+public struct CNIRoute: Codable, Equatable, Sendable {
     public var dst: String
     public var gw: String?
     public var mtu: Int?
@@ -72,7 +72,7 @@ public struct CNIRoute: Codable, Equatable {
     }
 }
 
-public struct CNIDNS: Codable, Equatable {
+public struct CNIDNS: Codable, Equatable, Sendable {
     public var nameservers: [String]?
     public var domain: String?
     public var search: [String]?

@@ -19,7 +19,6 @@ Configuration:
 
 CRI server:
 
-- [ ] Wire CRI request logging and structured error mapping into RPC handlers.
 - [ ] Wire CRI sandbox metadata persistence into sandbox lifecycle RPCs.
 - [ ] Wire CRI container metadata persistence into container lifecycle RPCs.
 - [ ] Execute CRI metadata reconcile plans against core snapshots on shim

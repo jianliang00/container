@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import GRPC
 import Testing
 
 @testable import ContainerCRIShimMacOS
@@ -36,5 +37,29 @@ struct CRIShimErrorMappingTests {
     func exposesDescriptiveMessages() {
         let disposition = CRIShimErrorMapper.disposition(for: CRIShimError.notFound("sandbox missing"))
         #expect(disposition.message == "sandbox missing")
+    }
+
+    @Test
+    func mapsErrorsToGRPCStatusCodes() {
+        #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.unsupported("unsupported")).code == .unimplemented)
+        #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.invalidArgument("invalid")).code == .invalidArgument)
+        #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.notFound("missing")).code == .notFound)
+        #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.internalError("boom")).code == .internalError)
+
+        let passthrough = GRPCStatus(code: .failedPrecondition, message: "already mapped")
+        let mapped = CRIShimGRPCStatusMapper.status(for: passthrough)
+        #expect(mapped.code == .failedPrecondition)
+        #expect(mapped.message == "already mapped")
+    }
+
+    @Test
+    func unsupportedOperationsMapThroughStructuredErrorModel() {
+        let runtimeStatus = CRIShimGRPCStatusMapper.status(for: CRIShimGRPCStatusMapper.unsupportedError(.runPodSandbox))
+        #expect(runtimeStatus.code == .unimplemented)
+        #expect(runtimeStatus.message?.contains("RunPodSandbox") == true)
+
+        let imageStatus = CRIShimGRPCStatusMapper.status(for: CRIShimGRPCStatusMapper.unsupportedError(.pullImage))
+        #expect(imageStatus.code == .unimplemented)
+        #expect(imageStatus.message?.contains("PullImage") == true)
     }
 }

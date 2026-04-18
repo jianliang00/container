@@ -39,82 +39,96 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     public var versionInfo: CRIShimRuntimeVersionInfo
     public var config: CRIShimConfig
     private let readinessChecker: any CRIShimReadinessChecking
+    private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
         config: CRIShimConfig,
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
-        readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker()
+        readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
+        handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
         self.config = config
         self.versionInfo = versionInfo
         self.readinessChecker = readinessChecker
+        self.handlerLogger = handlerLogger
     }
 
     public func version(
         request: Runtime_V1_VersionRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_VersionResponse {
-        var response = Runtime_V1_VersionResponse()
-        response.version = versionInfo.runtimeAPIVersion
-        response.runtimeName = versionInfo.runtimeName
-        response.runtimeVersion = versionInfo.runtimeVersion
-        response.runtimeApiVersion = versionInfo.runtimeAPIVersion
-        return response
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.version.rawValue) {
+            var response = Runtime_V1_VersionResponse()
+            response.version = versionInfo.runtimeAPIVersion
+            response.runtimeName = versionInfo.runtimeName
+            response.runtimeVersion = versionInfo.runtimeVersion
+            response.runtimeApiVersion = versionInfo.runtimeAPIVersion
+            return response
+        }
     }
 
     public func status(
         request: Runtime_V1_StatusRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StatusResponse {
-        let snapshot = await readinessChecker.snapshot(config: config)
-        var response = Runtime_V1_StatusResponse()
-        var status = Runtime_V1_RuntimeStatus()
-        status.conditions = [
-            makeRuntimeCondition(snapshot.runtime),
-            makeRuntimeCondition(snapshot.network),
-        ]
-        response.status = status
-        response.runtimeHandlers = runtimeHandlers(from: config)
-        response.features = Runtime_V1_RuntimeFeatures()
-        if request.verbose {
-            response.info = snapshot.info
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.status.rawValue) {
+            let snapshot = await readinessChecker.snapshot(config: config)
+            var response = Runtime_V1_StatusResponse()
+            var status = Runtime_V1_RuntimeStatus()
+            status.conditions = [
+                makeRuntimeCondition(snapshot.runtime),
+                makeRuntimeCondition(snapshot.network),
+            ]
+            response.status = status
+            response.runtimeHandlers = runtimeHandlers(from: config)
+            response.features = Runtime_V1_RuntimeFeatures()
+            if request.verbose {
+                response.info = snapshot.info
+            }
+            return response
         }
-        return response
     }
 
     public func runtimeConfig(
         request: Runtime_V1_RuntimeConfigRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RuntimeConfigResponse {
-        Runtime_V1_RuntimeConfigResponse()
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.runtimeConfig.rawValue) {
+            Runtime_V1_RuntimeConfigResponse()
+        }
     }
 
     public func updateRuntimeConfig(
         request: Runtime_V1_UpdateRuntimeConfigRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_UpdateRuntimeConfigResponse {
-        Runtime_V1_UpdateRuntimeConfigResponse()
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.updateRuntimeConfig.rawValue) {
+            Runtime_V1_UpdateRuntimeConfigResponse()
+        }
     }
 }
 
 public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProvider, @unchecked Sendable {
     private let imageManager: any CRIShimImageManaging
+    private let handlerLogger: CRIShimGRPCHandlerLogger
 
-    public init(imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()) {
+    public init(
+        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
+        handlerLogger: CRIShimGRPCHandlerLogger = .imageService()
+    ) {
         self.imageManager = imageManager
+        self.handlerLogger = handlerLogger
     }
 
     public func listImages(
         request: Runtime_V1_ListImagesRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListImagesResponse {
-        do {
+        try await handlerLogger.handle(operation: CRIImageOperation.listImages.rawValue) {
             var response = Runtime_V1_ListImagesResponse()
             let images = try await imageManager.listImages()
             response.images = filteredImages(images, request: request).map(makeCRIImage)
             return response
-        } catch {
-            throw CRIShimGRPCStatusMapper.status(for: error)
         }
     }
 
@@ -122,19 +136,19 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
         request: Runtime_V1_ImageStatusRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ImageStatusResponse {
-        do {
-            let reference = try CRIShimImageReference.resolve(request.image)
-            let image = try await findImage(reference: reference)
-            var response = Runtime_V1_ImageStatusResponse()
-            response.image = makeCRIImage(image)
-            if request.verbose {
-                response.info = ["image": jsonString(image.info)]
+        try await handlerLogger.handle(operation: CRIImageOperation.imageStatus.rawValue) {
+            do {
+                let reference = try CRIShimImageReference.resolve(request.image)
+                let image = try await findImage(reference: reference)
+                var response = Runtime_V1_ImageStatusResponse()
+                response.image = makeCRIImage(image)
+                if request.verbose {
+                    response.info = ["image": jsonString(image.info)]
+                }
+                return response
+            } catch CRIShimError.notFound {
+                return Runtime_V1_ImageStatusResponse()
             }
-            return response
-        } catch CRIShimError.notFound {
-            return Runtime_V1_ImageStatusResponse()
-        } catch {
-            throw CRIShimGRPCStatusMapper.status(for: error)
         }
     }
 
@@ -142,12 +156,10 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
         request: Runtime_V1_RemoveImageRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemoveImageResponse {
-        do {
+        try await handlerLogger.handle(operation: CRIImageOperation.removeImage.rawValue) {
             let reference = try CRIShimImageReference.resolve(request.image)
             try await imageManager.removeImage(reference: reference)
             return Runtime_V1_RemoveImageResponse()
-        } catch {
-            throw CRIShimGRPCStatusMapper.status(for: error)
         }
     }
 
@@ -161,21 +173,27 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
 }
 
 public enum CRIShimGRPCStatusMapper {
+    public static func unsupportedError(_ operation: CRIRuntimeOperation) -> CRIShimError {
+        CRIShimError.unsupported(CRIRuntimeOperationSurface.unsupportedReason(for: operation))
+    }
+
+    public static func unsupportedError(_ operation: CRIImageOperation) -> CRIShimError {
+        CRIShimError.unsupported(CRIImageOperationSurface.unsupportedReason(for: operation))
+    }
+
     public static func unsupported(_ operation: CRIRuntimeOperation) -> GRPCStatus {
-        GRPCStatus(
-            code: .unimplemented,
-            message: CRIRuntimeOperationSurface.unsupportedReason(for: operation)
-        )
+        status(for: unsupportedError(operation))
     }
 
     public static func unsupported(_ operation: CRIImageOperation) -> GRPCStatus {
-        GRPCStatus(
-            code: .unimplemented,
-            message: CRIImageOperationSurface.unsupportedReason(for: operation)
-        )
+        status(for: unsupportedError(operation))
     }
 
     public static func status(for error: any Error) -> GRPCStatus {
+        if let status = error as? GRPCStatus {
+            return status
+        }
+
         let disposition = CRIShimErrorMapper.disposition(for: error)
         let code: GRPCStatus.Code =
             switch disposition.kind {
@@ -197,154 +215,154 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         request: Runtime_V1_RunPodSandboxRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RunPodSandboxResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.runPodSandbox)
+        try await unsupportedRuntime(.runPodSandbox)
     }
 
     public func stopPodSandbox(
         request: Runtime_V1_StopPodSandboxRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StopPodSandboxResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.stopPodSandbox)
+        try await unsupportedRuntime(.stopPodSandbox)
     }
 
     public func removePodSandbox(
         request: Runtime_V1_RemovePodSandboxRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemovePodSandboxResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.removePodSandbox)
+        try await unsupportedRuntime(.removePodSandbox)
     }
 
     public func podSandboxStatus(
         request: Runtime_V1_PodSandboxStatusRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_PodSandboxStatusResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.podSandboxStatus)
+        try await unsupportedRuntime(.podSandboxStatus)
     }
 
     public func listPodSandbox(
         request: Runtime_V1_ListPodSandboxRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListPodSandboxResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.listPodSandbox)
+        try await unsupportedRuntime(.listPodSandbox)
     }
 
     public func createContainer(
         request: Runtime_V1_CreateContainerRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_CreateContainerResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.createContainer)
+        try await unsupportedRuntime(.createContainer)
     }
 
     public func startContainer(
         request: Runtime_V1_StartContainerRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StartContainerResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.startContainer)
+        try await unsupportedRuntime(.startContainer)
     }
 
     public func stopContainer(
         request: Runtime_V1_StopContainerRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StopContainerResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.stopContainer)
+        try await unsupportedRuntime(.stopContainer)
     }
 
     public func removeContainer(
         request: Runtime_V1_RemoveContainerRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemoveContainerResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.removeContainer)
+        try await unsupportedRuntime(.removeContainer)
     }
 
     public func listContainers(
         request: Runtime_V1_ListContainersRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListContainersResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.listContainers)
+        try await unsupportedRuntime(.listContainers)
     }
 
     public func containerStatus(
         request: Runtime_V1_ContainerStatusRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ContainerStatusResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.containerStatus)
+        try await unsupportedRuntime(.containerStatus)
     }
 
     public func updateContainerResources(
         request: Runtime_V1_UpdateContainerResourcesRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_UpdateContainerResourcesResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.updateContainerResources)
+        try await unsupportedRuntime(.updateContainerResources)
     }
 
     public func reopenContainerLog(
         request: Runtime_V1_ReopenContainerLogRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ReopenContainerLogResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.reopenContainerLog)
+        try await unsupportedRuntime(.reopenContainerLog)
     }
 
     public func execSync(
         request: Runtime_V1_ExecSyncRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ExecSyncResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.execSync)
+        try await unsupportedRuntime(.execSync)
     }
 
     public func exec(
         request: Runtime_V1_ExecRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ExecResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.exec)
+        try await unsupportedRuntime(.exec)
     }
 
     public func attach(
         request: Runtime_V1_AttachRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_AttachResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.attach)
+        try await unsupportedRuntime(.attach)
     }
 
     public func portForward(
         request: Runtime_V1_PortForwardRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_PortForwardResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.portForward)
+        try await unsupportedRuntime(.portForward)
     }
 
     public func containerStats(
         request: Runtime_V1_ContainerStatsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ContainerStatsResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.containerStats)
+        try await unsupportedRuntime(.containerStats)
     }
 
     public func listContainerStats(
         request: Runtime_V1_ListContainerStatsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListContainerStatsResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.listContainerStats)
+        try await unsupportedRuntime(.listContainerStats)
     }
 
     public func podSandboxStats(
         request: Runtime_V1_PodSandboxStatsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_PodSandboxStatsResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.podSandboxStats)
+        try await unsupportedRuntime(.podSandboxStats)
     }
 
     public func listPodSandboxStats(
         request: Runtime_V1_ListPodSandboxStatsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListPodSandboxStatsResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.listPodSandboxStats)
+        try await unsupportedRuntime(.listPodSandboxStats)
     }
 
     public func checkpointContainer(
         request: Runtime_V1_CheckpointContainerRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_CheckpointContainerResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.checkpointContainer)
+        try await unsupportedRuntime(.checkpointContainer)
     }
 
     public func getContainerEvents(
@@ -352,28 +370,28 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         responseStream: GRPCAsyncResponseStreamWriter<Runtime_V1_ContainerEventResponse>,
         context: GRPCAsyncServerCallContext
     ) async throws {
-        throw CRIShimGRPCStatusMapper.unsupported(.getContainerEvents)
+        let _: Void = try await unsupportedRuntime(.getContainerEvents)
     }
 
     public func listMetricDescriptors(
         request: Runtime_V1_ListMetricDescriptorsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListMetricDescriptorsResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.listMetricDescriptors)
+        try await unsupportedRuntime(.listMetricDescriptors)
     }
 
     public func listPodSandboxMetrics(
         request: Runtime_V1_ListPodSandboxMetricsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListPodSandboxMetricsResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.listPodSandboxMetrics)
+        try await unsupportedRuntime(.listPodSandboxMetrics)
     }
 
     public func updatePodSandboxResources(
         request: Runtime_V1_UpdatePodSandboxResourcesRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_UpdatePodSandboxResourcesResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.updatePodSandboxResources)
+        try await unsupportedRuntime(.updatePodSandboxResources)
     }
 }
 
@@ -406,14 +424,14 @@ extension Runtime_V1_ImageServiceAsyncProvider {
         request: Runtime_V1_PullImageRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_PullImageResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.pullImage)
+        try await unsupportedImage(.pullImage)
     }
 
     public func imageFsInfo(
         request: Runtime_V1_ImageFsInfoRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ImageFsInfoResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.imageFsInfo)
+        try await unsupportedImage(.imageFsInfo)
     }
 }
 

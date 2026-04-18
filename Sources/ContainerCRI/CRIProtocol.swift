@@ -51,106 +51,98 @@ public enum CRIRuntimeOperation: String, CaseIterable, Sendable {
     case listPodSandboxMetrics = "ListPodSandboxMetrics"
 }
 
-public struct CRIRuntimeOperationDisposition: Sendable, Equatable {
-    public enum Kind: String, Sendable, Equatable {
-        case supported
-        case unsupported
-    }
-
-    public var kind: Kind
-    public var detail: String
-
-    public init(kind: Kind, detail: String) {
-        self.kind = kind
-        self.detail = detail
-    }
-
-    public static func supported(_ detail: String) -> CRIRuntimeOperationDisposition {
-        CRIRuntimeOperationDisposition(kind: .supported, detail: detail)
-    }
-
-    public static func unsupported(_ detail: String) -> CRIRuntimeOperationDisposition {
-        CRIRuntimeOperationDisposition(kind: .unsupported, detail: detail)
-    }
-}
-
 public enum CRIRuntimeOperationSurface {
     public static let all: [CRIRuntimeOperation] = CRIRuntimeOperation.allCases
 
     public static func unsupportedReason(for operation: CRIRuntimeOperation) -> String {
         switch operation {
         case .version:
-            return "Version is reserved for the protobuf-backed CRI server"
+            return "Version is implemented by the protobuf-backed CRI server"
         case .status:
-            return "Status is reserved for the protobuf-backed CRI server"
+            return "Status is not wired to runtime and network health checks yet"
         case .runtimeConfig:
-            return "RuntimeConfig is not wired without generated CRI protobuf bindings"
+            return "RuntimeConfig is not wired to shim configuration yet"
         case .updateRuntimeConfig:
-            return "UpdateRuntimeConfig is not wired without generated CRI protobuf bindings"
+            return "UpdateRuntimeConfig is not wired to shim configuration yet"
         case .runPodSandbox:
-            return "RunPodSandbox is not wired without generated CRI protobuf bindings"
+            return "RunPodSandbox is not wired to sandbox lifecycle yet"
         case .stopPodSandbox:
-            return "StopPodSandbox is not wired without generated CRI protobuf bindings"
+            return "StopPodSandbox is not wired to sandbox lifecycle yet"
         case .removePodSandbox:
-            return "RemovePodSandbox is not wired without generated CRI protobuf bindings"
+            return "RemovePodSandbox is not wired to sandbox lifecycle yet"
         case .podSandboxStatus:
-            return "PodSandboxStatus is not wired without generated CRI protobuf bindings"
+            return "PodSandboxStatus is not wired to sandbox inspection yet"
         case .listPodSandbox:
-            return "ListPodSandbox is not wired without generated CRI protobuf bindings"
+            return "ListPodSandbox is not wired to sandbox inventory yet"
         case .createContainer:
-            return "CreateContainer is not wired without generated CRI protobuf bindings"
+            return "CreateContainer is not wired to workload creation yet"
         case .startContainer:
-            return "StartContainer is not wired without generated CRI protobuf bindings"
+            return "StartContainer is not wired to workload start yet"
         case .stopContainer:
-            return "StopContainer is not wired without generated CRI protobuf bindings"
+            return "StopContainer is not wired to workload stop yet"
         case .removeContainer:
-            return "RemoveContainer is not wired without generated CRI protobuf bindings"
+            return "RemoveContainer is not wired to workload removal yet"
         case .containerStatus:
-            return "ContainerStatus is not wired without generated CRI protobuf bindings"
+            return "ContainerStatus is not wired to workload inspection yet"
         case .listContainers:
-            return "ListContainers is not wired without generated CRI protobuf bindings"
+            return "ListContainers is not wired to workload inventory yet"
         case .updateContainerResources:
-            return "UpdateContainerResources is not wired without generated CRI protobuf bindings"
+            return "UpdateContainerResources is not wired to resource handling yet"
         case .updatePodSandboxResources:
-            return "UpdatePodSandboxResources is not wired without generated CRI protobuf bindings"
+            return "UpdatePodSandboxResources is not wired to resource handling yet"
         case .reopenContainerLog:
-            return "ReopenContainerLog is not wired without generated CRI protobuf bindings"
+            return "ReopenContainerLog is not wired to log rotation yet"
         case .execSync:
-            return "ExecSync is not wired without generated CRI protobuf bindings"
+            return "ExecSync is not wired to workload exec yet"
         case .exec:
-            return "Exec is not wired without generated CRI protobuf bindings"
+            return "Exec is not wired to the streaming server yet"
         case .attach:
-            return "Attach is not wired without generated CRI protobuf bindings"
+            return "Attach is not supported for macOS guest workloads"
         case .portForward:
-            return "PortForward is not wired without generated CRI protobuf bindings"
+            return "PortForward is not wired to the streaming server yet"
         case .containerStats:
-            return "ContainerStats is not wired without generated CRI protobuf bindings"
+            return "ContainerStats is not wired to workload stats yet"
         case .listContainerStats:
-            return "ListContainerStats is not wired without generated CRI protobuf bindings"
+            return "ListContainerStats is not wired to workload stats yet"
         case .podSandboxStats:
-            return "PodSandboxStats is not wired without generated CRI protobuf bindings"
+            return "PodSandboxStats is not wired to sandbox stats yet"
         case .listPodSandboxStats:
-            return "ListPodSandboxStats is not wired without generated CRI protobuf bindings"
+            return "ListPodSandboxStats is not wired to sandbox stats yet"
         case .checkpointContainer:
-            return "CheckpointContainer is not wired without generated CRI protobuf bindings"
+            return "CheckpointContainer is not supported for macOS guest workloads"
         case .getContainerEvents:
-            return "GetContainerEvents is not wired without generated CRI protobuf bindings"
+            return "GetContainerEvents is not wired to workload event streaming yet"
         case .listMetricDescriptors:
-            return "ListMetricDescriptors is not wired without generated CRI protobuf bindings"
+            return "ListMetricDescriptors is not wired to runtime metrics yet"
         case .listPodSandboxMetrics:
-            return "ListPodSandboxMetrics is not wired without generated CRI protobuf bindings"
+            return "ListPodSandboxMetrics is not wired to sandbox metrics yet"
         }
     }
 }
 
-public protocol CRIRuntimeService: Sendable {
-    func disposition(for operation: CRIRuntimeOperation) -> CRIRuntimeOperationDisposition
+public enum CRIImageOperation: String, CaseIterable, Sendable {
+    case listImages = "ListImages"
+    case imageStatus = "ImageStatus"
+    case pullImage = "PullImage"
+    case removeImage = "RemoveImage"
+    case imageFsInfo = "ImageFsInfo"
 }
 
-public struct DeterministicUnsupportedCRIRuntimeService: CRIRuntimeService {
-    public init() {}
+public enum CRIImageOperationSurface {
+    public static let all: [CRIImageOperation] = CRIImageOperation.allCases
 
-    public func disposition(for operation: CRIRuntimeOperation) -> CRIRuntimeOperationDisposition {
-        CRIRuntimeOperationDisposition.unsupported(CRIRuntimeOperationSurface.unsupportedReason(for: operation))
+    public static func unsupportedReason(for operation: CRIImageOperation) -> String {
+        switch operation {
+        case .listImages:
+            return "ListImages is not wired to container image inventory yet"
+        case .imageStatus:
+            return "ImageStatus is not wired to container image inventory yet"
+        case .pullImage:
+            return "PullImage is not wired to container image pull support yet"
+        case .removeImage:
+            return "RemoveImage is not wired to container image removal yet"
+        case .imageFsInfo:
+            return "ImageFsInfo is not wired to container image storage accounting yet"
+        }
     }
 }

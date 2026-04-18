@@ -111,11 +111,11 @@ public enum CRIRuntimeOperationSurface {
         case .checkpointContainer:
             return "CheckpointContainer is not supported for macOS guest workloads"
         case .getContainerEvents:
-            return "GetContainerEvents is not wired to workload event streaming yet"
+            return "GetContainerEvents returns an empty stream until workload event streaming is wired"
         case .listMetricDescriptors:
-            return "ListMetricDescriptors is not wired to runtime metrics yet"
+            return "ListMetricDescriptors returns empty descriptors until runtime metrics are wired"
         case .listPodSandboxMetrics:
-            return "ListPodSandboxMetrics is not wired to sandbox metrics yet"
+            return "ListPodSandboxMetrics returns empty metrics until sandbox metrics are wired"
         }
     }
 }

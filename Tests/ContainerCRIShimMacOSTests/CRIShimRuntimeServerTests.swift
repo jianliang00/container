@@ -168,6 +168,18 @@ struct CRIShimRuntimeServerTests {
         #expect(imageManager.pulledReferences == ["example.com/macos/pulled:latest"])
         #expect(imageManager.pulledAuthentications == [.basic(username: "cri-user", password: "cri-password")])
 
+        let metricDescriptors = try await client.listMetricDescriptors(Runtime_V1_ListMetricDescriptorsRequest())
+        #expect(metricDescriptors.descriptors.isEmpty)
+
+        let sandboxMetrics = try await client.listPodSandboxMetrics(Runtime_V1_ListPodSandboxMetricsRequest())
+        #expect(sandboxMetrics.podMetrics.isEmpty)
+
+        var events: [Runtime_V1_ContainerEventResponse] = []
+        for try await event in client.getContainerEvents(Runtime_V1_GetEventsRequest()) {
+            events.append(event)
+        }
+        #expect(events.isEmpty)
+
         try await channel.close().get()
         await server.stop()
         try await serverTask.value

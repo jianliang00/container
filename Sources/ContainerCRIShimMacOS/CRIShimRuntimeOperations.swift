@@ -20,6 +20,16 @@ import ContainerResource
 import Foundation
 
 public protocol CRIShimRuntimeManaging: Sendable {
+    func createWorkload(
+        sandboxID: String,
+        configuration: WorkloadConfiguration
+    ) async throws
+
+    func removeWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws
+
     func execSync(
         containerID: String,
         configuration: ProcessConfiguration,
@@ -32,6 +42,20 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
 
     public init(kit: ContainerKit = ContainerKit()) {
         self.kit = kit
+    }
+
+    public func createWorkload(
+        sandboxID: String,
+        configuration: WorkloadConfiguration
+    ) async throws {
+        try await kit.createWorkload(sandboxID: sandboxID, configuration: configuration)
+    }
+
+    public func removeWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws {
+        try await kit.removeWorkload(sandboxID: sandboxID, workloadID: workloadID)
     }
 
     public func execSync(

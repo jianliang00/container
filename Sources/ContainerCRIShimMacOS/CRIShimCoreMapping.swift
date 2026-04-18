@@ -83,7 +83,8 @@ func makeCRIShimContainerMetadata(
 
 func makeCRIShimWorkloadConfiguration(
     id: String,
-    request: Runtime_V1_CreateContainerRequest
+    request: Runtime_V1_CreateContainerRequest,
+    workloadImageDigest: String? = nil
 ) throws -> WorkloadConfiguration {
     let containerID = id.trimmed
     guard !containerID.isEmpty else {
@@ -95,7 +96,8 @@ func makeCRIShimWorkloadConfiguration(
     return WorkloadConfiguration(
         id: containerID,
         processConfiguration: makeProcessConfiguration(config),
-        workloadImageReference: image
+        workloadImageReference: image,
+        workloadImageDigest: emptyStringAsNil(workloadImageDigest ?? "")
     )
 }
 

@@ -20,7 +20,8 @@ Configuration:
 CRI server:
 
 - [ ] Wire CRI sandbox metadata persistence into sandbox lifecycle RPCs.
-- [ ] Wire CRI container metadata persistence into container lifecycle RPCs.
+- [ ] Wire CRI container metadata updates into `StartContainer`,
+  `StopContainer`, and `RemoveContainer`.
 - [ ] Execute CRI metadata reconcile plans against core snapshots on shim
   startup.
 
@@ -36,9 +37,7 @@ RuntimeService:
 - [ ] Implement `RemovePodSandbox`.
 - [ ] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
   snapshots and CNI network state.
-- [ ] Implement `CreateContainer` for macOS workload images.
-- [ ] Map CRI command, args, env, working directory, user, labels, annotations,
-  mounts, and log path to workload metadata.
+- [ ] Support CRI container mounts for macOS guest workloads.
 - [ ] Implement `StartContainer`.
 - [ ] Implement `StopContainer`.
 - [ ] Implement `RemoveContainer`.

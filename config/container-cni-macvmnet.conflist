@@ -5,6 +5,7 @@
         {
             "type": "macvmnet",
             "network": "default",
+            "runtime": "container-runtime-macos",
             "stateDir": "/var/lib/container/cni/macvmnet"
         }
     ]

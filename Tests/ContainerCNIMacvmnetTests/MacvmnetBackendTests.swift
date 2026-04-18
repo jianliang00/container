@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerSandboxServiceClient
 import ContainerizationExtras
 import Foundation
 import Testing
@@ -33,19 +34,26 @@ struct MacvmnetBackendTests {
             macAddress: "02:42:ac:11:00:02",
             dnsNameservers: ["192.168.64.1"]
         )
-        let client = FakeMacvmnetNetworkClient(
-            stateResult: try makeNetworkState(id: "default"),
-            attachmentByHostname: ["sandbox-1": attachment]
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let sandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [attachment])
         )
+        let sandboxFactory = FakeMacvmnetSandboxNetworkClientFactory(clientsBySandboxID: [
+            "sandbox-1": sandboxClient
+        ])
         let ledger = FakeMacvmnetAttachmentLedger()
-        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: sandboxFactory.make,
+            makeAttachmentLedger: { _ in ledger }
+        )
         let plan = try makePlan(command: .add, sandbox: "macvmnet://sandbox/sandbox-1")
 
         let result = try await backend.prepare(plan)
 
         #expect(result == CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: plan.sandbox))
-        #expect(client.lookupHostnames == ["sandbox-1"])
-        #expect(client.allocatedHostnames.isEmpty)
+        #expect(sandboxFactory.requests == [.init(sandboxID: "sandbox-1", runtimeName: CNISpec.defaultRuntimeName)])
+        #expect(sandboxClient.prepareRequests == 1)
         #expect(
             ledger.recordsByNetwork["default"] == [
                 MacvmnetAttachmentRecord(
@@ -64,31 +72,42 @@ struct MacvmnetBackendTests {
             ipv4Gateway: "192.168.64.1",
             macAddress: "02:42:ac:11:00:02"
         )
-        let client = FakeMacvmnetNetworkClient(
-            stateResult: try makeNetworkState(id: "default"),
-            attachmentByHostname: ["sandbox-1": attachment]
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let sandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [attachment])
         )
+        let sandboxFactory = FakeMacvmnetSandboxNetworkClientFactory(clientsBySandboxID: [
+            "sandbox-1": sandboxClient
+        ])
         let ledger = FakeMacvmnetAttachmentLedger()
-        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: sandboxFactory.make,
+            makeAttachmentLedger: { _ in ledger }
+        )
         let expected = CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: try CNISandboxURI("macvmnet://sandbox/sandbox-1"))
         let plan = try makePlan(command: .check, sandbox: "macvmnet://sandbox/sandbox-1", prevResult: expected)
 
         try await backend.inspect(plan)
 
-        #expect(client.lookupHostnames == ["sandbox-1"])
+        #expect(sandboxFactory.requests == [.init(sandboxID: "sandbox-1", runtimeName: CNISpec.defaultRuntimeName)])
+        #expect(sandboxClient.inspectRequests == 1)
     }
 
-    @Test func liveBackendReleasesOnlyWhenAttachmentExists() async throws {
+    @Test func liveBackendReleasesSandboxNetworkAndLedger() async throws {
         let attachment = try makeAttachment(
             network: "default",
             hostname: "sandbox-1",
             ipv4Address: "192.168.64.2/24",
             ipv4Gateway: "192.168.64.1"
         )
-        let client = FakeMacvmnetNetworkClient(
-            stateResult: try makeNetworkState(id: "default"),
-            attachmentByHostname: ["sandbox-1": attachment]
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let sandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [attachment])
         )
+        let sandboxFactory = FakeMacvmnetSandboxNetworkClientFactory(clientsBySandboxID: [
+            "sandbox-1": sandboxClient
+        ])
         let ledger = FakeMacvmnetAttachmentLedger(
             recordsByNetwork: [
                 "default": [
@@ -99,20 +118,22 @@ struct MacvmnetBackendTests {
                     )
                 ]
             ])
-        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: sandboxFactory.make,
+            makeAttachmentLedger: { _ in ledger }
+        )
         let plan = try makePlan(command: .delete, sandbox: nil)
 
         try await backend.release(plan)
 
-        #expect(client.deallocatedHostnames == ["sandbox-1"])
+        #expect(sandboxFactory.requests == [.init(sandboxID: "sandbox-1", runtimeName: CNISpec.defaultRuntimeName)])
+        #expect(sandboxClient.releaseRequests == 1)
         #expect(ledger.recordsByNetwork["default"]?.isEmpty == true)
     }
 
     @Test func liveBackendStatusChecksNetworkState() async throws {
-        let client = FakeMacvmnetNetworkClient(
-            stateResult: try makeNetworkState(id: "default"),
-            attachmentByHostname: [:]
-        )
+        let client = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
         let backend = MacvmnetLiveBackend { _ in client }
         let plan = try makePlan(command: .status, sandbox: nil)
 
@@ -136,13 +157,17 @@ struct MacvmnetBackendTests {
             ipv4Address: "192.168.64.22/24",
             ipv4Gateway: "192.168.64.1"
         )
-        let client = FakeMacvmnetNetworkClient(
-            stateResult: try makeNetworkState(id: "default"),
-            attachmentByHostname: [
-                "sandbox-stale": staleAttachment,
-                "sandbox-live": liveAttachment,
-            ]
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let staleSandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [staleAttachment])
         )
+        let liveSandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [liveAttachment])
+        )
+        let sandboxFactory = FakeMacvmnetSandboxNetworkClientFactory(clientsBySandboxID: [
+            "sandbox-stale": staleSandboxClient,
+            "sandbox-live": liveSandboxClient,
+        ])
         let ledger = FakeMacvmnetAttachmentLedger(
             recordsByNetwork: [
                 "default": [
@@ -158,13 +183,18 @@ struct MacvmnetBackendTests {
                     ),
                 ]
             ])
-        let backend = MacvmnetLiveBackend(makeNetworkClient: { _ in client }, makeAttachmentLedger: { _ in ledger })
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: sandboxFactory.make,
+            makeAttachmentLedger: { _ in ledger }
+        )
         let plan = MacvmnetOperationPlan(request: try makeGCRequest(validAttachments: [liveIdentity]))
 
         try await backend.garbageCollect(plan)
 
-        #expect(client.lookupHostnames == ["sandbox-stale"])
-        #expect(client.deallocatedHostnames == ["sandbox-stale"])
+        #expect(sandboxFactory.requests == [.init(sandboxID: "sandbox-stale", runtimeName: CNISpec.defaultRuntimeName)])
+        #expect(staleSandboxClient.releaseRequests == 1)
+        #expect(liveSandboxClient.releaseRequests == 0)
         #expect(ledger.recordsByNetwork["default"]?.map(\.identity) == [liveIdentity])
     }
 
@@ -289,56 +319,65 @@ struct MacvmnetBackendTests {
     }
 }
 
-private final class FakeMacvmnetNetworkClient: MacvmnetNetworkClient, @unchecked Sendable {
+private final class FakeMacvmnetNetworkHealthClient: MacvmnetNetworkHealthClient, @unchecked Sendable {
     var stateResult: NetworkState
-    var attachmentByHostname: [String: NetworkAttachment]
-    var allocatedHostnames: [String] = []
-    var lookupHostnames: [String] = []
-    var deallocatedHostnames: [String] = []
     var stateRequests = 0
 
-    init(stateResult: NetworkState, attachmentByHostname: [String: NetworkAttachment]) {
+    init(stateResult: NetworkState) {
         self.stateResult = stateResult
-        self.attachmentByHostname = attachmentByHostname
     }
 
     func state() async throws -> NetworkState {
         stateRequests += 1
         return stateResult
     }
+}
 
-    func allocateAttachment(hostname: String, macAddress: MACAddress?) async throws -> NetworkAttachment {
-        allocatedHostnames.append(hostname)
-        guard var attachment = attachmentByHostname[hostname] else {
-            throw CNIError.backendUnavailable("missing attachment for \(hostname)")
+private final class FakeMacvmnetSandboxNetworkClient: MacvmnetSandboxNetworkClient, @unchecked Sendable {
+    var state: SandboxNetworkState
+    var prepareRequests = 0
+    var inspectRequests = 0
+    var releaseRequests = 0
+
+    init(state: SandboxNetworkState) {
+        self.state = state
+    }
+
+    func prepareSandboxNetwork() async throws -> SandboxNetworkState {
+        prepareRequests += 1
+        return state
+    }
+
+    func inspectSandboxNetwork() async throws -> SandboxNetworkState {
+        inspectRequests += 1
+        return state
+    }
+
+    func releaseSandboxNetwork() async throws {
+        releaseRequests += 1
+        state = SandboxNetworkState(attachments: [])
+    }
+}
+
+private final class FakeMacvmnetSandboxNetworkClientFactory: @unchecked Sendable {
+    struct Request: Equatable {
+        var sandboxID: String
+        var runtimeName: String
+    }
+
+    var clientsBySandboxID: [String: FakeMacvmnetSandboxNetworkClient]
+    private(set) var requests: [Request] = []
+
+    init(clientsBySandboxID: [String: FakeMacvmnetSandboxNetworkClient]) {
+        self.clientsBySandboxID = clientsBySandboxID
+    }
+
+    func make(_ sandboxID: String, _ runtimeName: String) async throws -> any MacvmnetSandboxNetworkClient {
+        requests.append(Request(sandboxID: sandboxID, runtimeName: runtimeName))
+        guard let client = clientsBySandboxID[sandboxID] else {
+            throw CNIError.backendUnavailable("missing sandbox client for \(sandboxID)")
         }
-        if attachment.macAddress == nil, let macAddress {
-            attachment = NetworkAttachment(
-                network: attachment.network,
-                hostname: attachment.hostname,
-                ipv4Address: attachment.ipv4Address,
-                ipv4Gateway: attachment.ipv4Gateway,
-                ipv6Address: attachment.ipv6Address,
-                macAddress: macAddress,
-                dns: attachment.dns
-            )
-        }
-        attachmentByHostname[hostname] = attachment
-        return attachment
-    }
-
-    func deallocate(hostname: String) async throws {
-        deallocatedHostnames.append(hostname)
-        attachmentByHostname[hostname] = nil
-    }
-
-    func lookup(hostname: String) async throws -> NetworkAttachment? {
-        lookupHostnames.append(hostname)
-        return attachmentByHostname[hostname]
-    }
-
-    func disableAllocator() async throws -> Bool {
-        false
+        return client
     }
 }
 

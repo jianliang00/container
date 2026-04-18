@@ -17,6 +17,7 @@
 public struct MacvmnetOperationPlan: Equatable {
     public var command: CNICommand
     public var networkName: String
+    public var runtimeName: String
     public var containerID: String?
     public var interfaceName: String?
     public var sandbox: CNISandboxURI?
@@ -27,6 +28,7 @@ public struct MacvmnetOperationPlan: Equatable {
     public init(request: CNIRequest) {
         command = request.environment.command
         networkName = request.config.networkName
+        runtimeName = request.config.runtimeName
         containerID = request.environment.containerID
         interfaceName = request.environment.ifName
         sandbox = request.sandbox

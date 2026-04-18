@@ -24,7 +24,7 @@ struct CNIRequestTests {
         let request = try CNIRequest.parse(
             environment: [
                 "CNI_COMMAND": "ADD",
-                "CNI_CONTAINERID": "container-1",
+                "CNI_CONTAINERID": "sandbox-1",
                 "CNI_NETNS": "macvmnet://sandbox/sandbox-1",
                 "CNI_IFNAME": "eth0",
                 "CNI_ARGS": "K8S_POD_NAMESPACE=default;K8S_POD_NAME=pod-a",
@@ -36,6 +36,7 @@ struct CNIRequestTests {
                   "cniVersion": "1.1.0",
                   "name": "kind",
                   "type": "macvmnet",
+                  "runtime": "container-runtime-macos-test",
                   "macvmnetMode": "shared",
                   "ipam": { "type": "host-local" }
                 }
@@ -44,13 +45,14 @@ struct CNIRequestTests {
         )
 
         #expect(request.environment.command == .add)
-        #expect(request.environment.containerID == "container-1")
+        #expect(request.environment.containerID == "sandbox-1")
         #expect(request.environment.ifName == "eth0")
         #expect(request.environment.arguments["K8S_POD_NAMESPACE"] == "default")
         #expect(request.environment.path == ["/opt/cni/bin", "/usr/local/libexec/cni"])
         #expect(request.config.cniVersion == "1.1.0")
         #expect(request.config.name == "kind")
         #expect(request.config.type == "macvmnet")
+        #expect(request.config.runtimeName == "container-runtime-macos-test")
         #expect(request.config.extra["macvmnetMode"] == .string("shared"))
         #expect(request.sandbox?.sandboxID == "sandbox-1")
     }
@@ -71,11 +73,27 @@ struct CNIRequestTests {
         }
     }
 
+    @Test func rejectsSandboxURIThatDoesNotMatchContainerID() throws {
+        #expect {
+            _ = try CNIRequest.parse(
+                environment: [
+                    "CNI_COMMAND": "ADD",
+                    "CNI_CONTAINERID": "sandbox-1",
+                    "CNI_NETNS": "macvmnet://sandbox/sandbox-2",
+                    "CNI_IFNAME": "eth0",
+                ],
+                stdin: minimalConfigData()
+            )
+        } throws: { error in
+            error as? CNIError == .invalidConfiguration("CNI_NETNS sandbox ID must match CNI_CONTAINERID")
+        }
+    }
+
     @Test func decodesPreviousResultFromConfig() throws {
         let request = try CNIRequest.parse(
             environment: [
                 "CNI_COMMAND": "CHECK",
-                "CNI_CONTAINERID": "container-1",
+                "CNI_CONTAINERID": "sandbox-1",
                 "CNI_NETNS": "macvmnet://sandbox/sandbox-1",
                 "CNI_IFNAME": "eth0",
             ],
@@ -108,7 +126,7 @@ struct CNIRequestTests {
             _ = try CNIRequest.parse(
                 environment: [
                     "CNI_COMMAND": "ADD",
-                    "CNI_CONTAINERID": "container-1",
+                    "CNI_CONTAINERID": "sandbox-1",
                     "CNI_NETNS": "macvmnet://sandbox/sandbox-1",
                     "CNI_IFNAME": "eth0",
                 ],
@@ -132,7 +150,7 @@ struct CNIRequestTests {
             _ = try CNIRequest.parse(
                 environment: [
                     "CNI_COMMAND": "ADD",
-                    "CNI_CONTAINERID": "container-1",
+                    "CNI_CONTAINERID": "sandbox-1",
                     "CNI_NETNS": "macvmnet://sandbox/sandbox-1",
                     "CNI_IFNAME": "eth0",
                 ],
@@ -155,7 +173,7 @@ struct CNIRequestTests {
         let request = try CNIRequest.parse(
             environment: [
                 "CNI_COMMAND": "DEL",
-                "CNI_CONTAINERID": "container-1",
+                "CNI_CONTAINERID": "sandbox-1",
                 "CNI_NETNS": "macvmnet://sandbox/sandbox-1",
                 "CNI_IFNAME": "eth0",
             ],
@@ -166,6 +184,7 @@ struct CNIRequestTests {
 
         #expect(plan.command == .delete)
         #expect(plan.networkName == "default")
+        #expect(plan.runtimeName == CNISpec.defaultRuntimeName)
         #expect(plan.interfaceName == "eth0")
         #expect(plan.sandbox?.rawValue == "macvmnet://sandbox/sandbox-1")
     }

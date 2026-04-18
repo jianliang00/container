@@ -154,11 +154,14 @@ let package = Package(
         .target(
             name: "ContainerCRIShimMacOS",
             dependencies: [
+                .product(name: "GRPC", package: "grpc-swift"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIO", package: "swift-nio"),
                 "ContainerAPIClient",
                 "ContainerCRI",
                 "ContainerKit",
                 "ContainerResource",
+                "ContainerVersion",
             ]
         ),
         .executableTarget(
@@ -175,7 +178,10 @@ let package = Package(
         .testTarget(
             name: "ContainerCRIShimMacOSTests",
             dependencies: [
-                "ContainerCRIShimMacOS"
+                .product(name: "GRPC", package: "grpc-swift"),
+                .product(name: "NIO", package: "swift-nio"),
+                "ContainerCRI",
+                "ContainerCRIShimMacOS",
             ]
         ),
         .target(

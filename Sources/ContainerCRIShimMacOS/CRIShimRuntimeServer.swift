@@ -15,8 +15,9 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerCRI
-import Darwin
 import Foundation
+import GRPC
+import NIO
 
 public protocol CRIShimServerLifecycle: Sendable {
     func run() async throws
@@ -50,9 +51,7 @@ public struct DefaultCRIShimServerFactory: CRIShimServerFactory {
         guard let runtimeEndpoint = config.normalizedRuntimeEndpoint else {
             throw CRIShimServerFactoryError.missingRuntimeEndpoint
         }
-        let listener = try CRIShimUnixDomainSocketListener(socketPath: runtimeEndpoint)
-        let runtimeService = DeterministicUnsupportedCRIRuntimeService()
-        return CRIShimRuntimeServer(listener: listener, runtimeService: runtimeService)
+        return CRIShimGRPCServer(socketPath: runtimeEndpoint)
     }
 }
 
@@ -67,175 +66,104 @@ public enum CRIShimServerFactoryError: Error, Equatable, CustomStringConvertible
     }
 }
 
-public struct CRIShimRuntimeServer: CRIShimServerLifecycle {
-    public var listener: any CRIShimSocketLifecycle
-    public var runtimeService: any CRIRuntimeService
+public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendable {
+    public let socketPath: String
 
-    public init(listener: any CRIShimSocketLifecycle, runtimeService: any CRIRuntimeService) {
-        self.listener = listener
-        self.runtimeService = runtimeService
+    private let eventLoopGroup: any EventLoopGroup
+    private let ownsEventLoopGroup: Bool
+    private let serviceProviders: [any CallHandlerProvider]
+    private let stateLock = NSLock()
+    private var server: Server?
+
+    public convenience init(
+        socketPath: String,
+        versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo()
+    ) {
+        self.init(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(versionInfo: versionInfo),
+                CRIShimImageServiceProvider(),
+            ],
+            eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
+            ownsEventLoopGroup: true
+        )
+    }
+
+    public convenience init(
+        socketPath: String,
+        versionInfo: CRIShimRuntimeVersionInfo,
+        eventLoopGroup: any EventLoopGroup
+    ) {
+        self.init(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(versionInfo: versionInfo),
+                CRIShimImageServiceProvider(),
+            ],
+            eventLoopGroup: eventLoopGroup
+        )
+    }
+
+    public init(
+        socketPath: String,
+        serviceProviders: [any CallHandlerProvider],
+        eventLoopGroup: any EventLoopGroup,
+        ownsEventLoopGroup: Bool = false
+    ) {
+        self.socketPath = socketPath
+        self.serviceProviders = serviceProviders
+        self.eventLoopGroup = eventLoopGroup
+        self.ownsEventLoopGroup = ownsEventLoopGroup
     }
 
     public func run() async throws {
-        try await listener.start()
-        await listener.waitUntilStopped()
-    }
-
-    public func stop() async {
-        await listener.stop()
-    }
-
-    public func disposition(for operation: CRIRuntimeOperation) -> CRIRuntimeOperationDisposition {
-        runtimeService.disposition(for: operation)
-    }
-}
-
-public protocol CRIShimSocketLifecycle: Sendable {
-    var socketPath: String { get }
-    func start() async throws
-    func waitUntilStopped() async
-    func stop() async
-}
-
-public actor CRIShimUnixDomainSocketListener: CRIShimSocketLifecycle {
-    public let socketPath: String
-    private let cleanupExistingSocketFile: Bool
-
-    private var socketFD: Int32?
-    private var acceptTask: Task<Void, Never>?
-    private var started = false
-
-    public init(socketPath: String, cleanupExistingSocketFile: Bool = true) throws {
-        guard !socketPath.isEmpty else {
-            throw CRIShimSocketListenerError.emptySocketPath
-        }
-        self.socketPath = socketPath
-        self.cleanupExistingSocketFile = cleanupExistingSocketFile
-    }
-
-    public func start() async throws {
-        guard !started else {
-            return
-        }
-
-        if cleanupExistingSocketFile {
-            _ = try? FileManager.default.removeItem(atPath: socketPath)
-        }
-
-        let fd = socket(AF_UNIX, Int32(SOCK_STREAM), 0)
-        guard fd >= 0 else {
-            throw makePOSIXError(errno)
-        }
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let maxLength = MemoryLayout.size(ofValue: address.sun_path)
-        guard socketPath.utf8.count < maxLength else {
-            _ = Darwin.close(fd)
-            throw CRIShimSocketListenerError.socketPathTooLong(socketPath)
-        }
-        socketPath.withCString { cString in
-            withUnsafeMutablePointer(to: &address.sun_path) { pathPointer in
-                pathPointer.withMemoryRebound(to: CChar.self, capacity: maxLength) { destination in
-                    _ = strncpy(destination, cString, maxLength - 1)
-                }
-            }
-        }
-
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindResult == 0 else {
-            let error = makePOSIXError(errno)
-            _ = Darwin.close(fd)
-            throw error
-        }
-
-        guard listen(fd, 16) == 0 else {
-            let error = makePOSIXError(errno)
-            _ = Darwin.close(fd)
-            _ = try? FileManager.default.removeItem(atPath: socketPath)
-            throw error
-        }
-
-        socketFD = fd
-        started = true
-        acceptTask = Task.detached(priority: .background) { [fd] in
-            await Self.acceptLoop(socketFD: fd)
-        }
-    }
-
-    public func waitUntilStopped() async {
-        _ = await acceptTask?.value
-    }
-
-    public func stop() async {
-        guard started else {
-            return
-        }
-
-        started = false
-        if let socketFD {
-            _ = Darwin.shutdown(socketFD, SHUT_RDWR)
-            _ = Darwin.close(socketFD)
-            self.socketFD = nil
-        }
-        acceptTask?.cancel()
-        if let acceptTask {
-            _ = await acceptTask.value
-        }
-        self.acceptTask = nil
         _ = try? FileManager.default.removeItem(atPath: socketPath)
-    }
-
-    private static func acceptLoop(socketFD: Int32) async {
-        while !Task.isCancelled {
-            var address = sockaddr()
-            var length = socklen_t(MemoryLayout<sockaddr>.size)
-            let clientFD = withUnsafeMutablePointer(to: &address) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.accept(socketFD, $0, &length)
-                }
-            }
-
-            guard clientFD >= 0 else {
-                let code = errno
-                if code == EINTR {
-                    continue
-                }
-                if code == EBADF || code == EINVAL {
-                    break
-                }
-                continue
-            }
-
-            _ = Darwin.close(clientFD)
+        do {
+            let server = try await Server.insecure(group: eventLoopGroup)
+                .withServiceProviders(serviceProviders)
+                .bind(unixDomainSocketPath: socketPath)
+                .get()
+            setServer(server)
+            try await server.onClose.get()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+            await shutdownOwnedEventLoopGroupIfNeeded()
+        } catch {
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+            await shutdownOwnedEventLoopGroupIfNeeded()
+            throw error
         }
     }
-}
 
-public enum CRIShimSocketListenerError: Error, Equatable, CustomStringConvertible, Sendable {
-    case emptySocketPath
-    case socketPathTooLong(String)
+    public func stop() async {
+        guard let server = currentServer() else {
+            return
+        }
+        try? await server.close().get()
+    }
 
-    public var description: String {
-        switch self {
-        case .emptySocketPath:
-            return "socket path is required"
-        case .socketPathTooLong(let socketPath):
-            return "unix socket path too long: \(socketPath)"
+    private func setServer(_ server: Server?) {
+        stateLock.lock()
+        self.server = server
+        stateLock.unlock()
+    }
+
+    private func currentServer() -> Server? {
+        stateLock.lock()
+        let server = self.server
+        stateLock.unlock()
+        return server
+    }
+
+    private func shutdownOwnedEventLoopGroupIfNeeded() async {
+        setServer(nil)
+        guard ownsEventLoopGroup else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            eventLoopGroup.shutdownGracefully { _ in
+                continuation.resume()
+            }
         }
     }
-}
-
-public enum CRIShimSocketErrorMapper {
-    public static func makePOSIXError(_ code: Int32) -> POSIXError {
-        POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
-    }
-}
-
-private func makePOSIXError(_ code: Int32) -> POSIXError {
-    CRIShimSocketErrorMapper.makePOSIXError(code)
 }

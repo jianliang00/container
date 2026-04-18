@@ -93,7 +93,7 @@ public enum CRIRuntimeOperationSurface {
         case .reopenContainerLog:
             return "ReopenContainerLog is not wired to log rotation yet"
         case .execSync:
-            return "ExecSync is not wired to workload exec yet"
+            return "ExecSync requires a runtime manager"
         case .exec:
             return "Exec is not wired to the streaming server yet"
         case .attach:

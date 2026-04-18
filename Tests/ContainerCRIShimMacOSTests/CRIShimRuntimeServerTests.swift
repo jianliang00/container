@@ -21,6 +21,7 @@ import Testing
 
 @testable import ContainerCRI
 @testable import ContainerCRIShimMacOS
+@testable import ContainerResource
 
 #if os(Linux)
 import Glibc
@@ -66,6 +67,12 @@ struct CRIShimRuntimeServerTests {
                 usedBytes: 65_536,
                 timestampNanoseconds: 1_700_000_000_000_000_000
             ))
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(
+                exitCode: 7,
+                stdout: Data("exec stdout".utf8),
+                stderr: Data("exec stderr".utf8)
+            ))
         let server = CRIShimGRPCServer(
             socketPath: socketPath,
             config: config,
@@ -92,6 +99,7 @@ struct CRIShimRuntimeServerTests {
                     info: ["runtime": #"{"test":"ready"}"#]
                 )
             ),
+            runtimeManager: runtimeManager,
             imageManager: imageManager
         )
         let serverTask = Task {
@@ -128,6 +136,20 @@ struct CRIShimRuntimeServerTests {
         #expect(status.status.conditions[1].reason == "NetworkNotRunning")
         #expect(status.runtimeHandlers.map(\.name) == ["", "macos"])
         #expect(status.info["runtime"] == #"{"test":"ready"}"#)
+
+        var execSyncRequest = Runtime_V1_ExecSyncRequest()
+        execSyncRequest.containerID = "container-1"
+        execSyncRequest.cmd = ["/bin/echo", "hello"]
+        execSyncRequest.timeout = 3
+        let execSync = try await client.execSync(execSyncRequest)
+        #expect(execSync.exitCode == 7)
+        #expect(execSync.stdout == Data("exec stdout".utf8))
+        #expect(execSync.stderr == Data("exec stderr".utf8))
+        #expect(runtimeManager.execSyncCalls.count == 1)
+        #expect(runtimeManager.execSyncCalls[0].containerID == "container-1")
+        #expect(runtimeManager.execSyncCalls[0].configuration.executable == "/bin/echo")
+        #expect(runtimeManager.execSyncCalls[0].configuration.arguments == ["hello"])
+        #expect(runtimeManager.execSyncCalls[0].timeout == .seconds(3))
 
         let runtimeConfig = try await client.runtimeConfig(Runtime_V1_RuntimeConfigRequest())
         #expect(!runtimeConfig.hasLinux)
@@ -233,6 +255,35 @@ private struct StaticReadinessChecker: CRIShimReadinessChecking {
 
     func snapshot(config: CRIShimConfig) async -> CRIShimReadinessSnapshot {
         snapshot
+    }
+}
+
+private struct RecordingExecSyncCall {
+    var containerID: String
+    var configuration: ProcessConfiguration
+    var timeout: Duration?
+}
+
+private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
+    var execSyncResult: ExecSyncResult
+    private(set) var execSyncCalls: [RecordingExecSyncCall] = []
+
+    init(execSyncResult: ExecSyncResult) {
+        self.execSyncResult = execSyncResult
+    }
+
+    func execSync(
+        containerID: String,
+        configuration: ProcessConfiguration,
+        timeout: Duration?
+    ) async throws -> ExecSyncResult {
+        execSyncCalls.append(
+            RecordingExecSyncCall(
+                containerID: containerID,
+                configuration: configuration,
+                timeout: timeout
+            ))
+        return execSyncResult
     }
 }
 

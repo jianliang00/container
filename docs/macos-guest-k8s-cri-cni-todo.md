@@ -53,11 +53,8 @@ RuntimeService:
 - [ ] Implement `ExecSync`.
 - [ ] Implement `Exec` through a loopback streaming server.
 - [ ] Implement `PortForward` through a loopback streaming server.
-- [ ] Return deterministic unsupported response for `Attach`.
 - [ ] Implement minimal `ContainerStats`, `ListContainerStats`,
   `PodSandboxStats`, and `ListPodSandboxStats`.
-- [ ] Implement deterministic handlers for `CheckpointContainer`,
-  `GetContainerEvents`, `ListMetricDescriptors`, and `ListPodSandboxMetrics`.
 
 ImageService:
 

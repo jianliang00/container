@@ -384,16 +384,21 @@ The plugin persists CNI result metadata in `stateDir`, defaulting to
 `cni.dev/valid-attachments` to release stale macvmnet attachments and delete
 their cached CNI results.
 
+The plugin connects to sandbox-scoped runtime services using `runtime`,
+defaulting to `container-runtime-macos`. `ADD`, `CHECK`, `DEL`, and `GC` use
+`SandboxClient` for `PrepareSandboxNetwork`, `InspectSandboxNetwork`, and
+`ReleaseSandboxNetwork`; `STATUS` checks the local network service and selected
+network readiness.
+
 Non-netns CNI contract:
 
 - `CNI_CONTAINERID` is the CRI PodSandbox ID.
 - `CNI_NETNS` is a non-empty opaque VM isolation-domain reference owned by the
   shim, initially `macvmnet://sandbox/<sandboxID>`.
 - `CNI_IFNAME` is the logical Pod interface name. The plugin persists it in the
-  CNI result and maps it to the guest-reported interface by MAC and IP during
-  `CHECK`.
-- `ADD` validates that `CNI_CONTAINERID`, `CNI_NETNS`, and the sandbox record
-  refer to the same sandbox.
+  CNI result and compares it with the sandbox network state during `CHECK`.
+- `ADD` validates that `CNI_CONTAINERID` and `CNI_NETNS` refer to the same
+  sandbox before calling `PrepareSandboxNetwork`.
 - `CHECK` requires the previous `ADD` result as `prevResult` and compares that
   result with the persisted lease and current `InspectSandboxNetwork` state.
 - `DEL` tolerates a missing `CNI_NETNS`, missing lease, or already-released
@@ -537,6 +542,11 @@ Recommended node setup:
 - Pod `nodeSelector` or RuntimeClass scheduling rules selecting the macOS node,
   including `kubernetes.io/os=darwin`
 - matching toleration for the macOS node taint
+
+Pod manifests should omit `.spec.os.name` unless the deployed Kubernetes API
+server and kubelet explicitly admit `darwin` as a Pod OS value. The supported
+selection signal for this adapter is the node label and scheduling metadata
+above, not setting Pod OS to `linux` or `windows`.
 
 Pods should use macOS workload images and should not assume Linux-only security,
 namespace, filesystem, or cgroup behavior.

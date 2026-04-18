@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerCRI
+import ContainerResource
 import Foundation
 
 func makeCRIPodSandbox(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandbox {
@@ -56,6 +57,13 @@ func makeCRIContainer(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_Contai
     return container
 }
 
+func makeCRIContainer(
+    _ metadata: CRIShimContainerMetadata,
+    workloadSnapshot: WorkloadSnapshot?
+) -> Runtime_V1_Container {
+    makeCRIContainer(metadata.applying(workloadSnapshot: workloadSnapshot))
+}
+
 func makeCRIContainerStatus(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_ContainerStatus {
     var status = Runtime_V1_ContainerStatus()
     status.id = metadata.id
@@ -70,6 +78,17 @@ func makeCRIContainerStatus(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_
     status.labels = metadata.labels
     status.annotations = metadata.annotations
     status.logPath = metadata.logPath ?? ""
+    return status
+}
+
+func makeCRIContainerStatus(
+    _ metadata: CRIShimContainerMetadata,
+    workloadSnapshot: WorkloadSnapshot?
+) -> Runtime_V1_ContainerStatus {
+    var status = makeCRIContainerStatus(metadata.applying(workloadSnapshot: workloadSnapshot))
+    if let exitCode = workloadSnapshot?.exitCode {
+        status.exitCode = exitCode
+    }
     return status
 }
 
@@ -165,6 +184,28 @@ private func makeCRIContainerState(_ state: CRIShimContainerMetadata.State) -> R
         .containerRunning
     case .exited, .removed:
         .containerExited
+    }
+}
+
+extension CRIShimContainerMetadata {
+    fileprivate func applying(workloadSnapshot: WorkloadSnapshot?) -> CRIShimContainerMetadata {
+        guard let workloadSnapshot else {
+            return self
+        }
+
+        var metadata = self
+        switch workloadSnapshot.status {
+        case .running, .stopping:
+            metadata.state = .running
+        case .stopped:
+            metadata.state = .exited
+        case .unknown:
+            break
+        }
+
+        metadata.startedAt = workloadSnapshot.startedDate ?? metadata.startedAt
+        metadata.exitedAt = workloadSnapshot.exitedAt ?? metadata.exitedAt
+        return metadata
     }
 }
 

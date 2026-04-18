@@ -47,6 +47,11 @@ public protocol CRIShimRuntimeManaging: Sendable {
         workloadID: String
     ) async throws
 
+    func inspectWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws -> WorkloadSnapshot
+
     func execSync(
         containerID: String,
         configuration: ProcessConfiguration,
@@ -88,6 +93,13 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         workloadID: String
     ) async throws {
         try await kit.removeWorkload(sandboxID: sandboxID, workloadID: workloadID)
+    }
+
+    public func inspectWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws -> WorkloadSnapshot {
+        try await kit.inspectWorkload(sandboxID: sandboxID, workloadID: workloadID)
     }
 
     public func execSync(

@@ -281,6 +281,41 @@ struct CRIShimRuntimeServerTests {
         #expect(createdStatus.status.state == .containerCreated)
         #expect(createdStatus.status.logPath == "/var/log/pods/default_demo_uid/created/0.log")
 
+        var startRequest = Runtime_V1_StartContainerRequest()
+        startRequest.containerID = created.containerID
+        _ = try await client.startContainer(startRequest)
+        #expect(runtimeManager.startWorkloadCalls.count == 1)
+        let startCall = try #require(runtimeManager.startWorkloadCalls.first)
+        #expect(startCall.sandboxID == "sandbox-1")
+        #expect(startCall.workloadID == created.containerID)
+
+        let runningStatus = try await client.containerStatus(createdStatusRequest)
+        #expect(runningStatus.status.state == .containerRunning)
+        #expect(runningStatus.status.startedAt > 0)
+
+        var stopRequest = Runtime_V1_StopContainerRequest()
+        stopRequest.containerID = created.containerID
+        stopRequest.timeout = 2
+        _ = try await client.stopContainer(stopRequest)
+        #expect(runtimeManager.stopWorkloadCalls.count == 1)
+        let stopCall = try #require(runtimeManager.stopWorkloadCalls.first)
+        #expect(stopCall.sandboxID == "sandbox-1")
+        #expect(stopCall.workloadID == created.containerID)
+        #expect(stopCall.options.timeoutInSeconds == 2)
+        #expect(stopCall.options.signal == Int32(SIGTERM))
+
+        let stoppedStatus = try await client.containerStatus(createdStatusRequest)
+        #expect(stoppedStatus.status.state == .containerExited)
+        #expect(stoppedStatus.status.finishedAt > 0)
+
+        var removeRequest = Runtime_V1_RemoveContainerRequest()
+        removeRequest.containerID = created.containerID
+        _ = try await client.removeContainer(removeRequest)
+        #expect(runtimeManager.removeWorkloadCalls.count == 1)
+        let removeCall = try #require(runtimeManager.removeWorkloadCalls.first)
+        #expect(removeCall.sandboxID == "sandbox-1")
+        #expect(removeCall.workloadID == created.containerID)
+
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
         #expect(listImages.images.count == 1)
@@ -394,9 +429,17 @@ private struct RecordingCreateWorkloadCall {
     var configuration: WorkloadConfiguration
 }
 
+private struct RecordingStopWorkloadCall {
+    var sandboxID: String
+    var workloadID: String
+    var options: ContainerStopOptions
+}
+
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
     var execSyncResult: ExecSyncResult
     private(set) var createWorkloadCalls: [RecordingCreateWorkloadCall] = []
+    private(set) var startWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
+    private(set) var stopWorkloadCalls: [RecordingStopWorkloadCall] = []
     private(set) var removeWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var execSyncCalls: [RecordingExecSyncCall] = []
 
@@ -412,6 +455,26 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             RecordingCreateWorkloadCall(
                 sandboxID: sandboxID,
                 configuration: configuration
+            ))
+    }
+
+    func startWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws {
+        startWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
+    }
+
+    func stopWorkload(
+        sandboxID: String,
+        workloadID: String,
+        options: ContainerStopOptions
+    ) async throws {
+        stopWorkloadCalls.append(
+            RecordingStopWorkloadCall(
+                sandboxID: sandboxID,
+                workloadID: workloadID,
+                options: options
             ))
     }
 

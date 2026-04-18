@@ -47,6 +47,25 @@ struct CRIShimRuntimeServerTests {
         let socketPath = "/tmp/cri-shim-grpc-\(UUID().uuidString.prefix(8)).sock"
         let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let imageManager = RecordingImageManager(
+            images: [
+                CRIShimImageRecord(
+                    reference: "example.com/macos/workload:latest",
+                    digest: "sha256:abc123",
+                    size: 4096,
+                    annotations: ["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]
+                )
+            ],
+            pulledImage: CRIShimImageRecord(
+                reference: "example.com/macos/pulled:latest",
+                digest: "sha256:pulled",
+                size: 8192
+            ),
+            filesystemUsage: CRIShimImageFilesystemUsage(
+                mountpoint: "/var/lib/container-test",
+                usedBytes: 65_536,
+                timestampNanoseconds: 1_700_000_000_000_000_000
+            ))
         let server = CRIShimGRPCServer(
             socketPath: socketPath,
             config: config,
@@ -73,20 +92,7 @@ struct CRIShimRuntimeServerTests {
                     info: ["runtime": #"{"test":"ready"}"#]
                 )
             ),
-            imageManager: RecordingImageManager(
-                images: [
-                    CRIShimImageRecord(
-                        reference: "example.com/macos/workload:latest",
-                        digest: "sha256:abc123",
-                        size: 4096,
-                        annotations: ["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]
-                    )
-                ],
-                filesystemUsage: CRIShimImageFilesystemUsage(
-                    mountpoint: "/var/lib/container-test",
-                    usedBytes: 65_536,
-                    timestampNanoseconds: 1_700_000_000_000_000_000
-                ))
+            imageManager: imageManager
         )
         let serverTask = Task {
             try await server.run()
@@ -154,13 +160,13 @@ struct CRIShimRuntimeServerTests {
         #expect(imageFsInfo.imageFilesystems[0].usedBytes.value == 65_536)
         #expect(!imageFsInfo.imageFilesystems[0].hasInodesUsed)
 
-        do {
-            _ = try await imageClient.pullImage(Runtime_V1_PullImageRequest())
-            Issue.record("expected PullImage to return unimplemented until CRI registry auth is wired")
-        } catch let status as GRPCStatus {
-            #expect(status.code == .unimplemented)
-            #expect(status.message?.contains("PullImage") == true)
-        }
+        var pullImageRequest = Runtime_V1_PullImageRequest()
+        pullImageRequest.image.image = "example.com/macos/pulled:latest"
+        pullImageRequest.auth.auth = Data("cri-user:cri-password".utf8).base64EncodedString()
+        let pullImage = try await imageClient.pullImage(pullImageRequest)
+        #expect(pullImage.imageRef == "sha256:pulled")
+        #expect(imageManager.pulledReferences == ["example.com/macos/pulled:latest"])
+        #expect(imageManager.pulledAuthentications == [.basic(username: "cri-user", password: "cri-password")])
 
         try await channel.close().get()
         await server.stop()
@@ -217,11 +223,19 @@ private struct StaticReadinessChecker: CRIShimReadinessChecking {
 
 private final class RecordingImageManager: CRIShimImageManaging, @unchecked Sendable {
     var images: [CRIShimImageRecord]
+    var pulledImage: CRIShimImageRecord
     var filesystemUsage: CRIShimImageFilesystemUsage
+    private(set) var pulledReferences: [String] = []
+    private(set) var pulledAuthentications: [CRIShimImagePullAuthentication?] = []
     private(set) var removedReferences: [String] = []
 
     init(
         images: [CRIShimImageRecord],
+        pulledImage: CRIShimImageRecord = CRIShimImageRecord(
+            reference: "example.com/macos/pulled:latest",
+            digest: "sha256:pulled",
+            size: 0
+        ),
         filesystemUsage: CRIShimImageFilesystemUsage = CRIShimImageFilesystemUsage(
             mountpoint: "/var/lib/container-test",
             usedBytes: 0,
@@ -229,11 +243,21 @@ private final class RecordingImageManager: CRIShimImageManaging, @unchecked Send
         )
     ) {
         self.images = images
+        self.pulledImage = pulledImage
         self.filesystemUsage = filesystemUsage
     }
 
     func listImages() async throws -> [CRIShimImageRecord] {
         images
+    }
+
+    func pullImage(
+        reference: String,
+        authentication: CRIShimImagePullAuthentication?
+    ) async throws -> CRIShimImageRecord {
+        pulledReferences.append(reference)
+        pulledAuthentications.append(authentication)
+        return pulledImage
     }
 
     func removeImage(reference: String) async throws {

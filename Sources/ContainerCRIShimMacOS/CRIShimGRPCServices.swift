@@ -163,6 +163,20 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
         }
     }
 
+    public func pullImage(
+        request: Runtime_V1_PullImageRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_PullImageResponse {
+        try await handlerLogger.handle(operation: CRIImageOperation.pullImage.rawValue) {
+            let reference = try CRIShimImageReference.resolve(request.image)
+            let authentication = try CRIShimImagePullAuthentication.resolve(request)
+            let image = try await imageManager.pullImage(reference: reference, authentication: authentication)
+            var response = Runtime_V1_PullImageResponse()
+            response.imageRef = image.digest.isEmpty ? image.reference : image.digest
+            return response
+        }
+    }
+
     public func imageFsInfo(
         request: Runtime_V1_ImageFsInfoRequest,
         context: GRPCAsyncServerCallContext
@@ -429,15 +443,6 @@ private func makeRuntimeHandler(name: String) -> Runtime_V1_RuntimeHandler {
     handler.name = name
     handler.features = Runtime_V1_RuntimeHandlerFeatures()
     return handler
-}
-
-extension Runtime_V1_ImageServiceAsyncProvider {
-    public func pullImage(
-        request: Runtime_V1_PullImageRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_PullImageResponse {
-        try await unsupportedImage(.pullImage)
-    }
 }
 
 private func filteredImages(

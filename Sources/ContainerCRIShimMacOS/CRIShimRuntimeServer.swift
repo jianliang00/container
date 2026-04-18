@@ -51,7 +51,7 @@ public struct DefaultCRIShimServerFactory: CRIShimServerFactory {
         guard let runtimeEndpoint = config.normalizedRuntimeEndpoint else {
             throw CRIShimServerFactoryError.missingRuntimeEndpoint
         }
-        return CRIShimGRPCServer(socketPath: runtimeEndpoint)
+        return CRIShimGRPCServer(socketPath: runtimeEndpoint, config: config)
     }
 }
 
@@ -77,12 +77,13 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
 
     public convenience init(
         socketPath: String,
+        config: CRIShimConfig,
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo()
     ) {
         self.init(
             socketPath: socketPath,
             serviceProviders: [
-                CRIShimRuntimeServiceProvider(versionInfo: versionInfo),
+                CRIShimRuntimeServiceProvider(config: config, versionInfo: versionInfo),
                 CRIShimImageServiceProvider(),
             ],
             eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
@@ -92,13 +93,19 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
 
     public convenience init(
         socketPath: String,
+        config: CRIShimConfig,
         versionInfo: CRIShimRuntimeVersionInfo,
-        eventLoopGroup: any EventLoopGroup
+        eventLoopGroup: any EventLoopGroup,
+        readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker()
     ) {
         self.init(
             socketPath: socketPath,
             serviceProviders: [
-                CRIShimRuntimeServiceProvider(versionInfo: versionInfo),
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    versionInfo: versionInfo,
+                    readinessChecker: readinessChecker
+                ),
                 CRIShimImageServiceProvider(),
             ],
             eventLoopGroup: eventLoopGroup

@@ -39,6 +39,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
     public var podUID: String?
     public var namespace: String?
     public var name: String?
+    public var attempt: UInt32
     public var runtimeHandler: String
     public var sandboxImage: String
     public var network: String?
@@ -55,6 +56,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
         podUID: String? = nil,
         namespace: String? = nil,
         name: String? = nil,
+        attempt: UInt32 = 0,
         runtimeHandler: String,
         sandboxImage: String,
         network: String? = nil,
@@ -70,6 +72,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
         self.podUID = podUID
         self.namespace = namespace
         self.name = name
+        self.attempt = attempt
         self.runtimeHandler = runtimeHandler
         self.sandboxImage = sandboxImage
         self.network = network
@@ -82,6 +85,64 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
         self.updatedAt = updatedAt
     }
 
+    enum CodingKeys: String, CodingKey {
+        case id
+        case podUID
+        case namespace
+        case name
+        case attempt
+        case runtimeHandler
+        case sandboxImage
+        case network
+        case labels
+        case annotations
+        case networkLeaseID
+        case networkAttachments
+        case state
+        case createdAt
+        case updatedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            podUID: try container.decodeIfPresent(String.self, forKey: .podUID),
+            namespace: try container.decodeIfPresent(String.self, forKey: .namespace),
+            name: try container.decodeIfPresent(String.self, forKey: .name),
+            attempt: try container.decodeIfPresent(UInt32.self, forKey: .attempt) ?? 0,
+            runtimeHandler: try container.decode(String.self, forKey: .runtimeHandler),
+            sandboxImage: try container.decode(String.self, forKey: .sandboxImage),
+            network: try container.decodeIfPresent(String.self, forKey: .network),
+            labels: try container.decodeIfPresent([String: String].self, forKey: .labels) ?? [:],
+            annotations: try container.decodeIfPresent([String: String].self, forKey: .annotations) ?? [:],
+            networkLeaseID: try container.decodeIfPresent(String.self, forKey: .networkLeaseID),
+            networkAttachments: try container.decodeIfPresent([String].self, forKey: .networkAttachments) ?? [],
+            state: try container.decode(State.self, forKey: .state),
+            createdAt: try container.decode(Date.self, forKey: .createdAt),
+            updatedAt: try container.decode(Date.self, forKey: .updatedAt)
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(podUID, forKey: .podUID)
+        try container.encodeIfPresent(namespace, forKey: .namespace)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encode(attempt, forKey: .attempt)
+        try container.encode(runtimeHandler, forKey: .runtimeHandler)
+        try container.encode(sandboxImage, forKey: .sandboxImage)
+        try container.encodeIfPresent(network, forKey: .network)
+        try container.encode(labels, forKey: .labels)
+        try container.encode(annotations, forKey: .annotations)
+        try container.encodeIfPresent(networkLeaseID, forKey: .networkLeaseID)
+        try container.encode(networkAttachments, forKey: .networkAttachments)
+        try container.encode(state, forKey: .state)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+
     public var reconcileFingerprint: String {
         fingerprintSegments.joined(separator: "\u{1f}")
     }
@@ -92,6 +153,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
             podUID ?? "",
             namespace ?? "",
             name ?? "",
+            String(attempt),
             runtimeHandler,
             sandboxImage,
             network ?? "",
@@ -114,6 +176,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
     public var id: String
     public var sandboxID: String
     public var name: String
+    public var attempt: UInt32
     public var image: String
     public var runtimeHandler: String
     public var labels: [String: String]
@@ -131,6 +194,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         id: String,
         sandboxID: String,
         name: String,
+        attempt: UInt32 = 0,
         image: String,
         runtimeHandler: String,
         labels: [String: String] = [:],
@@ -147,6 +211,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         self.id = id
         self.sandboxID = sandboxID
         self.name = name
+        self.attempt = attempt
         self.image = image
         self.runtimeHandler = runtimeHandler
         self.labels = labels
@@ -161,6 +226,67 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         self.exitedAt = exitedAt
     }
 
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sandboxID
+        case name
+        case attempt
+        case image
+        case runtimeHandler
+        case labels
+        case annotations
+        case command
+        case args
+        case workingDirectory
+        case logPath
+        case state
+        case createdAt
+        case startedAt
+        case exitedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            sandboxID: try container.decode(String.self, forKey: .sandboxID),
+            name: try container.decode(String.self, forKey: .name),
+            attempt: try container.decodeIfPresent(UInt32.self, forKey: .attempt) ?? 0,
+            image: try container.decode(String.self, forKey: .image),
+            runtimeHandler: try container.decode(String.self, forKey: .runtimeHandler),
+            labels: try container.decodeIfPresent([String: String].self, forKey: .labels) ?? [:],
+            annotations: try container.decodeIfPresent([String: String].self, forKey: .annotations) ?? [:],
+            command: try container.decodeIfPresent([String].self, forKey: .command) ?? [],
+            args: try container.decodeIfPresent([String].self, forKey: .args) ?? [],
+            workingDirectory: try container.decodeIfPresent(String.self, forKey: .workingDirectory),
+            logPath: try container.decodeIfPresent(String.self, forKey: .logPath),
+            state: try container.decode(State.self, forKey: .state),
+            createdAt: try container.decode(Date.self, forKey: .createdAt),
+            startedAt: try container.decodeIfPresent(Date.self, forKey: .startedAt),
+            exitedAt: try container.decodeIfPresent(Date.self, forKey: .exitedAt)
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(sandboxID, forKey: .sandboxID)
+        try container.encode(name, forKey: .name)
+        try container.encode(attempt, forKey: .attempt)
+        try container.encode(image, forKey: .image)
+        try container.encode(runtimeHandler, forKey: .runtimeHandler)
+        try container.encode(labels, forKey: .labels)
+        try container.encode(annotations, forKey: .annotations)
+        try container.encode(command, forKey: .command)
+        try container.encode(args, forKey: .args)
+        try container.encodeIfPresent(workingDirectory, forKey: .workingDirectory)
+        try container.encodeIfPresent(logPath, forKey: .logPath)
+        try container.encode(state, forKey: .state)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(startedAt, forKey: .startedAt)
+        try container.encodeIfPresent(exitedAt, forKey: .exitedAt)
+    }
+
     public var reconcileFingerprint: String {
         fingerprintSegments.joined(separator: "\u{1f}")
     }
@@ -170,6 +296,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
             id,
             sandboxID,
             name,
+            String(attempt),
             image,
             runtimeHandler,
             canonicalDictionaryString(labels),
@@ -323,7 +450,7 @@ private struct CRIShimEntityStore<T: Codable & Identifiable<String> & Sendable> 
 }
 
 extension JSONEncoder {
-    fileprivate static var criShimMetadataEncoder: JSONEncoder {
+    static var criShimMetadataEncoder: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .custom { date, encoder in
@@ -335,7 +462,7 @@ extension JSONEncoder {
 }
 
 extension JSONDecoder {
-    fileprivate static var criShimMetadataDecoder: JSONDecoder {
+    static var criShimMetadataDecoder: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()

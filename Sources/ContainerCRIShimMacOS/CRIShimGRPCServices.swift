@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerCRI
+import ContainerResource
 import ContainerVersion
 import Foundation
 import GRPC
@@ -39,17 +40,20 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     public var versionInfo: CRIShimRuntimeVersionInfo
     public var config: CRIShimConfig
     private let readinessChecker: any CRIShimReadinessChecking
+    private let runtimeManager: any CRIShimRuntimeManaging
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
         config: CRIShimConfig,
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
         readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
+        runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
         handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
         self.config = config
         self.versionInfo = versionInfo
         self.readinessChecker = readinessChecker
+        self.runtimeManager = runtimeManager
         self.handlerLogger = handlerLogger
     }
 
@@ -104,6 +108,21 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_UpdateRuntimeConfigResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.updateRuntimeConfig.rawValue) {
             Runtime_V1_UpdateRuntimeConfigResponse()
+        }
+    }
+
+    public func execSync(
+        request: Runtime_V1_ExecSyncRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ExecSyncResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.execSync.rawValue) {
+            let invocation = try makeCRIShimExecSyncInvocation(request)
+            let result = try await runtimeManager.execSync(
+                containerID: invocation.containerID,
+                configuration: invocation.configuration,
+                timeout: invocation.timeout
+            )
+            return makeCRIShimExecSyncResponse(result)
         }
     }
 }

@@ -77,11 +77,11 @@ public enum CRIRuntimeOperationSurface {
         case .createContainer:
             return "CreateContainer is implemented by the protobuf-backed CRI server"
         case .startContainer:
-            return "StartContainer is not wired to workload start yet"
+            return "StartContainer is implemented by the protobuf-backed CRI server"
         case .stopContainer:
-            return "StopContainer is not wired to workload stop yet"
+            return "StopContainer is implemented by the protobuf-backed CRI server"
         case .removeContainer:
-            return "RemoveContainer is not wired to workload removal yet"
+            return "RemoveContainer is implemented by the protobuf-backed CRI server"
         case .containerStatus:
             return "ContainerStatus is not wired to workload inspection yet"
         case .listContainers:

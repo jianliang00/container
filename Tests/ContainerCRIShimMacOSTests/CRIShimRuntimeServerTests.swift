@@ -45,15 +45,34 @@ struct CRIShimRuntimeServerTests {
     @Test
     func grpcServerServesVersionOnUnixDomainSocket() async throws {
         let socketPath = "/tmp/cri-shim-grpc-\(UUID().uuidString.prefix(8)).sock"
+        let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let server = CRIShimGRPCServer(
             socketPath: socketPath,
+            config: config,
             versionInfo: CRIShimRuntimeVersionInfo(
                 runtimeName: "container-macos-test",
                 runtimeVersion: "1.2.3",
                 runtimeAPIVersion: CRIProtocol.runtimeAPIVersion
             ),
-            eventLoopGroup: group
+            eventLoopGroup: group,
+            readinessChecker: StaticReadinessChecker(
+                snapshot: CRIShimReadinessSnapshot(
+                    runtime: CRIShimRuntimeConditionSnapshot(
+                        type: CRIShimRuntimeConditionType.runtimeReady,
+                        status: true,
+                        reason: "RuntimeHealthOK",
+                        message: "test runtime ready"
+                    ),
+                    network: CRIShimRuntimeConditionSnapshot(
+                        type: CRIShimRuntimeConditionType.networkReady,
+                        status: false,
+                        reason: "NetworkNotRunning",
+                        message: "test network not ready"
+                    ),
+                    info: ["runtime": #"{"test":"ready"}"#]
+                )
+            )
         )
         let serverTask = Task {
             try await server.run()
@@ -76,13 +95,24 @@ struct CRIShimRuntimeServerTests {
         #expect(version.runtimeVersion == "1.2.3")
         #expect(version.runtimeApiVersion == CRIProtocol.runtimeAPIVersion)
 
-        do {
-            _ = try await client.status(Runtime_V1_StatusRequest())
-            Issue.record("expected Status to return unimplemented until readiness checks are wired")
-        } catch let status as GRPCStatus {
-            #expect(status.code == .unimplemented)
-            #expect(status.message?.contains("Status") == true)
-        }
+        var statusRequest = Runtime_V1_StatusRequest()
+        statusRequest.verbose = true
+        let status = try await client.status(statusRequest)
+        #expect(
+            status.status.conditions.map(\.type) == [
+                CRIShimRuntimeConditionType.runtimeReady,
+                CRIShimRuntimeConditionType.networkReady,
+            ])
+        #expect(status.status.conditions[0].status)
+        #expect(!status.status.conditions[1].status)
+        #expect(status.status.conditions[1].reason == "NetworkNotRunning")
+        #expect(status.runtimeHandlers.map(\.name) == ["", "macos"])
+        #expect(status.info["runtime"] == #"{"test":"ready"}"#)
+
+        let runtimeConfig = try await client.runtimeConfig(Runtime_V1_RuntimeConfigRequest())
+        #expect(!runtimeConfig.hasLinux)
+
+        _ = try await client.updateRuntimeConfig(Runtime_V1_UpdateRuntimeConfigRequest())
 
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         do {
@@ -135,6 +165,14 @@ private final class RecordingServer: CRIShimServerLifecycle, @unchecked Sendable
 
     func stop() async {
         stopCallCount += 1
+    }
+}
+
+private struct StaticReadinessChecker: CRIShimReadinessChecking {
+    var snapshot: CRIShimReadinessSnapshot
+
+    func snapshot(config: CRIShimConfig) async -> CRIShimReadinessSnapshot {
+        snapshot
     }
 }
 

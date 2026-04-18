@@ -345,6 +345,14 @@ Image and handler selection rules:
 | `ListMetricDescriptors` | Return empty descriptors |
 | `ListPodSandboxMetrics` | Return empty metrics |
 
+`Status` must not report `RuntimeReady` or `NetworkReady` from configuration
+alone. `RuntimeReady` is true only after the shim can reach the local container
+services health endpoint. `NetworkReady` is true only after the configured
+default network exists and is running. `RuntimeConfig` returns no Linux
+`cgroupDriver` because the macOS shim is not a Linux runtime; kubelet
+`UpdateRuntimeConfig` PodCIDR updates are accepted as no-ops because Pod IP
+allocation comes from the configured vmnet network.
+
 Unsupported Linux-specific request fields must fail before sandbox or workload
 creation when accepting them would make Pod behavior misleading.
 

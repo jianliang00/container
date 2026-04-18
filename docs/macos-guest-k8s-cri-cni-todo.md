@@ -27,9 +27,6 @@ CRI server:
 
 RuntimeService:
 
-- [ ] Implement `Status`.
-- [ ] Implement `RuntimeConfig`.
-- [ ] Implement `UpdateRuntimeConfig`.
 - [ ] Implement `RunPodSandbox` with configured runtime handler and sandbox
   image.
 - [ ] Invoke CNI `ADD` during `RunPodSandbox`.

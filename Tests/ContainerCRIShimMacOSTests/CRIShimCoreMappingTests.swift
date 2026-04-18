@@ -28,6 +28,7 @@ struct CRIShimCoreMappingTests {
         request.config.metadata.uid = "pod-uid"
         request.config.metadata.namespace = "default"
         request.config.metadata.name = "demo"
+        request.config.metadata.attempt = 2
         request.config.labels = ["app": "demo"]
         request.config.annotations = ["annotation": "value"]
 
@@ -43,6 +44,7 @@ struct CRIShimCoreMappingTests {
         #expect(metadata.podUID == "pod-uid")
         #expect(metadata.namespace == "default")
         #expect(metadata.name == "demo")
+        #expect(metadata.attempt == 2)
         #expect(metadata.runtimeHandler == "macos")
         #expect(metadata.sandboxImage == "example.com/macos/sandbox:latest")
         #expect(metadata.network == "default")
@@ -59,6 +61,7 @@ struct CRIShimCoreMappingTests {
         request.podSandboxID = "sandbox-1"
         request.sandboxConfig.logDirectory = "/var/log/pods/default_demo_uid"
         request.config.metadata.name = "workload"
+        request.config.metadata.attempt = 3
         request.config.image.image = "example.com/macos/workload:latest"
         request.config.command = ["/bin/echo"]
         request.config.args = ["hello", "world"]
@@ -84,6 +87,7 @@ struct CRIShimCoreMappingTests {
         #expect(metadata.id == "container-1")
         #expect(metadata.sandboxID == "sandbox-1")
         #expect(metadata.name == "workload")
+        #expect(metadata.attempt == 3)
         #expect(metadata.image == "example.com/macos/workload:latest")
         #expect(metadata.runtimeHandler == "macos")
         #expect(metadata.labels == ["app": "demo"])

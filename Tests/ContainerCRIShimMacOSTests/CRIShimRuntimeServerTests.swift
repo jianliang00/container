@@ -46,7 +46,45 @@ struct CRIShimRuntimeServerTests {
     @Test
     func grpcServerServesVersionOnUnixDomainSocket() async throws {
         let socketPath = "/tmp/cri-shim-grpc-\(UUID().uuidString.prefix(8)).sock"
-        let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.stateDirectory = stateDirectory.path
+        let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1",
+                podUID: "pod-uid",
+                namespace: "default",
+                name: "demo",
+                attempt: 2,
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                network: "default",
+                labels: ["app": "demo"],
+                annotations: ["pod": "annotation"],
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ))
+        try metadataStore.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-1",
+                sandboxID: "sandbox-1",
+                name: "workload",
+                attempt: 1,
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos",
+                labels: ["app": "demo", "tier": "frontend"],
+                annotations: ["container": "annotation"],
+                command: ["/bin/echo"],
+                args: ["hello"],
+                workingDirectory: "/workspace",
+                logPath: "/var/log/pods/default_demo_uid/workload/0.log",
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_010),
+                startedAt: Date(timeIntervalSince1970: 1_700_000_020)
+            ))
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let imageManager = RecordingImageManager(
             images: [
@@ -73,7 +111,7 @@ struct CRIShimRuntimeServerTests {
                 stdout: Data("exec stdout".utf8),
                 stderr: Data("exec stderr".utf8)
             ))
-        let server = CRIShimGRPCServer(
+        let server = try CRIShimGRPCServer(
             socketPath: socketPath,
             config: config,
             versionInfo: CRIShimRuntimeVersionInfo(
@@ -155,6 +193,58 @@ struct CRIShimRuntimeServerTests {
         #expect(!runtimeConfig.hasLinux)
 
         _ = try await client.updateRuntimeConfig(Runtime_V1_UpdateRuntimeConfigRequest())
+
+        var sandboxFilter = Runtime_V1_PodSandboxFilter()
+        sandboxFilter.labelSelector = ["app": "demo"]
+        let sandboxListRequest = Runtime_V1_ListPodSandboxRequest.with {
+            $0.filter = sandboxFilter
+        }
+        let sandboxes = try await client.listPodSandbox(sandboxListRequest)
+        #expect(sandboxes.items.count == 1)
+        #expect(sandboxes.items[0].id == "sandbox-1")
+        #expect(sandboxes.items[0].metadata.name == "demo")
+        #expect(sandboxes.items[0].metadata.uid == "pod-uid")
+        #expect(sandboxes.items[0].metadata.namespace == "default")
+        #expect(sandboxes.items[0].metadata.attempt == 2)
+        #expect(sandboxes.items[0].state == .sandboxReady)
+        #expect(sandboxes.items[0].runtimeHandler == "macos")
+
+        var sandboxStatusRequest = Runtime_V1_PodSandboxStatusRequest()
+        sandboxStatusRequest.podSandboxID = "sandbox-1"
+        sandboxStatusRequest.verbose = true
+        let sandboxStatus = try await client.podSandboxStatus(sandboxStatusRequest)
+        #expect(sandboxStatus.status.id == "sandbox-1")
+        #expect(sandboxStatus.status.metadata.attempt == 2)
+        #expect(sandboxStatus.status.state == .sandboxReady)
+        #expect(sandboxStatus.containersStatuses.map(\.id) == ["container-1"])
+        #expect(sandboxStatus.info["metadata"]?.contains(#""runtimeHandler":"macos""#) == true)
+
+        var containerFilter = Runtime_V1_ContainerFilter()
+        containerFilter.podSandboxID = "sandbox-1"
+        containerFilter.labelSelector = ["tier": "frontend"]
+        let containerListRequest = Runtime_V1_ListContainersRequest.with {
+            $0.filter = containerFilter
+        }
+        let containers = try await client.listContainers(containerListRequest)
+        #expect(containers.containers.count == 1)
+        #expect(containers.containers[0].id == "container-1")
+        #expect(containers.containers[0].podSandboxID == "sandbox-1")
+        #expect(containers.containers[0].metadata.name == "workload")
+        #expect(containers.containers[0].metadata.attempt == 1)
+        #expect(containers.containers[0].image.image == "example.com/macos/workload:latest")
+        #expect(containers.containers[0].state == .containerRunning)
+
+        var containerStatusRequest = Runtime_V1_ContainerStatusRequest()
+        containerStatusRequest.containerID = "container-1"
+        containerStatusRequest.verbose = true
+        let containerStatus = try await client.containerStatus(containerStatusRequest)
+        #expect(containerStatus.status.id == "container-1")
+        #expect(containerStatus.status.metadata.name == "workload")
+        #expect(containerStatus.status.metadata.attempt == 1)
+        #expect(containerStatus.status.state == .containerRunning)
+        #expect(containerStatus.status.startedAt == 1_700_000_020_000_000_000)
+        #expect(containerStatus.status.logPath == "/var/log/pods/default_demo_uid/workload/0.log")
+        #expect(containerStatus.info["metadata"]?.contains(#""sandboxID":"sandbox-1""#) == true)
 
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
@@ -377,6 +467,10 @@ private func shutdown(_ group: MultiThreadedEventLoopGroup) async {
             continuation.resume()
         }
     }
+}
+
+private func makeTemporaryDirectory() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("CRIShimRuntimeServerTests-\(UUID().uuidString)", isDirectory: true)
 }
 
 private let validConfigJSON = """

@@ -307,6 +307,7 @@ struct CRIShimRuntimeServerTests {
         let stoppedStatus = try await client.containerStatus(createdStatusRequest)
         #expect(stoppedStatus.status.state == .containerExited)
         #expect(stoppedStatus.status.finishedAt > 0)
+        #expect(stoppedStatus.status.exitCode == 42)
 
         var removeRequest = Runtime_V1_RemoveContainerRequest()
         removeRequest.containerID = created.containerID
@@ -437,6 +438,8 @@ private struct RecordingStopWorkloadCall {
 
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
     var execSyncResult: ExecSyncResult
+    private var workloadConfigurations: [String: WorkloadConfiguration] = [:]
+    private var workloadSnapshots: [String: WorkloadSnapshot] = [:]
     private(set) var createWorkloadCalls: [RecordingCreateWorkloadCall] = []
     private(set) var startWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var stopWorkloadCalls: [RecordingStopWorkloadCall] = []
@@ -451,6 +454,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         configuration: WorkloadConfiguration
     ) async throws {
+        workloadConfigurations[configuration.id] = configuration
         createWorkloadCalls.append(
             RecordingCreateWorkloadCall(
                 sandboxID: sandboxID,
@@ -462,6 +466,17 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         workloadID: String
     ) async throws {
+        let configuration =
+            workloadConfigurations[workloadID]
+            ?? WorkloadConfiguration(
+                id: workloadID,
+                processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+            )
+        workloadSnapshots[workloadID] = WorkloadSnapshot(
+            configuration: configuration,
+            status: .running,
+            startedDate: Date()
+        )
         startWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
     }
 
@@ -470,6 +485,19 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         workloadID: String,
         options: ContainerStopOptions
     ) async throws {
+        let configuration =
+            workloadConfigurations[workloadID]
+            ?? WorkloadConfiguration(
+                id: workloadID,
+                processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+            )
+        workloadSnapshots[workloadID] = WorkloadSnapshot(
+            configuration: configuration,
+            status: .stopped,
+            exitCode: 42,
+            startedDate: workloadSnapshots[workloadID]?.startedDate,
+            exitedAt: Date()
+        )
         stopWorkloadCalls.append(
             RecordingStopWorkloadCall(
                 sandboxID: sandboxID,
@@ -482,7 +510,19 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         workloadID: String
     ) async throws {
+        workloadConfigurations.removeValue(forKey: workloadID)
+        workloadSnapshots.removeValue(forKey: workloadID)
         removeWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
+    }
+
+    func inspectWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws -> WorkloadSnapshot {
+        guard let snapshot = workloadSnapshots[workloadID] else {
+            throw CRIShimError.notFound("workload \(workloadID) not found")
+        }
+        return snapshot
     }
 
     func execSync(

@@ -183,8 +183,14 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_ListContainersResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.listContainers.rawValue) {
             var response = Runtime_V1_ListContainersResponse()
-            response.containers = try filterCRIContainers(metadataStore.listContainers(), request: request)
-                .map(makeCRIContainer)
+            let containers = try filterCRIContainers(metadataStore.listContainers(), request: request)
+            var items: [Runtime_V1_Container] = []
+            items.reserveCapacity(containers.count)
+            for metadata in containers {
+                let snapshot = await workloadSnapshot(for: metadata)
+                items.append(makeCRIContainer(metadata, workloadSnapshot: snapshot))
+            }
+            response.containers = items
             return response
         }
     }
@@ -347,7 +353,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             }
 
             var response = Runtime_V1_ContainerStatusResponse()
-            response.status = makeCRIContainerStatus(metadata)
+            let snapshot = await workloadSnapshot(for: metadata)
+            response.status = makeCRIContainerStatus(metadata, workloadSnapshot: snapshot)
             if request.verbose {
                 response.info = makeCRIStatusInfo(metadata)
             }
@@ -364,6 +371,13 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             throw CRIShimMetadataStoreError.notFound(kind: .container, id: containerID)
         }
         return metadata
+    }
+
+    private func workloadSnapshot(for metadata: CRIShimContainerMetadata) async -> WorkloadSnapshot? {
+        try? await runtimeManager.inspectWorkload(
+            sandboxID: metadata.sandboxID,
+            workloadID: metadata.id
+        )
     }
 
     private func sandboxMetadata(id rawID: String, operation: String) throws -> CRIShimSandboxMetadata {

@@ -36,8 +36,6 @@ RuntimeService:
 - [ ] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
   snapshots and CNI network state.
 - [ ] Support CRI container mounts for macOS guest workloads.
-- [ ] Enrich `ContainerStatus` and `ListContainers` with core workload
-  snapshots and exit details.
 - [ ] Implement `ReopenContainerLog`.
 - [ ] Implement `Exec` through a loopback streaming server.
 - [ ] Implement `PortForward` through a loopback streaming server.

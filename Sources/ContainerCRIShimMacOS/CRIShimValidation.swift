@@ -40,6 +40,7 @@ extension CRIShimConfig {
         var issues: [String] = []
 
         validatePath(runtimeEndpoint, name: "runtimeEndpoint", allowUnixScheme: true, issues: &issues)
+        validateOptionalPath(stateDirectory, name: "stateDirectory", issues: &issues)
 
         if let streaming {
             validateNonEmpty(streaming.address, name: "streaming.address", issues: &issues)
@@ -152,6 +153,22 @@ private func validatePath(_ value: String?, name: String, allowUnixScheme: Bool 
     }
 
     let path = allowUnixScheme ? value.removingUnixScheme : value
+    if !path.hasPrefix("/") {
+        issues.append("\(name) must be an absolute path")
+    }
+}
+
+private func validateOptionalPath(_ value: String?, name: String, allowUnixScheme: Bool = false, issues: inout [String]) {
+    guard let value else {
+        return
+    }
+    let trimmed = value.trimmed
+    guard !trimmed.isEmpty else {
+        issues.append("\(name) cannot be empty")
+        return
+    }
+
+    let path = allowUnixScheme ? trimmed.removingUnixScheme : trimmed
     if !path.hasPrefix("/") {
         issues.append("\(name) must be an absolute path")
     }

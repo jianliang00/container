@@ -34,16 +34,16 @@ RuntimeService:
 - [ ] Invoke CNI `DEL` during sandbox stop and cleanup.
 - [ ] Remove sandbox policy state during sandbox stop and cleanup.
 - [ ] Implement `RemovePodSandbox`.
-- [ ] Implement `PodSandboxStatus`.
-- [ ] Implement `ListPodSandbox`.
+- [ ] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
+  snapshots and CNI network state.
 - [ ] Implement `CreateContainer` for macOS workload images.
 - [ ] Map CRI command, args, env, working directory, user, labels, annotations,
   mounts, and log path to workload metadata.
 - [ ] Implement `StartContainer`.
 - [ ] Implement `StopContainer`.
 - [ ] Implement `RemoveContainer`.
-- [ ] Implement `ContainerStatus`.
-- [ ] Implement `ListContainers`.
+- [ ] Enrich `ContainerStatus` and `ListContainers` with core workload
+  snapshots and exit details.
 - [ ] Implement `ReopenContainerLog`.
 - [ ] Implement `Exec` through a loopback streaming server.
 - [ ] Implement `PortForward` through a loopback streaming server.

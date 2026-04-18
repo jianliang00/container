@@ -51,7 +51,7 @@ public struct DefaultCRIShimServerFactory: CRIShimServerFactory {
         guard let runtimeEndpoint = config.normalizedRuntimeEndpoint else {
             throw CRIShimServerFactoryError.missingRuntimeEndpoint
         }
-        return CRIShimGRPCServer(socketPath: runtimeEndpoint, config: config)
+        return try CRIShimGRPCServer(socketPath: runtimeEndpoint, config: config)
     }
 }
 
@@ -81,12 +81,14 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
-    ) {
+    ) throws {
+        let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
         self.init(
             socketPath: socketPath,
             serviceProviders: [
                 CRIShimRuntimeServiceProvider(
                     config: config,
+                    metadataStore: metadataStore,
                     versionInfo: versionInfo,
                     runtimeManager: runtimeManager
                 ),
@@ -105,12 +107,14 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
-    ) {
+    ) throws {
+        let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
         self.init(
             socketPath: socketPath,
             serviceProviders: [
                 CRIShimRuntimeServiceProvider(
                     config: config,
+                    metadataStore: metadataStore,
                     versionInfo: versionInfo,
                     readinessChecker: readinessChecker,
                     runtimeManager: runtimeManager

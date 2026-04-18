@@ -228,6 +228,7 @@ when required fields are missing.
 The config owns:
 
 - CRI Unix socket path
+- CRI metadata state directory
 - streaming listen address and port
 - CNI binary and config paths
 - default sandbox image
@@ -259,6 +260,7 @@ Recommended initial shape:
 ```json
 {
   "runtimeEndpoint": "/var/run/container-cri-macos.sock",
+  "stateDirectory": "/var/lib/container/cri-shim-macos",
   "streaming": {
     "address": "127.0.0.1",
     "port": 0

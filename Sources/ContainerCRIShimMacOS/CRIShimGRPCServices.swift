@@ -39,12 +39,14 @@ public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
 public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsyncProvider, @unchecked Sendable {
     public var versionInfo: CRIShimRuntimeVersionInfo
     public var config: CRIShimConfig
+    private let metadataStore: CRIShimMetadataStore
     private let readinessChecker: any CRIShimReadinessChecking
     private let runtimeManager: any CRIShimRuntimeManaging
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
         config: CRIShimConfig,
+        metadataStore: CRIShimMetadataStore,
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
         readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
@@ -52,6 +54,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) {
         self.config = config
         self.versionInfo = versionInfo
+        self.metadataStore = metadataStore
         self.readinessChecker = readinessChecker
         self.runtimeManager = runtimeManager
         self.handlerLogger = handlerLogger
@@ -123,6 +126,86 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 timeout: invocation.timeout
             )
             return makeCRIShimExecSyncResponse(result)
+        }
+    }
+
+    public func podSandboxStatus(
+        request: Runtime_V1_PodSandboxStatusRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_PodSandboxStatusResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.podSandboxStatus.rawValue) {
+            let sandboxID = request.podSandboxID.trimmed
+            guard !sandboxID.isEmpty else {
+                throw CRIShimError.invalidArgument("PodSandboxStatus pod_sandbox_id is required")
+            }
+
+            guard let metadata = try metadataStore.sandbox(id: sandboxID) else {
+                throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
+            }
+
+            var response = Runtime_V1_PodSandboxStatusResponse()
+            response.status = makeCRIPodSandboxStatus(metadata)
+            response.containersStatuses = try metadataStore.listContainers()
+                .filter { $0.sandboxID == sandboxID }
+                .sorted(by: { lhs, rhs in
+                    if lhs.createdAt == rhs.createdAt {
+                        return lhs.id < rhs.id
+                    }
+                    return lhs.createdAt < rhs.createdAt
+                })
+                .map(makeCRIContainerStatus)
+            response.timestamp = Int64((Date().timeIntervalSince1970 * 1_000_000_000).rounded())
+            if request.verbose {
+                response.info = makeCRIStatusInfo(metadata)
+            }
+            return response
+        }
+    }
+
+    public func listPodSandbox(
+        request: Runtime_V1_ListPodSandboxRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ListPodSandboxResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.listPodSandbox.rawValue) {
+            var response = Runtime_V1_ListPodSandboxResponse()
+            response.items = try filterCRIPodSandboxes(metadataStore.listSandboxes(), request: request)
+                .map(makeCRIPodSandbox)
+            return response
+        }
+    }
+
+    public func listContainers(
+        request: Runtime_V1_ListContainersRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ListContainersResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.listContainers.rawValue) {
+            var response = Runtime_V1_ListContainersResponse()
+            response.containers = try filterCRIContainers(metadataStore.listContainers(), request: request)
+                .map(makeCRIContainer)
+            return response
+        }
+    }
+
+    public func containerStatus(
+        request: Runtime_V1_ContainerStatusRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ContainerStatusResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.containerStatus.rawValue) {
+            let containerID = request.containerID.trimmed
+            guard !containerID.isEmpty else {
+                throw CRIShimError.invalidArgument("ContainerStatus container_id is required")
+            }
+
+            guard let metadata = try metadataStore.container(id: containerID) else {
+                throw CRIShimMetadataStoreError.notFound(kind: .container, id: containerID)
+            }
+
+            var response = Runtime_V1_ContainerStatusResponse()
+            response.status = makeCRIContainerStatus(metadata)
+            if request.verbose {
+                response.info = makeCRIStatusInfo(metadata)
+            }
+            return response
         }
     }
 }

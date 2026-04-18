@@ -142,7 +142,7 @@ public enum CRIImageOperationSurface {
         case .removeImage:
             return "RemoveImage is implemented by the protobuf-backed CRI server"
         case .imageFsInfo:
-            return "ImageFsInfo is not wired to container image storage accounting yet"
+            return "ImageFsInfo is implemented by the protobuf-backed CRI server"
         }
     }
 }

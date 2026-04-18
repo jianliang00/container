@@ -163,6 +163,18 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
         }
     }
 
+    public func imageFsInfo(
+        request: Runtime_V1_ImageFsInfoRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ImageFsInfoResponse {
+        try await handlerLogger.handle(operation: CRIImageOperation.imageFsInfo.rawValue) {
+            let usage = try await imageManager.imageFilesystemUsage()
+            var response = Runtime_V1_ImageFsInfoResponse()
+            response.imageFilesystems = [makeCRIFilesystemUsage(usage)]
+            return response
+        }
+    }
+
     private func findImage(reference: String) async throws -> CRIShimImageRecord {
         let images = try await imageManager.listImages()
         guard let image = images.first(where: { $0.matches(reference: reference) }) else {
@@ -426,13 +438,6 @@ extension Runtime_V1_ImageServiceAsyncProvider {
     ) async throws -> Runtime_V1_PullImageResponse {
         try await unsupportedImage(.pullImage)
     }
-
-    public func imageFsInfo(
-        request: Runtime_V1_ImageFsInfoRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_ImageFsInfoResponse {
-        try await unsupportedImage(.imageFsInfo)
-    }
 }
 
 private func filteredImages(
@@ -470,6 +475,27 @@ private func makeImageSpec(_ image: CRIShimImageRecord) -> Runtime_V1_ImageSpec 
     spec.image = image.reference
     spec.annotations = image.annotations
     return spec
+}
+
+private func makeCRIFilesystemUsage(_ usage: CRIShimImageFilesystemUsage) -> Runtime_V1_FilesystemUsage {
+    var filesystem = Runtime_V1_FilesystemUsage()
+    filesystem.timestamp = usage.timestampNanoseconds
+
+    var identifier = Runtime_V1_FilesystemIdentifier()
+    identifier.mountpoint = usage.mountpoint
+    filesystem.fsID = identifier
+
+    var usedBytes = Runtime_V1_UInt64Value()
+    usedBytes.value = usage.usedBytes
+    filesystem.usedBytes = usedBytes
+
+    if let inodesUsedValue = usage.inodesUsed {
+        var inodesUsed = Runtime_V1_UInt64Value()
+        inodesUsed.value = inodesUsedValue
+        filesystem.inodesUsed = inodesUsed
+    }
+
+    return filesystem
 }
 
 extension CRIShimImageRecord {

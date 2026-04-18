@@ -145,6 +145,12 @@ let package = Package(
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ]
         ),
+        .testTarget(
+            name: "ContainerCRITests",
+            dependencies: [
+                "ContainerCRI"
+            ]
+        ),
         .target(
             name: "ContainerCRIShimMacOS",
             dependencies: [

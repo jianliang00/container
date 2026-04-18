@@ -216,6 +216,10 @@ Add Swift package targets:
 Generated protobuf files should stay isolated from hand-written shim code so CRI
 API changes are easy to regenerate and review.
 
+The CRI protobuf source is pinned in `Protos/KubernetesCRI` from
+`kubernetes/cri-api` tag `v0.35.3`. Regenerate the Swift bindings with
+`make cri-protos`.
+
 ## 7. Configuration
 
 The CRI shim and policy controller must be explicitly configured and fail fast

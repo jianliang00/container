@@ -62,10 +62,7 @@ RuntimeService:
 
 ImageService:
 
-- [ ] Implement `ListImages`.
-- [ ] Implement `ImageStatus`.
 - [ ] Implement `PullImage`.
-- [ ] Implement `RemoveImage`.
 - [ ] Implement minimal `ImageFsInfo`.
 - [ ] Validate sandbox images before runtime handler use.
 - [ ] Validate workload images before container start.

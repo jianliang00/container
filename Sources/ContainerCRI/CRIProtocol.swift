@@ -59,11 +59,11 @@ public enum CRIRuntimeOperationSurface {
         case .version:
             return "Version is implemented by the protobuf-backed CRI server"
         case .status:
-            return "Status is not wired to runtime and network health checks yet"
+            return "Status is implemented by the protobuf-backed CRI server"
         case .runtimeConfig:
-            return "RuntimeConfig is not wired to shim configuration yet"
+            return "RuntimeConfig is implemented by the protobuf-backed CRI server"
         case .updateRuntimeConfig:
-            return "UpdateRuntimeConfig is not wired to shim configuration yet"
+            return "UpdateRuntimeConfig is implemented by the protobuf-backed CRI server"
         case .runPodSandbox:
             return "RunPodSandbox is not wired to sandbox lifecycle yet"
         case .stopPodSandbox:

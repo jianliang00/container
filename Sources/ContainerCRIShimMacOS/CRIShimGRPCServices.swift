@@ -36,9 +36,17 @@ public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
 
 public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsyncProvider, @unchecked Sendable {
     public var versionInfo: CRIShimRuntimeVersionInfo
+    public var config: CRIShimConfig
+    private let readinessChecker: any CRIShimReadinessChecking
 
-    public init(versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo()) {
+    public init(
+        config: CRIShimConfig,
+        versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
+        readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker()
+    ) {
+        self.config = config
         self.versionInfo = versionInfo
+        self.readinessChecker = readinessChecker
     }
 
     public func version(
@@ -51,6 +59,40 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         response.runtimeVersion = versionInfo.runtimeVersion
         response.runtimeApiVersion = versionInfo.runtimeAPIVersion
         return response
+    }
+
+    public func status(
+        request: Runtime_V1_StatusRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_StatusResponse {
+        let snapshot = await readinessChecker.snapshot(config: config)
+        var response = Runtime_V1_StatusResponse()
+        var status = Runtime_V1_RuntimeStatus()
+        status.conditions = [
+            makeRuntimeCondition(snapshot.runtime),
+            makeRuntimeCondition(snapshot.network),
+        ]
+        response.status = status
+        response.runtimeHandlers = runtimeHandlers(from: config)
+        response.features = Runtime_V1_RuntimeFeatures()
+        if request.verbose {
+            response.info = snapshot.info
+        }
+        return response
+    }
+
+    public func runtimeConfig(
+        request: Runtime_V1_RuntimeConfigRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_RuntimeConfigResponse {
+        Runtime_V1_RuntimeConfigResponse()
+    }
+
+    public func updateRuntimeConfig(
+        request: Runtime_V1_UpdateRuntimeConfigRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_UpdateRuntimeConfigResponse {
+        Runtime_V1_UpdateRuntimeConfigResponse()
     }
 }
 
@@ -222,20 +264,6 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         throw CRIShimGRPCStatusMapper.unsupported(.listPodSandboxStats)
     }
 
-    public func updateRuntimeConfig(
-        request: Runtime_V1_UpdateRuntimeConfigRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_UpdateRuntimeConfigResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.updateRuntimeConfig)
-    }
-
-    public func status(
-        request: Runtime_V1_StatusRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_StatusResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.status)
-    }
-
     public func checkpointContainer(
         request: Runtime_V1_CheckpointContainerRequest,
         context: GRPCAsyncServerCallContext
@@ -265,19 +293,36 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         throw CRIShimGRPCStatusMapper.unsupported(.listPodSandboxMetrics)
     }
 
-    public func runtimeConfig(
-        request: Runtime_V1_RuntimeConfigRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_RuntimeConfigResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.runtimeConfig)
-    }
-
     public func updatePodSandboxResources(
         request: Runtime_V1_UpdatePodSandboxResourcesRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_UpdatePodSandboxResourcesResponse {
         throw CRIShimGRPCStatusMapper.unsupported(.updatePodSandboxResources)
     }
+}
+
+private func makeRuntimeCondition(
+    _ snapshot: CRIShimRuntimeConditionSnapshot
+) -> Runtime_V1_RuntimeCondition {
+    var condition = Runtime_V1_RuntimeCondition()
+    condition.type = snapshot.type
+    condition.status = snapshot.status
+    condition.reason = snapshot.reason
+    condition.message = snapshot.message
+    return condition
+}
+
+private func runtimeHandlers(from config: CRIShimConfig) -> [Runtime_V1_RuntimeHandler] {
+    var handlers: [Runtime_V1_RuntimeHandler] = [makeRuntimeHandler(name: "")]
+    handlers.append(contentsOf: config.runtimeHandlers.keys.sorted().map { makeRuntimeHandler(name: $0) })
+    return handlers
+}
+
+private func makeRuntimeHandler(name: String) -> Runtime_V1_RuntimeHandler {
+    var handler = Runtime_V1_RuntimeHandler()
+    handler.name = name
+    handler.features = Runtime_V1_RuntimeHandlerFeatures()
+    return handler
 }
 
 extension Runtime_V1_ImageServiceAsyncProvider {

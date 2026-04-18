@@ -78,13 +78,14 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
     public convenience init(
         socketPath: String,
         config: CRIShimConfig,
-        versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo()
+        versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
+        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
     ) {
         self.init(
             socketPath: socketPath,
             serviceProviders: [
                 CRIShimRuntimeServiceProvider(config: config, versionInfo: versionInfo),
-                CRIShimImageServiceProvider(),
+                CRIShimImageServiceProvider(imageManager: imageManager),
             ],
             eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
             ownsEventLoopGroup: true
@@ -96,7 +97,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         config: CRIShimConfig,
         versionInfo: CRIShimRuntimeVersionInfo,
         eventLoopGroup: any EventLoopGroup,
-        readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker()
+        readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
+        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
     ) {
         self.init(
             socketPath: socketPath,
@@ -106,7 +108,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     versionInfo: versionInfo,
                     readinessChecker: readinessChecker
                 ),
-                CRIShimImageServiceProvider(),
+                CRIShimImageServiceProvider(imageManager: imageManager),
             ],
             eventLoopGroup: eventLoopGroup
         )

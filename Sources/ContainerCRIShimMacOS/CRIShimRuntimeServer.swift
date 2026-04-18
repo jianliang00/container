@@ -79,12 +79,17 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         socketPath: String,
         config: CRIShimConfig,
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
+        runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
     ) {
         self.init(
             socketPath: socketPath,
             serviceProviders: [
-                CRIShimRuntimeServiceProvider(config: config, versionInfo: versionInfo),
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    versionInfo: versionInfo,
+                    runtimeManager: runtimeManager
+                ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
             eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
@@ -98,6 +103,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         versionInfo: CRIShimRuntimeVersionInfo,
         eventLoopGroup: any EventLoopGroup,
         readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
+        runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
     ) {
         self.init(
@@ -106,7 +112,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                 CRIShimRuntimeServiceProvider(
                     config: config,
                     versionInfo: versionInfo,
-                    readinessChecker: readinessChecker
+                    readinessChecker: readinessChecker,
+                    runtimeManager: runtimeManager
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],

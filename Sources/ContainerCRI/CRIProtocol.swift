@@ -87,9 +87,9 @@ public enum CRIRuntimeOperationSurface {
         case .listContainers:
             return "ListContainers is not wired to workload inventory yet"
         case .updateContainerResources:
-            return "UpdateContainerResources is not wired to resource handling yet"
+            return "UpdateContainerResources is a deterministic no-op for macOS guest workloads"
         case .updatePodSandboxResources:
-            return "UpdatePodSandboxResources is not wired to resource handling yet"
+            return "UpdatePodSandboxResources is a deterministic no-op for macOS guest workloads"
         case .reopenContainerLog:
             return "ReopenContainerLog is not wired to log rotation yet"
         case .execSync:

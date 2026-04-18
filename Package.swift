@@ -175,9 +175,9 @@ let package = Package(
         .target(
             name: "ContainerCNIMacvmnet",
             dependencies: [
-                .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerNetworkServiceClient",
                 "ContainerResource",
+                "ContainerSandboxServiceClient",
             ]
         ),
         .executableTarget(
@@ -194,6 +194,7 @@ let package = Package(
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerCNIMacvmnet",
                 "ContainerResource",
+                "ContainerSandboxServiceClient",
             ]
         ),
         .target(

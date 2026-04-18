@@ -136,6 +136,7 @@ public struct CNIRequest: Equatable {
         let config = try decoder.decode(CNIPluginConfig.self, from: stdin)
         try config.validate()
         let sandbox = try parsedEnvironment.netns.map(CNISandboxURI.init)
+        try validateSandboxIdentity(environment: parsedEnvironment, sandbox: sandbox)
         let validAttachments =
             parsedEnvironment.command == .garbageCollect
             ? try config.validAttachments()
@@ -146,5 +147,22 @@ public struct CNIRequest: Equatable {
             sandbox: sandbox,
             validAttachments: validAttachments
         )
+    }
+
+    private static func validateSandboxIdentity(
+        environment: CNIEnvironment,
+        sandbox: CNISandboxURI?
+    ) throws {
+        switch environment.command {
+        case .add, .check:
+            guard let containerID = environment.containerID, let sandbox else {
+                return
+            }
+            guard sandbox.sandboxID == containerID else {
+                throw CNIError.invalidConfiguration("CNI_NETNS sandbox ID must match CNI_CONTAINERID")
+            }
+        case .delete, .garbageCollect, .status, .version:
+            return
+        }
     }
 }

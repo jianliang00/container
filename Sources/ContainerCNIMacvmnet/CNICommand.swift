@@ -37,4 +37,5 @@ public enum CNISpec {
     public static let version = "1.1.0"
     public static let pluginType = "macvmnet"
     public static let defaultNetworkName = "default"
+    public static let defaultRuntimeName = "container-runtime-macos"
 }

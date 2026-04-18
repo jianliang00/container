@@ -75,7 +75,7 @@ public enum CRIRuntimeOperationSurface {
         case .listPodSandbox:
             return "ListPodSandbox is not wired to sandbox inventory yet"
         case .createContainer:
-            return "CreateContainer is not wired to workload creation yet"
+            return "CreateContainer is implemented by the protobuf-backed CRI server"
         case .startContainer:
             return "StartContainer is not wired to workload start yet"
         case .stopContainer:

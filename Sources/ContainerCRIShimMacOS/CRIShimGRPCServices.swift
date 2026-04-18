@@ -42,6 +42,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let metadataStore: CRIShimMetadataStore
     private let readinessChecker: any CRIShimReadinessChecking
     private let runtimeManager: any CRIShimRuntimeManaging
+    private let imageManager: any CRIShimImageManaging
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
@@ -50,6 +51,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
         readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
+        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
         handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
         self.config = config
@@ -57,6 +59,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         self.metadataStore = metadataStore
         self.readinessChecker = readinessChecker
         self.runtimeManager = runtimeManager
+        self.imageManager = imageManager
         self.handlerLogger = handlerLogger
     }
 
@@ -186,6 +189,64 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         }
     }
 
+    public func createContainer(
+        request: Runtime_V1_CreateContainerRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_CreateContainerResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.createContainer.rawValue) {
+            try CRIShimUnsupportedFieldValidator.validate(request)
+
+            let sandboxID = request.podSandboxID.trimmed
+            guard !sandboxID.isEmpty else {
+                throw CRIShimError.invalidArgument("CreateContainer pod_sandbox_id is required")
+            }
+
+            guard let sandbox = try metadataStore.sandbox(id: sandboxID) else {
+                throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
+            }
+
+            guard sandbox.state.allowsContainerCreation else {
+                throw CRIShimError.invalidArgument(
+                    "CreateContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
+                )
+            }
+
+            let containerID = UUID().uuidString.lowercased()
+            let requestedImage = try CRIShimImageReference.resolve(request.config.image)
+            let workloadImage = try await findWorkloadImage(reference: requestedImage)
+            let workloadImageDigest = workloadImage.digest.trimmed
+            guard !workloadImageDigest.isEmpty else {
+                throw CRIShimError.invalidArgument("workload image \(requestedImage) is missing a resolved digest")
+            }
+            let metadata = try makeCRIShimContainerMetadata(
+                id: containerID,
+                request: request,
+                sandbox: sandbox
+            )
+            let workloadConfiguration = try makeCRIShimWorkloadConfiguration(
+                id: containerID,
+                request: request,
+                workloadImageDigest: workloadImageDigest
+            )
+
+            try await runtimeManager.createWorkload(
+                sandboxID: sandbox.id,
+                configuration: workloadConfiguration
+            )
+
+            do {
+                try metadataStore.upsertContainer(metadata)
+            } catch {
+                try? await runtimeManager.removeWorkload(sandboxID: sandbox.id, workloadID: containerID)
+                throw error
+            }
+
+            var response = Runtime_V1_CreateContainerResponse()
+            response.containerID = containerID
+            return response
+        }
+    }
+
     public func containerStatus(
         request: Runtime_V1_ContainerStatusRequest,
         context: GRPCAsyncServerCallContext
@@ -206,6 +267,25 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 response.info = makeCRIStatusInfo(metadata)
             }
             return response
+        }
+    }
+
+    private func findWorkloadImage(reference: String) async throws -> CRIShimImageRecord {
+        let images = try await imageManager.listImages()
+        guard let image = images.first(where: { $0.matches(reference: reference) }) else {
+            throw CRIShimError.notFound("image not found: \(reference)")
+        }
+        return image
+    }
+}
+
+extension CRIShimSandboxMetadata.State {
+    fileprivate var allowsContainerCreation: Bool {
+        switch self {
+        case .ready, .running:
+            return true
+        case .pending, .stopped, .released:
+            return false
         }
     }
 }

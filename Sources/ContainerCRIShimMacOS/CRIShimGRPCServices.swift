@@ -396,21 +396,31 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         responseStream: GRPCAsyncResponseStreamWriter<Runtime_V1_ContainerEventResponse>,
         context: GRPCAsyncServerCallContext
     ) async throws {
-        let _: Void = try await unsupportedRuntime(.getContainerEvents)
+        let _: Void = try await CRIShimGRPCHandlerLogger.runtimeService().handle(
+            operation: CRIRuntimeOperation.getContainerEvents.rawValue
+        ) {}
     }
 
     public func listMetricDescriptors(
         request: Runtime_V1_ListMetricDescriptorsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListMetricDescriptorsResponse {
-        try await unsupportedRuntime(.listMetricDescriptors)
+        try await CRIShimGRPCHandlerLogger.runtimeService().handle(
+            operation: CRIRuntimeOperation.listMetricDescriptors.rawValue
+        ) {
+            Runtime_V1_ListMetricDescriptorsResponse()
+        }
     }
 
     public func listPodSandboxMetrics(
         request: Runtime_V1_ListPodSandboxMetricsRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ListPodSandboxMetricsResponse {
-        try await unsupportedRuntime(.listPodSandboxMetrics)
+        try await CRIShimGRPCHandlerLogger.runtimeService().handle(
+            operation: CRIRuntimeOperation.listPodSandboxMetrics.rawValue
+        ) {
+            Runtime_V1_ListPodSandboxMetricsResponse()
+        }
     }
 
     public func updatePodSandboxResources(

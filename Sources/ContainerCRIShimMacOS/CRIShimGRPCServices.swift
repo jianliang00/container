@@ -260,7 +260,12 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         request: Runtime_V1_RunPodSandboxRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RunPodSandboxResponse {
-        try await unsupportedRuntime(.runPodSandbox)
+        try await CRIShimGRPCHandlerLogger.runtimeService().handle(
+            operation: CRIRuntimeOperation.runPodSandbox.rawValue
+        ) {
+            try CRIShimUnsupportedFieldValidator.validate(request)
+            throw CRIShimGRPCStatusMapper.unsupportedError(.runPodSandbox)
+        }
     }
 
     public func stopPodSandbox(
@@ -295,7 +300,12 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         request: Runtime_V1_CreateContainerRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_CreateContainerResponse {
-        try await unsupportedRuntime(.createContainer)
+        try await CRIShimGRPCHandlerLogger.runtimeService().handle(
+            operation: CRIRuntimeOperation.createContainer.rawValue
+        ) {
+            try CRIShimUnsupportedFieldValidator.validate(request)
+            throw CRIShimGRPCStatusMapper.unsupportedError(.createContainer)
+        }
     }
 
     public func startContainer(

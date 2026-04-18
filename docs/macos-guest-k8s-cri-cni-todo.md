@@ -39,7 +39,6 @@ RuntimeService:
 - [ ] Implement `CreateContainer` for macOS workload images.
 - [ ] Map CRI command, args, env, working directory, user, labels, annotations,
   mounts, and log path to workload metadata.
-- [ ] Reject or clearly report unsupported Linux-only security context fields.
 - [ ] Implement `StartContainer`.
 - [ ] Implement `StopContainer`.
 - [ ] Implement `RemoveContainer`.
@@ -85,7 +84,6 @@ NetworkPolicy controller:
 Tests:
 
 - [ ] Add unit tests for CRI-to-core mapping helpers.
-- [ ] Add unit tests for CRI unsupported field handling.
 - [ ] Add unit tests for NetworkPolicy Kubernetes watch reconciliation.
 - [ ] Add integration validation for local `crictl` lifecycle.
 - [ ] Add integration validation for local kubelet static Pod lifecycle.

@@ -73,14 +73,20 @@ struct CRIShimRuntimeServerTests {
                     info: ["runtime": #"{"test":"ready"}"#]
                 )
             ),
-            imageManager: RecordingImageManager(images: [
-                CRIShimImageRecord(
-                    reference: "example.com/macos/workload:latest",
-                    digest: "sha256:abc123",
-                    size: 4096,
-                    annotations: ["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]
-                )
-            ])
+            imageManager: RecordingImageManager(
+                images: [
+                    CRIShimImageRecord(
+                        reference: "example.com/macos/workload:latest",
+                        digest: "sha256:abc123",
+                        size: 4096,
+                        annotations: ["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]
+                    )
+                ],
+                filesystemUsage: CRIShimImageFilesystemUsage(
+                    mountpoint: "/var/lib/container-test",
+                    usedBytes: 65_536,
+                    timestampNanoseconds: 1_700_000_000_000_000_000
+                ))
         )
         let serverTask = Task {
             try await server.run()
@@ -140,6 +146,13 @@ struct CRIShimRuntimeServerTests {
         var removeImageRequest = Runtime_V1_RemoveImageRequest()
         removeImageRequest.image.image = "example.com/macos/workload:latest"
         _ = try await imageClient.removeImage(removeImageRequest)
+
+        let imageFsInfo = try await imageClient.imageFsInfo(Runtime_V1_ImageFsInfoRequest())
+        #expect(imageFsInfo.imageFilesystems.count == 1)
+        #expect(imageFsInfo.imageFilesystems[0].timestamp == 1_700_000_000_000_000_000)
+        #expect(imageFsInfo.imageFilesystems[0].fsID.mountpoint == "/var/lib/container-test")
+        #expect(imageFsInfo.imageFilesystems[0].usedBytes.value == 65_536)
+        #expect(!imageFsInfo.imageFilesystems[0].hasInodesUsed)
 
         do {
             _ = try await imageClient.pullImage(Runtime_V1_PullImageRequest())
@@ -204,10 +217,19 @@ private struct StaticReadinessChecker: CRIShimReadinessChecking {
 
 private final class RecordingImageManager: CRIShimImageManaging, @unchecked Sendable {
     var images: [CRIShimImageRecord]
+    var filesystemUsage: CRIShimImageFilesystemUsage
     private(set) var removedReferences: [String] = []
 
-    init(images: [CRIShimImageRecord]) {
+    init(
+        images: [CRIShimImageRecord],
+        filesystemUsage: CRIShimImageFilesystemUsage = CRIShimImageFilesystemUsage(
+            mountpoint: "/var/lib/container-test",
+            usedBytes: 0,
+            timestampNanoseconds: 1
+        )
+    ) {
         self.images = images
+        self.filesystemUsage = filesystemUsage
     }
 
     func listImages() async throws -> [CRIShimImageRecord] {
@@ -216,6 +238,10 @@ private final class RecordingImageManager: CRIShimImageManaging, @unchecked Send
 
     func removeImage(reference: String) async throws {
         removedReferences.append(reference)
+    }
+
+    func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage {
+        filesystemUsage
     }
 }
 

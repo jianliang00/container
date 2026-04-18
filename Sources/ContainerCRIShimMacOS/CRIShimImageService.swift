@@ -40,9 +40,29 @@ public struct CRIShimImageRecord: Equatable, Sendable {
     }
 }
 
+public struct CRIShimImageFilesystemUsage: Equatable, Sendable {
+    public var mountpoint: String
+    public var usedBytes: UInt64
+    public var inodesUsed: UInt64?
+    public var timestampNanoseconds: Int64
+
+    public init(
+        mountpoint: String,
+        usedBytes: UInt64,
+        inodesUsed: UInt64? = nil,
+        timestampNanoseconds: Int64
+    ) {
+        self.mountpoint = mountpoint
+        self.usedBytes = usedBytes
+        self.inodesUsed = inodesUsed
+        self.timestampNanoseconds = timestampNanoseconds
+    }
+}
+
 public protocol CRIShimImageManaging: Sendable {
     func listImages() async throws -> [CRIShimImageRecord]
     func removeImage(reference: String) async throws
+    func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage
 }
 
 public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
@@ -58,6 +78,17 @@ public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
 
     public func removeImage(reference: String) async throws {
         try await kit.deleteImage(reference: reference, garbageCollect: false)
+    }
+
+    public func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage {
+        async let diskUsage = kit.diskUsage()
+        async let health = kit.health()
+        let (usage, healthSnapshot) = try await (diskUsage, health)
+        return CRIShimImageFilesystemUsage(
+            mountpoint: healthSnapshot.appRoot.path,
+            usedBytes: usage.images.sizeInBytes,
+            timestampNanoseconds: currentUnixTimeNanoseconds()
+        )
     }
 }
 
@@ -101,6 +132,10 @@ private func tagSeparator(in reference: String) -> String.Index? {
         return colon
     }
     return colon > slash ? colon : nil
+}
+
+private func currentUnixTimeNanoseconds() -> Int64 {
+    Int64((Date().timeIntervalSince1970 * 1_000_000_000).rounded())
 }
 
 public enum CRIShimImageReference {

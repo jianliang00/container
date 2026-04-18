@@ -79,6 +79,10 @@ public struct CNIPluginConfig: Codable, Equatable {
         stringValue(for: "network") ?? CNISpec.defaultNetworkName
     }
 
+    public var runtimeName: String {
+        stringValue(for: "runtime") ?? CNISpec.defaultRuntimeName
+    }
+
     public func stringValue(for key: String) -> String? {
         guard case .string(let value) = extra[key] else {
             return nil

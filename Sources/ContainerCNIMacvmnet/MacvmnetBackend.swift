@@ -16,23 +16,22 @@
 
 import ContainerNetworkServiceClient
 import ContainerResource
-import ContainerizationExtras
+import ContainerSandboxServiceClient
 import Foundation
 
-public protocol MacvmnetNetworkClient: Sendable {
+public protocol MacvmnetNetworkHealthClient: Sendable {
     func state() async throws -> NetworkState
-    func allocateAttachment(hostname: String, macAddress: MACAddress?) async throws -> Attachment
-    func deallocate(hostname: String) async throws
-    func lookup(hostname: String) async throws -> Attachment?
-    func disableAllocator() async throws -> Bool
 }
 
-extension NetworkClient: MacvmnetNetworkClient {
-    public func allocateAttachment(hostname: String, macAddress: MACAddress?) async throws -> Attachment {
-        let (attachment, _) = try await allocate(hostname: hostname, macAddress: macAddress)
-        return attachment
-    }
+extension NetworkClient: MacvmnetNetworkHealthClient {}
+
+public protocol MacvmnetSandboxNetworkClient: Sendable {
+    func prepareSandboxNetwork() async throws -> SandboxNetworkState
+    func inspectSandboxNetwork() async throws -> SandboxNetworkState
+    func releaseSandboxNetwork() async throws
 }
+
+extension SandboxClient: MacvmnetSandboxNetworkClient {}
 
 public protocol MacvmnetBackend: Sendable {
     func health(networkName: String) async throws
@@ -43,19 +42,25 @@ public protocol MacvmnetBackend: Sendable {
 }
 
 public struct MacvmnetLiveBackend: MacvmnetBackend {
-    public typealias NetworkClientFactory = @Sendable (String) -> any MacvmnetNetworkClient
+    public typealias NetworkHealthClientFactory = @Sendable (String) -> any MacvmnetNetworkHealthClient
+    public typealias SandboxNetworkClientFactory = @Sendable (String, String) async throws -> any MacvmnetSandboxNetworkClient
     public typealias AttachmentLedgerFactory = @Sendable (MacvmnetOperationPlan) -> any MacvmnetAttachmentLedger
 
-    private let makeNetworkClient: NetworkClientFactory
+    private let makeNetworkClient: NetworkHealthClientFactory
+    private let makeSandboxClient: SandboxNetworkClientFactory
     private let makeAttachmentLedger: AttachmentLedgerFactory
 
     public init(
-        makeNetworkClient: @escaping NetworkClientFactory = { NetworkClient(id: $0) },
+        makeNetworkClient: @escaping NetworkHealthClientFactory = { NetworkClient(id: $0) },
+        makeSandboxClient: @escaping SandboxNetworkClientFactory = { sandboxID, runtimeName in
+            try await SandboxClient.create(id: sandboxID, runtime: runtimeName)
+        },
         makeAttachmentLedger: @escaping AttachmentLedgerFactory = {
             FileMacvmnetAttachmentLedger(rootURL: URL(fileURLWithPath: $0.dataDirectory, isDirectory: true))
         }
     ) {
         self.makeNetworkClient = makeNetworkClient
+        self.makeSandboxClient = makeSandboxClient
         self.makeAttachmentLedger = makeAttachmentLedger
     }
 
@@ -64,28 +69,32 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     }
 
     public func prepare(_ plan: MacvmnetOperationPlan) async throws -> CNIResult {
-        let attachment = try await allocatedAttachment(for: plan)
+        let identity = try requireAttachmentIdentity(plan)
+        let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
+        let state = try await client.prepareSandboxNetwork()
+        let attachment = try attachment(from: state, for: plan)
         let result = CNIResult(
             attachment: attachment,
-            interfaceName: plan.interfaceName ?? "eth0",
+            interfaceName: identity.ifName,
             sandbox: plan.sandbox
         )
-        if let identity = plan.attachmentIdentity {
-            try makeAttachmentLedger(plan).upsert(
-                MacvmnetAttachmentRecord(identity: identity, networkName: plan.networkName, result: result)
-            )
-        }
+        try makeAttachmentLedger(plan).upsert(
+            MacvmnetAttachmentRecord(identity: identity, networkName: plan.networkName, result: result)
+        )
         return result
     }
 
     public func inspect(_ plan: MacvmnetOperationPlan) async throws {
-        let attachment = try await existingAttachment(for: plan)
+        let identity = try requireAttachmentIdentity(plan)
         guard let previousResult = plan.previousResult else {
             throw CNIError.invalidConfiguration("CHECK requires prevResult")
         }
+        let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
+        let state = try await client.inspectSandboxNetwork()
+        let attachment = try attachment(from: state, for: plan)
         let currentResult = CNIResult(
             attachment: attachment,
-            interfaceName: plan.interfaceName ?? "eth0",
+            interfaceName: identity.ifName,
             sandbox: plan.sandbox
         )
         guard previousResult == currentResult else {
@@ -96,60 +105,53 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     }
 
     public func release(_ plan: MacvmnetOperationPlan) async throws {
-        let client = makeNetworkClient(plan.networkName)
-        guard let hostName = plan.containerID, !hostName.isEmpty else {
-            throw CNIError.missingEnvironment("CNI_CONTAINERID")
-        }
-        guard try await client.lookup(hostname: hostName) != nil else {
-            if let identity = plan.attachmentIdentity {
-                try makeAttachmentLedger(plan).remove(identity: identity, networkName: plan.networkName)
-            }
-            return
-        }
-        try await client.deallocate(hostname: hostName)
-        if let identity = plan.attachmentIdentity {
-            try makeAttachmentLedger(plan).remove(identity: identity, networkName: plan.networkName)
-        }
+        let identity = try requireAttachmentIdentity(plan)
+        let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
+        try await client.releaseSandboxNetwork()
+        try makeAttachmentLedger(plan).remove(identity: identity, networkName: plan.networkName)
     }
 
     public func garbageCollect(_ plan: MacvmnetOperationPlan) async throws {
         let ledger = makeAttachmentLedger(plan)
-        let client = makeNetworkClient(plan.networkName)
         let staleRecords = try ledger.records(networkName: plan.networkName)
             .filter { !plan.validAttachments.contains($0.identity) }
 
         for record in staleRecords {
-            if try await client.lookup(hostname: record.identity.containerID) != nil {
-                try await client.deallocate(hostname: record.identity.containerID)
-            }
+            let client = try await makeSandboxClient(record.identity.containerID, plan.runtimeName)
+            try await client.releaseSandboxNetwork()
             try ledger.remove(identity: record.identity, networkName: record.networkName)
         }
     }
 
-    private func allocatedAttachment(for plan: MacvmnetOperationPlan) async throws -> Attachment {
-        let client = makeNetworkClient(plan.networkName)
-        guard let hostName = plan.containerID, !hostName.isEmpty else {
-            throw CNIError.missingEnvironment("CNI_CONTAINERID")
+    private func requireAttachmentIdentity(_ plan: MacvmnetOperationPlan) throws -> MacvmnetAttachmentIdentity {
+        guard let identity = plan.attachmentIdentity else {
+            throw CNIError.invalidConfiguration("CNI_CONTAINERID and CNI_IFNAME are required")
         }
+        return identity
+    }
 
-        if let attachment = try await client.lookup(hostname: hostName) {
+    private func attachment(
+        from state: SandboxNetworkState,
+        for plan: MacvmnetOperationPlan
+    ) throws -> Attachment {
+        let identity = try requireAttachmentIdentity(plan)
+        let networkAttachments = state.attachments.filter { $0.network == plan.networkName }
+        if let attachment = networkAttachments.first(where: { $0.hostname == identity.containerID }) {
+            return attachment
+        }
+        if networkAttachments.count == 1, let attachment = networkAttachments.first {
             return attachment
         }
 
-        return try await client.allocateAttachment(hostname: hostName, macAddress: nil)
-    }
-
-    private func existingAttachment(for plan: MacvmnetOperationPlan) async throws -> Attachment {
-        let client = makeNetworkClient(plan.networkName)
-        guard let hostName = plan.containerID, !hostName.isEmpty else {
-            throw CNIError.missingEnvironment("CNI_CONTAINERID")
-        }
-        guard let attachment = try await client.lookup(hostname: hostName) else {
+        if networkAttachments.isEmpty {
             throw CNIError.backendUnavailable(
-                "no network attachment found for sandbox \(hostName) on network \(plan.networkName)"
+                "no sandbox network attachment found for sandbox \(identity.containerID) on network \(plan.networkName)"
             )
         }
-        return attachment
+
+        throw CNIError.backendUnavailable(
+            "multiple sandbox network attachments found for sandbox \(identity.containerID) on network \(plan.networkName)"
+        )
     }
 }
 

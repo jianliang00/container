@@ -83,14 +83,6 @@ ImageService:
 - [ ] Validate workload images before container start.
 - [ ] Map CRI registry auth into existing image pull support.
 
-CNI plugin:
-
-- [ ] Wire CNI `ADD` to `PrepareSandboxNetwork`.
-- [ ] Wire live CNI `CHECK` to `InspectSandboxNetwork` and guest interface
-  validation.
-- [ ] Wire CNI `DEL` to `ReleaseSandboxNetwork`.
-- [ ] Return live CNI result data from sandbox network lease state.
-
 Logs and exec streaming:
 
 - [ ] Implement CRI log adapter from workload stdout/stderr to kubelet log path.
@@ -121,8 +113,6 @@ Tests:
 
 - [ ] Add unit tests for CRI-to-core mapping helpers.
 - [ ] Add unit tests for CRI unsupported field handling.
-- [ ] Add live-adapter unit tests for CNI sandbox network API wiring and
-  cleanup behavior.
 - [ ] Add unit tests for NetworkPolicy Kubernetes watch reconciliation.
 - [ ] Add integration validation for local `crictl` lifecycle.
 - [ ] Add integration validation for local kubelet static Pod lifecycle.

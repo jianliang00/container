@@ -61,10 +61,8 @@ RuntimeService:
 
 ImageService:
 
-- [ ] Implement `PullImage`.
 - [ ] Validate sandbox images before runtime handler use.
 - [ ] Validate workload images before container start.
-- [ ] Map CRI registry auth into existing image pull support.
 
 Logs and exec streaming:
 

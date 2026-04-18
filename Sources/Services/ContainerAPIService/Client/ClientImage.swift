@@ -435,7 +435,7 @@ extension ClientImage {
         reference: String,
         platform: Platform? = nil,
         scheme: RequestScheme = .auto,
-        containerSystemConfig: ContainerSystemConfig,
+        authentication: ClientImagePullAuthentication? = nil,
         progressUpdate: ProgressUpdateHandler? = nil,
         maxConcurrentDownloads: Int = 3
     ) async throws -> ClientImage {
@@ -453,6 +453,10 @@ extension ClientImage {
 
         request.set(key: .imageReference, value: reference)
         try request.set(platform: platform)
+        if let authentication {
+            let authenticationData = try JSONEncoder().encode(authentication)
+            request.set(key: .imagePullAuthentication, value: authenticationData)
+        }
 
         let insecure = try scheme.schemeFor(host: host, internalDnsDomain: containerSystemConfig.dns.domain) == .http
         request.set(key: .insecureFlag, value: insecure)

@@ -138,7 +138,7 @@ public enum CRIImageOperationSurface {
         case .imageStatus:
             return "ImageStatus is implemented by the protobuf-backed CRI server"
         case .pullImage:
-            return "PullImage is not wired to container image pull support yet"
+            return "PullImage is implemented by the protobuf-backed CRI server"
         case .removeImage:
             return "RemoveImage is implemented by the protobuf-backed CRI server"
         case .imageFsInfo:

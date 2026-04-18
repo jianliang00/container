@@ -19,10 +19,27 @@ import ContainerKit
 import ContainerResource
 import Foundation
 
+#if os(Linux)
+import Glibc
+#else
+import Darwin
+#endif
+
 public protocol CRIShimRuntimeManaging: Sendable {
     func createWorkload(
         sandboxID: String,
         configuration: WorkloadConfiguration
+    ) async throws
+
+    func startWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws
+
+    func stopWorkload(
+        sandboxID: String,
+        workloadID: String,
+        options: ContainerStopOptions
     ) async throws
 
     func removeWorkload(
@@ -49,6 +66,21 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         configuration: WorkloadConfiguration
     ) async throws {
         try await kit.createWorkload(sandboxID: sandboxID, configuration: configuration)
+    }
+
+    public func startWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws {
+        try await kit.startWorkload(sandboxID: sandboxID, workloadID: workloadID)
+    }
+
+    public func stopWorkload(
+        sandboxID: String,
+        workloadID: String,
+        options: ContainerStopOptions
+    ) async throws {
+        try await kit.stopWorkload(sandboxID: sandboxID, workloadID: workloadID, options: options)
     }
 
     public func removeWorkload(
@@ -121,6 +153,23 @@ func makeCRIShimExecSyncResponse(
     response.stderr = cappedExecSyncOutput(result.stderr, limit: outputLimitBytes)
     response.exitCode = result.exitCode
     return response
+}
+
+func makeCRIShimStopOptions(
+    _ request: Runtime_V1_StopContainerRequest
+) throws -> ContainerStopOptions {
+    guard request.timeout >= 0 else {
+        throw CRIShimError.invalidArgument("StopContainer timeout must be greater than or equal to zero")
+    }
+    guard request.timeout <= Int64(Int32.max) else {
+        throw CRIShimError.invalidArgument("StopContainer timeout exceeds supported range")
+    }
+
+    let signal = request.timeout == 0 ? SIGKILL : SIGTERM
+    return ContainerStopOptions(
+        timeoutInSeconds: Int32(request.timeout),
+        signal: Int32(signal)
+    )
 }
 
 private func cappedExecSyncOutput(_ data: Data, limit: Int) -> Data {

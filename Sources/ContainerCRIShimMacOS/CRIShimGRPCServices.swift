@@ -247,6 +247,91 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         }
     }
 
+    public func startContainer(
+        request: Runtime_V1_StartContainerRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_StartContainerResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.startContainer.rawValue) {
+            var metadata = try containerMetadata(
+                id: request.containerID,
+                operation: "StartContainer"
+            )
+            guard metadata.state == .created else {
+                throw CRIShimError.invalidArgument(
+                    "StartContainer requires a created container, got \(metadata.state.rawValue)"
+                )
+            }
+            let sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "StartContainer")
+            guard sandbox.state.allowsContainerCreation else {
+                throw CRIShimError.invalidArgument(
+                    "StartContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
+                )
+            }
+
+            try await runtimeManager.startWorkload(
+                sandboxID: metadata.sandboxID,
+                workloadID: metadata.id
+            )
+
+            metadata.state = .running
+            metadata.startedAt = Date()
+            metadata.exitedAt = nil
+            try metadataStore.upsertContainer(metadata)
+            return Runtime_V1_StartContainerResponse()
+        }
+    }
+
+    public func stopContainer(
+        request: Runtime_V1_StopContainerRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_StopContainerResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.stopContainer.rawValue) {
+            var metadata = try containerMetadata(
+                id: request.containerID,
+                operation: "StopContainer"
+            )
+            let options = try makeCRIShimStopOptions(request)
+            guard metadata.state == .running else {
+                throw CRIShimError.invalidArgument(
+                    "StopContainer requires a running container, got \(metadata.state.rawValue)"
+                )
+            }
+
+            try await runtimeManager.stopWorkload(
+                sandboxID: metadata.sandboxID,
+                workloadID: metadata.id,
+                options: options
+            )
+
+            metadata.state = .exited
+            metadata.exitedAt = Date()
+            try metadataStore.upsertContainer(metadata)
+            return Runtime_V1_StopContainerResponse()
+        }
+    }
+
+    public func removeContainer(
+        request: Runtime_V1_RemoveContainerRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_RemoveContainerResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.removeContainer.rawValue) {
+            let metadata = try containerMetadata(
+                id: request.containerID,
+                operation: "RemoveContainer"
+            )
+            guard metadata.state != .running else {
+                throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
+            }
+
+            try await runtimeManager.removeWorkload(
+                sandboxID: metadata.sandboxID,
+                workloadID: metadata.id
+            )
+            try metadataStore.deleteContainer(id: metadata.id)
+            return Runtime_V1_RemoveContainerResponse()
+        }
+    }
+
     public func containerStatus(
         request: Runtime_V1_ContainerStatusRequest,
         context: GRPCAsyncServerCallContext
@@ -268,6 +353,28 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             }
             return response
         }
+    }
+
+    private func containerMetadata(id rawID: String, operation: String) throws -> CRIShimContainerMetadata {
+        let containerID = rawID.trimmed
+        guard !containerID.isEmpty else {
+            throw CRIShimError.invalidArgument("\(operation) container_id is required")
+        }
+        guard let metadata = try metadataStore.container(id: containerID) else {
+            throw CRIShimMetadataStoreError.notFound(kind: .container, id: containerID)
+        }
+        return metadata
+    }
+
+    private func sandboxMetadata(id rawID: String, operation: String) throws -> CRIShimSandboxMetadata {
+        let sandboxID = rawID.trimmed
+        guard !sandboxID.isEmpty else {
+            throw CRIShimError.invalidArgument("\(operation) sandbox id is required")
+        }
+        guard let metadata = try metadataStore.sandbox(id: sandboxID) else {
+            throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
+        }
+        return metadata
     }
 
     private func findWorkloadImage(reference: String) async throws -> CRIShimImageRecord {

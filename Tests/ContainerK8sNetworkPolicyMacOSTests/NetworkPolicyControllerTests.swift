@@ -21,6 +21,144 @@ import Testing
 
 struct NetworkPolicyControllerTests {
     @Test
+    func watchEventsDriveIncrementalReconcilePlans() async throws {
+        let config = K8sNetworkPolicyControllerConfig(
+            nodeName: "node-a",
+            networkID: "macvmnet"
+        )
+        let namespace = K8sNetworkPolicyNamespaceMetadata(name: "app", labels: ["name": "app"])
+        let frontendPod = K8sNetworkPolicyPodMetadata(
+            namespace: "app",
+            name: "frontend",
+            uid: "pod-frontend",
+            nodeName: "node-a",
+            sandboxID: "sandbox-frontend",
+            labels: ["role": "frontend"]
+        )
+        let apiPod = K8sNetworkPolicyPodMetadata(
+            namespace: "app",
+            name: "api",
+            uid: "pod-api",
+            nodeName: "node-a",
+            sandboxID: "sandbox-api",
+            labels: ["role": "api"]
+        )
+        let frontendCNI = K8sNetworkPolicyCNIEndpointMetadata(
+            sandboxID: "sandbox-frontend",
+            networkID: "macvmnet",
+            nodeName: "node-a",
+            ipv4Address: try IPv4Address("10.244.0.10"),
+            macAddress: try MACAddress("02:42:ac:11:00:10")
+        )
+        let apiCNI = K8sNetworkPolicyCNIEndpointMetadata(
+            sandboxID: "sandbox-api",
+            networkID: "macvmnet",
+            nodeName: "node-a",
+            ipv4Address: try IPv4Address("10.244.0.20"),
+            macAddress: try MACAddress("02:42:ac:11:00:20")
+        )
+        let initialPolicy = NetworkPolicyResource(
+            namespace: "app",
+            name: "allow-frontend-to-api",
+            uid: "policy-1",
+            podSelector: LabelSelector(matchLabels: ["role": "api"]),
+            policyTypes: [.ingress],
+            ingress: [
+                NetworkPolicyRule(
+                    peers: [
+                        NetworkPolicyPeer(podSelector: LabelSelector(matchLabels: ["role": "frontend"]))
+                    ],
+                    ports: [
+                        try NumericPortSelector(.tcp, port: 8443)
+                    ]
+                )
+            ]
+        )
+
+        var watchState = K8sNetworkPolicyWatchState()
+        watchState.apply(.upsertNamespace(namespace))
+        watchState.apply(.upsertPod(frontendPod))
+        watchState.apply(.upsertPod(apiPod))
+        watchState.apply(.upsertCNIEndpoint(frontendCNI))
+        watchState.apply(.upsertCNIEndpoint(apiCNI))
+        let initialSnapshot = watchState.apply(.upsertNetworkPolicy(initialPolicy))
+
+        let initialResult = try K8sNetworkPolicyController.reconcile(
+            config: config,
+            snapshot: initialSnapshot
+        )
+        #expect(initialSnapshot.generation == 6)
+        #expect(initialResult.plan.applyStates.map(\.sandboxID) == ["sandbox-api"])
+
+        let adapter = K8sNetworkPolicyFakeAdapter()
+        try await adapter.execute(initialResult.plan)
+
+        let duplicateSnapshot = watchState.apply(.upsertNetworkPolicy(initialPolicy))
+        #expect(duplicateSnapshot.generation == initialSnapshot.generation)
+
+        let updatedPolicy = NetworkPolicyResource(
+            namespace: "app",
+            name: "allow-frontend-to-api",
+            uid: "policy-1",
+            podSelector: LabelSelector(matchLabels: ["role": "api"]),
+            policyTypes: [.ingress, .egress],
+            ingress: initialPolicy.ingress,
+            egress: [
+                NetworkPolicyRule(
+                    peers: [
+                        NetworkPolicyPeer(ipBlock: try IPv4CIDR("10.96.0.10/32"))
+                    ],
+                    ports: [
+                        try NumericPortSelector(.udp, port: 53)
+                    ]
+                )
+            ]
+        )
+        let updateSnapshot = watchState.apply(.upsertNetworkPolicy(updatedPolicy))
+        let updateResult = try K8sNetworkPolicyController.reconcile(
+            config: config,
+            snapshot: updateSnapshot,
+            currentState: K8sNetworkPolicyControllerState(
+                appliedPoliciesBySandboxID: adapter.appliedPoliciesBySandboxID
+            )
+        )
+        #expect(updateSnapshot.generation == 7)
+        #expect(updateResult.plan.applyStates.map(\.sandboxID) == ["sandbox-api"])
+        try await adapter.execute(updateResult.plan)
+        #expect(adapter.appliedPoliciesBySandboxID["sandbox-api"]?.generation == 7)
+
+        let deleteSnapshot = watchState.apply(.deletePod(uid: "pod-api"))
+        let deleteResult = try K8sNetworkPolicyController.reconcile(
+            config: config,
+            snapshot: deleteSnapshot,
+            currentState: K8sNetworkPolicyControllerState(
+                appliedPoliciesBySandboxID: adapter.appliedPoliciesBySandboxID
+            )
+        )
+        #expect(deleteSnapshot.generation == 8)
+        #expect(deleteResult.plan.removedSandboxIDs == ["sandbox-api"])
+        try await adapter.execute(deleteResult.plan)
+
+        let relistSnapshot = watchState.replace(
+            with: K8sNetworkPolicyControllerSnapshot(
+                generation: 100,
+                namespaces: [namespace],
+                pods: [frontendPod, apiPod],
+                cniMetadata: [frontendCNI, apiCNI],
+                policies: [updatedPolicy]
+            ))
+        let relistResult = try K8sNetworkPolicyController.reconcile(
+            config: config,
+            snapshot: relistSnapshot,
+            currentState: K8sNetworkPolicyControllerState(
+                appliedPoliciesBySandboxID: adapter.appliedPoliciesBySandboxID
+            )
+        )
+        #expect(relistSnapshot.generation == 100)
+        #expect(relistResult.plan.applyStates.map(\.sandboxID) == ["sandbox-api"])
+    }
+
+    @Test
     func reconcilesAddUpdateDeleteAndRestartThroughFakeAdapter() async throws {
         let config = K8sNetworkPolicyControllerConfig(
             nodeName: "node-a",

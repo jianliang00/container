@@ -83,7 +83,6 @@ NetworkPolicy controller:
 
 Tests:
 
-- [ ] Add unit tests for NetworkPolicy Kubernetes watch reconciliation.
 - [ ] Add integration validation for local `crictl` lifecycle.
 - [ ] Add integration validation for local kubelet static Pod lifecycle.
 - [ ] Add integration validation for `kubectl logs`.

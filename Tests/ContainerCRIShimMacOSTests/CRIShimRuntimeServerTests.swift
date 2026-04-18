@@ -246,6 +246,41 @@ struct CRIShimRuntimeServerTests {
         #expect(containerStatus.status.logPath == "/var/log/pods/default_demo_uid/workload/0.log")
         #expect(containerStatus.info["metadata"]?.contains(#""sandboxID":"sandbox-1""#) == true)
 
+        var createRequest = Runtime_V1_CreateContainerRequest()
+        createRequest.podSandboxID = "sandbox-1"
+        createRequest.sandboxConfig.logDirectory = "/var/log/pods/default_demo_uid"
+        createRequest.config.metadata.name = "created-workload"
+        createRequest.config.metadata.attempt = 4
+        createRequest.config.image.image = "example.com/macos/workload:latest"
+        createRequest.config.command = ["/usr/bin/python3"]
+        createRequest.config.args = ["-c", "print('hello')"]
+        createRequest.config.envs = [keyValue("HELLO", "world")]
+        createRequest.config.workingDir = "/workspace"
+        createRequest.config.labels = ["app": "created"]
+        createRequest.config.annotations = ["note": "created"]
+        createRequest.config.logPath = "created/0.log"
+        let created = try await client.createContainer(createRequest)
+        #expect(!created.containerID.isEmpty)
+        #expect(runtimeManager.createWorkloadCalls.count == 1)
+        let createCall = try #require(runtimeManager.createWorkloadCalls.first)
+        #expect(createCall.sandboxID == "sandbox-1")
+        #expect(createCall.configuration.id == created.containerID)
+        #expect(createCall.configuration.workloadImageReference == "example.com/macos/workload:latest")
+        #expect(createCall.configuration.workloadImageDigest == "sha256:abc123")
+        #expect(createCall.configuration.processConfiguration.executable == "/usr/bin/python3")
+        #expect(createCall.configuration.processConfiguration.arguments == ["-c", "print('hello')"])
+        #expect(createCall.configuration.processConfiguration.environment == ["HELLO=world"])
+        #expect(createCall.configuration.processConfiguration.workingDirectory == "/workspace")
+
+        var createdStatusRequest = Runtime_V1_ContainerStatusRequest()
+        createdStatusRequest.containerID = created.containerID
+        let createdStatus = try await client.containerStatus(createdStatusRequest)
+        #expect(createdStatus.status.id == created.containerID)
+        #expect(createdStatus.status.metadata.name == "created-workload")
+        #expect(createdStatus.status.metadata.attempt == 4)
+        #expect(createdStatus.status.state == .containerCreated)
+        #expect(createdStatus.status.logPath == "/var/log/pods/default_demo_uid/created/0.log")
+
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
         #expect(listImages.images.count == 1)
@@ -354,12 +389,37 @@ private struct RecordingExecSyncCall {
     var timeout: Duration?
 }
 
+private struct RecordingCreateWorkloadCall {
+    var sandboxID: String
+    var configuration: WorkloadConfiguration
+}
+
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
     var execSyncResult: ExecSyncResult
+    private(set) var createWorkloadCalls: [RecordingCreateWorkloadCall] = []
+    private(set) var removeWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var execSyncCalls: [RecordingExecSyncCall] = []
 
     init(execSyncResult: ExecSyncResult) {
         self.execSyncResult = execSyncResult
+    }
+
+    func createWorkload(
+        sandboxID: String,
+        configuration: WorkloadConfiguration
+    ) async throws {
+        createWorkloadCalls.append(
+            RecordingCreateWorkloadCall(
+                sandboxID: sandboxID,
+                configuration: configuration
+            ))
+    }
+
+    func removeWorkload(
+        sandboxID: String,
+        workloadID: String
+    ) async throws {
+        removeWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
     }
 
     func execSync(
@@ -459,6 +519,13 @@ private func connectedUnixSocket(path: String) throws -> NIOBSDSocket.Handle {
         }
     }
     return socket
+}
+
+private func keyValue(_ key: String, _ value: String) -> Runtime_V1_KeyValue {
+    var result = Runtime_V1_KeyValue()
+    result.key = key
+    result.value = value
+    return result
 }
 
 private func shutdown(_ group: MultiThreadedEventLoopGroup) async {

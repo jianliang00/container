@@ -90,7 +90,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     config: config,
                     metadataStore: metadataStore,
                     versionInfo: versionInfo,
-                    runtimeManager: runtimeManager
+                    runtimeManager: runtimeManager,
+                    imageManager: imageManager
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
@@ -117,7 +118,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     metadataStore: metadataStore,
                     versionInfo: versionInfo,
                     readinessChecker: readinessChecker,
-                    runtimeManager: runtimeManager
+                    runtimeManager: runtimeManager,
+                    imageManager: imageManager
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],

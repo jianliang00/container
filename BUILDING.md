@@ -38,6 +38,13 @@ BUILD_CONFIGURATION=release make install
 make protos
 ```
 
+To regenerate only the Kubernetes CRI `runtime.v1` bindings used by
+`container-cri-shim-macos`, run:
+
+```bash
+make cri-protos
+```
+
 ## Develop using a local copy of Containerization
 
 To make changes to `container` that require changes to the Containerization project, or vice versa:

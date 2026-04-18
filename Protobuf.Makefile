@@ -17,10 +17,14 @@ LOCAL_DIR := $(ROOT_DIR)/.local
 LOCAL_BIN_DIR := $(LOCAL_DIR)/bin
 
 BUILDER_SHIM_REPO ?= https://github.com/apple/container-builder-shim.git
+CRI_API_REPO ?= https://github.com/kubernetes/cri-api.git
 
 # Versions
 BUILDER_SHIM_VERSION ?= $(shell sed -n 's/let builderShimVersion *= *"\(.*\)"/\1/p' Package.swift)
+CRI_API_VERSION ?= v0.35.3
 PROTOC_VERSION := 26.1
+CRI_API_PROTO_DIR := Protos/KubernetesCRI/runtime/v1
+CRI_API_LOCAL_DIR := $(LOCAL_DIR)/cri-api-$(CRI_API_VERSION)
 
 # Protoc binary installation
 PROTOC_ZIP := protoc-$(PROTOC_VERSION)-osx-universal_binary.zip
@@ -40,7 +44,10 @@ protoc-gen-swift:
 	@$(SWIFT) build --product protoc-gen-grpc-swift
 
 .PHONY: protos
-protos: $(PROTOC) protoc-gen-swift
+protos: builder-protos cri-protos
+
+.PHONY: builder-protos
+builder-protos: $(PROTOC) protoc-gen-swift
 	@echo Generating protocol buffers source code...
 	@mkdir -p $(LOCAL_DIR)
 	@if [ ! -d "$(LOCAL_DIR)/container-builder-shim" ]; then \
@@ -57,8 +64,29 @@ protos: $(PROTOC) protoc-gen-swift
 		-I.
 	@"$(MAKE)" update-licenses
 
+.PHONY: cri-protos
+cri-protos: $(PROTOC) protoc-gen-swift
+	@echo Generating Kubernetes CRI protocol buffers source code...
+	@mkdir -p $(LOCAL_DIR)
+	@if [ ! -d "$(CRI_API_LOCAL_DIR)" ]; then \
+		cd $(LOCAL_DIR) && git clone --branch $(CRI_API_VERSION) --depth 1 $(CRI_API_REPO) "cri-api-$(CRI_API_VERSION)"; \
+	fi
+	@mkdir -p $(CRI_API_PROTO_DIR)
+	@install -m 0644 "$(CRI_API_LOCAL_DIR)/pkg/apis/runtime/v1/api.proto" "$(CRI_API_PROTO_DIR)/api.proto"
+	@$(PROTOC) api.proto \
+		--plugin=protoc-gen-grpc-swift=$(BUILD_BIN_DIR)/protoc-gen-grpc-swift \
+		--plugin=protoc-gen-swift=$(BUILD_BIN_DIR)/protoc-gen-swift \
+		--proto_path=$(CRI_API_PROTO_DIR) \
+		--grpc-swift_out="Sources/ContainerCRI" \
+		--grpc-swift_opt=Visibility=Public \
+		--swift_out="Sources/ContainerCRI" \
+		--swift_opt=Visibility=Public \
+		-I.
+	@"$(MAKE)" update-licenses
+
 .PHONY: clean-proto-tools
 clean-proto-tools:
 	@echo Cleaning proto tools...
 	@rm -rf $(LOCAL_DIR)/bin/protoc*
 	@rm -rf $(LOCAL_DIR)/container-builder-shim
+	@rm -rf $(LOCAL_DIR)/cri-api-*

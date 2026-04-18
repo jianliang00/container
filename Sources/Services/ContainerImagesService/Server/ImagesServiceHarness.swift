@@ -49,10 +49,17 @@ public struct ImagesServiceHarness: Sendable {
         }
         let insecure = message.bool(key: .insecureFlag)
         let maxConcurrentDownloads = message.int64(key: .maxConcurrentDownloads)
+        let authentication = try message.imagePullAuthentication()
 
         let progressUpdateService = ProgressUpdateService(message: message)
         let imageDescription = try await service.pull(
-            reference: ref, platform: platform, insecure: insecure, progressUpdate: progressUpdateService?.handler, maxConcurrentDownloads: Int(maxConcurrentDownloads))
+            reference: ref,
+            platform: platform,
+            insecure: insecure,
+            authentication: authentication?.containerizationAuthentication,
+            progressUpdate: progressUpdateService?.handler,
+            maxConcurrentDownloads: Int(maxConcurrentDownloads)
+        )
 
         let imageData = try JSONEncoder().encode(imageDescription)
         let reply = message.reply()
@@ -210,6 +217,37 @@ public struct ImagesServiceHarness: Sendable {
         reply.set(key: .imageSize, value: size)
         reply.set(key: .reclaimableSize, value: reclaimable)
         return reply
+    }
+}
+
+private struct StaticBearerAuthentication: Authentication {
+    var tokenValue: String
+
+    func token() async throws -> String {
+        if tokenValue.lowercased().hasPrefix("bearer ") {
+            return tokenValue
+        }
+        return "Bearer \(tokenValue)"
+    }
+}
+
+extension ClientImagePullAuthentication {
+    fileprivate var containerizationAuthentication: Authentication {
+        switch kind {
+        case .basic:
+            return BasicAuthentication(username: username ?? "", password: secret)
+        case .bearer:
+            return StaticBearerAuthentication(tokenValue: secret)
+        }
+    }
+}
+
+extension XPCMessage {
+    fileprivate func imagePullAuthentication() throws -> ClientImagePullAuthentication? {
+        guard let data = dataNoCopy(key: .imagePullAuthentication) else {
+            return nil
+        }
+        return try JSONDecoder().decode(ClientImagePullAuthentication.self, from: data)
     }
 }
 

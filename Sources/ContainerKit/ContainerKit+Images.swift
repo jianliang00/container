@@ -26,8 +26,11 @@ extension ContainerKit {
         try await ClientImage.get(reference: reference)
     }
 
-    public func pullImage(reference: String) async throws -> Image {
-        try await ClientImage.pull(reference: reference)
+    public func pullImage(
+        reference: String,
+        authentication: ClientImagePullAuthentication? = nil
+    ) async throws -> Image {
+        try await ClientImage.pull(reference: reference, authentication: authentication)
     }
 
     public func deleteImage(reference: String, garbageCollect: Bool = false) async throws {

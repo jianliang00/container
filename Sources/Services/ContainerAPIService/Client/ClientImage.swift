@@ -436,7 +436,12 @@ extension ClientImage {
     }
 
     public static func pull(
-        reference: String, platform: Platform? = nil, scheme: RequestScheme = .auto, progressUpdate: ProgressUpdateHandler? = nil, maxConcurrentDownloads: Int = 3
+        reference: String,
+        platform: Platform? = nil,
+        scheme: RequestScheme = .auto,
+        authentication: ClientImagePullAuthentication? = nil,
+        progressUpdate: ProgressUpdateHandler? = nil,
+        maxConcurrentDownloads: Int = 3
     ) async throws -> ClientImage {
         guard maxConcurrentDownloads > 0 else {
             throw ContainerizationError(.invalidArgument, message: "maximum number of concurrent downloads must be greater than 0, got \(maxConcurrentDownloads)")
@@ -452,6 +457,10 @@ extension ClientImage {
 
         request.set(key: .imageReference, value: reference)
         try request.set(platform: platform)
+        if let authentication {
+            let authenticationData = try JSONEncoder().encode(authentication)
+            request.set(key: .imagePullAuthentication, value: authenticationData)
+        }
 
         let insecure = try scheme.schemeFor(host: host) == .http
         request.set(key: .insecureFlag, value: insecure)

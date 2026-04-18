@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerCRI
 import ContainerKit
 import Foundation
@@ -61,6 +62,7 @@ public struct CRIShimImageFilesystemUsage: Equatable, Sendable {
 
 public protocol CRIShimImageManaging: Sendable {
     func listImages() async throws -> [CRIShimImageRecord]
+    func pullImage(reference: String, authentication: CRIShimImagePullAuthentication?) async throws -> CRIShimImageRecord
     func removeImage(reference: String) async throws
     func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage
 }
@@ -76,6 +78,14 @@ public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
         try await kit.listImages().map(CRIShimImageRecord.init)
     }
 
+    public func pullImage(
+        reference: String,
+        authentication: CRIShimImagePullAuthentication?
+    ) async throws -> CRIShimImageRecord {
+        let image = try await kit.pullImage(reference: reference, authentication: authentication?.clientAuthentication)
+        return CRIShimImageRecord(image: image)
+    }
+
     public func removeImage(reference: String) async throws {
         try await kit.deleteImage(reference: reference, garbageCollect: false)
     }
@@ -89,6 +99,60 @@ public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
             usedBytes: usage.images.sizeInBytes,
             timestampNanoseconds: currentUnixTimeNanoseconds()
         )
+    }
+}
+
+public enum CRIShimImagePullAuthentication: Equatable, Sendable {
+    case basic(username: String, password: String)
+    case bearer(token: String)
+
+    public static func resolve(_ request: Runtime_V1_PullImageRequest) throws -> CRIShimImagePullAuthentication? {
+        guard request.hasAuth else {
+            return nil
+        }
+        return try resolve(request.auth)
+    }
+
+    public static func resolve(_ authConfig: Runtime_V1_AuthConfig) throws -> CRIShimImagePullAuthentication? {
+        let registryToken = authConfig.registryToken.trimmed
+        if !registryToken.isEmpty {
+            return .bearer(token: registryToken)
+        }
+
+        let identityToken = authConfig.identityToken.trimmed
+        if !identityToken.isEmpty {
+            return .bearer(token: identityToken)
+        }
+
+        let username = authConfig.username
+        let password = authConfig.password
+        if !username.isEmpty || !password.isEmpty {
+            return .basic(username: username, password: password)
+        }
+
+        let encodedAuth = authConfig.auth.trimmed
+        guard !encodedAuth.isEmpty else {
+            return nil
+        }
+        guard let decodedData = Data(base64Encoded: encodedAuth),
+            let decoded = String(data: decodedData, encoding: .utf8)
+        else {
+            throw CRIShimError.invalidArgument("image auth field is not valid base64")
+        }
+        let parts = decoded.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else {
+            throw CRIShimError.invalidArgument("image auth field must decode to username:password")
+        }
+        return .basic(username: String(parts[0]), password: String(parts[1]))
+    }
+
+    var clientAuthentication: ClientImagePullAuthentication {
+        switch self {
+        case .basic(let username, let password):
+            return .basic(username: username, password: password)
+        case .bearer(let token):
+            return .bearer(token: token)
+        }
     }
 }
 

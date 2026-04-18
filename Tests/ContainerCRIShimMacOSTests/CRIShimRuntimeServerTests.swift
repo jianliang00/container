@@ -174,6 +174,9 @@ struct CRIShimRuntimeServerTests {
         let sandboxMetrics = try await client.listPodSandboxMetrics(Runtime_V1_ListPodSandboxMetricsRequest())
         #expect(sandboxMetrics.podMetrics.isEmpty)
 
+        _ = try await client.updateContainerResources(Runtime_V1_UpdateContainerResourcesRequest())
+        _ = try await client.updatePodSandboxResources(Runtime_V1_UpdatePodSandboxResourcesRequest())
+
         var events: [Runtime_V1_ContainerEventResponse] = []
         for try await event in client.getContainerEvents(Runtime_V1_GetEventsRequest()) {
             events.append(event)

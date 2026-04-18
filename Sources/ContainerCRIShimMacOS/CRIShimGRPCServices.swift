@@ -318,7 +318,11 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         request: Runtime_V1_UpdateContainerResourcesRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_UpdateContainerResourcesResponse {
-        try await unsupportedRuntime(.updateContainerResources)
+        try await CRIShimGRPCHandlerLogger.runtimeService().handle(
+            operation: CRIRuntimeOperation.updateContainerResources.rawValue
+        ) {
+            Runtime_V1_UpdateContainerResourcesResponse()
+        }
     }
 
     public func reopenContainerLog(
@@ -427,7 +431,11 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         request: Runtime_V1_UpdatePodSandboxResourcesRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_UpdatePodSandboxResourcesResponse {
-        try await unsupportedRuntime(.updatePodSandboxResources)
+        try await CRIShimGRPCHandlerLogger.runtimeService().handle(
+            operation: CRIRuntimeOperation.updatePodSandboxResources.rawValue
+        ) {
+            Runtime_V1_UpdatePodSandboxResourcesResponse()
+        }
     }
 }
 

@@ -46,7 +46,6 @@ RuntimeService:
 - [ ] Implement `ContainerStatus`.
 - [ ] Implement `ListContainers`.
 - [ ] Implement `ReopenContainerLog`.
-- [ ] Implement `ExecSync`.
 - [ ] Implement `Exec` through a loopback streaming server.
 - [ ] Implement `PortForward` through a loopback streaming server.
 - [ ] Implement minimal `ContainerStats`, `ListContainerStats`,

@@ -25,6 +25,8 @@ struct CRIShimConfigTests {
         let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
 
         #expect(config.runtimeEndpoint == "/var/run/container-cri-macos.sock")
+        #expect(config.stateDirectory == nil)
+        #expect(config.normalizedStateDirectory == CRIShimConfigDefaults.stateDirectoryURL.path)
         #expect(config.streaming?.address == "127.0.0.1")
         #expect(config.streaming?.port == 0)
         #expect(config.cni?.binDir == "/opt/cni/bin")
@@ -51,6 +53,7 @@ struct CRIShimConfigTests {
     func validationReportsMissingRequiredSectionsAndInvalidValues() throws {
         let config = CRIShimConfig(
             runtimeEndpoint: "relative.sock",
+            stateDirectory: "relative-state",
             streaming: StreamingConfig(address: " ", port: 70_000),
             cni: CNIConfig(binDir: nil, confDir: "relative", plugin: "nested/plugin"),
             defaults: RuntimeProfile(
@@ -69,6 +72,7 @@ struct CRIShimConfigTests {
 
         let issues = config.validationIssues
         #expect(issues.contains("runtimeEndpoint must be an absolute path"))
+        #expect(issues.contains("stateDirectory must be an absolute path"))
         #expect(issues.contains("streaming.address is required"))
         #expect(issues.contains("streaming.port must be between 0 and 65535"))
         #expect(issues.contains("cni.binDir is required"))

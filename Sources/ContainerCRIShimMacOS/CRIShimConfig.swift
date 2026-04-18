@@ -20,6 +20,7 @@ public enum CRIShimConfigDefaults {
     public static let fileName = "container-cri-shim-macos-config.json"
     public static let systemConfigURL = URL(fileURLWithPath: "/etc/container/\(fileName)")
     public static let legacySystemConfigURL = URL(fileURLWithPath: "/etc/\(fileName)")
+    public static let stateDirectoryURL = URL(fileURLWithPath: "/var/lib/container/cri-shim-macos")
     public static let userConfigURL = URL(
         fileURLWithPath: ("~/.config/container/\(fileName)" as NSString).expandingTildeInPath
     )
@@ -57,6 +58,7 @@ public struct CRIShimConfigLoadError: Error, Equatable, CustomStringConvertible,
 
 public struct CRIShimConfig: Codable, Equatable, Sendable {
     public var runtimeEndpoint: String?
+    public var stateDirectory: String?
     public var streaming: StreamingConfig?
     public var cni: CNIConfig?
     public var defaults: RuntimeProfile?
@@ -66,6 +68,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
 
     public init(
         runtimeEndpoint: String? = nil,
+        stateDirectory: String? = nil,
         streaming: StreamingConfig? = nil,
         cni: CNIConfig? = nil,
         defaults: RuntimeProfile? = nil,
@@ -74,6 +77,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         kubeProxy: KubeProxyConfig? = nil
     ) {
         self.runtimeEndpoint = runtimeEndpoint
+        self.stateDirectory = stateDirectory
         self.streaming = streaming
         self.cni = cni
         self.defaults = defaults
@@ -84,6 +88,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case runtimeEndpoint
+        case stateDirectory
         case streaming
         case cni
         case defaults
@@ -95,6 +100,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         runtimeEndpoint = try container.decodeIfPresent(String.self, forKey: .runtimeEndpoint)
+        stateDirectory = try container.decodeIfPresent(String.self, forKey: .stateDirectory)
         streaming = try container.decodeIfPresent(StreamingConfig.self, forKey: .streaming)
         cni = try container.decodeIfPresent(CNIConfig.self, forKey: .cni)
         defaults = try container.decodeIfPresent(RuntimeProfile.self, forKey: .defaults)
@@ -106,6 +112,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(runtimeEndpoint, forKey: .runtimeEndpoint)
+        try container.encodeIfPresent(stateDirectory, forKey: .stateDirectory)
         try container.encodeIfPresent(streaming, forKey: .streaming)
         try container.encodeIfPresent(cni, forKey: .cni)
         try container.encodeIfPresent(defaults, forKey: .defaults)
@@ -139,6 +146,13 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
 
     public var normalizedRuntimeEndpoint: String? {
         runtimeEndpoint?.removingUnixScheme
+    }
+
+    public var normalizedStateDirectory: String {
+        guard let stateDirectory = stateDirectory?.trimmed, !stateDirectory.isEmpty else {
+            return CRIShimConfigDefaults.stateDirectoryURL.path
+        }
+        return stateDirectory
     }
 }
 

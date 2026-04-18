@@ -19,7 +19,6 @@ Configuration:
 
 CRI server:
 
-- [ ] Start a Unix socket gRPC server from `container-cri-shim-macos`.
 - [ ] Wire CRI request logging and structured error mapping into RPC handlers.
 - [ ] Wire CRI sandbox metadata persistence into sandbox lifecycle RPCs.
 - [ ] Wire CRI container metadata persistence into container lifecycle RPCs.
@@ -28,7 +27,6 @@ CRI server:
 
 RuntimeService:
 
-- [ ] Implement `Version`.
 - [ ] Implement `Status`.
 - [ ] Implement `RuntimeConfig`.
 - [ ] Implement `UpdateRuntimeConfig`.

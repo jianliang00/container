@@ -15,10 +15,18 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import GRPC
+import NIO
 import Testing
 
 @testable import ContainerCRI
 @testable import ContainerCRIShimMacOS
+
+#if os(Linux)
+import Glibc
+#else
+import Darwin
+#endif
 
 struct CRIShimRuntimeServerTests {
     @Test
@@ -35,25 +43,67 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
-    func unixDomainSocketListenerStartsAndStopsCleanly() async throws {
-        let socketPath = "/tmp/cri-shim-\(UUID().uuidString.prefix(8)).sock"
-        let listener = try CRIShimUnixDomainSocketListener(socketPath: socketPath)
+    func grpcServerServesVersionOnUnixDomainSocket() async throws {
+        let socketPath = "/tmp/cri-shim-grpc-\(UUID().uuidString.prefix(8)).sock"
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            versionInfo: CRIShimRuntimeVersionInfo(
+                runtimeName: "container-macos-test",
+                runtimeVersion: "1.2.3",
+                runtimeAPIVersion: CRIProtocol.runtimeAPIVersion
+            ),
+            eventLoopGroup: group
+        )
+        let serverTask = Task {
+            try await server.run()
+        }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
 
-        try await listener.start()
+        try await waitForSocket(at: socketPath)
 
-        #expect(FileManager.default.fileExists(atPath: socketPath))
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
 
-        await listener.stop()
+        let version = try await client.version(Runtime_V1_VersionRequest())
 
+        #expect(version.version == CRIProtocol.runtimeAPIVersion)
+        #expect(version.runtimeName == "container-macos-test")
+        #expect(version.runtimeVersion == "1.2.3")
+        #expect(version.runtimeApiVersion == CRIProtocol.runtimeAPIVersion)
+
+        do {
+            _ = try await client.status(Runtime_V1_StatusRequest())
+            Issue.record("expected Status to return unimplemented until readiness checks are wired")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .unimplemented)
+            #expect(status.message?.contains("Status") == true)
+        }
+
+        let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
+        do {
+            _ = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
+            Issue.record("expected ListImages to return unimplemented until image inventory is wired")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .unimplemented)
+            #expect(status.message?.contains("ListImages") == true)
+        }
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
         #expect(!FileManager.default.fileExists(atPath: socketPath))
+        await shutdown(group)
     }
 
     @Test
     func runtimeOperationSurfaceHasDeterministicUnsupportedMessages() {
         for operation in CRIRuntimeOperationSurface.all {
-            let disposition = DeterministicUnsupportedCRIRuntimeService().disposition(for: operation)
-            #expect(disposition.kind == .unsupported)
-            #expect(!disposition.detail.isEmpty)
+            #expect(!CRIRuntimeOperationSurface.unsupportedReason(for: operation).isEmpty)
         }
         #expect(CRIRuntimeOperationSurface.all.contains(.version))
         #expect(CRIRuntimeOperationSurface.all.contains(.status))
@@ -85,6 +135,50 @@ private final class RecordingServer: CRIShimServerLifecycle, @unchecked Sendable
 
     func stop() async {
         stopCallCount += 1
+    }
+}
+
+private func waitForSocket(at path: String) async throws {
+    for _ in 0..<100 {
+        if FileManager.default.fileExists(atPath: path) {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw CRIShimRuntimeServerTestError.socketDidNotStart(path)
+}
+
+private enum CRIShimRuntimeServerTestError: Error {
+    case socketDidNotStart(String)
+}
+
+private func connectedUnixSocket(path: String) throws -> NIOBSDSocket.Handle {
+    #if os(Linux)
+    let socketType = CInt(SOCK_STREAM.rawValue)
+    #else
+    let socketType = SOCK_STREAM
+    #endif
+    let socket = socket(AF_UNIX, socketType, 0)
+    guard socket >= 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    let address = try SocketAddress(unixDomainSocketPath: path)
+    try address.withSockAddr { pointer, size in
+        guard connect(socket, pointer, UInt32(size)) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            _ = close(socket)
+            throw error
+        }
+    }
+    return socket
+}
+
+private func shutdown(_ group: MultiThreadedEventLoopGroup) async {
+    await withCheckedContinuation { continuation in
+        group.shutdownGracefully { _ in
+            continuation.resume()
+        }
     }
 }
 

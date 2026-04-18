@@ -13,13 +13,6 @@ Related docs:
 
 ## 1. Implementation Capabilities
 
-Protocol and generated code:
-
-- [ ] Pin the CRI protobuf source to the selected Kubernetes `cri-api` tag.
-- [ ] Add a regeneration command or script for CRI Swift protobuf and gRPC
-  bindings.
-- [ ] Document the CRI/CNI/Kubernetes references used by the implementation.
-
 Configuration:
 
 - [ ] Decide kube-proxy launch settings for single-node Service reachability.

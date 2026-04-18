@@ -16,6 +16,7 @@
 
 import ContainerCRI
 import ContainerVersion
+import Foundation
 import GRPC
 
 public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
@@ -97,7 +98,66 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
 }
 
 public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProvider, @unchecked Sendable {
-    public init() {}
+    private let imageManager: any CRIShimImageManaging
+
+    public init(imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()) {
+        self.imageManager = imageManager
+    }
+
+    public func listImages(
+        request: Runtime_V1_ListImagesRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ListImagesResponse {
+        do {
+            var response = Runtime_V1_ListImagesResponse()
+            let images = try await imageManager.listImages()
+            response.images = filteredImages(images, request: request).map(makeCRIImage)
+            return response
+        } catch {
+            throw CRIShimGRPCStatusMapper.status(for: error)
+        }
+    }
+
+    public func imageStatus(
+        request: Runtime_V1_ImageStatusRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ImageStatusResponse {
+        do {
+            let reference = try CRIShimImageReference.resolve(request.image)
+            let image = try await findImage(reference: reference)
+            var response = Runtime_V1_ImageStatusResponse()
+            response.image = makeCRIImage(image)
+            if request.verbose {
+                response.info = ["image": jsonString(image.info)]
+            }
+            return response
+        } catch CRIShimError.notFound {
+            return Runtime_V1_ImageStatusResponse()
+        } catch {
+            throw CRIShimGRPCStatusMapper.status(for: error)
+        }
+    }
+
+    public func removeImage(
+        request: Runtime_V1_RemoveImageRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_RemoveImageResponse {
+        do {
+            let reference = try CRIShimImageReference.resolve(request.image)
+            try await imageManager.removeImage(reference: reference)
+            return Runtime_V1_RemoveImageResponse()
+        } catch {
+            throw CRIShimGRPCStatusMapper.status(for: error)
+        }
+    }
+
+    private func findImage(reference: String) async throws -> CRIShimImageRecord {
+        let images = try await imageManager.listImages()
+        guard let image = images.first(where: { $0.matches(reference: reference) }) else {
+            throw CRIShimError.notFound("image not found: \(reference)")
+        }
+        return image
+    }
 }
 
 public enum CRIShimGRPCStatusMapper {
@@ -113,6 +173,22 @@ public enum CRIShimGRPCStatusMapper {
             code: .unimplemented,
             message: CRIImageOperationSurface.unsupportedReason(for: operation)
         )
+    }
+
+    public static func status(for error: any Error) -> GRPCStatus {
+        let disposition = CRIShimErrorMapper.disposition(for: error)
+        let code: GRPCStatus.Code =
+            switch disposition.kind {
+            case .unsupported:
+                .unimplemented
+            case .invalidArgument:
+                .invalidArgument
+            case .notFound:
+                .notFound
+            case .internalError:
+                .internalError
+            }
+        return GRPCStatus(code: code, message: disposition.message)
     }
 }
 
@@ -326,32 +402,11 @@ private func makeRuntimeHandler(name: String) -> Runtime_V1_RuntimeHandler {
 }
 
 extension Runtime_V1_ImageServiceAsyncProvider {
-    public func listImages(
-        request: Runtime_V1_ListImagesRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_ListImagesResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.listImages)
-    }
-
-    public func imageStatus(
-        request: Runtime_V1_ImageStatusRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_ImageStatusResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.imageStatus)
-    }
-
     public func pullImage(
         request: Runtime_V1_PullImageRequest,
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_PullImageResponse {
         throw CRIShimGRPCStatusMapper.unsupported(.pullImage)
-    }
-
-    public func removeImage(
-        request: Runtime_V1_RemoveImageRequest,
-        context: GRPCAsyncServerCallContext
-    ) async throws -> Runtime_V1_RemoveImageResponse {
-        throw CRIShimGRPCStatusMapper.unsupported(.removeImage)
     }
 
     public func imageFsInfo(
@@ -360,4 +415,60 @@ extension Runtime_V1_ImageServiceAsyncProvider {
     ) async throws -> Runtime_V1_ImageFsInfoResponse {
         throw CRIShimGRPCStatusMapper.unsupported(.imageFsInfo)
     }
+}
+
+private func filteredImages(
+    _ images: [CRIShimImageRecord],
+    request: Runtime_V1_ListImagesRequest
+) -> [CRIShimImageRecord] {
+    guard request.hasFilter, request.filter.hasImage else {
+        return images
+    }
+
+    guard let reference = try? CRIShimImageReference.resolve(request.filter.image) else {
+        return images
+    }
+
+    return images.filter { $0.matches(reference: reference) }
+}
+
+private func makeCRIImage(_ image: CRIShimImageRecord) -> Runtime_V1_Image {
+    var result = Runtime_V1_Image()
+    result.id = image.digest
+    if image.reference.contains("@") {
+        result.repoDigests = [image.reference]
+    } else {
+        result.repoTags = [image.reference]
+        result.repoDigests = image.repoDigests
+    }
+    result.size = image.size
+    result.spec = makeImageSpec(image)
+    result.pinned = image.pinned
+    return result
+}
+
+private func makeImageSpec(_ image: CRIShimImageRecord) -> Runtime_V1_ImageSpec {
+    var spec = Runtime_V1_ImageSpec()
+    spec.image = image.reference
+    spec.annotations = image.annotations
+    return spec
+}
+
+extension CRIShimImageRecord {
+    fileprivate var info: [String: String] {
+        [
+            "digest": digest,
+            "reference": reference,
+            "size": String(size),
+        ]
+    }
+}
+
+private func jsonString(_ value: [String: String]) -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    guard let data = try? encoder.encode(value) else {
+        return "{}"
+    }
+    return String(decoding: data, as: UTF8.self)
 }

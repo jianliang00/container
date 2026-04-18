@@ -134,13 +134,13 @@ public enum CRIImageOperationSurface {
     public static func unsupportedReason(for operation: CRIImageOperation) -> String {
         switch operation {
         case .listImages:
-            return "ListImages is not wired to container image inventory yet"
+            return "ListImages is implemented by the protobuf-backed CRI server"
         case .imageStatus:
-            return "ImageStatus is not wired to container image inventory yet"
+            return "ImageStatus is implemented by the protobuf-backed CRI server"
         case .pullImage:
             return "PullImage is not wired to container image pull support yet"
         case .removeImage:
-            return "RemoveImage is not wired to container image removal yet"
+            return "RemoveImage is implemented by the protobuf-backed CRI server"
         case .imageFsInfo:
             return "ImageFsInfo is not wired to container image storage accounting yet"
         }

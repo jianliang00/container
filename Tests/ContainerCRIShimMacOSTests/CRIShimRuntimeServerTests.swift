@@ -72,7 +72,15 @@ struct CRIShimRuntimeServerTests {
                     ),
                     info: ["runtime": #"{"test":"ready"}"#]
                 )
-            )
+            ),
+            imageManager: RecordingImageManager(images: [
+                CRIShimImageRecord(
+                    reference: "example.com/macos/workload:latest",
+                    digest: "sha256:abc123",
+                    size: 4096,
+                    annotations: ["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]
+                )
+            ])
         )
         let serverTask = Task {
             try await server.run()
@@ -115,12 +123,30 @@ struct CRIShimRuntimeServerTests {
         _ = try await client.updateRuntimeConfig(Runtime_V1_UpdateRuntimeConfigRequest())
 
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
+        let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
+        #expect(listImages.images.count == 1)
+        #expect(listImages.images[0].id == "sha256:abc123")
+        #expect(listImages.images[0].repoTags == ["example.com/macos/workload:latest"])
+        #expect(listImages.images[0].repoDigests == ["example.com/macos/workload@sha256:abc123"])
+
+        var imageStatusRequest = Runtime_V1_ImageStatusRequest()
+        imageStatusRequest.image.image = "sha256:abc123"
+        imageStatusRequest.verbose = true
+        let imageStatus = try await imageClient.imageStatus(imageStatusRequest)
+        #expect(imageStatus.image.id == "sha256:abc123")
+        #expect(imageStatus.info["image"]?.contains(#""reference""#) == true)
+        #expect(imageStatus.info["image"]?.contains("example.com") == true)
+
+        var removeImageRequest = Runtime_V1_RemoveImageRequest()
+        removeImageRequest.image.image = "example.com/macos/workload:latest"
+        _ = try await imageClient.removeImage(removeImageRequest)
+
         do {
-            _ = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
-            Issue.record("expected ListImages to return unimplemented until image inventory is wired")
+            _ = try await imageClient.pullImage(Runtime_V1_PullImageRequest())
+            Issue.record("expected PullImage to return unimplemented until CRI registry auth is wired")
         } catch let status as GRPCStatus {
             #expect(status.code == .unimplemented)
-            #expect(status.message?.contains("ListImages") == true)
+            #expect(status.message?.contains("PullImage") == true)
         }
 
         try await channel.close().get()
@@ -173,6 +199,23 @@ private struct StaticReadinessChecker: CRIShimReadinessChecking {
 
     func snapshot(config: CRIShimConfig) async -> CRIShimReadinessSnapshot {
         snapshot
+    }
+}
+
+private final class RecordingImageManager: CRIShimImageManaging, @unchecked Sendable {
+    var images: [CRIShimImageRecord]
+    private(set) var removedReferences: [String] = []
+
+    init(images: [CRIShimImageRecord]) {
+        self.images = images
+    }
+
+    func listImages() async throws -> [CRIShimImageRecord] {
+        images
+    }
+
+    func removeImage(reference: String) async throws {
+        removedReferences.append(reference)
     }
 }
 

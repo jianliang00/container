@@ -21,6 +21,12 @@ import Testing
 @testable import ContainerCRIShimMacOS
 @testable import ContainerResource
 
+#if os(Linux)
+import Glibc
+#else
+import Darwin
+#endif
+
 struct CRIShimRuntimeOperationsTests {
     @Test
     func mapsExecSyncRequestToProcessConfiguration() throws {
@@ -76,5 +82,24 @@ struct CRIShimRuntimeOperationsTests {
         #expect(response.exitCode == 7)
         #expect(response.stdout == Data(repeating: 0x41, count: 4))
         #expect(response.stderr == Data(repeating: 0x42, count: 4))
+    }
+
+    @Test
+    func mapsStopContainerTimeoutToStopOptions() throws {
+        var graceful = Runtime_V1_StopContainerRequest()
+        graceful.timeout = 3
+        let gracefulOptions = try makeCRIShimStopOptions(graceful)
+        #expect(gracefulOptions.timeoutInSeconds == 3)
+        #expect(gracefulOptions.signal == Int32(SIGTERM))
+
+        let immediateOptions = try makeCRIShimStopOptions(Runtime_V1_StopContainerRequest())
+        #expect(immediateOptions.timeoutInSeconds == 0)
+        #expect(immediateOptions.signal == Int32(SIGKILL))
+
+        var negative = Runtime_V1_StopContainerRequest()
+        negative.timeout = -1
+        #expect(throws: CRIShimError.invalidArgument("StopContainer timeout must be greater than or equal to zero")) {
+            try makeCRIShimStopOptions(negative)
+        }
     }
 }

@@ -325,6 +325,29 @@ struct CRIShimRuntimeServerTests {
         #expect(containerStatus.status.logPath == "/var/log/pods/default_demo_uid/workload/0.log")
         #expect(containerStatus.info["metadata"]?.contains(#""sandboxID":"sandbox-1""#) == true)
 
+        var containerStatsRequest = Runtime_V1_ContainerStatsRequest()
+        containerStatsRequest.containerID = "container-1"
+        let containerStats = try await client.containerStats(containerStatsRequest)
+        #expect(containerStats.stats.attributes.id == "container-1")
+        #expect(containerStats.stats.attributes.metadata.name == "workload")
+
+        var listContainerStatsRequest = Runtime_V1_ListContainerStatsRequest()
+        listContainerStatsRequest.filter.podSandboxID = "sandbox-1"
+        listContainerStatsRequest.filter.labelSelector = ["tier": "frontend"]
+        let containerStatsList = try await client.listContainerStats(listContainerStatsRequest)
+        #expect(containerStatsList.stats.map(\.attributes.id) == ["container-1"])
+
+        var podSandboxStatsRequest = Runtime_V1_PodSandboxStatsRequest()
+        podSandboxStatsRequest.podSandboxID = "sandbox-1"
+        let podSandboxStats = try await client.podSandboxStats(podSandboxStatsRequest)
+        #expect(podSandboxStats.stats.attributes.id == "sandbox-1")
+        #expect(podSandboxStats.stats.attributes.metadata.name == "demo")
+
+        var listPodSandboxStatsRequest = Runtime_V1_ListPodSandboxStatsRequest()
+        listPodSandboxStatsRequest.filter.labelSelector = ["app": "demo"]
+        let podSandboxStatsList = try await client.listPodSandboxStats(listPodSandboxStatsRequest)
+        #expect(podSandboxStatsList.stats.map(\.attributes.id) == ["sandbox-1"])
+
         var createRequest = Runtime_V1_CreateContainerRequest()
         createRequest.podSandboxID = "sandbox-1"
         createRequest.sandboxConfig.logDirectory = "/var/log/pods/default_demo_uid"

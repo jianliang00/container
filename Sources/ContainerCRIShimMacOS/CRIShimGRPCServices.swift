@@ -479,6 +479,60 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         }
     }
 
+    public func containerStats(
+        request: Runtime_V1_ContainerStatsRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ContainerStatsResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.containerStats.rawValue) {
+            let metadata = try containerMetadata(
+                id: request.containerID,
+                operation: "ContainerStats"
+            )
+            var response = Runtime_V1_ContainerStatsResponse()
+            response.stats = makeCRIContainerStats(metadata)
+            return response
+        }
+    }
+
+    public func listContainerStats(
+        request: Runtime_V1_ListContainerStatsRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ListContainerStatsResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.listContainerStats.rawValue) {
+            var response = Runtime_V1_ListContainerStatsResponse()
+            response.stats = try filterCRIContainers(metadataStore.listContainers(), request: request)
+                .map(makeCRIContainerStats)
+            return response
+        }
+    }
+
+    public func podSandboxStats(
+        request: Runtime_V1_PodSandboxStatsRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_PodSandboxStatsResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.podSandboxStats.rawValue) {
+            let metadata = try sandboxMetadata(
+                id: request.podSandboxID,
+                operation: "PodSandboxStats"
+            )
+            var response = Runtime_V1_PodSandboxStatsResponse()
+            response.stats = makeCRIPodSandboxStats(metadata)
+            return response
+        }
+    }
+
+    public func listPodSandboxStats(
+        request: Runtime_V1_ListPodSandboxStatsRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ListPodSandboxStatsResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.listPodSandboxStats.rawValue) {
+            var response = Runtime_V1_ListPodSandboxStatsResponse()
+            response.stats = try filterCRIPodSandboxes(metadataStore.listSandboxes(), request: request)
+                .map(makeCRIPodSandboxStats)
+            return response
+        }
+    }
+
     private func containerMetadata(id rawID: String, operation: String) throws -> CRIShimContainerMetadata {
         let containerID = rawID.trimmed
         guard !containerID.isEmpty else {

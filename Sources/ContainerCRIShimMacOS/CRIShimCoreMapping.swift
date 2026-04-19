@@ -16,6 +16,7 @@
 
 import ContainerCRI
 import ContainerResource
+import ContainerizationOCI
 import Foundation
 
 func makeCRIShimSandboxMetadata(
@@ -45,6 +46,44 @@ func makeCRIShimSandboxMetadata(
         createdAt: now,
         updatedAt: now
     )
+}
+
+func makeCRIShimSandboxConfiguration(
+    id: String,
+    request: Runtime_V1_RunPodSandboxRequest,
+    handler: ResolvedRuntimeHandler,
+    sandboxImage: CRIShimImageRecord
+) throws -> ContainerConfiguration {
+    let sandboxID = id.trimmed
+    guard !sandboxID.isEmpty else {
+        throw CRIShimError.invalidArgument("sandbox id is required")
+    }
+
+    var configuration = ContainerConfiguration(
+        id: sandboxID,
+        image: try makeCRIShimImageDescription(sandboxImage, requestedReference: handler.sandboxImage),
+        process: ProcessConfiguration(
+            executable: "/usr/bin/true",
+            arguments: [],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+    )
+    configuration.platform = Platform(
+        arch: handler.workloadPlatform.architecture ?? "arm64",
+        os: handler.workloadPlatform.os ?? "darwin"
+    )
+    configuration.runtimeHandler = "container-runtime-macos"
+    configuration.labels = request.config.labels
+    configuration.macosGuest = ContainerConfiguration.MacOSGuestOptions(
+        snapshotEnabled: false,
+        guiEnabled: handler.guiEnabled,
+        agentPort: 27_000,
+        networkBackend: try makeCRIShimMacOSNetworkBackend(handler.networkBackend)
+    )
+    return configuration
 }
 
 func makeCRIShimContainerMetadata(
@@ -81,6 +120,31 @@ func makeCRIShimContainerMetadata(
     )
 }
 
+func makeCRIShimImageDescription(
+    _ image: CRIShimImageRecord,
+    requestedReference: String
+) throws -> ImageDescription {
+    let digest = image.digest.trimmed
+    guard !digest.isEmpty else {
+        throw CRIShimError.invalidArgument("image \(requestedReference) is missing a resolved digest")
+    }
+
+    let mediaType = image.mediaType.trimmed
+    guard !mediaType.isEmpty else {
+        throw CRIShimError.invalidArgument("image \(requestedReference) is missing a descriptor media type")
+    }
+
+    return ImageDescription(
+        reference: image.reference.trimmed.isEmpty ? requestedReference : image.reference,
+        descriptor: Descriptor(
+            mediaType: mediaType,
+            digest: digest,
+            size: Int64(min(image.size, UInt64(Int64.max))),
+            annotations: image.annotations.isEmpty ? nil : image.annotations
+        )
+    )
+}
+
 func makeCRIShimWorkloadConfiguration(
     id: String,
     request: Runtime_V1_CreateContainerRequest,
@@ -99,6 +163,19 @@ func makeCRIShimWorkloadConfiguration(
         workloadImageReference: image,
         workloadImageDigest: emptyStringAsNil(workloadImageDigest ?? "")
     )
+}
+
+private func makeCRIShimMacOSNetworkBackend(
+    _ value: String
+) throws -> ContainerConfiguration.MacOSGuestOptions.NetworkBackend {
+    switch value.trimmed {
+    case "virtualizationNAT":
+        return .virtualizationNAT
+    case "vmnetShared":
+        return .vmnetShared
+    default:
+        throw CRIShimError.invalidArgument("unsupported macOS network backend: \(value)")
+    }
 }
 
 func makeCRIShimMounts(_ mounts: [Runtime_V1_Mount]) throws -> [Filesystem] {

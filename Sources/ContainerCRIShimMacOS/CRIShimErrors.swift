@@ -14,6 +14,8 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationError
+
 public enum CRIShimErrorKind: String, Sendable, Codable, Equatable {
     case unsupported
     case invalidArgument
@@ -91,6 +93,19 @@ public enum CRIShimErrorMapper {
             switch error {
             case .missingRuntimeEndpoint:
                 return CRIShimErrorDisposition(kind: .invalidArgument, message: error.description)
+            }
+        }
+
+        if let error = error as? ContainerizationError {
+            switch error.code {
+            case .invalidArgument, .invalidState, .empty:
+                return CRIShimErrorDisposition(kind: .invalidArgument, message: error.description)
+            case .notFound:
+                return CRIShimErrorDisposition(kind: .notFound, message: error.description)
+            case .unsupported:
+                return CRIShimErrorDisposition(kind: .unsupported, message: error.description)
+            default:
+                return CRIShimErrorDisposition(kind: .internalError, message: error.description)
             }
         }
 

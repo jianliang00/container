@@ -19,20 +19,11 @@ Configuration:
 
 CRI server:
 
-- [ ] Wire CRI sandbox metadata persistence into sandbox lifecycle RPCs.
 - [ ] Execute CRI metadata reconcile plans against core snapshots on shim
   startup.
 
 RuntimeService:
 
-- [ ] Implement `RunPodSandbox` with configured runtime handler and sandbox
-  image.
-- [ ] Invoke CNI `ADD` during `RunPodSandbox`.
-- [ ] Start the macOS sandbox VM after successful CNI `ADD`.
-- [ ] Implement `StopPodSandbox`.
-- [ ] Invoke CNI `DEL` during sandbox stop and cleanup.
-- [ ] Remove sandbox policy state during sandbox stop and cleanup.
-- [ ] Implement `RemovePodSandbox`.
 - [ ] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
   snapshots and CNI network state.
 - [ ] Support CRI container mounts for macOS guest workloads.

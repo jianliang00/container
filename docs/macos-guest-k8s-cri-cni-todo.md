@@ -33,11 +33,6 @@ RuntimeService:
 - [ ] Implement minimal `ContainerStats`, `ListContainerStats`,
   `PodSandboxStats`, and `ListPodSandboxStats`.
 
-ImageService:
-
-- [ ] Validate sandbox images before runtime handler use.
-- [ ] Validate workload images before container start.
-
 Logs and exec streaming:
 
 - [ ] Implement CRI log adapter from workload stdout/stderr to kubelet log path.

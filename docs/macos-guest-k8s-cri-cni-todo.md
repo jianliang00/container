@@ -30,8 +30,6 @@ RuntimeService:
 - [ ] Implement `ReopenContainerLog`.
 - [ ] Implement `Exec` through a loopback streaming server.
 - [ ] Implement `PortForward` through a loopback streaming server.
-- [ ] Implement minimal `ContainerStats`, `ListContainerStats`,
-  `PodSandboxStats`, and `ListPodSandboxStats`.
 
 Logs and exec streaming:
 

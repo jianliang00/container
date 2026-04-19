@@ -101,13 +101,13 @@ public enum CRIRuntimeOperationSurface {
         case .portForward:
             return "PortForward is not wired to the streaming server yet"
         case .containerStats:
-            return "ContainerStats is not wired to workload stats yet"
+            return "ContainerStats is implemented by the protobuf-backed CRI server"
         case .listContainerStats:
-            return "ListContainerStats is not wired to workload stats yet"
+            return "ListContainerStats is implemented by the protobuf-backed CRI server"
         case .podSandboxStats:
-            return "PodSandboxStats is not wired to sandbox stats yet"
+            return "PodSandboxStats is implemented by the protobuf-backed CRI server"
         case .listPodSandboxStats:
-            return "ListPodSandboxStats is not wired to sandbox stats yet"
+            return "ListPodSandboxStats is implemented by the protobuf-backed CRI server"
         case .checkpointContainer:
             return "CheckpointContainer is not supported for macOS guest workloads"
         case .getContainerEvents:

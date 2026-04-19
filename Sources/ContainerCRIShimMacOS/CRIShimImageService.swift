@@ -17,11 +17,13 @@
 import ContainerAPIClient
 import ContainerCRI
 import ContainerKit
+import ContainerizationOCI
 import Foundation
 
 public struct CRIShimImageRecord: Equatable, Sendable {
     public var reference: String
     public var digest: String
+    public var mediaType: String
     public var size: UInt64
     public var annotations: [String: String]
     public var pinned: Bool
@@ -29,12 +31,14 @@ public struct CRIShimImageRecord: Equatable, Sendable {
     public init(
         reference: String,
         digest: String,
+        mediaType: String = MediaTypes.index,
         size: UInt64,
         annotations: [String: String] = [:],
         pinned: Bool = false
     ) {
         self.reference = reference
         self.digest = digest
+        self.mediaType = mediaType
         self.size = size
         self.annotations = annotations
         self.pinned = pinned
@@ -157,11 +161,12 @@ public enum CRIShimImagePullAuthentication: Equatable, Sendable {
 }
 
 extension CRIShimImageRecord {
-    init(image: Image) {
+    init(image: ContainerAPIClient.ClientImage) {
         let descriptorSize = image.descriptor.size
         self.init(
             reference: image.reference,
             digest: image.digest,
+            mediaType: image.descriptor.mediaType,
             size: UInt64(max(0, descriptorSize)),
             annotations: image.descriptor.annotations ?? [:],
             pinned: false

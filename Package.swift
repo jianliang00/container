@@ -157,6 +157,8 @@ let package = Package(
                 .product(name: "GRPC", package: "grpc-swift"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerAPIClient",
                 "ContainerCRI",
                 "ContainerKit",

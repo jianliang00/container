@@ -80,7 +80,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         config: CRIShimConfig,
         versionInfo: CRIShimRuntimeVersionInfo = CRIShimRuntimeVersionInfo(),
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
-        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
+        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
+        cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager()
     ) throws {
         let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
         self.init(
@@ -91,7 +92,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     metadataStore: metadataStore,
                     versionInfo: versionInfo,
                     runtimeManager: runtimeManager,
-                    imageManager: imageManager
+                    imageManager: imageManager,
+                    cniManager: cniManager
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
@@ -107,7 +109,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         eventLoopGroup: any EventLoopGroup,
         readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
-        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager()
+        imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
+        cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager()
     ) throws {
         let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
         self.init(
@@ -119,7 +122,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     versionInfo: versionInfo,
                     readinessChecker: readinessChecker,
                     runtimeManager: runtimeManager,
-                    imageManager: imageManager
+                    imageManager: imageManager,
+                    cniManager: cniManager
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],

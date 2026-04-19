@@ -89,11 +89,17 @@ struct CRIShimRuntimeServerTests {
         let imageManager = RecordingImageManager(
             images: [
                 CRIShimImageRecord(
+                    reference: "localhost/macos-sandbox:latest",
+                    digest: "sha256:sandbox",
+                    size: 16_384,
+                    annotations: ["org.apple.container.macos.image.role": "sandbox"]
+                ),
+                CRIShimImageRecord(
                     reference: "example.com/macos/workload:latest",
                     digest: "sha256:abc123",
                     size: 4096,
                     annotations: ["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]
-                )
+                ),
             ],
             pulledImage: CRIShimImageRecord(
                 reference: "example.com/macos/pulled:latest",
@@ -111,6 +117,7 @@ struct CRIShimRuntimeServerTests {
                 stdout: Data("exec stdout".utf8),
                 stderr: Data("exec stderr".utf8)
             ))
+        let cniManager = RecordingCNIManager()
         let server = try CRIShimGRPCServer(
             socketPath: socketPath,
             config: config,
@@ -138,7 +145,8 @@ struct CRIShimRuntimeServerTests {
                 )
             ),
             runtimeManager: runtimeManager,
-            imageManager: imageManager
+            imageManager: imageManager,
+            cniManager: cniManager
         )
         let serverTask = Task {
             try await server.run()
@@ -193,6 +201,76 @@ struct CRIShimRuntimeServerTests {
         #expect(!runtimeConfig.hasLinux)
 
         _ = try await client.updateRuntimeConfig(Runtime_V1_UpdateRuntimeConfigRequest())
+
+        var runSandboxRequest = Runtime_V1_RunPodSandboxRequest()
+        runSandboxRequest.runtimeHandler = "macos"
+        runSandboxRequest.config.metadata.uid = "created-pod-uid"
+        runSandboxRequest.config.metadata.namespace = "default"
+        runSandboxRequest.config.metadata.name = "created-pod"
+        runSandboxRequest.config.metadata.attempt = 1
+        runSandboxRequest.config.labels = ["app": "created-pod"]
+        runSandboxRequest.config.annotations = ["pod": "created"]
+        let runSandbox = try await client.runPodSandbox(runSandboxRequest)
+        #expect(!runSandbox.podSandboxID.isEmpty)
+        #expect(runtimeManager.createSandboxCalls.count == 1)
+        let createSandboxCall = try #require(runtimeManager.createSandboxCalls.first)
+        #expect(createSandboxCall.id == runSandbox.podSandboxID)
+        #expect(createSandboxCall.image.reference == "localhost/macos-sandbox:latest")
+        #expect(createSandboxCall.image.digest == "sha256:sandbox")
+        #expect(createSandboxCall.platform.os == "darwin")
+        #expect(createSandboxCall.platform.architecture == "arm64")
+        #expect(createSandboxCall.runtimeHandler == "container-runtime-macos")
+        #expect(createSandboxCall.macosGuest?.networkBackend == .vmnetShared)
+        #expect(cniManager.addCalls.count == 1)
+        let cniAddCall = try #require(cniManager.addCalls.first)
+        #expect(cniAddCall.sandboxID == runSandbox.podSandboxID)
+        #expect(cniAddCall.networkName == "default")
+        #expect(runtimeManager.startSandboxCalls.count == 1)
+        let startSandboxCall = try #require(runtimeManager.startSandboxCalls.first)
+        #expect(startSandboxCall.id == runSandbox.podSandboxID)
+        #expect(!startSandboxCall.presentGUI)
+
+        var createdSandboxStatusRequest = Runtime_V1_PodSandboxStatusRequest()
+        createdSandboxStatusRequest.podSandboxID = runSandbox.podSandboxID
+        createdSandboxStatusRequest.verbose = true
+        let createdSandboxStatus = try await client.podSandboxStatus(createdSandboxStatusRequest)
+        #expect(createdSandboxStatus.status.id == runSandbox.podSandboxID)
+        #expect(createdSandboxStatus.status.metadata.name == "created-pod")
+        #expect(createdSandboxStatus.status.metadata.uid == "created-pod-uid")
+        #expect(createdSandboxStatus.status.state == .sandboxReady)
+        #expect(createdSandboxStatus.status.runtimeHandler == "macos")
+        let createdSandboxStatusInfo = try #require(createdSandboxStatus.info["metadata"])
+        let createdSandboxStatusMetadata = try JSONDecoder.criShimMetadataDecoder.decode(
+            CRIShimSandboxMetadata.self,
+            from: Data(createdSandboxStatusInfo.utf8)
+        )
+        #expect(createdSandboxStatusMetadata.networkLeaseID == "macvmnet://sandbox/\(runSandbox.podSandboxID)")
+        #expect(createdSandboxStatusMetadata.networkAttachments == ["default"])
+
+        var stopSandboxRequest = Runtime_V1_StopPodSandboxRequest()
+        stopSandboxRequest.podSandboxID = runSandbox.podSandboxID
+        _ = try await client.stopPodSandbox(stopSandboxRequest)
+        #expect(runtimeManager.stopSandboxCalls.count == 1)
+        let stopSandboxCall = try #require(runtimeManager.stopSandboxCalls.first)
+        #expect(stopSandboxCall.id == runSandbox.podSandboxID)
+        #expect(stopSandboxCall.options.timeoutInSeconds == 5)
+        #expect(cniManager.deleteCalls.count == 1)
+        let cniDeleteCall = try #require(cniManager.deleteCalls.first)
+        #expect(cniDeleteCall.sandboxID == runSandbox.podSandboxID)
+        #expect(cniDeleteCall.networkName == "default")
+        #expect(runtimeManager.removeSandboxPolicyCalls == [runSandbox.podSandboxID])
+
+        let stoppedSandboxStatus = try await client.podSandboxStatus(createdSandboxStatusRequest)
+        #expect(stoppedSandboxStatus.status.state == .sandboxNotready)
+
+        var removeSandboxRequest = Runtime_V1_RemovePodSandboxRequest()
+        removeSandboxRequest.podSandboxID = runSandbox.podSandboxID
+        _ = try await client.removePodSandbox(removeSandboxRequest)
+        #expect(runtimeManager.removeSandboxCalls.count == 1)
+        let removeSandboxCall = try #require(runtimeManager.removeSandboxCalls.first)
+        #expect(removeSandboxCall.id == runSandbox.podSandboxID)
+        #expect(removeSandboxCall.force)
+        #expect(try metadataStore.sandbox(id: runSandbox.podSandboxID) == nil)
 
         var sandboxFilter = Runtime_V1_PodSandboxFilter()
         sandboxFilter.labelSelector = ["app": "demo"]
@@ -319,10 +397,12 @@ struct CRIShimRuntimeServerTests {
 
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
-        #expect(listImages.images.count == 1)
-        #expect(listImages.images[0].id == "sha256:abc123")
-        #expect(listImages.images[0].repoTags == ["example.com/macos/workload:latest"])
-        #expect(listImages.images[0].repoDigests == ["example.com/macos/workload@sha256:abc123"])
+        #expect(listImages.images.count == 2)
+        let listedWorkloadImage = try #require(
+            listImages.images.first { $0.id == "sha256:abc123" }
+        )
+        #expect(listedWorkloadImage.repoTags == ["example.com/macos/workload:latest"])
+        #expect(listedWorkloadImage.repoDigests == ["example.com/macos/workload@sha256:abc123"])
 
         var imageStatusRequest = Runtime_V1_ImageStatusRequest()
         imageStatusRequest.image.image = "sha256:abc123"
@@ -440,6 +520,11 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var execSyncResult: ExecSyncResult
     private var workloadConfigurations: [String: WorkloadConfiguration] = [:]
     private var workloadSnapshots: [String: WorkloadSnapshot] = [:]
+    private(set) var createSandboxCalls: [ContainerConfiguration] = []
+    private(set) var startSandboxCalls: [(id: String, presentGUI: Bool)] = []
+    private(set) var stopSandboxCalls: [(id: String, options: ContainerStopOptions)] = []
+    private(set) var removeSandboxCalls: [(id: String, force: Bool)] = []
+    private(set) var removeSandboxPolicyCalls: [String] = []
     private(set) var createWorkloadCalls: [RecordingCreateWorkloadCall] = []
     private(set) var startWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var stopWorkloadCalls: [RecordingStopWorkloadCall] = []
@@ -448,6 +533,39 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
 
     init(execSyncResult: ExecSyncResult) {
         self.execSyncResult = execSyncResult
+    }
+
+    func createSandbox(
+        configuration: ContainerConfiguration
+    ) async throws {
+        createSandboxCalls.append(configuration)
+    }
+
+    func startSandbox(
+        id: String,
+        presentGUI: Bool
+    ) async throws {
+        startSandboxCalls.append((id: id, presentGUI: presentGUI))
+    }
+
+    func stopSandbox(
+        id: String,
+        options: ContainerStopOptions
+    ) async throws {
+        stopSandboxCalls.append((id: id, options: options))
+    }
+
+    func removeSandbox(
+        id: String,
+        force: Bool
+    ) async throws {
+        removeSandboxCalls.append((id: id, force: force))
+    }
+
+    func removeSandboxPolicy(
+        sandboxID: String
+    ) async throws {
+        removeSandboxPolicyCalls.append(sandboxID)
     }
 
     func createWorkload(
@@ -537,6 +655,33 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
                 timeout: timeout
             ))
         return execSyncResult
+    }
+}
+
+private final class RecordingCNIManager: CRIShimCNIManaging, @unchecked Sendable {
+    private(set) var addCalls: [(sandboxID: String, networkName: String)] = []
+    private(set) var deleteCalls: [(sandboxID: String, networkName: String)] = []
+
+    func add(
+        sandboxID: String,
+        networkName: String,
+        config: CRIShimConfig
+    ) async throws -> CRIShimCNIResult {
+        addCalls.append((sandboxID: sandboxID, networkName: networkName))
+        return CRIShimCNIResult(
+            networkName: networkName,
+            interfaceName: "eth0",
+            sandboxURI: "macvmnet://sandbox/\(sandboxID)",
+            podIPs: ["192.168.64.10/24"]
+        )
+    }
+
+    func delete(
+        sandboxID: String,
+        networkName: String,
+        config: CRIShimConfig
+    ) async throws {
+        deleteCalls.append((sandboxID: sandboxID, networkName: networkName))
     }
 }
 

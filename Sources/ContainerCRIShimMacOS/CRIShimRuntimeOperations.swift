@@ -26,6 +26,29 @@ import Darwin
 #endif
 
 public protocol CRIShimRuntimeManaging: Sendable {
+    func createSandbox(
+        configuration: ContainerConfiguration
+    ) async throws
+
+    func startSandbox(
+        id: String,
+        presentGUI: Bool
+    ) async throws
+
+    func stopSandbox(
+        id: String,
+        options: ContainerStopOptions
+    ) async throws
+
+    func removeSandbox(
+        id: String,
+        force: Bool
+    ) async throws
+
+    func removeSandboxPolicy(
+        sandboxID: String
+    ) async throws
+
     func createWorkload(
         sandboxID: String,
         configuration: WorkloadConfiguration
@@ -64,6 +87,39 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
 
     public init(kit: ContainerKit = ContainerKit()) {
         self.kit = kit
+    }
+
+    public func createSandbox(
+        configuration: ContainerConfiguration
+    ) async throws {
+        try await kit.createSandbox(configuration: configuration)
+    }
+
+    public func startSandbox(
+        id: String,
+        presentGUI: Bool
+    ) async throws {
+        try await kit.startSandbox(id: id, presentGUI: presentGUI)
+    }
+
+    public func stopSandbox(
+        id: String,
+        options: ContainerStopOptions
+    ) async throws {
+        try await kit.stopSandbox(id: id, options: options)
+    }
+
+    public func removeSandbox(
+        id: String,
+        force: Bool
+    ) async throws {
+        try await kit.removeSandbox(id: id, force: force)
+    }
+
+    public func removeSandboxPolicy(
+        sandboxID: String
+    ) async throws {
+        try await kit.removeSandboxPolicy(sandboxID: sandboxID)
     }
 
     public func createWorkload(

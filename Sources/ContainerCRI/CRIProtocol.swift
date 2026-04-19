@@ -65,15 +65,15 @@ public enum CRIRuntimeOperationSurface {
         case .updateRuntimeConfig:
             return "UpdateRuntimeConfig is implemented by the protobuf-backed CRI server"
         case .runPodSandbox:
-            return "RunPodSandbox is not wired to sandbox lifecycle yet"
+            return "RunPodSandbox is implemented by the protobuf-backed CRI server"
         case .stopPodSandbox:
-            return "StopPodSandbox is not wired to sandbox lifecycle yet"
+            return "StopPodSandbox is implemented by the protobuf-backed CRI server"
         case .removePodSandbox:
-            return "RemovePodSandbox is not wired to sandbox lifecycle yet"
+            return "RemovePodSandbox is implemented by the protobuf-backed CRI server"
         case .podSandboxStatus:
-            return "PodSandboxStatus is not wired to sandbox inspection yet"
+            return "PodSandboxStatus is implemented by the protobuf-backed CRI server"
         case .listPodSandbox:
-            return "ListPodSandbox is not wired to sandbox inventory yet"
+            return "ListPodSandbox is implemented by the protobuf-backed CRI server"
         case .createContainer:
             return "CreateContainer is implemented by the protobuf-backed CRI server"
         case .startContainer:
@@ -83,9 +83,9 @@ public enum CRIRuntimeOperationSurface {
         case .removeContainer:
             return "RemoveContainer is implemented by the protobuf-backed CRI server"
         case .containerStatus:
-            return "ContainerStatus is not wired to workload inspection yet"
+            return "ContainerStatus is implemented by the protobuf-backed CRI server"
         case .listContainers:
-            return "ListContainers is not wired to workload inventory yet"
+            return "ListContainers is implemented by the protobuf-backed CRI server"
         case .updateContainerResources:
             return "UpdateContainerResources is a deterministic no-op for macOS guest workloads"
         case .updatePodSandboxResources:
@@ -93,7 +93,7 @@ public enum CRIRuntimeOperationSurface {
         case .reopenContainerLog:
             return "ReopenContainerLog is not wired to log rotation yet"
         case .execSync:
-            return "ExecSync requires a runtime manager"
+            return "ExecSync is implemented by the protobuf-backed CRI server"
         case .exec:
             return "Exec is not wired to the streaming server yet"
         case .attach:

@@ -92,6 +92,28 @@ func makeCRIContainerStatus(
     return status
 }
 
+func makeCRIContainerStats(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_ContainerStats {
+    var stats = Runtime_V1_ContainerStats()
+    var attributes = Runtime_V1_ContainerAttributes()
+    attributes.id = metadata.id
+    attributes.metadata = makeCRIContainerMetadata(metadata)
+    attributes.labels = metadata.labels
+    attributes.annotations = metadata.annotations
+    stats.attributes = attributes
+    return stats
+}
+
+func makeCRIPodSandboxStats(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandboxStats {
+    var stats = Runtime_V1_PodSandboxStats()
+    var attributes = Runtime_V1_PodSandboxAttributes()
+    attributes.id = metadata.id
+    attributes.metadata = makeCRIPodSandboxMetadata(metadata)
+    attributes.labels = metadata.labels
+    attributes.annotations = metadata.annotations
+    stats.attributes = attributes
+    return stats
+}
+
 func filterCRIPodSandboxes(
     _ sandboxes: [CRIShimSandboxMetadata],
     request: Runtime_V1_ListPodSandboxRequest
@@ -139,6 +161,49 @@ func filterCRIContainers(
             return labelsMatch(filter.labelSelector, labels: container.labels)
         }
         .sorted(by: containerSort)
+}
+
+func filterCRIContainers(
+    _ containers: [CRIShimContainerMetadata],
+    request: Runtime_V1_ListContainerStatsRequest
+) -> [CRIShimContainerMetadata] {
+    guard request.hasFilter else {
+        return containers.sorted(by: containerSort)
+    }
+
+    let filter = request.filter
+    return
+        containers
+        .filter { container in
+            if !filter.id.isEmpty, container.id != filter.id {
+                return false
+            }
+            if !filter.podSandboxID.isEmpty, container.sandboxID != filter.podSandboxID {
+                return false
+            }
+            return labelsMatch(filter.labelSelector, labels: container.labels)
+        }
+        .sorted(by: containerSort)
+}
+
+func filterCRIPodSandboxes(
+    _ sandboxes: [CRIShimSandboxMetadata],
+    request: Runtime_V1_ListPodSandboxStatsRequest
+) -> [CRIShimSandboxMetadata] {
+    guard request.hasFilter else {
+        return sandboxes.sorted(by: sandboxSort)
+    }
+
+    let filter = request.filter
+    return
+        sandboxes
+        .filter { sandbox in
+            if !filter.id.isEmpty, sandbox.id != filter.id {
+                return false
+            }
+            return labelsMatch(filter.labelSelector, labels: sandbox.labels)
+        }
+        .sorted(by: sandboxSort)
 }
 
 func makeCRIStatusInfo<T: Encodable>(_ value: T) -> [String: String] {

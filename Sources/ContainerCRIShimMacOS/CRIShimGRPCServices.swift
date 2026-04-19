@@ -43,6 +43,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let readinessChecker: any CRIShimReadinessChecking
     private let runtimeManager: any CRIShimRuntimeManaging
     private let imageManager: any CRIShimImageManaging
+    private let cniManager: any CRIShimCNIManaging
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
@@ -52,6 +53,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         readinessChecker: any CRIShimReadinessChecking = ContainerKitCRIShimReadinessChecker(),
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
+        cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager(),
         handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
         self.config = config
@@ -60,6 +62,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         self.readinessChecker = readinessChecker
         self.runtimeManager = runtimeManager
         self.imageManager = imageManager
+        self.cniManager = cniManager
         self.handlerLogger = handlerLogger
     }
 
@@ -114,6 +117,110 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_UpdateRuntimeConfigResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.updateRuntimeConfig.rawValue) {
             Runtime_V1_UpdateRuntimeConfigResponse()
+        }
+    }
+
+    public func runPodSandbox(
+        request: Runtime_V1_RunPodSandboxRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_RunPodSandboxResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.runPodSandbox.rawValue) {
+            try CRIShimUnsupportedFieldValidator.validate(request)
+
+            let handler = try config.resolveRuntimeHandler(request.runtimeHandler)
+            let sandboxID = UUID().uuidString.lowercased()
+            let sandboxImage = try await findImage(reference: handler.sandboxImage)
+            var metadata = try makeCRIShimSandboxMetadata(
+                id: sandboxID,
+                request: request,
+                handler: handler
+            )
+            let sandboxConfiguration = try makeCRIShimSandboxConfiguration(
+                id: sandboxID,
+                request: request,
+                handler: handler,
+                sandboxImage: sandboxImage
+            )
+
+            try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
+            do {
+                try metadataStore.upsertSandbox(metadata)
+            } catch {
+                try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
+                throw error
+            }
+
+            do {
+                let network = try await cniManager.add(
+                    sandboxID: sandboxID,
+                    networkName: handler.network,
+                    config: config
+                )
+                metadata.networkLeaseID = network.sandboxURI
+                metadata.networkAttachments = [network.networkName]
+                metadata.state = .ready
+                metadata.updatedAt = Date()
+                try metadataStore.upsertSandbox(metadata)
+
+                try await runtimeManager.startSandbox(id: sandboxID, presentGUI: handler.guiEnabled)
+                metadata.state = .running
+                metadata.updatedAt = Date()
+                try metadataStore.upsertSandbox(metadata)
+            } catch {
+                try? await cniManager.delete(sandboxID: sandboxID, networkName: handler.network, config: config)
+                try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
+                try? metadataStore.deleteSandbox(id: sandboxID)
+                throw error
+            }
+
+            var response = Runtime_V1_RunPodSandboxResponse()
+            response.podSandboxID = sandboxID
+            return response
+        }
+    }
+
+    public func stopPodSandbox(
+        request: Runtime_V1_StopPodSandboxRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_StopPodSandboxResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.stopPodSandbox.rawValue) {
+            var metadata = try sandboxMetadata(
+                id: request.podSandboxID,
+                operation: "StopPodSandbox"
+            )
+            if metadata.state != .released {
+                try await stopSandboxResources(metadata: &metadata)
+            }
+            return Runtime_V1_StopPodSandboxResponse()
+        }
+    }
+
+    public func removePodSandbox(
+        request: Runtime_V1_RemovePodSandboxRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_RemovePodSandboxResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.removePodSandbox.rawValue) {
+            var metadata = try sandboxMetadata(
+                id: request.podSandboxID,
+                operation: "RemovePodSandbox"
+            )
+            if metadata.state != .released {
+                try await stopSandboxResources(metadata: &metadata)
+            }
+
+            do {
+                try await runtimeManager.removeSandbox(id: metadata.id, force: true)
+            } catch {
+                try throwUnlessNotFound(error)
+            }
+
+            let containers = try metadataStore.listContainers()
+                .filter { $0.sandboxID == metadata.id }
+            for container in containers {
+                try metadataStore.deleteContainer(id: container.id)
+            }
+            try metadataStore.deleteSandbox(id: metadata.id)
+            return Runtime_V1_RemovePodSandboxResponse()
         }
     }
 
@@ -219,7 +326,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
 
             let containerID = UUID().uuidString.lowercased()
             let requestedImage = try CRIShimImageReference.resolve(request.config.image)
-            let workloadImage = try await findWorkloadImage(reference: requestedImage)
+            let workloadImage = try await findImage(reference: requestedImage)
             let workloadImageDigest = workloadImage.digest.trimmed
             guard !workloadImageDigest.isEmpty else {
                 throw CRIShimError.invalidArgument("workload image \(requestedImage) is missing a resolved digest")
@@ -391,12 +498,109 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         return metadata
     }
 
-    private func findWorkloadImage(reference: String) async throws -> CRIShimImageRecord {
+    private func stopSandboxResources(metadata: inout CRIShimSandboxMetadata) async throws {
+        var firstError: (any Error)?
+        func record(_ error: any Error) {
+            if firstError == nil {
+                firstError = error
+            }
+        }
+
+        let now = Date()
+        let containers = try metadataStore.listContainers()
+            .filter { $0.sandboxID == metadata.id }
+
+        for var container in containers where container.state == .created || container.state == .running {
+            var stopped = true
+            if container.state == .running {
+                do {
+                    try await runtimeManager.stopWorkload(
+                        sandboxID: metadata.id,
+                        workloadID: container.id,
+                        options: .default
+                    )
+                } catch {
+                    if !isNotFound(error) {
+                        record(error)
+                        stopped = false
+                    }
+                }
+            }
+            guard stopped else {
+                continue
+            }
+            container.state = .exited
+            container.exitedAt = now
+            try metadataStore.upsertContainer(container)
+        }
+
+        if metadata.state != .stopped {
+            do {
+                try await runtimeManager.stopSandbox(id: metadata.id, options: .default)
+            } catch {
+                if !isNotFound(error) {
+                    record(error)
+                }
+            }
+        }
+
+        do {
+            try await runtimeManager.removeSandboxPolicy(sandboxID: metadata.id)
+        } catch {
+            if !isNotFound(error) {
+                record(error)
+            }
+        }
+
+        if let networkName = sandboxNetworkName(metadata) {
+            do {
+                try await cniManager.delete(
+                    sandboxID: metadata.id,
+                    networkName: networkName,
+                    config: config
+                )
+            } catch {
+                record(error)
+            }
+        }
+
+        if let firstError {
+            throw firstError
+        }
+
+        metadata.networkLeaseID = nil
+        metadata.networkAttachments = []
+        metadata.state = .stopped
+        metadata.updatedAt = now
+        try metadataStore.upsertSandbox(metadata)
+    }
+
+    private func findImage(reference: String) async throws -> CRIShimImageRecord {
         let images = try await imageManager.listImages()
         guard let image = images.first(where: { $0.matches(reference: reference) }) else {
             throw CRIShimError.notFound("image not found: \(reference)")
         }
         return image
+    }
+}
+
+private func sandboxNetworkName(_ metadata: CRIShimSandboxMetadata) -> String? {
+    guard metadata.networkLeaseID != nil || !metadata.networkAttachments.isEmpty else {
+        return nil
+    }
+    if let network = metadata.network?.trimmed, !network.isEmpty {
+        return network
+    }
+    return metadata.networkAttachments.first(where: { !$0.trimmed.isEmpty })
+}
+
+private func isNotFound(_ error: any Error) -> Bool {
+    CRIShimErrorMapper.disposition(for: error).kind == .notFound
+}
+
+private func throwUnlessNotFound(_ error: any Error) throws {
+    if !isNotFound(error) {
+        throw error
     }
 }
 

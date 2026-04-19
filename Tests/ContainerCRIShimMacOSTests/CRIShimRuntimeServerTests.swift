@@ -98,7 +98,8 @@ struct CRIShimRuntimeServerTests {
                     reference: "example.com/macos/workload:latest",
                     digest: "sha256:abc123",
                     size: 4096,
-                    annotations: ["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]
+                    annotations: MacOSImageContract.annotations(for: .workload)
+                        .merging(["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]) { current, _ in current }
                 ),
             ],
             pulledImage: CRIShimImageRecord(

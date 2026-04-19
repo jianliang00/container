@@ -130,6 +130,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             let handler = try config.resolveRuntimeHandler(request.runtimeHandler)
             let sandboxID = UUID().uuidString.lowercased()
             let sandboxImage = try await findImage(reference: handler.sandboxImage)
+            try validateCRIShimImage(
+                sandboxImage,
+                expectedRole: .sandbox,
+                requestedReference: handler.sandboxImage
+            )
             var metadata = try makeCRIShimSandboxMetadata(
                 id: sandboxID,
                 request: request,
@@ -327,6 +332,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             let containerID = UUID().uuidString.lowercased()
             let requestedImage = try CRIShimImageReference.resolve(request.config.image)
             let workloadImage = try await findImage(reference: requestedImage)
+            try validateCRIShimImage(
+                workloadImage,
+                expectedRole: .workload,
+                requestedReference: requestedImage
+            )
             let workloadImageDigest = workloadImage.digest.trimmed
             guard !workloadImageDigest.isEmpty else {
                 throw CRIShimError.invalidArgument("workload image \(requestedImage) is missing a resolved digest")

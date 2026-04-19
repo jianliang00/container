@@ -17,6 +17,7 @@
 import ContainerAPIClient
 import ContainerCRI
 import ContainerKit
+import ContainerResource
 import ContainerizationOCI
 import Foundation
 
@@ -190,6 +191,42 @@ extension CRIShimImageRecord {
                 reference
             }
         return ["\(baseReference)@\(digest)"]
+    }
+}
+
+func validateCRIShimImage(
+    _ image: CRIShimImageRecord,
+    expectedRole: MacOSImageRole,
+    requestedReference: String
+) throws {
+    guard !image.digest.trimmed.isEmpty else {
+        throw CRIShimError.invalidArgument("image \(requestedReference) is missing a resolved digest")
+    }
+    guard !image.mediaType.trimmed.isEmpty else {
+        throw CRIShimError.invalidArgument("image \(requestedReference) is missing a descriptor media type")
+    }
+
+    do {
+        guard let role = try MacOSImageContract.role(descriptorAnnotations: image.annotations) else {
+            throw MacOSImageContractError.missingRoleAnnotation
+        }
+        guard role == expectedRole else {
+            throw expectedRole == .sandbox
+                ? MacOSImageContractError.sandboxImageRequired
+                : MacOSImageContractError.workloadImageRequired
+        }
+        if expectedRole == .workload {
+            guard let format = try MacOSImageContract.workloadFormat(descriptorAnnotations: image.annotations) else {
+                throw MacOSImageContractError.missingWorkloadFormatAnnotation
+            }
+            guard format == .v1 else {
+                throw MacOSImageContractError.invalidWorkloadFormatAnnotation(format.rawValue)
+            }
+        }
+    } catch let error as MacOSImageContractError {
+        throw CRIShimError.invalidArgument(
+            "image \(requestedReference) cannot be used as a macOS \(expectedRole.rawValue) image: \(error.localizedDescription)"
+        )
     }
 }
 

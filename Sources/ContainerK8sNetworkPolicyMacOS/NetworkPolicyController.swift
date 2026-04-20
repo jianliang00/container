@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerKit
 import ContainerResource
 import ContainerizationExtras
 import Foundation
@@ -296,6 +297,47 @@ public protocol K8sNetworkPolicyAdapter: Sendable {
     func inspect(sandboxID: String) async throws -> SandboxNetworkPolicyState?
 }
 
+extension K8sNetworkPolicyAdapter {
+    @discardableResult
+    public func execute(
+        _ plan: K8sNetworkPolicyReconcilePlan,
+        currentState: K8sNetworkPolicyControllerState = .init()
+    ) async throws -> K8sNetworkPolicyControllerState {
+        var appliedPoliciesBySandboxID = currentState.appliedPoliciesBySandboxID
+        for operation in plan.operations {
+            switch operation {
+            case .apply(let state):
+                let applied = try await apply(state)
+                appliedPoliciesBySandboxID[applied.sandboxID] = applied
+            case .remove(let sandboxID):
+                try await remove(sandboxID: sandboxID)
+                appliedPoliciesBySandboxID.removeValue(forKey: sandboxID)
+            }
+        }
+        return K8sNetworkPolicyControllerState(appliedPoliciesBySandboxID: appliedPoliciesBySandboxID)
+    }
+}
+
+public struct ContainerKitK8sNetworkPolicyAdapter: K8sNetworkPolicyAdapter {
+    public var kit: ContainerKit
+
+    public init(kit: ContainerKit = ContainerKit()) {
+        self.kit = kit
+    }
+
+    public func apply(_ state: SandboxNetworkPolicyState) async throws -> SandboxNetworkPolicyState {
+        try await kit.applySandboxPolicy(state.policy)
+    }
+
+    public func remove(sandboxID: String) async throws {
+        try await kit.removeSandboxPolicy(sandboxID: sandboxID)
+    }
+
+    public func inspect(sandboxID: String) async throws -> SandboxNetworkPolicyState? {
+        try await kit.inspectSandboxPolicy(sandboxID: sandboxID)
+    }
+}
+
 public final class K8sNetworkPolicyFakeAdapter: K8sNetworkPolicyAdapter, @unchecked Sendable {
     public private(set) var appliedPoliciesBySandboxID: [String: SandboxNetworkPolicyState]
     public private(set) var appliedOrder: [String]
@@ -322,7 +364,14 @@ public final class K8sNetworkPolicyFakeAdapter: K8sNetworkPolicyAdapter, @unchec
         appliedPoliciesBySandboxID[sandboxID]
     }
 
-    public func execute(_ plan: K8sNetworkPolicyReconcilePlan) async throws {
+    @discardableResult
+    public func execute(
+        _ plan: K8sNetworkPolicyReconcilePlan,
+        currentState: K8sNetworkPolicyControllerState = .init()
+    ) async throws -> K8sNetworkPolicyControllerState {
+        if !currentState.appliedPoliciesBySandboxID.isEmpty {
+            appliedPoliciesBySandboxID = currentState.appliedPoliciesBySandboxID
+        }
         for operation in plan.operations {
             switch operation {
             case .apply(let state):
@@ -331,6 +380,7 @@ public final class K8sNetworkPolicyFakeAdapter: K8sNetworkPolicyAdapter, @unchec
                 try await remove(sandboxID: sandboxID)
             }
         }
+        return K8sNetworkPolicyControllerState(appliedPoliciesBySandboxID: appliedPoliciesBySandboxID)
     }
 }
 

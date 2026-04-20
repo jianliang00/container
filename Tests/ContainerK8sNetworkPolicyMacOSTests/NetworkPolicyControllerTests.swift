@@ -91,7 +91,8 @@ struct NetworkPolicyControllerTests {
         #expect(initialResult.plan.applyStates.map(\.sandboxID) == ["sandbox-api"])
 
         let adapter = K8sNetworkPolicyFakeAdapter()
-        try await adapter.execute(initialResult.plan)
+        let appliedInitialState = try await adapter.execute(initialResult.plan)
+        #expect(appliedInitialState.appliedPoliciesBySandboxID.keys.sorted() == ["sandbox-api"])
 
         let duplicateSnapshot = watchState.apply(.upsertNetworkPolicy(initialPolicy))
         #expect(duplicateSnapshot.generation == initialSnapshot.generation)
@@ -124,7 +125,8 @@ struct NetworkPolicyControllerTests {
         )
         #expect(updateSnapshot.generation == 7)
         #expect(updateResult.plan.applyStates.map(\.sandboxID) == ["sandbox-api"])
-        try await adapter.execute(updateResult.plan)
+        let appliedUpdateState = try await adapter.execute(updateResult.plan)
+        #expect(appliedUpdateState.appliedPoliciesBySandboxID["sandbox-api"]?.generation == 7)
         #expect(adapter.appliedPoliciesBySandboxID["sandbox-api"]?.generation == 7)
 
         let deleteSnapshot = watchState.apply(.deletePod(uid: "pod-api"))

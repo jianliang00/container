@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationExtras
 import Foundation
 import GRPC
 import NIO
@@ -21,6 +22,7 @@ import Testing
 
 @testable import ContainerCRI
 @testable import ContainerCRIShimMacOS
+@testable import ContainerKit
 @testable import ContainerResource
 
 #if os(Linux)
@@ -112,12 +114,39 @@ struct CRIShimRuntimeServerTests {
                 usedBytes: 65_536,
                 timestampNanoseconds: 1_700_000_000_000_000_000
             ))
+        let sandboxWorkloadSnapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: "container-1",
+                processConfiguration: ProcessConfiguration(executable: "/bin/echo", arguments: [], environment: [])
+            ),
+            status: .running,
+            startedDate: Date(timeIntervalSince1970: 1_700_000_030)
+        )
         let runtimeManager = RecordingRuntimeManager(
             execSyncResult: ExecSyncResult(
                 exitCode: 7,
                 stdout: Data("exec stdout".utf8),
                 stderr: Data("exec stderr".utf8)
-            ))
+            ),
+            sandboxSnapshots: [
+                "sandbox-1": SandboxSnapshot(
+                    status: .running,
+                    networks: [
+                        try makeNetworkAttachment(
+                            network: "default",
+                            address: "192.168.64.20/24",
+                            gateway: "192.168.64.1"
+                        ),
+                        try makeNetworkAttachment(
+                            network: "secondary",
+                            address: "192.168.65.20/24",
+                            gateway: "192.168.65.1"
+                        ),
+                    ],
+                    containers: [],
+                    workloads: [sandboxWorkloadSnapshot]
+                )
+            ])
         let cniManager = RecordingCNIManager()
         let server = try CRIShimGRPCServer(
             socketPath: socketPath,
@@ -287,6 +316,7 @@ struct CRIShimRuntimeServerTests {
         #expect(sandboxes.items[0].metadata.attempt == 2)
         #expect(sandboxes.items[0].state == .sandboxReady)
         #expect(sandboxes.items[0].runtimeHandler == "macos")
+        #expect(runtimeManager.inspectSandboxCalls.contains("sandbox-1"))
 
         var sandboxStatusRequest = Runtime_V1_PodSandboxStatusRequest()
         sandboxStatusRequest.podSandboxID = "sandbox-1"
@@ -295,8 +325,13 @@ struct CRIShimRuntimeServerTests {
         #expect(sandboxStatus.status.id == "sandbox-1")
         #expect(sandboxStatus.status.metadata.attempt == 2)
         #expect(sandboxStatus.status.state == .sandboxReady)
+        #expect(sandboxStatus.status.hasNetwork)
+        #expect(sandboxStatus.status.network.ip == "192.168.64.20")
+        #expect(sandboxStatus.status.network.additionalIps.map(\.ip) == ["192.168.65.20"])
         #expect(sandboxStatus.containersStatuses.map(\.id) == ["container-1"])
+        #expect(sandboxStatus.containersStatuses[0].startedAt == 1_700_000_030_000_000_000)
         #expect(sandboxStatus.info["metadata"]?.contains(#""runtimeHandler":"macos""#) == true)
+        #expect(sandboxStatus.info["sandboxSnapshot"]?.contains(#""status":"running""#) == true)
 
         var containerFilter = Runtime_V1_ContainerFilter()
         containerFilter.podSandboxID = "sandbox-1"
@@ -542,6 +577,7 @@ private struct RecordingStopWorkloadCall {
 
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
     var execSyncResult: ExecSyncResult
+    private var sandboxSnapshots: [String: SandboxSnapshot]
     private var workloadConfigurations: [String: WorkloadConfiguration] = [:]
     private var workloadSnapshots: [String: WorkloadSnapshot] = [:]
     private(set) var createSandboxCalls: [ContainerConfiguration] = []
@@ -549,19 +585,33 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var stopSandboxCalls: [(id: String, options: ContainerStopOptions)] = []
     private(set) var removeSandboxCalls: [(id: String, force: Bool)] = []
     private(set) var removeSandboxPolicyCalls: [String] = []
+    private(set) var inspectSandboxCalls: [String] = []
     private(set) var createWorkloadCalls: [RecordingCreateWorkloadCall] = []
     private(set) var startWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var stopWorkloadCalls: [RecordingStopWorkloadCall] = []
     private(set) var removeWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var execSyncCalls: [RecordingExecSyncCall] = []
 
-    init(execSyncResult: ExecSyncResult) {
+    init(
+        execSyncResult: ExecSyncResult,
+        sandboxSnapshots: [String: SandboxSnapshot] = [:],
+        workloadSnapshots: [String: WorkloadSnapshot] = [:]
+    ) {
         self.execSyncResult = execSyncResult
+        self.sandboxSnapshots = sandboxSnapshots
+        self.workloadSnapshots = workloadSnapshots
     }
 
     func createSandbox(
         configuration: ContainerConfiguration
     ) async throws {
+        sandboxSnapshots[configuration.id] = SandboxSnapshot(
+            configuration: SandboxConfiguration(containerConfiguration: configuration),
+            status: .stopped,
+            networks: [],
+            containers: [],
+            workloads: []
+        )
         createSandboxCalls.append(configuration)
     }
 
@@ -569,6 +619,10 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         id: String,
         presentGUI: Bool
     ) async throws {
+        if var snapshot = sandboxSnapshots[id] {
+            snapshot.status = .running
+            sandboxSnapshots[id] = snapshot
+        }
         startSandboxCalls.append((id: id, presentGUI: presentGUI))
     }
 
@@ -576,6 +630,10 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         id: String,
         options: ContainerStopOptions
     ) async throws {
+        if var snapshot = sandboxSnapshots[id] {
+            snapshot.status = .stopped
+            sandboxSnapshots[id] = snapshot
+        }
         stopSandboxCalls.append((id: id, options: options))
     }
 
@@ -583,6 +641,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         id: String,
         force: Bool
     ) async throws {
+        sandboxSnapshots.removeValue(forKey: id)
         removeSandboxCalls.append((id: id, force: force))
     }
 
@@ -590,6 +649,16 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String
     ) async throws {
         removeSandboxPolicyCalls.append(sandboxID)
+    }
+
+    func inspectSandbox(
+        id: String
+    ) async throws -> SandboxSnapshot {
+        inspectSandboxCalls.append(id)
+        guard let snapshot = sandboxSnapshots[id] else {
+            throw CRIShimError.notFound("sandbox \(id) not found")
+        }
+        return snapshot
     }
 
     func createWorkload(
@@ -614,11 +683,13 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
                 id: workloadID,
                 processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
             )
-        workloadSnapshots[workloadID] = WorkloadSnapshot(
+        let snapshot = WorkloadSnapshot(
             configuration: configuration,
             status: .running,
             startedDate: Date()
         )
+        workloadSnapshots[workloadID] = snapshot
+        replaceWorkloadSnapshot(snapshot, sandboxID: sandboxID)
         startWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
     }
 
@@ -633,13 +704,15 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
                 id: workloadID,
                 processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
             )
-        workloadSnapshots[workloadID] = WorkloadSnapshot(
+        let snapshot = WorkloadSnapshot(
             configuration: configuration,
             status: .stopped,
             exitCode: 42,
             startedDate: workloadSnapshots[workloadID]?.startedDate,
             exitedAt: Date()
         )
+        workloadSnapshots[workloadID] = snapshot
+        replaceWorkloadSnapshot(snapshot, sandboxID: sandboxID)
         stopWorkloadCalls.append(
             RecordingStopWorkloadCall(
                 sandboxID: sandboxID,
@@ -654,6 +727,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     ) async throws {
         workloadConfigurations.removeValue(forKey: workloadID)
         workloadSnapshots.removeValue(forKey: workloadID)
+        removeWorkloadSnapshot(workloadID, sandboxID: sandboxID)
         removeWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
     }
 
@@ -679,6 +753,23 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
                 timeout: timeout
             ))
         return execSyncResult
+    }
+
+    private func replaceWorkloadSnapshot(_ workload: WorkloadSnapshot, sandboxID: String) {
+        guard var sandboxSnapshot = sandboxSnapshots[sandboxID] else {
+            return
+        }
+        sandboxSnapshot.workloads.removeAll { $0.id == workload.id }
+        sandboxSnapshot.workloads.append(workload)
+        sandboxSnapshots[sandboxID] = sandboxSnapshot
+    }
+
+    private func removeWorkloadSnapshot(_ workloadID: String, sandboxID: String) {
+        guard var sandboxSnapshot = sandboxSnapshots[sandboxID] else {
+            return
+        }
+        sandboxSnapshot.workloads.removeAll { $0.id == workloadID }
+        sandboxSnapshots[sandboxID] = sandboxSnapshot
     }
 }
 
@@ -798,6 +889,21 @@ private func keyValue(_ key: String, _ value: String) -> Runtime_V1_KeyValue {
     result.key = key
     result.value = value
     return result
+}
+
+private func makeNetworkAttachment(
+    network: String,
+    address: String,
+    gateway: String
+) throws -> ContainerResource.Attachment {
+    ContainerResource.Attachment(
+        network: network,
+        hostname: "demo",
+        ipv4Address: try CIDRv4(address),
+        ipv4Gateway: try IPv4Address(gateway),
+        ipv6Address: nil,
+        macAddress: nil
+    )
 }
 
 private func shutdown(_ group: MultiThreadedEventLoopGroup) async {

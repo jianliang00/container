@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerCRI
+import ContainerKit
 import ContainerResource
 import Foundation
 
@@ -30,6 +31,13 @@ func makeCRIPodSandbox(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSand
     return sandbox
 }
 
+func makeCRIPodSandbox(
+    _ metadata: CRIShimSandboxMetadata,
+    sandboxSnapshot: SandboxSnapshot?
+) -> Runtime_V1_PodSandbox {
+    makeCRIPodSandbox(metadata.applying(sandboxSnapshot: sandboxSnapshot))
+}
+
 func makeCRIPodSandboxStatus(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandboxStatus {
     var status = Runtime_V1_PodSandboxStatus()
     status.id = metadata.id
@@ -39,6 +47,17 @@ func makeCRIPodSandboxStatus(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_P
     status.labels = metadata.labels
     status.annotations = metadata.annotations
     status.runtimeHandler = metadata.runtimeHandler
+    return status
+}
+
+func makeCRIPodSandboxStatus(
+    _ metadata: CRIShimSandboxMetadata,
+    sandboxSnapshot: SandboxSnapshot?
+) -> Runtime_V1_PodSandboxStatus {
+    var status = makeCRIPodSandboxStatus(metadata.applying(sandboxSnapshot: sandboxSnapshot))
+    if let network = makeCRIPodSandboxNetworkStatus(sandboxSnapshot) {
+        status.network = network
+    }
     return status
 }
 
@@ -210,6 +229,17 @@ func makeCRIStatusInfo<T: Encodable>(_ value: T) -> [String: String] {
     ["metadata": makeCRIStatusJSONString(value)]
 }
 
+func makeCRIPodSandboxStatusInfo(
+    _ metadata: CRIShimSandboxMetadata,
+    sandboxSnapshot: SandboxSnapshot?
+) -> [String: String] {
+    var info = makeCRIStatusInfo(metadata)
+    if let sandboxSnapshot {
+        info["sandboxSnapshot"] = makeCRIStatusJSONString(sandboxSnapshot)
+    }
+    return info
+}
+
 private func makeCRIPodSandboxMetadata(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandboxMetadata {
     var result = Runtime_V1_PodSandboxMetadata()
     result.name = metadata.name ?? ""
@@ -232,6 +262,30 @@ private func makeCRIImageSpec(_ reference: String) -> Runtime_V1_ImageSpec {
     return image
 }
 
+private func makeCRIPodSandboxNetworkStatus(_ sandboxSnapshot: SandboxSnapshot?) -> Runtime_V1_PodSandboxNetworkStatus? {
+    guard let sandboxSnapshot else {
+        return nil
+    }
+    let ips = sandboxSnapshot.networks.map(\.ipv4Address.address.description)
+    return makeCRIPodSandboxNetworkStatus(ips: ips)
+}
+
+private func makeCRIPodSandboxNetworkStatus(ips rawIPs: [String]) -> Runtime_V1_PodSandboxNetworkStatus? {
+    let ips = rawIPs.map(\.trimmed).filter { !$0.isEmpty }
+    guard let primaryIP = ips.first else {
+        return nil
+    }
+
+    var network = Runtime_V1_PodSandboxNetworkStatus()
+    network.ip = primaryIP
+    network.additionalIps = ips.dropFirst().map { ip in
+        var podIP = Runtime_V1_PodIP()
+        podIP.ip = ip
+        return podIP
+    }
+    return network
+}
+
 private func makeCRIPodSandboxState(_ state: CRIShimSandboxMetadata.State) -> Runtime_V1_PodSandboxState {
     switch state {
     case .ready, .running:
@@ -249,6 +303,30 @@ private func makeCRIContainerState(_ state: CRIShimContainerMetadata.State) -> R
         .containerRunning
     case .exited, .removed:
         .containerExited
+    }
+}
+
+extension CRIShimSandboxMetadata {
+    func applying(sandboxSnapshot: SandboxSnapshot?) -> CRIShimSandboxMetadata {
+        guard let sandboxSnapshot else {
+            return self
+        }
+
+        var metadata = self
+        switch sandboxSnapshot.status {
+        case .running:
+            metadata.state = .running
+        case .stopping, .stopped:
+            metadata.state = .stopped
+        case .unknown:
+            break
+        }
+
+        let networks = sandboxSnapshot.networks.map(\.network).filter { !$0.trimmed.isEmpty }
+        if !networks.isEmpty {
+            metadata.networkAttachments = networks
+        }
+        return metadata
     }
 }
 

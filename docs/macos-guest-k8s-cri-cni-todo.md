@@ -24,7 +24,7 @@ CRI server:
 
 RuntimeService:
 
-- [ ] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
+- [x] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
   snapshots and CNI network state.
 - [ ] Support CRI container mounts for macOS guest workloads.
 - [ ] Implement `ReopenContainerLog`.

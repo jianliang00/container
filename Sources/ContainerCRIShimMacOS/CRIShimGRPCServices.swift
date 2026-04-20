@@ -145,7 +145,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 id: sandboxID,
                 request: request,
                 handler: handler,
-                sandboxImage: sandboxImage
+                sandboxImage: sandboxImage,
+                metadata: metadata
             )
 
             try await runtimeManager.createSandbox(configuration: sandboxConfiguration)

@@ -52,7 +52,8 @@ func makeCRIShimSandboxConfiguration(
     id: String,
     request: Runtime_V1_RunPodSandboxRequest,
     handler: ResolvedRuntimeHandler,
-    sandboxImage: CRIShimImageRecord
+    sandboxImage: CRIShimImageRecord,
+    metadata: CRIShimSandboxMetadata? = nil
 ) throws -> ContainerConfiguration {
     let sandboxID = id.trimmed
     guard !sandboxID.isEmpty else {
@@ -77,6 +78,9 @@ func makeCRIShimSandboxConfiguration(
     )
     configuration.runtimeHandler = "container-runtime-macos"
     configuration.labels = request.config.labels
+    if let metadata {
+        configuration.labels[CRIShimCoreLabel.sandboxMetadata] = try makeCRIShimCoreMetadataLabel(metadata)
+    }
     configuration.macosGuest = ContainerConfiguration.MacOSGuestOptions(
         snapshotEnabled: false,
         guiEnabled: handler.guiEnabled,
@@ -84,6 +88,26 @@ func makeCRIShimSandboxConfiguration(
         networkBackend: try makeCRIShimMacOSNetworkBackend(handler.networkBackend)
     )
     return configuration
+}
+
+enum CRIShimCoreLabel {
+    static let sandboxMetadata = "org.apple.container.cri.macos.sandbox-metadata"
+}
+
+func makeCRIShimCoreMetadataLabel(_ metadata: CRIShimSandboxMetadata) throws -> String {
+    let data = try JSONEncoder.criShimMetadataEncoder.encode(metadata)
+    return String(decoding: data, as: UTF8.self)
+}
+
+func decodeCRIShimCoreSandboxMetadataLabel(_ labels: [String: String]) -> CRIShimSandboxMetadata? {
+    guard let value = labels[CRIShimCoreLabel.sandboxMetadata] else {
+        return nil
+    }
+    return try? JSONDecoder.criShimMetadataDecoder.decode(CRIShimSandboxMetadata.self, from: Data(value.utf8))
+}
+
+func removeCRIShimCoreLabels(_ labels: [String: String]) -> [String: String] {
+    labels.filter { key, _ in key != CRIShimCoreLabel.sandboxMetadata }
 }
 
 func makeCRIShimContainerMetadata(

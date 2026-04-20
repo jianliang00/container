@@ -161,6 +161,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
             canonicalDictionaryString(annotations),
             networkLeaseID ?? "",
             networkAttachments.sorted().joined(separator: ","),
+            state.rawValue,
         ]
     }
 }
@@ -305,6 +306,9 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
             args.joined(separator: ","),
             workingDirectory ?? "",
             logPath ?? "",
+            state.rawValue,
+            startedAt.map(criShimMetadataDateString(from:)) ?? "",
+            exitedAt.map(criShimMetadataDateString(from:)) ?? "",
         ]
     }
 }

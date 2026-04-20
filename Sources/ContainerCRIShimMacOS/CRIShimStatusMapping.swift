@@ -331,7 +331,7 @@ extension CRIShimSandboxMetadata {
 }
 
 extension CRIShimContainerMetadata {
-    fileprivate func applying(workloadSnapshot: WorkloadSnapshot?) -> CRIShimContainerMetadata {
+    func applying(workloadSnapshot: WorkloadSnapshot?) -> CRIShimContainerMetadata {
         guard let workloadSnapshot else {
             return self
         }

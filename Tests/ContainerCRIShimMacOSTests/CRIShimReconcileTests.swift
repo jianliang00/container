@@ -18,6 +18,8 @@ import Foundation
 import Testing
 
 @testable import ContainerCRIShimMacOS
+@testable import ContainerKit
+@testable import ContainerResource
 
 struct CRIShimReconcileTests {
     @Test
@@ -152,4 +154,150 @@ struct CRIShimReconcileTests {
 
         #expect(plan.isEmpty)
     }
+
+    @Test
+    func executorUpdatesMetadataFromRuntimeSnapshots() throws {
+        let storeURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = try CRIShimMetadataStore(rootURL: storeURL)
+        let oldStart = Date(timeIntervalSince1970: 1_700_000_010)
+        let newStart = Date(timeIntervalSince1970: 1_700_000_020)
+        let exitedAt = Date(timeIntervalSince1970: 1_700_000_030)
+        let now = Date(timeIntervalSince1970: 1_700_000_040)
+
+        try store.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1",
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                network: "default",
+                state: .running,
+                createdAt: oldStart,
+                updatedAt: oldStart
+            ))
+        try store.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-1",
+                sandboxID: "sandbox-1",
+                name: "workload",
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos",
+                state: .running,
+                createdAt: oldStart,
+                startedAt: oldStart
+            ))
+
+        let workloadSnapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: "container-1",
+                processConfiguration: ProcessConfiguration(executable: "/bin/echo", arguments: [], environment: []),
+                workloadImageReference: "example.com/macos/workload:latest"
+            ),
+            status: .stopped,
+            exitCode: 0,
+            startedDate: newStart,
+            exitedAt: exitedAt
+        )
+        let sandboxSnapshot = SandboxSnapshot(
+            configuration: try makeSandboxConfiguration(id: "sandbox-1"),
+            status: .stopped,
+            networks: [],
+            containers: [],
+            workloads: [workloadSnapshot]
+        )
+
+        let result = try CRIShimReconcileExecutor().execute(
+            metadataStore: store,
+            runtimeSnapshots: CRIShimRuntimeSnapshotInventory(sandboxes: [sandboxSnapshot]),
+            now: now
+        )
+
+        #expect(containsStep(result.appliedSteps, kind: .sandbox, action: .update, id: "sandbox-1"))
+        #expect(containsStep(result.appliedSteps, kind: .container, action: .update, id: "container-1"))
+        let sandboxMetadata = try store.sandbox(id: "sandbox-1")
+        let sandbox = try #require(sandboxMetadata)
+        #expect(sandbox.state == .stopped)
+        #expect(sandbox.updatedAt == now)
+        let containerMetadata = try store.container(id: "container-1")
+        let container = try #require(containerMetadata)
+        #expect(container.state == .exited)
+        #expect(container.startedAt == newStart)
+        #expect(container.exitedAt == exitedAt)
+    }
+
+    @Test
+    func executorDeletesMetadataMissingFromRuntimeSnapshots() throws {
+        let storeURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = try CRIShimMetadataStore(rootURL: storeURL)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        try store.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1",
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                state: .running,
+                createdAt: now,
+                updatedAt: now
+            ))
+        try store.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-1",
+                sandboxID: "sandbox-1",
+                name: "workload",
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos",
+                state: .running,
+                createdAt: now
+            ))
+
+        let result = try CRIShimReconcileExecutor().execute(
+            metadataStore: store,
+            runtimeSnapshots: CRIShimRuntimeSnapshotInventory()
+        )
+
+        #expect(containsStep(result.appliedSteps, kind: .sandbox, action: .delete, id: "sandbox-1"))
+        #expect(try store.sandbox(id: "sandbox-1") == nil)
+        #expect(try store.container(id: "container-1") == nil)
+    }
+}
+
+private func containsStep(
+    _ steps: [CRIShimReconcileStep],
+    kind: CRIShimReconcileStep.Kind,
+    action: CRIShimReconcileStep.Action,
+    id: String
+) -> Bool {
+    steps.contains { step in
+        step.kind == kind && step.action == action && step.id == id
+    }
+}
+
+private func makeSandboxConfiguration(id: String) throws -> SandboxConfiguration {
+    let imageJSON = """
+        {
+          "reference": "example.com/macos/sandbox:latest",
+          "descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:sandbox",
+            "size": 1
+          }
+        }
+        """
+    let image = try JSONDecoder().decode(ImageDescription.self, from: Data(imageJSON.utf8))
+    let process = ProcessConfiguration(
+        executable: "/usr/bin/true",
+        arguments: [],
+        environment: [],
+        workingDirectory: "/",
+        terminal: false,
+        user: .id(uid: 0, gid: 0)
+    )
+    var configuration = ContainerConfiguration(id: id, image: image, process: process)
+    configuration.runtimeHandler = "container-runtime-macos"
+    return SandboxConfiguration(containerConfiguration: configuration)
+}
+
+private func makeTemporaryDirectory() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("CRIShimReconcileTests-\(UUID().uuidString)", isDirectory: true)
 }

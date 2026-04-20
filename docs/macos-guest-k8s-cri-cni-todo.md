@@ -19,7 +19,7 @@ Configuration:
 
 CRI server:
 
-- [ ] Execute CRI metadata reconcile plans against core snapshots on shim
+- [x] Execute CRI metadata reconcile plans against core snapshots on shim
   startup.
 
 RuntimeService:

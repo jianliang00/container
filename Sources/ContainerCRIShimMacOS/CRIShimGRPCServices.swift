@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerCRI
+import ContainerKit
 import ContainerResource
 import ContainerVersion
 import Foundation
@@ -259,7 +260,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             }
 
             var response = Runtime_V1_PodSandboxStatusResponse()
-            response.status = makeCRIPodSandboxStatus(metadata)
+            let snapshot = await sandboxSnapshot(for: metadata)
+            let workloadSnapshots = workloadSnapshotsByID(snapshot)
+            response.status = makeCRIPodSandboxStatus(metadata, sandboxSnapshot: snapshot)
             response.containersStatuses = try metadataStore.listContainers()
                 .filter { $0.sandboxID == sandboxID }
                 .sorted(by: { lhs, rhs in
@@ -268,10 +271,10 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     }
                     return lhs.createdAt < rhs.createdAt
                 })
-                .map(makeCRIContainerStatus)
+                .map { makeCRIContainerStatus($0, workloadSnapshot: workloadSnapshots[$0.id]) }
             response.timestamp = Int64((Date().timeIntervalSince1970 * 1_000_000_000).rounded())
             if request.verbose {
-                response.info = makeCRIStatusInfo(metadata)
+                response.info = makeCRIPodSandboxStatusInfo(metadata, sandboxSnapshot: snapshot)
             }
             return response
         }
@@ -283,7 +286,13 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_ListPodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.listPodSandbox.rawValue) {
             var response = Runtime_V1_ListPodSandboxResponse()
-            response.items = try filterCRIPodSandboxes(metadataStore.listSandboxes(), request: request)
+            var sandboxes: [CRIShimSandboxMetadata] = []
+            let storedSandboxes = try metadataStore.listSandboxes()
+            sandboxes.reserveCapacity(storedSandboxes.count)
+            for metadata in storedSandboxes {
+                sandboxes.append(metadata.applying(sandboxSnapshot: await sandboxSnapshot(for: metadata)))
+            }
+            response.items = filterCRIPodSandboxes(sandboxes, request: request)
                 .map(makeCRIPodSandbox)
             return response
         }
@@ -551,6 +560,10 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         )
     }
 
+    private func sandboxSnapshot(for metadata: CRIShimSandboxMetadata) async -> SandboxSnapshot? {
+        try? await runtimeManager.inspectSandbox(id: metadata.id)
+    }
+
     private func sandboxMetadata(id rawID: String, operation: String) throws -> CRIShimSandboxMetadata {
         let sandboxID = rawID.trimmed
         guard !sandboxID.isEmpty else {
@@ -656,6 +669,15 @@ private func sandboxNetworkName(_ metadata: CRIShimSandboxMetadata) -> String? {
         return network
     }
     return metadata.networkAttachments.first(where: { !$0.trimmed.isEmpty })
+}
+
+private func workloadSnapshotsByID(_ sandboxSnapshot: SandboxSnapshot?) -> [String: WorkloadSnapshot] {
+    guard let sandboxSnapshot else {
+        return [:]
+    }
+    return sandboxSnapshot.workloads.reduce(into: [:]) { snapshots, workload in
+        snapshots[workload.id] = workload
+    }
 }
 
 private func isNotFound(_ error: any Error) -> Bool {

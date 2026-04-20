@@ -53,6 +53,8 @@ public protocol CRIShimRuntimeManaging: Sendable {
         id: String
     ) async throws -> SandboxSnapshot
 
+    func listSandboxSnapshots() async throws -> [SandboxSnapshot]
+
     func createWorkload(
         sandboxID: String,
         configuration: WorkloadConfiguration
@@ -130,6 +132,16 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         id: String
     ) async throws -> SandboxSnapshot {
         try await kit.inspectSandbox(id: id)
+    }
+
+    public func listSandboxSnapshots() async throws -> [SandboxSnapshot] {
+        let containers = try await kit.listContainers()
+        var snapshots: [SandboxSnapshot] = []
+        snapshots.reserveCapacity(containers.count)
+        for container in containers where container.configuration.macosGuest != nil {
+            snapshots.append(try await kit.inspectSandbox(id: container.id))
+        }
+        return snapshots
     }
 
     public func createWorkload(

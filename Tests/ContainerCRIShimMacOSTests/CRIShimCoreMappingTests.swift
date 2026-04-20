@@ -109,6 +109,29 @@ struct CRIShimCoreMappingTests {
     }
 
     @Test
+    func embedsSandboxMetadataInCoreLabelsForStartupReconcile() throws {
+        var request = Runtime_V1_RunPodSandboxRequest()
+        request.config.labels = ["app": "demo"]
+        let configuration = try makeCRIShimSandboxConfiguration(
+            id: "sandbox-1",
+            request: request,
+            handler: resolvedRuntimeHandler,
+            sandboxImage: CRIShimImageRecord(
+                reference: "example.com/macos/sandbox:latest",
+                digest: "sha256:sandbox",
+                size: 1
+            ),
+            metadata: sandboxMetadata
+        )
+
+        #expect(configuration.labels["app"] == "demo")
+        let decodedMetadata = try #require(decodeCRIShimCoreSandboxMetadataLabel(configuration.labels))
+        #expect(decodedMetadata.id == "sandbox-1")
+        #expect(decodedMetadata.runtimeHandler == "macos")
+        #expect(removeCRIShimCoreLabels(configuration.labels) == ["app": "demo"])
+    }
+
+    @Test
     func preservesImageDefaultCommandWhenCommandIsUnset() throws {
         var request = Runtime_V1_CreateContainerRequest()
         request.config.metadata.name = "image-default"

@@ -24,6 +24,10 @@ public protocol CRIShimServerLifecycle: Sendable {
     func stop() async
 }
 
+public protocol CRIShimServerStartupTask {
+    func run() async throws
+}
+
 public protocol CRIShimServerFactory: Sendable {
     func makeServer(config: CRIShimConfig) throws -> any CRIShimServerLifecycle
 }
@@ -72,6 +76,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
     private let eventLoopGroup: any EventLoopGroup
     private let ownsEventLoopGroup: Bool
     private let serviceProviders: [any CallHandlerProvider]
+    private let startupTasks: [any CRIShimServerStartupTask]
     private let stateLock = NSLock()
     private var server: Server?
 
@@ -84,6 +89,12 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager()
     ) throws {
         let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
+        let startupTasks: [any CRIShimServerStartupTask] = [
+            CRIShimMetadataReconcileStartupTask(
+                metadataStore: metadataStore,
+                runtimeManager: runtimeManager
+            )
+        ]
         self.init(
             socketPath: socketPath,
             serviceProviders: [
@@ -98,7 +109,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
             eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
-            ownsEventLoopGroup: true
+            ownsEventLoopGroup: true,
+            startupTasks: startupTasks
         )
     }
 
@@ -113,6 +125,12 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager()
     ) throws {
         let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
+        let startupTasks: [any CRIShimServerStartupTask] = [
+            CRIShimMetadataReconcileStartupTask(
+                metadataStore: metadataStore,
+                runtimeManager: runtimeManager
+            )
+        ]
         self.init(
             socketPath: socketPath,
             serviceProviders: [
@@ -127,7 +145,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
-            eventLoopGroup: eventLoopGroup
+            eventLoopGroup: eventLoopGroup,
+            startupTasks: startupTasks
         )
     }
 
@@ -135,15 +154,20 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         socketPath: String,
         serviceProviders: [any CallHandlerProvider],
         eventLoopGroup: any EventLoopGroup,
-        ownsEventLoopGroup: Bool = false
+        ownsEventLoopGroup: Bool = false,
+        startupTasks: [any CRIShimServerStartupTask] = []
     ) {
         self.socketPath = socketPath
         self.serviceProviders = serviceProviders
         self.eventLoopGroup = eventLoopGroup
         self.ownsEventLoopGroup = ownsEventLoopGroup
+        self.startupTasks = startupTasks
     }
 
     public func run() async throws {
+        for task in startupTasks {
+            try await task.run()
+        }
         _ = try? FileManager.default.removeItem(atPath: socketPath)
         do {
             let server = try await Server.insecure(group: eventLoopGroup)

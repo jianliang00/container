@@ -49,6 +49,10 @@ public protocol CRIShimRuntimeManaging: Sendable {
         sandboxID: String
     ) async throws
 
+    func inspectSandbox(
+        id: String
+    ) async throws -> SandboxSnapshot
+
     func createWorkload(
         sandboxID: String,
         configuration: WorkloadConfiguration
@@ -120,6 +124,12 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         sandboxID: String
     ) async throws {
         try await kit.removeSandboxPolicy(sandboxID: sandboxID)
+    }
+
+    public func inspectSandbox(
+        id: String
+    ) async throws -> SandboxSnapshot {
+        try await kit.inspectSandbox(id: id)
     }
 
     public func createWorkload(

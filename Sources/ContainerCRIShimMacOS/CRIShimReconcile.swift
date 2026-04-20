@@ -14,6 +14,8 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerKit
+import ContainerResource
 import Foundation
 
 public struct CRIShimRuntimeInventory: Codable, Equatable, Sendable {
@@ -196,5 +198,407 @@ public struct CRIShimReconciler {
         }
 
         return steps
+    }
+}
+
+public struct CRIShimRuntimeSnapshotInventory: Sendable {
+    public var sandboxes: [SandboxSnapshot]
+
+    public init(sandboxes: [SandboxSnapshot] = []) {
+        self.sandboxes = sandboxes
+    }
+
+    public func makeInventory(
+        store: CRIShimMetadataSnapshot,
+        now: Date = Date()
+    ) -> CRIShimRuntimeInventory {
+        let storedSandboxes = Dictionary(uniqueKeysWithValues: store.sandboxes.map { ($0.id, $0) })
+        let storedContainers = Dictionary(uniqueKeysWithValues: store.containers.map { ($0.id, $0) })
+        var sandboxInventory: [CRIShimRuntimeSandboxInventory] = []
+        var containerInventory: [CRIShimRuntimeContainerInventory] = []
+
+        for sandboxSnapshot in sandboxes {
+            guard let sandboxID = sandboxSnapshot.criShimSandboxID else {
+                continue
+            }
+            let sandboxMetadata =
+                storedSandboxes[sandboxID]?.applying(sandboxSnapshot: sandboxSnapshot)
+                ?? makeCRIShimSandboxMetadata(sandboxSnapshot: sandboxSnapshot, now: now)
+            guard let sandboxMetadata else {
+                continue
+            }
+            sandboxInventory.append(
+                CRIShimRuntimeSandboxInventory(
+                    id: sandboxID,
+                    state: .live,
+                    fingerprint: sandboxMetadata.reconcileFingerprint
+                )
+            )
+
+            for workloadSnapshot in sandboxSnapshot.workloads {
+                let containerMetadata =
+                    storedContainers[workloadSnapshot.id]?.applying(workloadSnapshot: workloadSnapshot)
+                    ?? makeCRIShimContainerMetadata(
+                        workloadSnapshot: workloadSnapshot,
+                        sandboxID: sandboxID,
+                        sandboxMetadata: sandboxMetadata,
+                        now: now
+                    )
+                guard let containerMetadata else {
+                    continue
+                }
+                containerInventory.append(
+                    CRIShimRuntimeContainerInventory(
+                        id: workloadSnapshot.id,
+                        state: .live,
+                        fingerprint: containerMetadata.reconcileFingerprint
+                    )
+                )
+            }
+        }
+
+        return CRIShimRuntimeInventory(
+            sandboxes: sandboxInventory.sorted(by: { $0.id < $1.id }),
+            containers: containerInventory.sorted(by: { $0.id < $1.id })
+        )
+    }
+}
+
+public struct CRIShimReconcileExecutionResult: Sendable {
+    public var plan: CRIShimReconcilePlan
+    public var appliedSteps: [CRIShimReconcileStep]
+    public var skippedSteps: [CRIShimReconcileStep]
+
+    public init(
+        plan: CRIShimReconcilePlan,
+        appliedSteps: [CRIShimReconcileStep] = [],
+        skippedSteps: [CRIShimReconcileStep] = []
+    ) {
+        self.plan = plan
+        self.appliedSteps = appliedSteps
+        self.skippedSteps = skippedSteps
+    }
+}
+
+public struct CRIShimReconcileExecutor {
+    public var reconciler: CRIShimReconciler
+
+    public init(reconciler: CRIShimReconciler = CRIShimReconciler()) {
+        self.reconciler = reconciler
+    }
+
+    @discardableResult
+    public func execute(
+        metadataStore: CRIShimMetadataStore,
+        runtimeSnapshots: CRIShimRuntimeSnapshotInventory,
+        now: Date = Date()
+    ) throws -> CRIShimReconcileExecutionResult {
+        let storeSnapshot = try metadataStore.snapshot()
+        let plan = reconciler.makePlan(
+            store: storeSnapshot,
+            inventory: runtimeSnapshots.makeInventory(store: storeSnapshot, now: now)
+        )
+
+        var context = CRIShimReconcileExecutionContext(
+            metadataStore: metadataStore,
+            runtimeSnapshots: runtimeSnapshots,
+            now: now
+        )
+        for step in plan.sandboxSteps {
+            try context.applySandboxStep(step)
+        }
+        for step in plan.containerSteps {
+            try context.applyContainerStep(step)
+        }
+
+        return CRIShimReconcileExecutionResult(
+            plan: plan,
+            appliedSteps: context.appliedSteps,
+            skippedSteps: context.skippedSteps
+        )
+    }
+}
+
+public struct CRIShimMetadataReconcileStartupTask: CRIShimServerStartupTask {
+    private let metadataStore: CRIShimMetadataStore
+    private let runtimeManager: any CRIShimRuntimeManaging
+    private let executor: CRIShimReconcileExecutor
+
+    public init(
+        metadataStore: CRIShimMetadataStore,
+        runtimeManager: any CRIShimRuntimeManaging,
+        executor: CRIShimReconcileExecutor = CRIShimReconcileExecutor()
+    ) {
+        self.metadataStore = metadataStore
+        self.runtimeManager = runtimeManager
+        self.executor = executor
+    }
+
+    public func run() async throws {
+        let snapshots = try await runtimeManager.listSandboxSnapshots()
+        try executor.execute(
+            metadataStore: metadataStore,
+            runtimeSnapshots: CRIShimRuntimeSnapshotInventory(sandboxes: snapshots)
+        )
+    }
+}
+
+private struct CRIShimReconcileExecutionContext {
+    let metadataStore: CRIShimMetadataStore
+    let runtimeSnapshots: CRIShimRuntimeSnapshotInventory
+    let now: Date
+    var appliedSteps: [CRIShimReconcileStep] = []
+    var skippedSteps: [CRIShimReconcileStep] = []
+
+    private var sandboxSnapshotsByID: [String: SandboxSnapshot] {
+        Dictionary(
+            runtimeSnapshots.sandboxes.compactMap { snapshot in
+                snapshot.criShimSandboxID.map { ($0, snapshot) }
+            },
+            uniquingKeysWith: { _, new in new }
+        )
+    }
+
+    private var workloadSnapshotsByID: [String: (sandboxID: String, snapshot: WorkloadSnapshot)] {
+        var result: [String: (sandboxID: String, snapshot: WorkloadSnapshot)] = [:]
+        for sandboxSnapshot in runtimeSnapshots.sandboxes {
+            guard let sandboxID = sandboxSnapshot.criShimSandboxID else {
+                continue
+            }
+            for workloadSnapshot in sandboxSnapshot.workloads {
+                result[workloadSnapshot.id] = (sandboxID: sandboxID, snapshot: workloadSnapshot)
+            }
+        }
+        return result
+    }
+
+    mutating func applySandboxStep(_ step: CRIShimReconcileStep) throws {
+        switch step.action {
+        case .create:
+            try createSandboxMetadata(step)
+        case .update:
+            try updateSandboxMetadata(step)
+        case .delete:
+            try deleteSandboxMetadata(step)
+        case .release:
+            try releaseSandboxMetadata(step)
+        }
+    }
+
+    mutating func applyContainerStep(_ step: CRIShimReconcileStep) throws {
+        switch step.action {
+        case .create:
+            try createContainerMetadata(step)
+        case .update:
+            try updateContainerMetadata(step)
+        case .delete:
+            try deleteContainerMetadata(step)
+        case .release:
+            try releaseContainerMetadata(step)
+        }
+    }
+
+    private mutating func createSandboxMetadata(_ step: CRIShimReconcileStep) throws {
+        guard
+            let snapshot = sandboxSnapshotsByID[step.id],
+            let metadata = makeCRIShimSandboxMetadata(sandboxSnapshot: snapshot, now: now)
+        else {
+            skippedSteps.append(step)
+            return
+        }
+        try metadataStore.upsertSandbox(metadata)
+        appliedSteps.append(step)
+    }
+
+    private mutating func updateSandboxMetadata(_ step: CRIShimReconcileStep) throws {
+        guard
+            var metadata = try metadataStore.sandbox(id: step.id),
+            let snapshot = sandboxSnapshotsByID[step.id]
+        else {
+            skippedSteps.append(step)
+            return
+        }
+        metadata = metadata.applying(sandboxSnapshot: snapshot)
+        metadata.updatedAt = now
+        try metadataStore.upsertSandbox(metadata)
+        appliedSteps.append(step)
+    }
+
+    private mutating func deleteSandboxMetadata(_ step: CRIShimReconcileStep) throws {
+        let containers = try metadataStore.listContainers().filter { $0.sandboxID == step.id }
+        for container in containers {
+            try? metadataStore.deleteContainer(id: container.id)
+        }
+        try? metadataStore.deleteSandbox(id: step.id)
+        appliedSteps.append(step)
+    }
+
+    private mutating func releaseSandboxMetadata(_ step: CRIShimReconcileStep) throws {
+        guard var metadata = try metadataStore.sandbox(id: step.id) else {
+            skippedSteps.append(step)
+            return
+        }
+        metadata.state = .released
+        metadata.updatedAt = now
+        try metadataStore.upsertSandbox(metadata)
+        appliedSteps.append(step)
+    }
+
+    private mutating func createContainerMetadata(_ step: CRIShimReconcileStep) throws {
+        guard let workload = workloadSnapshotsByID[step.id] else {
+            skippedSteps.append(step)
+            return
+        }
+
+        let sandboxMetadata =
+            try metadataStore.sandbox(id: workload.sandboxID)
+            ?? sandboxSnapshotsByID[workload.sandboxID].flatMap { makeCRIShimSandboxMetadata(sandboxSnapshot: $0, now: now) }
+        guard
+            let sandboxMetadata,
+            let metadata = makeCRIShimContainerMetadata(
+                workloadSnapshot: workload.snapshot,
+                sandboxID: workload.sandboxID,
+                sandboxMetadata: sandboxMetadata,
+                now: now
+            )
+        else {
+            skippedSteps.append(step)
+            return
+        }
+
+        try metadataStore.upsertContainer(metadata)
+        appliedSteps.append(step)
+    }
+
+    private mutating func updateContainerMetadata(_ step: CRIShimReconcileStep) throws {
+        guard
+            var metadata = try metadataStore.container(id: step.id),
+            let workload = workloadSnapshotsByID[step.id]
+        else {
+            skippedSteps.append(step)
+            return
+        }
+        metadata = metadata.applying(workloadSnapshot: workload.snapshot)
+        try metadataStore.upsertContainer(metadata)
+        appliedSteps.append(step)
+    }
+
+    private mutating func deleteContainerMetadata(_ step: CRIShimReconcileStep) throws {
+        try? metadataStore.deleteContainer(id: step.id)
+        appliedSteps.append(step)
+    }
+
+    private mutating func releaseContainerMetadata(_ step: CRIShimReconcileStep) throws {
+        guard var metadata = try metadataStore.container(id: step.id) else {
+            skippedSteps.append(step)
+            return
+        }
+        metadata.state = .removed
+        metadata.exitedAt = metadata.exitedAt ?? now
+        try metadataStore.upsertContainer(metadata)
+        appliedSteps.append(step)
+    }
+}
+
+extension SandboxSnapshot {
+    fileprivate var criShimSandboxID: String? {
+        configuration?.id.trimmed.nonEmpty
+            ?? containers.first?.id.trimmed.nonEmpty
+    }
+}
+
+private func makeCRIShimSandboxMetadata(
+    sandboxSnapshot: SandboxSnapshot,
+    now: Date
+) -> CRIShimSandboxMetadata? {
+    guard let sandboxID = sandboxSnapshot.criShimSandboxID else {
+        return nil
+    }
+
+    if var metadata = sandboxSnapshot.configuration.flatMap({ decodeCRIShimCoreSandboxMetadataLabel($0.labels) }) {
+        metadata.id = sandboxID
+        metadata = metadata.applying(sandboxSnapshot: sandboxSnapshot)
+        metadata.updatedAt = now
+        return metadata
+    }
+
+    guard let configuration = sandboxSnapshot.configuration else {
+        return nil
+    }
+
+    let networkNames = sandboxSnapshot.networks.map(\.network).filter { !$0.trimmed.isEmpty }
+    return CRIShimSandboxMetadata(
+        id: sandboxID,
+        runtimeHandler: configuration.runtimeHandler == "container-runtime-macos" ? "" : configuration.runtimeHandler,
+        sandboxImage: configuration.image.reference,
+        network: networkNames.first,
+        labels: removeCRIShimCoreLabels(configuration.labels),
+        annotations: [:],
+        networkAttachments: networkNames,
+        state: makeCRIShimSandboxMetadataState(sandboxSnapshot.status),
+        createdAt: now,
+        updatedAt: now
+    )
+}
+
+private func makeCRIShimContainerMetadata(
+    workloadSnapshot: WorkloadSnapshot,
+    sandboxID: String,
+    sandboxMetadata: CRIShimSandboxMetadata,
+    now: Date
+) -> CRIShimContainerMetadata? {
+    let process = workloadSnapshot.configuration.processConfiguration
+    let image =
+        [
+            workloadSnapshot.configuration.workloadImageReference,
+            workloadSnapshot.configuration.workloadImageDigest,
+        ]
+        .compactMap { $0?.trimmed.nonEmpty }
+        .first ?? ""
+
+    var metadata = CRIShimContainerMetadata(
+        id: workloadSnapshot.id,
+        sandboxID: sandboxID,
+        name: workloadSnapshot.id,
+        image: image,
+        runtimeHandler: sandboxMetadata.runtimeHandler,
+        command: [process.executable].filter { !$0.trimmed.isEmpty },
+        args: process.arguments,
+        workingDirectory: process.workingDirectory,
+        logPath: nil,
+        state: makeCRIShimContainerMetadataState(workloadSnapshot.status),
+        createdAt: workloadSnapshot.startedDate ?? workloadSnapshot.exitedAt ?? now,
+        startedAt: workloadSnapshot.startedDate,
+        exitedAt: workloadSnapshot.exitedAt
+    )
+    metadata = metadata.applying(workloadSnapshot: workloadSnapshot)
+    return metadata
+}
+
+private func makeCRIShimSandboxMetadataState(_ status: RuntimeStatus) -> CRIShimSandboxMetadata.State {
+    switch status {
+    case .running:
+        .running
+    case .stopping, .stopped:
+        .stopped
+    case .unknown:
+        .pending
+    }
+}
+
+private func makeCRIShimContainerMetadataState(_ status: RuntimeStatus) -> CRIShimContainerMetadata.State {
+    switch status {
+    case .running, .stopping:
+        .running
+    case .stopped:
+        .exited
+    case .unknown:
+        .created
+    }
+}
+
+extension String {
+    fileprivate var nonEmpty: String? {
+        isEmpty ? nil : self
     }
 }

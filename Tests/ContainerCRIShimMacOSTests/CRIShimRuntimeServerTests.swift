@@ -130,6 +130,10 @@ struct CRIShimRuntimeServerTests {
             ),
             sandboxSnapshots: [
                 "sandbox-1": SandboxSnapshot(
+                    configuration: try makeSandboxConfiguration(
+                        id: "sandbox-1",
+                        labels: ["app": "demo"]
+                    ),
                     status: .running,
                     networks: [
                         try makeNetworkAttachment(
@@ -356,7 +360,7 @@ struct CRIShimRuntimeServerTests {
         #expect(containerStatus.status.metadata.name == "workload")
         #expect(containerStatus.status.metadata.attempt == 1)
         #expect(containerStatus.status.state == .containerRunning)
-        #expect(containerStatus.status.startedAt == 1_700_000_020_000_000_000)
+        #expect(containerStatus.status.startedAt == 1_700_000_030_000_000_000)
         #expect(containerStatus.status.logPath == "/var/log/pods/default_demo_uid/workload/0.log")
         #expect(containerStatus.info["metadata"]?.contains(#""sandboxID":"sandbox-1""#) == true)
 
@@ -661,6 +665,12 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         return snapshot
     }
 
+    func listSandboxSnapshots() async throws -> [SandboxSnapshot] {
+        sandboxSnapshots.values.sorted {
+            ($0.configuration?.id ?? "") < ($1.configuration?.id ?? "")
+        }
+    }
+
     func createWorkload(
         sandboxID: String,
         configuration: WorkloadConfiguration
@@ -904,6 +914,35 @@ private func makeNetworkAttachment(
         ipv6Address: nil,
         macAddress: nil
     )
+}
+
+private func makeSandboxConfiguration(
+    id: String,
+    labels: [String: String] = [:]
+) throws -> SandboxConfiguration {
+    let imageJSON = """
+        {
+          "reference": "example.com/macos/sandbox:latest",
+          "descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:sandbox",
+            "size": 1
+          }
+        }
+        """
+    let image = try JSONDecoder().decode(ImageDescription.self, from: Data(imageJSON.utf8))
+    let process = ProcessConfiguration(
+        executable: "/usr/bin/true",
+        arguments: [],
+        environment: [],
+        workingDirectory: "/",
+        terminal: false,
+        user: .id(uid: 0, gid: 0)
+    )
+    var configuration = ContainerConfiguration(id: id, image: image, process: process)
+    configuration.runtimeHandler = "container-runtime-macos"
+    configuration.labels = labels
+    return SandboxConfiguration(containerConfiguration: configuration)
 }
 
 private func shutdown(_ group: MultiThreadedEventLoopGroup) async {

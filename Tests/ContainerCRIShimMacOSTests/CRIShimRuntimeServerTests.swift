@@ -50,6 +50,7 @@ struct CRIShimRuntimeServerTests {
         let socketPath = "/tmp/cri-shim-grpc-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let criLogDirectory = stateDirectory.appendingPathComponent("cri-logs", isDirectory: true)
         var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
         config.stateDirectory = stateDirectory.path
         let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
@@ -82,7 +83,7 @@ struct CRIShimRuntimeServerTests {
                 command: ["/bin/echo"],
                 args: ["hello"],
                 workingDirectory: "/workspace",
-                logPath: "/var/log/pods/default_demo_uid/workload/0.log",
+                logPath: criLogDirectory.appendingPathComponent("workload/0.log").path,
                 state: .running,
                 createdAt: Date(timeIntervalSince1970: 1_700_000_010),
                 startedAt: Date(timeIntervalSince1970: 1_700_000_020)
@@ -128,6 +129,7 @@ struct CRIShimRuntimeServerTests {
                 stdout: Data("exec stdout".utf8),
                 stderr: Data("exec stderr".utf8)
             ),
+            logRootURL: stateDirectory.appendingPathComponent("workload-logs", isDirectory: true),
             sandboxSnapshots: [
                 "sandbox-1": SandboxSnapshot(
                     configuration: try makeSandboxConfiguration(
@@ -361,7 +363,7 @@ struct CRIShimRuntimeServerTests {
         #expect(containerStatus.status.metadata.attempt == 1)
         #expect(containerStatus.status.state == .containerRunning)
         #expect(containerStatus.status.startedAt == 1_700_000_030_000_000_000)
-        #expect(containerStatus.status.logPath == "/var/log/pods/default_demo_uid/workload/0.log")
+        #expect(containerStatus.status.logPath == criLogDirectory.appendingPathComponent("workload/0.log").path)
         #expect(containerStatus.info["metadata"]?.contains(#""sandboxID":"sandbox-1""#) == true)
 
         var containerStatsRequest = Runtime_V1_ContainerStatsRequest()
@@ -389,7 +391,7 @@ struct CRIShimRuntimeServerTests {
 
         var createRequest = Runtime_V1_CreateContainerRequest()
         createRequest.podSandboxID = "sandbox-1"
-        createRequest.sandboxConfig.logDirectory = "/var/log/pods/default_demo_uid"
+        createRequest.sandboxConfig.logDirectory = criLogDirectory.path
         createRequest.config.metadata.name = "created-workload"
         createRequest.config.metadata.attempt = 4
         createRequest.config.image.image = "example.com/macos/workload:latest"
@@ -420,7 +422,7 @@ struct CRIShimRuntimeServerTests {
         #expect(createdStatus.status.metadata.name == "created-workload")
         #expect(createdStatus.status.metadata.attempt == 4)
         #expect(createdStatus.status.state == .containerCreated)
-        #expect(createdStatus.status.logPath == "/var/log/pods/default_demo_uid/created/0.log")
+        #expect(createdStatus.status.logPath == criLogDirectory.appendingPathComponent("created/0.log").path)
 
         var startRequest = Runtime_V1_StartContainerRequest()
         startRequest.containerID = created.containerID
@@ -429,6 +431,36 @@ struct CRIShimRuntimeServerTests {
         let startCall = try #require(runtimeManager.startWorkloadCalls.first)
         #expect(startCall.sandboxID == "sandbox-1")
         #expect(startCall.workloadID == created.containerID)
+
+        let createdLogPath = criLogDirectory.appendingPathComponent("created/0.log").path
+        try runtimeManager.appendStdout("hello stdout\n", workloadID: created.containerID)
+        try runtimeManager.appendStderr("oops stderr\n", workloadID: created.containerID)
+        let initialCRIContent = try await waitForFileContent(
+            at: createdLogPath,
+            containing: [
+                " stdout F hello stdout",
+                " stderr F oops stderr",
+            ]
+        )
+        #expect(initialCRIContent.contains(" stdout F hello stdout"))
+        #expect(initialCRIContent.contains(" stderr F oops stderr"))
+
+        let rotatedLogPath = criLogDirectory.appendingPathComponent("created/0.log.1").path
+        try FileManager.default.moveItem(atPath: createdLogPath, toPath: rotatedLogPath)
+        _ = FileManager.default.createFile(atPath: createdLogPath, contents: nil)
+
+        var reopenRequest = Runtime_V1_ReopenContainerLogRequest()
+        reopenRequest.containerID = created.containerID
+        _ = try await client.reopenContainerLog(reopenRequest)
+
+        try runtimeManager.appendStdout("after rotate\n", workloadID: created.containerID)
+        let reopenedCRIContent = try await waitForFileContent(
+            at: createdLogPath,
+            containing: [" stdout F after rotate"]
+        )
+        #expect(reopenedCRIContent.contains(" stdout F after rotate"))
+        let rotatedCRIContent = try String(contentsOfFile: rotatedLogPath, encoding: .utf8)
+        #expect(!rotatedCRIContent.contains("after rotate"))
 
         let runningStatus = try await client.containerStatus(createdStatusRequest)
         #expect(runningStatus.status.state == .containerRunning)
@@ -581,6 +613,7 @@ private struct RecordingStopWorkloadCall {
 
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
     var execSyncResult: ExecSyncResult
+    private let logRootURL: URL
     private var sandboxSnapshots: [String: SandboxSnapshot]
     private var workloadConfigurations: [String: WorkloadConfiguration] = [:]
     private var workloadSnapshots: [String: WorkloadSnapshot] = [:]
@@ -598,12 +631,15 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
 
     init(
         execSyncResult: ExecSyncResult,
+        logRootURL: URL = makeTemporaryDirectory(),
         sandboxSnapshots: [String: SandboxSnapshot] = [:],
         workloadSnapshots: [String: WorkloadSnapshot] = [:]
     ) {
         self.execSyncResult = execSyncResult
+        self.logRootURL = logRootURL
         self.sandboxSnapshots = sandboxSnapshots
         self.workloadSnapshots = workloadSnapshots
+        try? FileManager.default.createDirectory(at: logRootURL, withIntermediateDirectories: true)
     }
 
     func createSandbox(
@@ -676,6 +712,24 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         configuration: WorkloadConfiguration
     ) async throws {
         workloadConfigurations[configuration.id] = configuration
+        let logDirectory = logRootURL.appendingPathComponent(configuration.id, isDirectory: true)
+        try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        let stdoutLogURL = logDirectory.appendingPathComponent("stdout.log", isDirectory: false)
+        let stderrLogURL = logDirectory.appendingPathComponent("stderr.log", isDirectory: false)
+        if !FileManager.default.fileExists(atPath: stdoutLogURL.path) {
+            _ = FileManager.default.createFile(atPath: stdoutLogURL.path, contents: nil)
+        }
+        if !FileManager.default.fileExists(atPath: stderrLogURL.path) {
+            _ = FileManager.default.createFile(atPath: stderrLogURL.path, contents: nil)
+        }
+        let snapshot = WorkloadSnapshot(
+            configuration: configuration,
+            status: .unknown,
+            stdoutLogPath: stdoutLogURL.path,
+            stderrLogPath: stderrLogURL.path
+        )
+        workloadSnapshots[configuration.id] = snapshot
+        replaceWorkloadSnapshot(snapshot, sandboxID: sandboxID)
         createWorkloadCalls.append(
             RecordingCreateWorkloadCall(
                 sandboxID: sandboxID,
@@ -693,10 +747,13 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
                 id: workloadID,
                 processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
             )
+        let existingSnapshot = workloadSnapshots[workloadID]
         let snapshot = WorkloadSnapshot(
             configuration: configuration,
             status: .running,
-            startedDate: Date()
+            startedDate: Date(),
+            stdoutLogPath: existingSnapshot?.stdoutLogPath,
+            stderrLogPath: existingSnapshot?.stderrLogPath
         )
         workloadSnapshots[workloadID] = snapshot
         replaceWorkloadSnapshot(snapshot, sandboxID: sandboxID)
@@ -714,12 +771,15 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
                 id: workloadID,
                 processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
             )
+        let existingSnapshot = workloadSnapshots[workloadID]
         let snapshot = WorkloadSnapshot(
             configuration: configuration,
             status: .stopped,
             exitCode: 42,
-            startedDate: workloadSnapshots[workloadID]?.startedDate,
-            exitedAt: Date()
+            startedDate: existingSnapshot?.startedDate,
+            exitedAt: Date(),
+            stdoutLogPath: existingSnapshot?.stdoutLogPath,
+            stderrLogPath: existingSnapshot?.stderrLogPath
         )
         workloadSnapshots[workloadID] = snapshot
         replaceWorkloadSnapshot(snapshot, sandboxID: sandboxID)
@@ -765,6 +825,14 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         return execSyncResult
     }
 
+    func appendStdout(_ text: String, workloadID: String) throws {
+        try appendLog(text, workloadID: workloadID, stream: \.stdoutLogPath)
+    }
+
+    func appendStderr(_ text: String, workloadID: String) throws {
+        try appendLog(text, workloadID: workloadID, stream: \.stderrLogPath)
+    }
+
     private func replaceWorkloadSnapshot(_ workload: WorkloadSnapshot, sandboxID: String) {
         guard var sandboxSnapshot = sandboxSnapshots[sandboxID] else {
             return
@@ -780,6 +848,27 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         }
         sandboxSnapshot.workloads.removeAll { $0.id == workloadID }
         sandboxSnapshots[sandboxID] = sandboxSnapshot
+    }
+
+    private func appendLog(
+        _ text: String,
+        workloadID: String,
+        stream: KeyPath<WorkloadSnapshot, String?>
+    ) throws {
+        guard let snapshot = workloadSnapshots[workloadID] else {
+            throw CRIShimError.notFound("workload \(workloadID) not found")
+        }
+        guard let path = snapshot[keyPath: stream] else {
+            throw CRIShimError.notFound("log path for workload \(workloadID) not found")
+        }
+        let data = Data(text.utf8)
+        if !FileManager.default.fileExists(atPath: path) {
+            _ = FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
     }
 }
 
@@ -868,8 +957,25 @@ private func waitForSocket(at path: String) async throws {
     throw CRIShimRuntimeServerTestError.socketDidNotStart(path)
 }
 
+private func waitForFileContent(
+    at path: String,
+    containing expectedFragments: [String]
+) async throws -> String {
+    for _ in 0..<200 {
+        if let data = FileManager.default.contents(atPath: path),
+            let content = String(data: data, encoding: .utf8),
+            expectedFragments.allSatisfy(content.contains)
+        {
+            return content
+        }
+        try await Task.sleep(for: .milliseconds(25))
+    }
+    throw CRIShimRuntimeServerTestError.fileDidNotContainExpectedContent(path)
+}
+
 private enum CRIShimRuntimeServerTestError: Error {
     case socketDidNotStart(String)
+    case fileDidNotContainExpectedContent(String)
 }
 
 private func connectedUnixSocket(path: String) throws -> NIOBSDSocket.Handle {

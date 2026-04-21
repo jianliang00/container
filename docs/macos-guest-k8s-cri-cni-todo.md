@@ -27,15 +27,15 @@ RuntimeService:
 - [x] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
   snapshots and CNI network state.
 - [ ] Support CRI container mounts for macOS guest workloads.
-- [ ] Implement `ReopenContainerLog`.
+- [x] Implement `ReopenContainerLog`.
 - [ ] Implement `Exec` through a loopback streaming server.
 - [ ] Implement `PortForward` through a loopback streaming server.
 
 Logs and exec streaming:
 
-- [ ] Implement CRI log adapter from workload stdout/stderr to kubelet log path.
-- [ ] Start and stop per-container log mux tasks with workload lifecycle.
-- [ ] Implement log rotation reopen behavior.
+- [x] Implement CRI log adapter from workload stdout/stderr to kubelet log path.
+- [x] Start and stop per-container log mux tasks with workload lifecycle.
+- [x] Implement log rotation reopen behavior.
 - [ ] Add loopback-only streaming HTTP server.
 - [ ] Add short-lived stream token model.
 - [ ] Bridge streaming exec to `ContainerClient.streamExec`.

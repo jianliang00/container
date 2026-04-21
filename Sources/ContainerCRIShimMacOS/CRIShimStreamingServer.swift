@@ -25,7 +25,6 @@ import Glibc
 import Darwin
 #endif
 
-private let criShimStreamingSessionTimeoutSeconds: TimeInterval = 30
 private let criShimStreamingUpgradeRequired = HTTPResponseStatus(statusCode: 426, reasonPhrase: "Upgrade Required")
 
 private enum CRIShimStreamingRoute: String, Sendable {
@@ -136,6 +135,7 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
     private let config: CRIShimConfig
     private let runtimeManager: any CRIShimRuntimeManaging
     private let sessionStore: CRIShimStreamingSessionStore
+    private let activeSessionIdleTimeout: TimeAmount?
     private let websocketMaxFrameSize: Int
     private let stateLock = NSLock()
     private var serverChannel: Channel?
@@ -146,11 +146,18 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
         config: CRIShimConfig,
         runtimeManager: any CRIShimRuntimeManaging,
         sessionTimeoutSeconds: TimeInterval = 30,
+        activeSessionIdleTimeoutSeconds: TimeInterval = 300,
         websocketMaxFrameSize: Int = 1 << 20
     ) {
         self.config = config
         self.runtimeManager = runtimeManager
         self.sessionStore = CRIShimStreamingSessionStore(sessionTTL: sessionTimeoutSeconds)
+        self.activeSessionIdleTimeout =
+            if activeSessionIdleTimeoutSeconds > 0 {
+                .nanoseconds(Int64((activeSessionIdleTimeoutSeconds * 1_000_000_000).rounded()))
+            } else {
+                nil
+            }
         self.websocketMaxFrameSize = websocketMaxFrameSize
     }
 
@@ -274,7 +281,8 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
             server: self,
             runtimeManager: runtimeManager,
             session: session,
-            negotiatedSubprotocol: selectedSubprotocol
+            negotiatedSubprotocol: selectedSubprotocol,
+            idleTimeout: activeSessionIdleTimeout
         )
         return CRIShimPreparedWebSocketUpgrade(
             subprotocol: selectedSubprotocol,
@@ -499,31 +507,37 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     private let runtimeManager: any CRIShimRuntimeManaging
     private let session: CRIShimStreamingSessionDescriptor
     private let negotiatedSubprotocol: String
+    private let idleTimeout: TimeAmount?
     private let stateLock = NSLock()
     private var channel: Channel?
     private var cleanupPerformed = false
     private var backgroundTasks: [Task<Void, Never>] = []
     private var sessionState: SessionState?
+    private var idleTimeoutTask: Scheduled<Void>?
 
     init(
         server: CRIShimStreamingServer,
         runtimeManager: any CRIShimRuntimeManaging,
         session: CRIShimStreamingSessionDescriptor,
-        negotiatedSubprotocol: String
+        negotiatedSubprotocol: String,
+        idleTimeout: TimeAmount?
     ) {
         self.server = server
         self.runtimeManager = runtimeManager
         self.session = session
         self.negotiatedSubprotocol = negotiatedSubprotocol
+        self.idleTimeout = idleTimeout
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
         channel = context.channel
+        recordActivity()
         startSession()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let frame = unwrapInboundIn(data)
+        recordActivity()
 
         switch frame.opcode {
         case .binary:
@@ -536,7 +550,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             }
         case .connectionClose:
             Task {
-                await closeWebSocket()
+                await closeWebSocket(killProcess: true)
             }
         case .text, .continuation:
             Task {
@@ -643,7 +657,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 do {
                     let exitCode = try await process.wait()
                     await sendExecExitStatus(protocolVersion: protocolVersion, exitCode: exitCode)
-                    await closeWebSocket()
+                    await closeWebSocket(killProcess: false)
                 } catch {
                     await failSession(String(describing: error))
                 }
@@ -663,7 +677,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         let state = CRIShimPortForwardState(invocation: invocation, handles: handles)
         sessionState = .portForward(state)
         if handles.isEmpty {
-            await closeWebSocket()
+            await closeWebSocket(killProcess: false)
             return
         }
 
@@ -828,7 +842,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         }
         state.openPorts.remove(port)
         if state.openPorts.isEmpty {
-            await closeWebSocket()
+            await closeWebSocket(killProcess: false)
         }
     }
 
@@ -883,12 +897,12 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         case .none:
             break
         }
-        await closeWebSocket()
+        await closeWebSocket(killProcess: true)
     }
 
-    private func closeWebSocket() async {
+    private func closeWebSocket(killProcess: Bool) async {
         try? await writeFrame(opcode: .connectionClose, payload: ByteBuffer())
-        await cleanup(killProcess: false)
+        await cleanup(killProcess: killProcess)
         if let channel {
             try? await channel.close().get()
         }
@@ -900,6 +914,8 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 return false
             }
             cleanupPerformed = true
+            idleTimeoutTask?.cancel()
+            idleTimeoutTask = nil
             return true
         }
         guard shouldRun else {
@@ -936,6 +952,32 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         }
     }
 
+    private func recordActivity() {
+        guard let idleTimeout, let channel else {
+            return
+        }
+
+        let scheduled = channel.eventLoop.scheduleTask(in: idleTimeout) { [weak self] in
+            guard let self else {
+                return
+            }
+            Task {
+                await self.failSession("streaming session timed out due to inactivity")
+            }
+        }
+
+        let staleTask = stateLock.withLock { () -> Scheduled<Void>? in
+            guard !cleanupPerformed else {
+                scheduled.cancel()
+                return nil
+            }
+            let previous = idleTimeoutTask
+            idleTimeoutTask = scheduled
+            return previous
+        }
+        staleTask?.cancel()
+    }
+
     private func writeBinaryMessage(
         stream: UInt8,
         payload: Data
@@ -944,6 +986,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             return
         }
         try await writeFrame(opcode: .binary, payload: buffer)
+        recordActivity()
     }
 
     private func writeFrame(

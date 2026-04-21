@@ -28,19 +28,19 @@ RuntimeService:
   snapshots and CNI network state.
 - [ ] Support CRI container mounts for macOS guest workloads.
 - [x] Implement `ReopenContainerLog`.
-- [ ] Implement `Exec` through a loopback streaming server.
-- [ ] Implement `PortForward` through a loopback streaming server.
+- [x] Implement `Exec` through a loopback streaming server.
+- [x] Implement `PortForward` through a loopback streaming server.
 
 Logs and exec streaming:
 
 - [x] Implement CRI log adapter from workload stdout/stderr to kubelet log path.
 - [x] Start and stop per-container log mux tasks with workload lifecycle.
 - [x] Implement log rotation reopen behavior.
-- [ ] Add loopback-only streaming HTTP server.
-- [ ] Add short-lived stream token model.
-- [ ] Bridge streaming exec to `ContainerClient.streamExec`.
-- [ ] Bridge streaming port-forward to `ContainerKit.streamPortForward`.
-- [ ] Implement TTY resize handling where core exposes it.
+- [x] Add loopback-only streaming HTTP server.
+- [x] Add short-lived stream token model.
+- [x] Bridge streaming exec to `ContainerClient.streamExec`.
+- [x] Bridge streaming port-forward to `ContainerKit.streamPortForward`.
+- [x] Implement TTY resize handling where core exposes it.
 - [ ] Implement disconnect and stream timeout cleanup.
 
 NetworkPolicy controller:

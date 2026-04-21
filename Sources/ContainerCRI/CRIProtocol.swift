@@ -91,15 +91,15 @@ public enum CRIRuntimeOperationSurface {
         case .updatePodSandboxResources:
             return "UpdatePodSandboxResources is a deterministic no-op for macOS guest workloads"
         case .reopenContainerLog:
-            return "ReopenContainerLog is not wired to log rotation yet"
+            return "ReopenContainerLog is implemented by the protobuf-backed CRI server"
         case .execSync:
             return "ExecSync is implemented by the protobuf-backed CRI server"
         case .exec:
-            return "Exec is not wired to the streaming server yet"
+            return "Exec is implemented by the protobuf-backed CRI server"
         case .attach:
             return "Attach is not supported for macOS guest workloads"
         case .portForward:
-            return "PortForward is not wired to the streaming server yet"
+            return "PortForward is implemented by the protobuf-backed CRI server"
         case .containerStats:
             return "ContainerStats is implemented by the protobuf-backed CRI server"
         case .listContainerStats:

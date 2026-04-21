@@ -45,6 +45,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let runtimeManager: any CRIShimRuntimeManaging
     private let imageManager: any CRIShimImageManaging
     private let cniManager: any CRIShimCNIManaging
+    private let logManager: any CRIShimLogManaging
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
@@ -55,6 +56,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         runtimeManager: any CRIShimRuntimeManaging = ContainerKitCRIShimRuntimeManager(),
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager(),
+        logManager: (any CRIShimLogManaging)? = nil,
         handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
         self.config = config
@@ -64,6 +66,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         self.runtimeManager = runtimeManager
         self.imageManager = imageManager
         self.cniManager = cniManager
+        self.logManager =
+            logManager
+            ?? CRIShimLogManager(
+                stateDirectoryURL: URL(fileURLWithPath: config.normalizedStateDirectory)
+            )
         self.handlerLogger = handlerLogger
     }
 
@@ -224,6 +231,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             let containers = try metadataStore.listContainers()
                 .filter { $0.sandboxID == metadata.id }
             for container in containers {
+                await logManager.stop(containerID: container.id, removeState: true)
                 try metadataStore.deleteContainer(id: container.id)
             }
             try metadataStore.deleteSandbox(id: metadata.id)
@@ -401,10 +409,24 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 )
             }
 
-            try await runtimeManager.startWorkload(
+            let workloadSnapshot = try await runtimeManager.inspectWorkload(
                 sandboxID: metadata.sandboxID,
                 workloadID: metadata.id
             )
+            try await logManager.start(
+                container: metadata,
+                workloadSnapshot: workloadSnapshot
+            )
+
+            do {
+                try await runtimeManager.startWorkload(
+                    sandboxID: metadata.sandboxID,
+                    workloadID: metadata.id
+                )
+            } catch {
+                await logManager.stop(containerID: metadata.id, removeState: false)
+                throw error
+            }
 
             metadata.state = .running
             metadata.startedAt = Date()
@@ -439,6 +461,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             metadata.state = .exited
             metadata.exitedAt = Date()
             try metadataStore.upsertContainer(metadata)
+            await logManager.stop(containerID: metadata.id, removeState: false)
             return Runtime_V1_StopContainerResponse()
         }
     }
@@ -460,6 +483,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 sandboxID: metadata.sandboxID,
                 workloadID: metadata.id
             )
+            await logManager.stop(containerID: metadata.id, removeState: true)
             try metadataStore.deleteContainer(id: metadata.id)
             return Runtime_V1_RemoveContainerResponse()
         }
@@ -543,6 +567,20 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         }
     }
 
+    public func reopenContainerLog(
+        request: Runtime_V1_ReopenContainerLogRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ReopenContainerLogResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.reopenContainerLog.rawValue) {
+            let metadata = try containerMetadata(
+                id: request.containerID,
+                operation: "ReopenContainerLog"
+            )
+            try await logManager.reopen(container: metadata)
+            return Runtime_V1_ReopenContainerLogResponse()
+        }
+    }
+
     private func containerMetadata(id rawID: String, operation: String) throws -> CRIShimContainerMetadata {
         let containerID = rawID.trimmed
         guard !containerID.isEmpty else {
@@ -610,6 +648,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             container.state = .exited
             container.exitedAt = now
             try metadataStore.upsertContainer(container)
+            await logManager.stop(containerID: container.id, removeState: false)
         }
 
         if metadata.state != .stopped {

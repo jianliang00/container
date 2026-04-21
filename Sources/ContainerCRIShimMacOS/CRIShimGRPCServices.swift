@@ -46,6 +46,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let imageManager: any CRIShimImageManaging
     private let cniManager: any CRIShimCNIManaging
     private let logManager: any CRIShimLogManaging
+    private let streamingServer: CRIShimStreamingServer?
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
@@ -57,6 +58,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager(),
         logManager: (any CRIShimLogManaging)? = nil,
+        streamingServer: CRIShimStreamingServer? = nil,
         handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
         self.config = config
@@ -71,6 +73,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             ?? CRIShimLogManager(
                 stateDirectoryURL: URL(fileURLWithPath: config.normalizedStateDirectory)
             )
+        self.streamingServer = streamingServer
         self.handlerLogger = handlerLogger
     }
 
@@ -251,6 +254,38 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 timeout: invocation.timeout
             )
             return makeCRIShimExecSyncResponse(result)
+        }
+    }
+
+    public func exec(
+        request: Runtime_V1_ExecRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_ExecResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.exec.rawValue) {
+            guard let streamingServer else {
+                throw CRIShimError.internalError("streaming server is not configured")
+            }
+            let invocation = try makeCRIShimExecStreamingInvocation(request)
+            _ = try containerMetadata(id: invocation.containerID, operation: "Exec")
+            var response = Runtime_V1_ExecResponse()
+            response.url = try await streamingServer.registerExecURL(invocation)
+            return response
+        }
+    }
+
+    public func portForward(
+        request: Runtime_V1_PortForwardRequest,
+        context: GRPCAsyncServerCallContext
+    ) async throws -> Runtime_V1_PortForwardResponse {
+        try await handlerLogger.handle(operation: CRIRuntimeOperation.portForward.rawValue) {
+            guard let streamingServer else {
+                throw CRIShimError.internalError("streaming server is not configured")
+            }
+            let invocation = try makeCRIShimPortForwardInvocation(request)
+            _ = try sandboxMetadata(id: invocation.sandboxID, operation: "PortForward")
+            var response = Runtime_V1_PortForwardResponse()
+            response.url = try await streamingServer.registerPortForwardURL(invocation)
+            return response
         }
     }
 

@@ -233,6 +233,85 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.execSyncCalls[0].configuration.arguments == ["hello"])
         #expect(runtimeManager.execSyncCalls[0].timeout == .seconds(3))
 
+        var execRequest = Runtime_V1_ExecRequest()
+        execRequest.containerID = "container-1"
+        execRequest.cmd = ["/bin/cat"]
+        execRequest.stdin = true
+        execRequest.stdout = true
+        execRequest.stderr = false
+        execRequest.tty = true
+        let exec = try await client.exec(execRequest)
+        let execTask = try makeWebSocketTask(
+            from: exec.url,
+            protocols: ["v5.channel.k8s.io"]
+        )
+        execTask.resume()
+
+        try await execTask.send(
+            .data(Data([4]) + Data(#"{"Width":120,"Height":42}"#.utf8))
+        )
+        try await execTask.send(
+            .data(Data([0]) + Data("hello exec\n".utf8))
+        )
+
+        let execOutput = try await receiveBinaryMessage(from: execTask)
+        #expect(execOutput.first == 1)
+        #expect(String(decoding: execOutput.dropFirst(), as: UTF8.self) == "stdout:hello exec\n")
+
+        try await execTask.send(.data(Data([255])))
+        let execStatus = try await receiveBinaryMessage(from: execTask)
+        #expect(execStatus.first == 3)
+        #expect(String(decoding: execStatus.dropFirst(), as: UTF8.self).contains(#""status":"Success""#))
+
+        let recordedProcess = try #require(runtimeManager.streamExecProcesses["container-1"])
+        #expect(recordedProcess.started)
+        #expect(recordedProcess.resizeCalls == [CRIShimTerminalSize(width: 120, height: 42)])
+
+        var portForwardRequest = Runtime_V1_PortForwardRequest()
+        portForwardRequest.podSandboxID = "sandbox-1"
+        portForwardRequest.port = [8080, 8081]
+        let portForward = try await client.portForward(portForwardRequest)
+        let portForwardTask = try makeWebSocketTask(
+            from: portForward.url,
+            protocols: ["portforward.k8s.io"]
+        )
+        portForwardTask.resume()
+
+        try await portForwardTask.send(
+            .data(Data([0]) + portPrefixData(8080) + Data("ping0".utf8))
+        )
+        try await portForwardTask.send(
+            .data(Data([2]) + portPrefixData(8081) + Data("ping1".utf8))
+        )
+
+        let firstPortForwardMessage = try await receiveBinaryMessage(from: portForwardTask)
+        let secondPortForwardMessage = try await receiveBinaryMessage(from: portForwardTask)
+        let portForwardMessages = [firstPortForwardMessage, secondPortForwardMessage]
+        let observedPortForwardMessages = Set(
+            portForwardMessages.map(ObservedPortForwardMessage.init)
+        )
+        let expectedPortForwardMessages: Set<ObservedPortForwardMessage> = [
+            ObservedPortForwardMessage(
+                stream: 0,
+                forwardedPort: 8080,
+                payload: "echo:8080:ping0"
+            ),
+            ObservedPortForwardMessage(
+                stream: 2,
+                forwardedPort: 8081,
+                payload: "echo:8081:ping1"
+            ),
+        ]
+        #expect(observedPortForwardMessages == expectedPortForwardMessages)
+        #expect(
+            runtimeManager.portForwardCalls == [
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 8080),
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 8081),
+            ]
+        )
+        execTask.cancel(with: .normalClosure, reason: nil)
+        portForwardTask.cancel(with: .normalClosure, reason: nil)
+
         let runtimeConfig = try await client.runtimeConfig(Runtime_V1_RuntimeConfigRequest())
         #expect(!runtimeConfig.hasLinux)
 
@@ -600,6 +679,34 @@ private struct RecordingExecSyncCall {
     var timeout: Duration?
 }
 
+private struct RecordingStreamExecCall {
+    var containerID: String
+    var configuration: ProcessConfiguration
+}
+
+private struct RecordingPortForwardCall: Equatable {
+    var sandboxID: String
+    var port: UInt32
+}
+
+private struct ObservedPortForwardMessage: Hashable {
+    var stream: UInt8
+    var forwardedPort: UInt16
+    var payload: String
+
+    init(stream: UInt8, forwardedPort: UInt16, payload: String) {
+        self.stream = stream
+        self.forwardedPort = forwardedPort
+        self.payload = payload
+    }
+
+    init(_ message: Data) {
+        stream = message[0]
+        forwardedPort = UInt16(message[1]) | (UInt16(message[2]) << 8)
+        payload = String(decoding: message.dropFirst(3), as: UTF8.self)
+    }
+}
+
 private struct RecordingCreateWorkloadCall {
     var sandboxID: String
     var configuration: WorkloadConfiguration
@@ -611,12 +718,94 @@ private struct RecordingStopWorkloadCall {
     var options: ContainerStopOptions
 }
 
+private final class RecordingStreamingProcess: CRIShimStreamingProcess, @unchecked Sendable {
+    let stdin: FileHandle?
+    let stdout: FileHandle?
+    let stderr: FileHandle?
+    private(set) var started = false
+    private(set) var resizeCalls: [CRIShimTerminalSize] = []
+    private(set) var killSignals: [Int32] = []
+    private let stateLock = NSLock()
+    private var waitTask: Task<Int32, Never>?
+
+    init(
+        stdin: FileHandle?,
+        stdout: FileHandle?,
+        stderr: FileHandle?
+    ) {
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+    }
+
+    func start() async throws {
+        started = true
+        waitTask = Task {
+            if let stderr {
+                try? stderr.close()
+            }
+
+            if let stdin, let stdout {
+                for await data in fileHandleStream(stdin) {
+                    try? stdout.write(contentsOf: Data("stdout:".utf8) + data)
+                }
+            }
+
+            try? stdout?.close()
+            try? stdin?.close()
+            return 0
+        }
+    }
+
+    func resize(_ size: CRIShimTerminalSize) async throws {
+        stateLock.withLock {
+            resizeCalls.append(size)
+        }
+    }
+
+    func kill(_ signal: Int32) async throws {
+        stateLock.withLock {
+            killSignals.append(signal)
+        }
+        try? stdin?.close()
+        try? stdout?.close()
+        try? stderr?.close()
+        if waitTask == nil {
+            waitTask = Task { 128 + signal }
+        }
+    }
+
+    func wait() async throws -> Int32 {
+        await waitTask?.value ?? 0
+    }
+}
+
+private final class RecordingPortForwardConnection: @unchecked Sendable {
+    let forwardedHandle: FileHandle
+    let peerHandle: FileHandle
+
+    init(forwardedHandle: FileHandle, peerHandle: FileHandle) {
+        self.forwardedHandle = forwardedHandle
+        self.peerHandle = peerHandle
+    }
+
+    func startEcho(port: UInt32) {
+        Task {
+            for await data in fileHandleStream(peerHandle) {
+                try? peerHandle.write(contentsOf: Data("echo:\(port):".utf8) + data)
+            }
+        }
+    }
+}
+
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
     var execSyncResult: ExecSyncResult
     private let logRootURL: URL
     private var sandboxSnapshots: [String: SandboxSnapshot]
     private var workloadConfigurations: [String: WorkloadConfiguration] = [:]
     private var workloadSnapshots: [String: WorkloadSnapshot] = [:]
+    private(set) var streamExecProcesses: [String: RecordingStreamingProcess] = [:]
+    private(set) var portForwardConnections: [UInt32: RecordingPortForwardConnection] = [:]
     private(set) var createSandboxCalls: [ContainerConfiguration] = []
     private(set) var startSandboxCalls: [(id: String, presentGUI: Bool)] = []
     private(set) var stopSandboxCalls: [(id: String, options: ContainerStopOptions)] = []
@@ -628,6 +817,8 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var stopWorkloadCalls: [RecordingStopWorkloadCall] = []
     private(set) var removeWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var execSyncCalls: [RecordingExecSyncCall] = []
+    private(set) var streamExecCalls: [RecordingStreamExecCall] = []
+    private(set) var portForwardCalls: [RecordingPortForwardCall] = []
 
     init(
         execSyncResult: ExecSyncResult,
@@ -825,6 +1016,41 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         return execSyncResult
     }
 
+    func streamExec(
+        containerID: String,
+        configuration: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) async throws -> any CRIShimStreamingProcess {
+        let process = RecordingStreamingProcess(
+            stdin: stdio[0],
+            stdout: stdio[1],
+            stderr: stdio[2]
+        )
+        streamExecCalls.append(
+            RecordingStreamExecCall(
+                containerID: containerID,
+                configuration: configuration
+            )
+        )
+        streamExecProcesses[containerID] = process
+        return process
+    }
+
+    func streamPortForward(
+        sandboxID: String,
+        port: UInt32
+    ) async throws -> FileHandle {
+        let (forwardedHandle, peerHandle) = try makeSocketPair()
+        let connection = RecordingPortForwardConnection(
+            forwardedHandle: forwardedHandle,
+            peerHandle: peerHandle
+        )
+        connection.startEcho(port: port)
+        portForwardCalls.append(RecordingPortForwardCall(sandboxID: sandboxID, port: port))
+        portForwardConnections[port] = connection
+        return forwardedHandle
+    }
+
     func appendStdout(_ text: String, workloadID: String) throws {
         try appendLog(text, workloadID: workloadID, stream: \.stdoutLogPath)
     }
@@ -973,9 +1199,86 @@ private func waitForFileContent(
     throw CRIShimRuntimeServerTestError.fileDidNotContainExpectedContent(path)
 }
 
+private func fileHandleStream(_ handle: FileHandle) -> AsyncStream<Data> {
+    AsyncStream { continuation in
+        handle.readabilityHandler = { fileHandle in
+            let data = fileHandle.availableData
+            if data.isEmpty {
+                fileHandle.readabilityHandler = nil
+                continuation.finish()
+                return
+            }
+            continuation.yield(data)
+        }
+    }
+}
+
+private func makeSocketPair() throws -> (FileHandle, FileHandle) {
+    var fileDescriptors = [Int32](repeating: 0, count: 2)
+    guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &fileDescriptors) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    return (
+        FileHandle(fileDescriptor: fileDescriptors[0], closeOnDealloc: true),
+        FileHandle(fileDescriptor: fileDescriptors[1], closeOnDealloc: true)
+    )
+}
+
+private func makeWebSocketTask(
+    from urlString: String,
+    protocols: [String]
+) throws -> URLSessionWebSocketTask {
+    guard var components = URLComponents(string: urlString) else {
+        throw POSIXError(.EINVAL)
+    }
+    if components.scheme == "http" {
+        components.scheme = "ws"
+    } else if components.scheme == "https" {
+        components.scheme = "wss"
+    }
+    guard let url = components.url else {
+        throw POSIXError(.EINVAL)
+    }
+    return URLSession.shared.webSocketTask(with: url, protocols: protocols)
+}
+
+private func receiveBinaryMessage(
+    from task: URLSessionWebSocketTask
+) async throws -> Data {
+    let message = try await task.receive()
+    switch message {
+    case .data(let data):
+        return data
+    case .string(let string):
+        throw CRIShimRuntimeServerTestError.unexpectedTextFrame(string)
+    @unknown default:
+        throw CRIShimRuntimeServerTestError.unexpectedFrame
+    }
+}
+
+private func portPrefixData(_ port: UInt16) -> Data {
+    Data(
+        [
+            UInt8(truncatingIfNeeded: port & 0x00FF),
+            UInt8(truncatingIfNeeded: (port & 0xFF00) >> 8),
+        ]
+    )
+}
+
 private enum CRIShimRuntimeServerTestError: Error {
     case socketDidNotStart(String)
     case fileDidNotContainExpectedContent(String)
+    case unexpectedTextFrame(String)
+    case unexpectedFrame
+}
+
+extension NSLock {
+    fileprivate func withLock<R>(_ body: () throws -> R) rethrows -> R {
+        lock()
+        defer { unlock() }
+        return try body()
+    }
 }
 
 private func connectedUnixSocket(path: String) throws -> NIOBSDSocket.Handle {

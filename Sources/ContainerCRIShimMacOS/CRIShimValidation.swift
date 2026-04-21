@@ -44,6 +44,14 @@ extension CRIShimConfig {
 
         if let streaming {
             validateNonEmpty(streaming.address, name: "streaming.address", issues: &issues)
+            if let address = streaming.address?.trimmed,
+                !address.isEmpty,
+                address != "127.0.0.1",
+                address != "::1",
+                address.lowercased() != "localhost"
+            {
+                issues.append("streaming.address must be a loopback address")
+            }
             if let port = streaming.port {
                 if port < 0 || port > 65535 {
                     issues.append("streaming.port must be between 0 and 65535")

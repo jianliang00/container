@@ -77,6 +77,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
     private let ownsEventLoopGroup: Bool
     private let serviceProviders: [any CallHandlerProvider]
     private let startupTasks: [any CRIShimServerStartupTask]
+    private let streamingServer: CRIShimStreamingServer?
     private let stateLock = NSLock()
     private var server: Server?
 
@@ -91,6 +92,10 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         let stateDirectoryURL = URL(fileURLWithPath: config.normalizedStateDirectory)
         let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectoryURL)
         let logManager = CRIShimLogManager(stateDirectoryURL: stateDirectoryURL)
+        let streamingServer = CRIShimStreamingServer(
+            config: config,
+            runtimeManager: runtimeManager
+        )
         let startupTasks: [any CRIShimServerStartupTask] = [
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
@@ -112,13 +117,15 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     runtimeManager: runtimeManager,
                     imageManager: imageManager,
                     cniManager: cniManager,
-                    logManager: logManager
+                    logManager: logManager,
+                    streamingServer: streamingServer
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
             eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
             ownsEventLoopGroup: true,
-            startupTasks: startupTasks
+            startupTasks: startupTasks,
+            streamingServer: streamingServer
         )
     }
 
@@ -135,6 +142,10 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         let stateDirectoryURL = URL(fileURLWithPath: config.normalizedStateDirectory)
         let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectoryURL)
         let logManager = CRIShimLogManager(stateDirectoryURL: stateDirectoryURL)
+        let streamingServer = CRIShimStreamingServer(
+            config: config,
+            runtimeManager: runtimeManager
+        )
         let startupTasks: [any CRIShimServerStartupTask] = [
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
@@ -157,12 +168,14 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     runtimeManager: runtimeManager,
                     imageManager: imageManager,
                     cniManager: cniManager,
-                    logManager: logManager
+                    logManager: logManager,
+                    streamingServer: streamingServer
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
             eventLoopGroup: eventLoopGroup,
-            startupTasks: startupTasks
+            startupTasks: startupTasks,
+            streamingServer: streamingServer
         )
     }
 
@@ -171,19 +184,22 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         serviceProviders: [any CallHandlerProvider],
         eventLoopGroup: any EventLoopGroup,
         ownsEventLoopGroup: Bool = false,
-        startupTasks: [any CRIShimServerStartupTask] = []
+        startupTasks: [any CRIShimServerStartupTask] = [],
+        streamingServer: CRIShimStreamingServer? = nil
     ) {
         self.socketPath = socketPath
         self.serviceProviders = serviceProviders
         self.eventLoopGroup = eventLoopGroup
         self.ownsEventLoopGroup = ownsEventLoopGroup
         self.startupTasks = startupTasks
+        self.streamingServer = streamingServer
     }
 
     public func run() async throws {
         for task in startupTasks {
             try await task.run()
         }
+        try await streamingServer?.start(eventLoopGroup: eventLoopGroup)
         _ = try? FileManager.default.removeItem(atPath: socketPath)
         do {
             let server = try await Server.insecure(group: eventLoopGroup)
@@ -193,15 +209,18 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
             setServer(server)
             try await server.onClose.get()
             _ = try? FileManager.default.removeItem(atPath: socketPath)
+            await streamingServer?.stop()
             await shutdownOwnedEventLoopGroupIfNeeded()
         } catch {
             _ = try? FileManager.default.removeItem(atPath: socketPath)
+            await streamingServer?.stop()
             await shutdownOwnedEventLoopGroupIfNeeded()
             throw error
         }
     }
 
     public func stop() async {
+        await streamingServer?.stop()
         guard let server = currentServer() else {
             return
         }

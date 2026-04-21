@@ -14,9 +14,11 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerCRI
 import ContainerKit
 import ContainerResource
+import ContainerizationOS
 import Foundation
 
 #if os(Linux)
@@ -86,6 +88,69 @@ public protocol CRIShimRuntimeManaging: Sendable {
         configuration: ProcessConfiguration,
         timeout: Duration?
     ) async throws -> ExecSyncResult
+
+    func streamExec(
+        containerID: String,
+        configuration: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) async throws -> any CRIShimStreamingProcess
+
+    func streamPortForward(
+        sandboxID: String,
+        port: UInt32
+    ) async throws -> FileHandle
+}
+
+public struct CRIShimTerminalSize: Sendable, Equatable {
+    public var width: Int
+    public var height: Int
+
+    public init(width: Int, height: Int) {
+        self.width = width
+        self.height = height
+    }
+}
+
+public protocol CRIShimStreamingProcess: Sendable {
+    func start() async throws
+    func resize(_ size: CRIShimTerminalSize) async throws
+    func kill(_ signal: Int32) async throws
+    func wait() async throws -> Int32
+}
+
+private struct ContainerKitCRIShimStreamingProcess: CRIShimStreamingProcess {
+    private let process: any ClientProcess
+
+    init(process: any ClientProcess) {
+        self.process = process
+    }
+
+    func start() async throws {
+        try await process.start()
+    }
+
+    func resize(_ size: CRIShimTerminalSize) async throws {
+        guard size.width > 0, size.width <= Int(UInt16.max) else {
+            throw CRIShimError.invalidArgument("terminal width must be between 1 and \(UInt16.max)")
+        }
+        guard size.height > 0, size.height <= Int(UInt16.max) else {
+            throw CRIShimError.invalidArgument("terminal height must be between 1 and \(UInt16.max)")
+        }
+        try await process.resize(
+            Terminal.Size(
+                width: UInt16(size.width),
+                height: UInt16(size.height)
+            )
+        )
+    }
+
+    func kill(_ signal: Int32) async throws {
+        try await process.kill(signal)
+    }
+
+    func wait() async throws -> Int32 {
+        try await process.wait()
+    }
 }
 
 public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
@@ -187,12 +252,46 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
     ) async throws -> ExecSyncResult {
         try await kit.execSync(id: containerID, configuration: configuration, timeout: timeout)
     }
+
+    public func streamExec(
+        containerID: String,
+        configuration: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) async throws -> any CRIShimStreamingProcess {
+        let process = try await kit.streamExec(
+            id: containerID,
+            configuration: configuration,
+            stdio: stdio
+        )
+        return ContainerKitCRIShimStreamingProcess(process: process)
+    }
+
+    public func streamPortForward(
+        sandboxID: String,
+        port: UInt32
+    ) async throws -> FileHandle {
+        try await kit.streamPortForward(id: sandboxID, port: port)
+    }
 }
 
 struct CRIShimExecSyncInvocation {
     var containerID: String
     var configuration: ProcessConfiguration
     var timeout: Duration?
+}
+
+struct CRIShimExecStreamingInvocation {
+    var containerID: String
+    var configuration: ProcessConfiguration
+    var stdin: Bool
+    var stdout: Bool
+    var stderr: Bool
+    var tty: Bool
+}
+
+struct CRIShimPortForwardInvocation {
+    var sandboxID: String
+    var ports: [UInt32]
 }
 
 let criShimExecSyncOutputLimitBytes = 16 * 1024 * 1024
@@ -231,6 +330,67 @@ func makeCRIShimExecSyncInvocation(
             user: .id(uid: 0, gid: 0)
         ),
         timeout: timeout
+    )
+}
+
+func makeCRIShimExecStreamingInvocation(
+    _ request: Runtime_V1_ExecRequest
+) throws -> CRIShimExecStreamingInvocation {
+    let containerID = request.containerID.trimmed
+    guard !containerID.isEmpty else {
+        throw CRIShimError.invalidArgument("Exec container_id is required")
+    }
+
+    guard let executable = request.cmd.first?.trimmed, !executable.isEmpty else {
+        throw CRIShimError.invalidArgument("Exec cmd must include an executable")
+    }
+
+    if request.tty, request.stderr {
+        throw CRIShimError.invalidArgument("Exec tty and stderr cannot both be true")
+    }
+    if !request.stdin, !request.stdout, !request.stderr {
+        throw CRIShimError.invalidArgument("Exec requires stdin, stdout, or stderr")
+    }
+
+    return CRIShimExecStreamingInvocation(
+        containerID: containerID,
+        configuration: ProcessConfiguration(
+            executable: executable,
+            arguments: Array(request.cmd.dropFirst()),
+            environment: [],
+            workingDirectory: "/",
+            terminal: request.tty,
+            user: .id(uid: 0, gid: 0)
+        ),
+        stdin: request.stdin,
+        stdout: request.stdout,
+        stderr: request.stderr,
+        tty: request.tty
+    )
+}
+
+func makeCRIShimPortForwardInvocation(
+    _ request: Runtime_V1_PortForwardRequest
+) throws -> CRIShimPortForwardInvocation {
+    let sandboxID = request.podSandboxID.trimmed
+    guard !sandboxID.isEmpty else {
+        throw CRIShimError.invalidArgument("PortForward pod_sandbox_id is required")
+    }
+
+    guard !request.port.isEmpty else {
+        throw CRIShimError.invalidArgument("PortForward requires at least one port")
+    }
+
+    let ports = try request.port.map { rawPort in
+        guard rawPort > 0, rawPort <= UInt32(UInt16.max) else {
+            throw CRIShimError.invalidArgument("PortForward port \(rawPort) must be between 1 and 65535")
+        }
+        return UInt32(rawPort)
+    }
+
+    return CRIShimPortForwardInvocation(
+        sandboxID: sandboxID,
+        ports: ports
     )
 }
 

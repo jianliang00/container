@@ -245,7 +245,7 @@ struct CRIShimRuntimeServerTests {
             from: exec.url,
             protocols: ["v5.channel.k8s.io"]
         )
-        execTask.resume()
+        try await resumeWebSocketTask(execTask)
 
         try await execTask.send(
             .data(Data([4]) + Data(#"{"Width":120,"Height":42}"#.utf8))
@@ -275,7 +275,7 @@ struct CRIShimRuntimeServerTests {
             from: portForward.url,
             protocols: ["portforward.k8s.io"]
         )
-        portForwardTask.resume()
+        try await resumeWebSocketTask(portForwardTask)
 
         try await portForwardTask.send(
             .data(Data([0]) + portPrefixData(8080) + Data("ping0".utf8))
@@ -619,6 +619,132 @@ struct CRIShimRuntimeServerTests {
             events.append(event)
         }
         #expect(events.isEmpty)
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        #expect(!FileManager.default.fileExists(atPath: socketPath))
+        await shutdown(group)
+    }
+
+    @Test
+    func execStreamingTimeoutKillsIdleProcess() async throws {
+        let socketPath = "/tmp/cri-shim-timeout-\(UUID().uuidString.prefix(8)).sock"
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.stateDirectory = stateDirectory.path
+
+        let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1",
+                podUID: "pod-uid",
+                namespace: "default",
+                name: "timeout-demo",
+                attempt: 1,
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                network: "default",
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ))
+        try metadataStore.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-1",
+                sandboxID: "sandbox-1",
+                name: "workload",
+                attempt: 1,
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos",
+                command: ["/bin/cat"],
+                args: [],
+                logPath: stateDirectory.appendingPathComponent("cri.log").path,
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_010),
+                startedAt: Date(timeIntervalSince1970: 1_700_000_020)
+            ))
+
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(
+                exitCode: 0,
+                stdout: Data(),
+                stderr: Data()
+            )
+        )
+        let imageManager = RecordingImageManager(images: [])
+        let cniManager = RecordingCNIManager()
+        let logManager = CRIShimLogManager(stateDirectoryURL: stateDirectory)
+        let streamingServer = CRIShimStreamingServer(
+            config: config,
+            runtimeManager: runtimeManager,
+            activeSessionIdleTimeoutSeconds: 0.5
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    metadataStore: metadataStore,
+                    runtimeManager: runtimeManager,
+                    imageManager: imageManager,
+                    cniManager: cniManager,
+                    logManager: logManager,
+                    streamingServer: streamingServer
+                ),
+                CRIShimImageServiceProvider(imageManager: imageManager),
+            ],
+            eventLoopGroup: group,
+            startupTasks: [],
+            streamingServer: streamingServer
+        )
+        let serverTask = Task {
+            try await server.run()
+        }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
+
+        try await waitForSocket(at: socketPath)
+
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+
+        var execRequest = Runtime_V1_ExecRequest()
+        execRequest.containerID = "container-1"
+        execRequest.cmd = ["/bin/cat"]
+        execRequest.stdin = true
+        execRequest.stdout = true
+        execRequest.tty = true
+        let exec = try await client.exec(execRequest)
+        let execTask = try makeWebSocketTask(
+            from: exec.url,
+            protocols: ["v5.channel.k8s.io"]
+        )
+        try await resumeWebSocketTask(execTask)
+
+        let process = try await waitForValue(description: "stream exec process") {
+            runtimeManager.streamExecProcesses["container-1"]
+        }
+        try await waitForCondition(description: "stream exec process start") {
+            process.started
+        }
+
+        let timeoutStatus = try await receiveBinaryMessage(from: execTask)
+        #expect(timeoutStatus.first == 3)
+        #expect(
+            String(decoding: timeoutStatus.dropFirst(), as: UTF8.self)
+                .contains("timed out due to inactivity")
+        )
+
+        try await waitForCondition(description: "stream exec process kill") {
+            process.killSignals == [Int32(SIGTERM)]
+        }
 
         try await channel.close().get()
         await server.stop()
@@ -1199,6 +1325,47 @@ private func waitForFileContent(
     throw CRIShimRuntimeServerTestError.fileDidNotContainExpectedContent(path)
 }
 
+private func waitForValue<T>(
+    description: String,
+    timeout: Duration = .seconds(2),
+    pollInterval: Duration = .milliseconds(10),
+    _ body: () -> T?
+) async throws -> T {
+    let timeoutNanoseconds =
+        max(timeout.components.seconds, 0) * 1_000_000_000
+        + Int64(timeout.components.attoseconds / 1_000_000_000)
+    let pollNanoseconds = max(
+        Int64(pollInterval.components.seconds) * 1_000_000_000
+            + Int64(pollInterval.components.attoseconds / 1_000_000_000),
+        1_000_000
+    )
+    let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(timeoutNanoseconds, 1))
+
+    while DispatchTime.now().uptimeNanoseconds <= deadline {
+        if let value = body() {
+            return value
+        }
+        try await Task.sleep(nanoseconds: UInt64(pollNanoseconds))
+    }
+
+    throw CRIShimRuntimeServerTestError.timedOut(description)
+}
+
+private func waitForCondition(
+    description: String,
+    timeout: Duration = .seconds(2),
+    pollInterval: Duration = .milliseconds(10),
+    _ body: () -> Bool
+) async throws {
+    _ = try await waitForValue(
+        description: description,
+        timeout: timeout,
+        pollInterval: pollInterval
+    ) {
+        body() ? true : nil
+    }
+}
+
 private func fileHandleStream(_ handle: FileHandle) -> AsyncStream<Data> {
     AsyncStream { continuation in
         handle.readabilityHandler = { fileHandle in
@@ -1243,6 +1410,14 @@ private func makeWebSocketTask(
     return URLSession.shared.webSocketTask(with: url, protocols: protocols)
 }
 
+private func resumeWebSocketTask(
+    _ task: URLSessionWebSocketTask,
+    connectDelay: Duration = .milliseconds(50)
+) async throws {
+    task.resume()
+    try await Task.sleep(for: connectDelay)
+}
+
 private func receiveBinaryMessage(
     from task: URLSessionWebSocketTask
 ) async throws -> Data {
@@ -1269,6 +1444,7 @@ private func portPrefixData(_ port: UInt16) -> Data {
 private enum CRIShimRuntimeServerTestError: Error {
     case socketDidNotStart(String)
     case fileDidNotContainExpectedContent(String)
+    case timedOut(String)
     case unexpectedTextFrame(String)
     case unexpectedFrame
 }

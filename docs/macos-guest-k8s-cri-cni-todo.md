@@ -41,7 +41,7 @@ Logs and exec streaming:
 - [x] Bridge streaming exec to `ContainerClient.streamExec`.
 - [x] Bridge streaming port-forward to `ContainerKit.streamPortForward`.
 - [x] Implement TTY resize handling where core exposes it.
-- [ ] Implement disconnect and stream timeout cleanup.
+- [x] Implement disconnect and stream timeout cleanup.
 
 NetworkPolicy controller:
 

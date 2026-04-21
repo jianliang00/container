@@ -88,12 +88,19 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager()
     ) throws {
-        let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
+        let stateDirectoryURL = URL(fileURLWithPath: config.normalizedStateDirectory)
+        let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectoryURL)
+        let logManager = CRIShimLogManager(stateDirectoryURL: stateDirectoryURL)
         let startupTasks: [any CRIShimServerStartupTask] = [
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
                 runtimeManager: runtimeManager
-            )
+            ),
+            CRIShimLogReconcileStartupTask(
+                metadataStore: metadataStore,
+                runtimeManager: runtimeManager,
+                logManager: logManager
+            ),
         ]
         self.init(
             socketPath: socketPath,
@@ -104,7 +111,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     versionInfo: versionInfo,
                     runtimeManager: runtimeManager,
                     imageManager: imageManager,
-                    cniManager: cniManager
+                    cniManager: cniManager,
+                    logManager: logManager
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],
@@ -124,12 +132,19 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager()
     ) throws {
-        let metadataStore = try CRIShimMetadataStore(rootURL: URL(fileURLWithPath: config.normalizedStateDirectory))
+        let stateDirectoryURL = URL(fileURLWithPath: config.normalizedStateDirectory)
+        let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectoryURL)
+        let logManager = CRIShimLogManager(stateDirectoryURL: stateDirectoryURL)
         let startupTasks: [any CRIShimServerStartupTask] = [
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
                 runtimeManager: runtimeManager
-            )
+            ),
+            CRIShimLogReconcileStartupTask(
+                metadataStore: metadataStore,
+                runtimeManager: runtimeManager,
+                logManager: logManager
+            ),
         ]
         self.init(
             socketPath: socketPath,
@@ -141,7 +156,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     readinessChecker: readinessChecker,
                     runtimeManager: runtimeManager,
                     imageManager: imageManager,
-                    cniManager: cniManager
+                    cniManager: cniManager,
+                    logManager: logManager
                 ),
                 CRIShimImageServiceProvider(imageManager: imageManager),
             ],

@@ -21,61 +21,13 @@ import Foundation
 @main
 struct CNIMacvmnet {
     static func main() async {
-        do {
-            try await run()
-        } catch {
-            writeError(error)
-            exit(EXIT_FAILURE)
-        }
-    }
-
-    private static func run() async throws {
         let environment = ProcessInfo.processInfo.environment
-        let command = try CNIEnvironment.parse(environment).command
-
-        if command == .version {
-            try writeJSON(CNIVersionResult())
-            return
-        }
-
         let stdin = FileHandle.standardInput.readDataToEndOfFile()
-        let request = try CNIRequest.parse(environment: environment, stdin: stdin)
-        let handler = MacvmnetOperationHandler(backend: MacvmnetLiveBackend())
-
-        switch request.environment.command {
-        case .status:
-            _ = try await handle(request, handler: handler)
-        case .add, .check, .delete, .garbageCollect:
-            if let result = try await handle(request, handler: handler) {
-                try writeJSON(result)
-            }
-        case .version:
-            try writeJSON(CNIVersionResult())
+        let runner = CNIMacvmnetCommandRunner(backend: MacvmnetLiveBackend())
+        let result = await runner.execute(environment: environment, stdin: stdin)
+        if !result.stdout.isEmpty {
+            FileHandle.standardOutput.write(result.stdout)
         }
-    }
-
-    private static func handle(
-        _ request: CNIRequest,
-        handler: MacvmnetOperationHandler<MacvmnetLiveBackend>
-    ) async throws -> CNIResult? {
-        try await handler.handle(request)
-    }
-
-    private static func writeJSON<T: Encodable>(_ value: T) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        var data = try encoder.encode(value)
-        data.append(0x0a)
-        FileHandle.standardOutput.write(data)
-    }
-
-    private static func writeError(_ error: Error) {
-        let response = CNIErrorResponse(error: error)
-        do {
-            try writeJSON(response)
-        } catch {
-            let fallback = #"{"cniVersion":"\#(CNISpec.version)","code":100,"msg":"failed to encode CNI error response"}"#
-            FileHandle.standardOutput.write(Data((fallback + "\n").utf8))
-        }
+        exit(result.exitCode)
     }
 }

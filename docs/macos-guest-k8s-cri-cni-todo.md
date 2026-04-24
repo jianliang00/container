@@ -26,7 +26,14 @@ RuntimeService:
 
 - [x] Enrich `PodSandboxStatus` and `ListPodSandbox` with core sandbox
   snapshots and CNI network state.
-- [ ] Support CRI container mounts for macOS guest workloads.
+- [x] Persist CRI container mounts in macOS workload configuration.
+- [x] Defer sandbox VM boot until the first `StartContainer` so workload
+  mounts can be included in the boot-time `virtiofs` share set.
+- [x] Merge sandbox and workload mounts before VM boot and reject conflicting
+  hostPath or guest-path mappings deterministically.
+- [x] Reject late workload mounts that were not already included in the
+  sandbox VM boot-time mount set.
+- [x] Prepare guest symlink mappings for each workload's configured mounts.
 - [x] Implement `ReopenContainerLog`.
 - [x] Implement `Exec` through a loopback streaming server.
 - [x] Implement `PortForward` through a loopback streaming server.

@@ -35,6 +35,8 @@ public struct WorkloadConfiguration: Sendable, Codable {
     public var id: String
     /// Process configuration used to start the workload.
     public var processConfiguration: ProcessConfiguration
+    /// Host filesystems required by this workload inside the macOS guest.
+    public var mounts: [Filesystem]
     /// Source reference of the workload image when the workload is image-backed.
     public var workloadImageReference: String?
     /// Resolved digest of the workload image when the workload is image-backed.
@@ -55,6 +57,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         case persistedSchemaVersion = "schemaVersion"
         case id
         case processConfiguration
+        case mounts
         case workloadImageReference
         case workloadImageDigest
         case guestPayloadPath
@@ -65,6 +68,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
     public init(
         id: String,
         processConfiguration: ProcessConfiguration,
+        mounts: [Filesystem] = [],
         workloadImageReference: String? = nil,
         workloadImageDigest: String? = nil,
         guestPayloadPath: String? = nil,
@@ -74,6 +78,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         self.persistedSchemaVersion = Self.schemaVersion
         self.id = id
         self.processConfiguration = processConfiguration
+        self.mounts = mounts
         self.workloadImageReference = workloadImageReference
         self.workloadImageDigest = workloadImageDigest
         self.guestPayloadPath = guestPayloadPath
@@ -94,6 +99,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         self.persistedSchemaVersion = schemaVersion
         self.id = try container.decode(String.self, forKey: .id)
         self.processConfiguration = try container.decode(ProcessConfiguration.self, forKey: .processConfiguration)
+        self.mounts = try container.decodeIfPresent([Filesystem].self, forKey: .mounts) ?? []
         self.workloadImageReference = try container.decodeIfPresent(String.self, forKey: .workloadImageReference)
         self.workloadImageDigest = try container.decodeIfPresent(String.self, forKey: .workloadImageDigest)
         self.guestPayloadPath = try container.decodeIfPresent(String.self, forKey: .guestPayloadPath)

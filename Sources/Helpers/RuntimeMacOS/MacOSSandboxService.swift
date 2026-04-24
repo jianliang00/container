@@ -943,7 +943,8 @@ extension MacOSSandboxService {
             throw ContainerizationError(.invalidState, message: "cannot start sandbox from state \(sandboxState)")
         }
 
-        let config = try await prepareSandboxIfNeeded(progressUpdate: progressUpdate)
+        var config = try await prepareSandboxIfNeeded(progressUpdate: progressUpdate)
+        config = try prepareBootMountConfiguration(containerConfig: config)
         try openLogsIfNeeded()
         try writeBootLog("bootstrapping container \(config.id)")
         try writeBootLog("startSandboxIfNeeded presentGUI=\(presentGUI) state=\(sandboxState)")
@@ -987,14 +988,65 @@ extension MacOSSandboxService {
         sandboxState = .booted
     }
 
+    private func prepareBootMountConfiguration(containerConfig: ContainerConfiguration) throws -> ContainerConfiguration {
+        let workloadMounts = workloads.values
+            .sorted { $0.id < $1.id }
+            .map(\.configuration.mounts)
+        let mergedMounts = try MacOSGuestMountMapping.mergeHostPathMounts(
+            [containerConfig.mounts] + workloadMounts
+        )
+        if mountIdentitySet(mergedMounts) == mountIdentitySet(containerConfig.mounts) {
+            return containerConfig
+        }
+
+        var updated = containerConfig
+        updated.mounts = mergedMounts
+        configuration = updated
+        try persistSandboxConfiguration(updated)
+        return updated
+    }
+
+    private func validateLateWorkloadMounts(
+        _ workloadConfiguration: WorkloadConfiguration,
+        containerConfig: ContainerConfiguration
+    ) throws {
+        guard !workloadConfiguration.mounts.isEmpty else {
+            return
+        }
+
+        let bootMounts = try MacOSGuestMountMapping.mergeHostPathMounts([containerConfig.mounts])
+        let requestedMounts = try MacOSGuestMountMapping.mergeHostPathMounts([
+            containerConfig.mounts,
+            workloadConfiguration.mounts,
+        ])
+        guard mountIdentitySet(requestedMounts).isSubset(of: mountIdentitySet(bootMounts)) else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "cannot add macOS guest workload mounts after sandbox VM has booted"
+            )
+        }
+    }
+
+    private func mountIdentitySet(_ mounts: [Filesystem]) -> Set<String> {
+        Set(
+            mounts.map { mount in
+                "\(mount.source)\u{0}\(mount.destination)\u{0}\(mount.options.readonly)"
+            })
+    }
+
     private func createWorkloadIfNeeded(workloadConfiguration: WorkloadConfiguration, stdio: [FileHandle?]) async throws {
         let workloadConfiguration = try await resolveCreatedWorkloadConfiguration(workloadConfiguration)
         let workloadID = workloadConfiguration.id
-        guard let _ = configuration else {
+        guard let containerConfiguration = configuration else {
             throw ContainerizationError(.invalidState, message: "sandbox not prepared")
         }
-        guard sandboxState == .booted || sandboxState == .running else {
-            throw ContainerizationError(.invalidState, message: "sandbox not started")
+        switch sandboxState {
+        case .created:
+            break
+        case .booted, .running:
+            try validateLateWorkloadMounts(workloadConfiguration, containerConfig: containerConfiguration)
+        default:
+            throw ContainerizationError(.invalidState, message: "cannot create workload from sandbox state \(sandboxState)")
         }
         guard workloads[workloadID] == nil else {
             throw ContainerizationError(.exists, message: "workload \(workloadID) already exists")
@@ -1108,6 +1160,12 @@ extension MacOSSandboxService {
     private func startWorkloadIfNeeded(workloadID: String) async throws {
         guard let configuration else {
             throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        if case .created = sandboxState {
+            try await startSandboxIfNeeded(
+                stdio: [nil, nil, nil],
+                presentGUI: configuration.macosGuest?.guiEnabled ?? true
+            )
         }
         guard sandboxState == .booted || sandboxState == .running else {
             throw ContainerizationError(.invalidState, message: "sandbox not started")
@@ -1269,13 +1327,18 @@ extension MacOSSandboxService {
 
     private func persistSandboxMetadata(for configuration: ContainerConfiguration) throws {
         try layout.prepareBaseDirectories()
-        try persistJSON(SandboxConfiguration(containerConfiguration: configuration), to: sandboxConfigurationPath())
+        try persistSandboxConfiguration(configuration)
         if configuration.readOnlyFiles.isEmpty {
             try MacOSReadOnlyFileInjectionStore.stage([], in: layout)
         } else if !FileManager.default.fileExists(atPath: layout.readonlyInjectionManifestURL.path) {
             try MacOSReadOnlyFileInjectionStore.stage(configuration.readOnlyFiles, in: layout)
         }
         try persistWorkloadConfiguration(.init(id: configuration.id, processConfiguration: configuration.initProcess))
+    }
+
+    private func persistSandboxConfiguration(_ configuration: ContainerConfiguration) throws {
+        try layout.prepareBaseDirectories()
+        try persistJSON(SandboxConfiguration(containerConfiguration: configuration), to: sandboxConfigurationPath())
     }
 
     private func persistWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
@@ -1339,6 +1402,7 @@ extension MacOSSandboxService {
         return WorkloadConfiguration(
             id: configuration.id,
             processConfiguration: configuration.processConfiguration,
+            mounts: configuration.mounts,
             workloadImageReference: configuration.workloadImageReference,
             workloadImageDigest: configuration.workloadImageDigest,
             guestPayloadPath: configuration.guestPayloadPath ?? guestPayloadPath(for: configuration.id),
@@ -1423,6 +1487,7 @@ extension MacOSSandboxService {
         return WorkloadConfiguration(
             id: normalized.id,
             processConfiguration: processConfiguration,
+            mounts: normalized.mounts,
             workloadImageReference: normalized.workloadImageReference,
             workloadImageDigest: resolvedImage.imageDigest,
             guestPayloadPath: normalized.guestPayloadPath,

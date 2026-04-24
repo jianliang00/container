@@ -340,10 +340,7 @@ struct CRIShimRuntimeServerTests {
         let cniAddCall = try #require(cniManager.addCalls.first)
         #expect(cniAddCall.sandboxID == runSandbox.podSandboxID)
         #expect(cniAddCall.networkName == "default")
-        #expect(runtimeManager.startSandboxCalls.count == 1)
-        let startSandboxCall = try #require(runtimeManager.startSandboxCalls.first)
-        #expect(startSandboxCall.id == runSandbox.podSandboxID)
-        #expect(!startSandboxCall.presentGUI)
+        #expect(runtimeManager.startSandboxCalls.isEmpty)
 
         var createdSandboxStatusRequest = Runtime_V1_PodSandboxStatusRequest()
         createdSandboxStatusRequest.podSandboxID = runSandbox.podSandboxID
@@ -481,6 +478,13 @@ struct CRIShimRuntimeServerTests {
         createRequest.config.labels = ["app": "created"]
         createRequest.config.annotations = ["note": "created"]
         createRequest.config.logPath = "created/0.log"
+        let mountedHostPath = stateDirectory.appendingPathComponent("mounted-host", isDirectory: true)
+        try FileManager.default.createDirectory(at: mountedHostPath, withIntermediateDirectories: true)
+        var mount = Runtime_V1_Mount()
+        mount.hostPath = mountedHostPath.path
+        mount.containerPath = "/Users/demo/workspace"
+        mount.readonly = true
+        createRequest.config.mounts = [mount]
         let created = try await client.createContainer(createRequest)
         #expect(!created.containerID.isEmpty)
         #expect(runtimeManager.createWorkloadCalls.count == 1)
@@ -493,6 +497,10 @@ struct CRIShimRuntimeServerTests {
         #expect(createCall.configuration.processConfiguration.arguments == ["-c", "print('hello')"])
         #expect(createCall.configuration.processConfiguration.environment == ["HELLO=world"])
         #expect(createCall.configuration.processConfiguration.workingDirectory == "/workspace")
+        #expect(createCall.configuration.mounts.count == 1)
+        #expect(createCall.configuration.mounts[0].source == normalizedDirectoryPath(mountedHostPath))
+        #expect(createCall.configuration.mounts[0].destination == "/Users/demo/workspace")
+        #expect(createCall.configuration.mounts[0].options == ["ro"])
 
         var createdStatusRequest = Runtime_V1_ContainerStatusRequest()
         createdStatusRequest.containerID = created.containerID
@@ -1540,6 +1548,11 @@ private func shutdown(_ group: MultiThreadedEventLoopGroup) async {
 
 private func makeTemporaryDirectory() -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent("CRIShimRuntimeServerTests-\(UUID().uuidString)", isDirectory: true)
+}
+
+private func normalizedDirectoryPath(_ url: URL) -> String {
+    let path = url.path
+    return path.hasSuffix("/") ? path : "\(path)/"
 }
 
 private let validConfigJSON = """

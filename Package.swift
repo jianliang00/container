@@ -190,6 +190,7 @@ let package = Package(
                 "ContainerAPIClient",
                 "ContainerCRI",
                 "ContainerKit",
+                "ContainerK8sNetworkPolicyMacOS",
                 "ContainerResource",
                 "ContainerVersion",
             ]
@@ -214,6 +215,7 @@ let package = Package(
                 "ContainerCRI",
                 "ContainerCRIShimMacOS",
                 "ContainerKit",
+                "ContainerK8sNetworkPolicyMacOS",
             ]
         ),
         .target(

@@ -49,7 +49,10 @@ NetworkPolicy controller:
 - [ ] Watch `Pods`, `Namespaces`, and `NetworkPolicies`.
 - [ ] Wire Kubernetes watch events into the local endpoint index for Pods
   scheduled to this node.
-- [ ] Feed CRI sandbox metadata and CNI Pod IP state into the endpoint index.
+- [x] Project CRI sandbox metadata and core/CNI Pod IP state into
+  NetworkPolicy endpoint-index events.
+- [ ] Wire projected CRI/CNI endpoint events into the long-running
+  NetworkPolicy controller.
 - [x] Apply compiled policy with `ContainerKit.applySandboxPolicy`.
 - [x] Remove compiled policy with `ContainerKit.removeSandboxPolicy` when Pods
   or policies are deleted.

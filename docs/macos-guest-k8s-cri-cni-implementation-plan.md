@@ -533,8 +533,37 @@ The current plan supports kubelet-materialized paths:
 - `Secret`
 - `projected`
 
-The shim maps these into existing sandbox filesystem primitives. It rejects or
-warns on unsupported propagation and recursive read-only options.
+The shim maps CRI `ContainerConfig.mounts` into macOS guest `virtiofs`
+filesystem entries. Kubernetes passes these mounts in `CreateContainer`, while
+the macOS VM must receive its `virtiofs` directory-sharing devices before the
+VM boots. Therefore the shim must not boot the sandbox VM in `RunPodSandbox`.
+
+Required lifecycle:
+
+1. `RunPodSandbox` creates the sandbox bundle, runs CNI, persists sandbox
+   metadata, and leaves the VM ready but not booted.
+2. `CreateContainer` validates CRI mounts, converts supported hostPath
+   directory mounts into `Filesystem.virtiofs` entries, and persists them in the
+   workload configuration.
+3. The first `StartContainer` computes the sandbox VM mount set from sandbox
+   mounts plus all created workload mounts, validates conflicts, updates the
+   sandbox configuration before boot, and starts the VM.
+4. Guest-side mount preparation projects each workload's configured guest paths
+   through the existing `/Volumes/My Shared Files/<share>` automount symlink
+   mapping.
+5. If the VM is already booted, later workloads may only use mount mappings
+   that were already part of the VM boot-time mount set. Any new hostPath or
+   guest-path mapping returns a deterministic failed-precondition error.
+
+Supported CRI mount subset:
+
+- `host_path` must be an existing absolute host directory
+- `container_path` must be an absolute guest path accepted by the macOS guest
+  mount mapping rules
+- `readonly` maps to a read-only `virtiofs` share
+- mount propagation must be private
+- image mounts, SELinux relabel, ID-mapped mounts, and recursive read-only
+  mounts are rejected
 
 Important limitation:
 

@@ -494,12 +494,20 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     private final class CRIShimPortForwardState {
         let invocation: CRIShimPortForwardInvocation
         var handles: [UInt32: FileHandle]
-        var openPorts: Set<UInt32>
+        private let lock = NSLock()
+        private var openPorts: Set<UInt32>
 
         init(invocation: CRIShimPortForwardInvocation, handles: [UInt32: FileHandle]) {
             self.invocation = invocation
             self.handles = handles
             self.openPorts = Set(handles.keys)
+        }
+
+        func close(port: UInt32) -> Bool {
+            lock.withLock {
+                openPorts.remove(port)
+                return openPorts.isEmpty
+            }
         }
     }
 
@@ -840,8 +848,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         guard case .portForward(let state) = sessionState else {
             return
         }
-        state.openPorts.remove(port)
-        if state.openPorts.isEmpty {
+        if state.close(port: port) {
             await closeWebSocket(killProcess: false)
         }
     }

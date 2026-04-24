@@ -316,8 +316,12 @@ extension CRIShimSandboxMetadata {
         switch sandboxSnapshot.status {
         case .running:
             metadata.state = .running
-        case .stopping, .stopped:
+        case .stopping:
             metadata.state = .stopped
+        case .stopped:
+            if metadata.state != .ready {
+                metadata.state = .stopped
+            }
         case .unknown:
             break
         }

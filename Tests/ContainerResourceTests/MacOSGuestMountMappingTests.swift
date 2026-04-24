@@ -86,6 +86,43 @@ struct MacOSGuestMountMappingTests {
     }
 
     @Test
+    func mergeHostPathMountsDeduplicatesAndRejectsConflicts() throws {
+        let tempRoot = makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let sourceA = tempRoot.appendingPathComponent("source-a")
+        let sourceB = tempRoot.appendingPathComponent("source-b")
+        try FileManager.default.createDirectory(at: sourceA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sourceB, withIntermediateDirectories: true)
+
+        let first = Filesystem.virtiofs(source: sourceA.path, destination: "/Users/demo/data", options: [])
+        let duplicate = Filesystem.virtiofs(source: sourceA.path, destination: "/Users/demo/data", options: [])
+        let second = Filesystem.virtiofs(source: sourceB.path, destination: "/opt/config", options: ["ro"])
+
+        let merged = try MacOSGuestMountMapping.mergeHostPathMounts([[first], [duplicate, second]])
+        #expect(merged.count == 2)
+        #expect(merged[0].source == normalizedDirectoryPath(sourceA))
+        #expect(merged[0].destination == "/Users/demo/data")
+        #expect(merged[1].source == normalizedDirectoryPath(sourceB))
+        #expect(merged[1].destination == "/opt/config")
+        #expect(merged[1].options == ["ro"])
+
+        #expect(throws: MacOSGuestMountMapping.Error.conflictingGuestPath("/Users/demo/data")) {
+            try MacOSGuestMountMapping.mergeHostPathMounts([
+                [first],
+                [Filesystem.virtiofs(source: sourceB.path, destination: "/Users/demo/data", options: [])],
+            ])
+        }
+
+        #expect(throws: MacOSGuestMountMapping.Error.conflictingHostPath(normalizedDirectoryPath(sourceA))) {
+            try MacOSGuestMountMapping.mergeHostPathMounts([
+                [first],
+                [Filesystem.virtiofs(source: sourceA.path, destination: "/Users/demo/readonly", options: ["ro"])],
+            ])
+        }
+    }
+
+    @Test
     func rejectsUnsupportedMountShapes() throws {
         let tempRoot = makeTempRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -144,4 +181,9 @@ struct MacOSGuestMountMappingTests {
 
 private func makeTempRoot() -> URL {
     FileManager.default.temporaryDirectory.appendingPathComponent("MacOSGuestMountMappingTests-\(UUID().uuidString)")
+}
+
+private func normalizedDirectoryPath(_ url: URL) -> String {
+    let path = url.path
+    return path.hasSuffix("/") ? path : "\(path)/"
 }

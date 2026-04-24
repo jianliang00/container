@@ -28,6 +28,72 @@ import Testing
 @Suite(.serialized)
 struct MacOSImageBackedWorkloadTests {
     @Test
+    func createWorkloadBeforeBootPersistsMountsForBootTimeSharePlanning() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-mount-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let hostDirectory = tempDirectory.appendingPathComponent("host-data", isDirectory: true)
+        try FileManager.default.createDirectory(at: hostDirectory, withIntermediateDirectories: true)
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests")
+        )
+        try await service.testingPrepareSandbox(
+            try Self.baseContainerConfiguration(indexDigest: "sha256:test"),
+            state: "created"
+        )
+
+        let workload = WorkloadConfiguration(
+            id: "mounted-workload",
+            processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: []),
+            mounts: [
+                .virtiofs(source: hostDirectory.path, destination: "/Users/demo/data", options: ["ro"])
+            ]
+        )
+
+        try await service.testingCreateWorkload(workload)
+
+        let stored = try #require(await service.testingWorkloadConfiguration("mounted-workload"))
+        #expect(stored.mounts.count == 1)
+        #expect(stored.mounts[0].source == Self.normalizedDirectoryPath(hostDirectory))
+        #expect(stored.mounts[0].destination == "/Users/demo/data")
+        #expect(stored.mounts[0].options == ["ro"])
+    }
+
+    @Test
+    func createWorkloadAfterBootRejectsNewMountShares() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-late-mount-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let hostDirectory = tempDirectory.appendingPathComponent("late-host-data", isDirectory: true)
+        try FileManager.default.createDirectory(at: hostDirectory, withIntermediateDirectories: true)
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests")
+        )
+        try await service.testingPrepareSandbox(
+            try Self.baseContainerConfiguration(indexDigest: "sha256:test"),
+            state: "booted"
+        )
+
+        let workload = WorkloadConfiguration(
+            id: "late-mounted-workload",
+            processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: []),
+            mounts: [
+                .virtiofs(source: hostDirectory.path, destination: "/Users/demo/data", options: [])
+            ]
+        )
+
+        await #expect(throws: Error.self) {
+            try await service.testingCreateWorkload(workload)
+        }
+    }
+
+    @Test
     func startImageBackedWorkloadInjectsPayloadMetadataAndMapsPayloadPathsWithoutChroot() async throws {
         let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-image-tests")
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
@@ -325,14 +391,14 @@ struct MacOSImageBackedWorkloadTests {
             options: .init(timeoutInSeconds: 1, signal: SIGTERM)
         )
 
-        server.stop()
-        try server.waitForCompletion()
-
         let snapshot = try await service.testingInspectWorkload(workloadID)
         let updatedSessionID = await service.testingSessionID(for: workloadID)
         #expect(snapshot.status == .stopped)
         #expect(snapshot.exitCode == 0)
         #expect(updatedSessionID == sessionID)
+
+        server.stop()
+        try server.waitForCompletion()
 
         let requests = server.recordedRequests()
         let workloadStarts = requests.filter {
@@ -869,6 +935,11 @@ extension MacOSImageBackedWorkloadTests {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(prefix)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private static func normalizedDirectoryPath(_ url: URL) -> String {
+        let path = url.path
+        return path.hasSuffix("/") ? path : "\(path)/"
     }
 }
 

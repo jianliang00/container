@@ -46,6 +46,8 @@ public enum MacOSGuestMountMapping {
         case guestPathNotAbsolute(String)
         case guestPathReserved(String)
         case guestPathNotWritable(String)
+        case conflictingGuestPath(String)
+        case conflictingHostPath(String)
 
         public var errorDescription: String? {
             switch self {
@@ -62,6 +64,10 @@ public enum MacOSGuestMountMapping {
                     macOS guest mount destination must be under a writable guest path \
                     (/Users/, /private/, /tmp/, /var/, /usr/local/, /opt/): \(path)
                     """
+            case .conflictingGuestPath(let path):
+                return "macOS guest mount destination has conflicting hostPath mappings: \(path)"
+            case .conflictingHostPath(let path):
+                return "macOS guest mount source has conflicting read-only mappings: \(path)"
             }
         }
     }
@@ -119,6 +125,54 @@ public enum MacOSGuestMountMapping {
                 readOnly: planned.readOnly
             )
         }
+    }
+
+    public static func mergeHostPathMounts(_ mountGroups: [[Filesystem]]) throws -> [Filesystem] {
+        var merged: [Filesystem] = []
+        var seenKeys: Set<String> = []
+        var mappingsByGuestPath: [String: (source: String, readOnly: Bool)] = [:]
+        var readOnlyByHostPath: [String: Bool] = [:]
+
+        for mounts in mountGroups {
+            for mount in mounts {
+                let normalized = try normalizedHostPathMount(mount)
+                let readOnly = normalized.options.readonly
+                let guestPath = normalized.destination
+                let hostPath = normalized.source
+
+                if let existing = mappingsByGuestPath[guestPath],
+                    existing.source != hostPath || existing.readOnly != readOnly
+                {
+                    throw Error.conflictingGuestPath(guestPath)
+                }
+                if let existingReadOnly = readOnlyByHostPath[hostPath],
+                    existingReadOnly != readOnly
+                {
+                    throw Error.conflictingHostPath(hostPath)
+                }
+
+                mappingsByGuestPath[guestPath] = (source: hostPath, readOnly: readOnly)
+                readOnlyByHostPath[hostPath] = readOnly
+
+                let key = "\(hostPath)\u{0}\(guestPath)\u{0}\(readOnly)"
+                if seenKeys.insert(key).inserted {
+                    merged.append(normalized)
+                }
+            }
+        }
+
+        return merged
+    }
+
+    private static func normalizedHostPathMount(_ mount: Filesystem) throws -> Filesystem {
+        _ = try hostPathShares(from: [mount])
+        let source = URL(fileURLWithPath: mount.source).standardizedFileURL.path
+        let destination = URL(fileURLWithPath: mount.destination).standardizedFileURL.path
+        var options: MountOptions = []
+        if mount.options.readonly {
+            options.append("ro")
+        }
+        return .virtiofs(source: source, destination: destination, options: options)
     }
 
     private static func isReservedGuestPath(_ path: String) -> Bool {

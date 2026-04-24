@@ -74,6 +74,14 @@ struct CRIShimCoreMappingTests {
         request.config.annotations = ["container": "annotation"]
         request.config.logPath = "workload/0.log"
         request.config.tty = true
+        let mountRoot = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: mountRoot) }
+        let workspace = mountRoot.appendingPathComponent("workspace")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        var mount = Runtime_V1_Mount()
+        mount.hostPath = workspace.path
+        mount.containerPath = "/Users/demo/workspace"
+        request.config.mounts = [mount]
 
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let metadata = try makeCRIShimContainerMetadata(
@@ -106,6 +114,9 @@ struct CRIShimCoreMappingTests {
         #expect(workload.processConfiguration.environment == ["GREETING=hello", "TARGET=world"])
         #expect(workload.processConfiguration.workingDirectory == "/workspace")
         #expect(workload.processConfiguration.terminal)
+        #expect(workload.mounts.count == 1)
+        #expect(workload.mounts[0].source == normalizedDirectoryPath(workspace))
+        #expect(workload.mounts[0].destination == "/Users/demo/workspace")
     }
 
     @Test
@@ -148,12 +159,19 @@ struct CRIShimCoreMappingTests {
 
     @Test
     func mapsPrivateHostPathMountsToVirtiofs() throws {
+        let tempRoot = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let workspace = tempRoot.appendingPathComponent("host-workspace")
+        let config = tempRoot.appendingPathComponent("host-config")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+
         var writable = Runtime_V1_Mount()
-        writable.hostPath = "/tmp/host-workspace"
+        writable.hostPath = workspace.path
         writable.containerPath = "/Users/demo/workspace"
 
         var readonly = Runtime_V1_Mount()
-        readonly.hostPath = "/tmp/host-config"
+        readonly.hostPath = config.path
         readonly.containerPath = "/opt/config"
         readonly.readonly = true
 
@@ -161,19 +179,24 @@ struct CRIShimCoreMappingTests {
 
         #expect(mounts.count == 2)
         #expect(mounts[0].isVirtiofs)
-        #expect(mounts[0].source == "/tmp/host-workspace")
+        #expect(mounts[0].source == normalizedDirectoryPath(workspace))
         #expect(mounts[0].destination == "/Users/demo/workspace")
         #expect(mounts[0].options.isEmpty)
         #expect(mounts[1].isVirtiofs)
-        #expect(mounts[1].source == "/tmp/host-config")
+        #expect(mounts[1].source == normalizedDirectoryPath(config))
         #expect(mounts[1].destination == "/opt/config")
         #expect(mounts[1].options == ["ro"])
     }
 
     @Test
     func rejectsUnsupportedMountOptions() {
+        let tempRoot = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let host = tempRoot.appendingPathComponent("host")
+        try? FileManager.default.createDirectory(at: host, withIntermediateDirectories: true)
+
         var propagation = Runtime_V1_Mount()
-        propagation.hostPath = "/tmp/host"
+        propagation.hostPath = host.path
         propagation.containerPath = "/Users/demo/host"
         propagation.propagation = .propagationBidirectional
         #expect(throws: CRIShimError.unsupported("CRI mount propagation must be private for macOS guest workloads")) {
@@ -216,4 +239,13 @@ private func keyValue(_ key: String, _ value: String) -> Runtime_V1_KeyValue {
     pair.key = key
     pair.value = value
     return pair
+}
+
+private func makeTemporaryDirectory() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("CRIShimCoreMappingTests-\(UUID().uuidString)")
+}
+
+private func normalizedDirectoryPath(_ url: URL) -> String {
+    let path = url.path
+    return path.hasSuffix("/") ? path : "\(path)/"
 }

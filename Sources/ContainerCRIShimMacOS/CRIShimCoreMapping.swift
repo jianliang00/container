@@ -184,6 +184,7 @@ func makeCRIShimWorkloadConfiguration(
     return WorkloadConfiguration(
         id: containerID,
         processConfiguration: makeProcessConfiguration(config),
+        mounts: try makeCRIShimMounts(config.mounts),
         workloadImageReference: image,
         workloadImageDigest: emptyStringAsNil(workloadImageDigest ?? "")
     )
@@ -203,7 +204,11 @@ private func makeCRIShimMacOSNetworkBackend(
 }
 
 func makeCRIShimMounts(_ mounts: [Runtime_V1_Mount]) throws -> [Filesystem] {
-    try mounts.map(makeCRIShimMount)
+    do {
+        return try MacOSGuestMountMapping.mergeHostPathMounts([mounts.map(makeCRIShimMount)])
+    } catch let error as MacOSGuestMountMapping.Error {
+        throw CRIShimError.invalidArgument(error.localizedDescription)
+    }
 }
 
 private func makeCRIShimMount(_ mount: Runtime_V1_Mount) throws -> Filesystem {

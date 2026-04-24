@@ -178,11 +178,6 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 metadata.state = .ready
                 metadata.updatedAt = Date()
                 try metadataStore.upsertSandbox(metadata)
-
-                try await runtimeManager.startSandbox(id: sandboxID, presentGUI: handler.guiEnabled)
-                metadata.state = .running
-                metadata.updatedAt = Date()
-                try metadataStore.upsertSandbox(metadata)
             } catch {
                 try? await cniManager.delete(sandboxID: sandboxID, networkName: handler.network, config: config)
                 try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
@@ -437,11 +432,19 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     "StartContainer requires a created container, got \(metadata.state.rawValue)"
                 )
             }
-            let sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "StartContainer")
+            var sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "StartContainer")
             guard sandbox.state.allowsContainerCreation else {
                 throw CRIShimError.invalidArgument(
                     "StartContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
                 )
+            }
+            if sandbox.state == .ready {
+                let runtimeHandler = sandbox.runtimeHandler.trimmed.isEmpty ? nil : sandbox.runtimeHandler
+                let handler = try config.resolveRuntimeHandler(runtimeHandler)
+                try await runtimeManager.startSandbox(id: sandbox.id, presentGUI: handler.guiEnabled)
+                sandbox.state = .running
+                sandbox.updatedAt = Date()
+                try metadataStore.upsertSandbox(sandbox)
             }
 
             let workloadSnapshot = try await runtimeManager.inspectWorkload(

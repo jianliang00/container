@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerizationExtras
+import Foundation
 import Testing
 
 @testable import ContainerK8sNetworkPolicyMacOS
@@ -430,5 +431,152 @@ struct NetworkPolicyControllerTests {
         )
         #expect(result.plan.operations.isEmpty)
         #expect(result.plan.compiledPolicySet.endpointPolicies.isEmpty)
+    }
+
+    @Test
+    func runnerPersistsAppliedStateAndSkipsDuplicateAfterRestart() async throws {
+        let config = sampleControllerConfig()
+        let snapshot = try sampleControllerSnapshot(generation: 11)
+        let store = InMemoryK8sNetworkPolicyControllerStateStore()
+
+        let firstAdapter = K8sNetworkPolicyFakeAdapter()
+        let firstRunner = K8sNetworkPolicyControllerRunner(
+            config: config,
+            adapter: firstAdapter,
+            stateStore: store
+        )
+        let firstRun = try await firstRunner.runOnce(snapshot: snapshot)
+        #expect(firstRun.reconcileResult.plan.applyStates.map(\.sandboxID) == ["sandbox-api"])
+        #expect(firstRun.appliedState.appliedPoliciesBySandboxID.keys.sorted() == ["sandbox-api"])
+
+        let secondAdapter = K8sNetworkPolicyFakeAdapter()
+        let secondRunner = K8sNetworkPolicyControllerRunner(
+            config: config,
+            adapter: secondAdapter,
+            stateStore: store
+        )
+        let secondRun = try await secondRunner.runOnce(snapshot: snapshot)
+        #expect(secondRun.reconcileResult.plan.isEmpty)
+        #expect(secondAdapter.appliedOrder.isEmpty)
+        #expect(secondRun.appliedState.appliedPoliciesBySandboxID.keys.sorted() == ["sandbox-api"])
+    }
+
+    @Test
+    func runnerRemovesPersistedStateWhenEndpointDisappears() async throws {
+        let config = sampleControllerConfig()
+        let initialSnapshot = try sampleControllerSnapshot(generation: 21)
+        let store = InMemoryK8sNetworkPolicyControllerStateStore()
+
+        let initialRunner = K8sNetworkPolicyControllerRunner(
+            config: config,
+            adapter: K8sNetworkPolicyFakeAdapter(),
+            stateStore: store
+        )
+        let initialRun = try await initialRunner.runOnce(snapshot: initialSnapshot)
+        #expect(initialRun.appliedState.appliedPoliciesBySandboxID.keys.sorted() == ["sandbox-api"])
+
+        let deleteSnapshot = try sampleControllerSnapshot(generation: 22, includeAPIPod: false)
+        let deleteAdapter = K8sNetworkPolicyFakeAdapter()
+        let deleteRunner = K8sNetworkPolicyControllerRunner(
+            config: config,
+            adapter: deleteAdapter,
+            stateStore: store
+        )
+        let deleteRun = try await deleteRunner.runOnce(snapshot: deleteSnapshot)
+        #expect(deleteRun.reconcileResult.plan.removedSandboxIDs == ["sandbox-api"])
+        #expect(deleteAdapter.removedSandboxIDs == ["sandbox-api"])
+        #expect(deleteRun.appliedState.appliedPoliciesBySandboxID.isEmpty)
+        #expect((try store.load()).appliedPoliciesBySandboxID.isEmpty)
+    }
+
+    @Test
+    func fileStateStoreLoadsMissingAsEmptyAndPersistsState() async throws {
+        let stateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("container-networkpolicy-state-\(UUID().uuidString)")
+            .appendingPathComponent("state.json")
+        defer {
+            try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent())
+        }
+
+        let store = FileK8sNetworkPolicyControllerStateStore(url: stateURL)
+        #expect(try store.load().appliedPoliciesBySandboxID.isEmpty)
+
+        let runner = K8sNetworkPolicyControllerRunner(
+            config: sampleControllerConfig(),
+            adapter: K8sNetworkPolicyFakeAdapter(),
+            stateStore: store
+        )
+        let run = try await runner.runOnce(snapshot: try sampleControllerSnapshot(generation: 31))
+        #expect(run.appliedState.appliedPoliciesBySandboxID.keys.sorted() == ["sandbox-api"])
+        #expect(try store.load() == run.appliedState)
+    }
+
+    private func sampleControllerConfig() -> K8sNetworkPolicyControllerConfig {
+        K8sNetworkPolicyControllerConfig(
+            nodeName: "node-a",
+            networkID: "macvmnet"
+        )
+    }
+
+    private func sampleControllerSnapshot(
+        generation: UInt64,
+        includeAPIPod: Bool = true
+    ) throws -> K8sNetworkPolicyControllerSnapshot {
+        let namespace = K8sNetworkPolicyNamespaceMetadata(name: "app", labels: ["name": "app"])
+        let frontendPod = K8sNetworkPolicyPodMetadata(
+            namespace: "app",
+            name: "frontend",
+            uid: "pod-frontend",
+            nodeName: "node-a",
+            sandboxID: "sandbox-frontend",
+            labels: ["role": "frontend"]
+        )
+        let apiPod = K8sNetworkPolicyPodMetadata(
+            namespace: "app",
+            name: "api",
+            uid: "pod-api",
+            nodeName: "node-a",
+            sandboxID: "sandbox-api",
+            labels: ["role": "api"]
+        )
+        let frontendCNI = K8sNetworkPolicyCNIEndpointMetadata(
+            sandboxID: "sandbox-frontend",
+            networkID: "macvmnet",
+            nodeName: "node-a",
+            ipv4Address: try IPv4Address("10.244.0.10"),
+            macAddress: try MACAddress("02:42:ac:11:00:10")
+        )
+        let apiCNI = K8sNetworkPolicyCNIEndpointMetadata(
+            sandboxID: "sandbox-api",
+            networkID: "macvmnet",
+            nodeName: "node-a",
+            ipv4Address: try IPv4Address("10.244.0.20"),
+            macAddress: try MACAddress("02:42:ac:11:00:20")
+        )
+        let policy = NetworkPolicyResource(
+            namespace: "app",
+            name: "allow-frontend-to-api",
+            uid: "policy-1",
+            podSelector: LabelSelector(matchLabels: ["role": "api"]),
+            policyTypes: [.ingress],
+            ingress: [
+                NetworkPolicyRule(
+                    peers: [
+                        NetworkPolicyPeer(podSelector: LabelSelector(matchLabels: ["role": "frontend"]))
+                    ],
+                    ports: [
+                        try NumericPortSelector(.tcp, port: 8443)
+                    ]
+                )
+            ]
+        )
+
+        return K8sNetworkPolicyControllerSnapshot(
+            generation: generation,
+            namespaces: [namespace],
+            pods: includeAPIPod ? [frontendPod, apiPod] : [frontendPod],
+            cniMetadata: includeAPIPod ? [frontendCNI, apiCNI] : [frontendCNI],
+            policies: [policy]
+        )
     }
 }

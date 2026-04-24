@@ -53,8 +53,10 @@ NetworkPolicy controller:
 - [x] Apply compiled policy with `ContainerKit.applySandboxPolicy`.
 - [x] Remove compiled policy with `ContainerKit.removeSandboxPolicy` when Pods
   or policies are deleted.
-- [ ] Load applied policy state and execute reconcile plans after Pod,
-  Namespace, NetworkPolicy, shim, controller, kubelet, or apiserver restart.
+- [x] Persist applied policy state and execute reconcile plans from restored
+  controller state.
+- [ ] Rebuild watch snapshots and reconcile after Pod, Namespace,
+  NetworkPolicy, shim, kubelet, or apiserver restart.
 - [ ] Emit logs and Kubernetes events for unsupported policy fields.
 
 Tests:

@@ -18,6 +18,7 @@ import ContainerCRI
 import ContainerKit
 import ContainerResource
 import ContainerVersion
+import ContainerizationError
 import Foundation
 import GRPC
 
@@ -521,10 +522,14 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
             }
 
-            try await runtimeManager.removeWorkload(
-                sandboxID: metadata.sandboxID,
-                workloadID: metadata.id
-            )
+            do {
+                try await runtimeManager.removeWorkload(
+                    sandboxID: metadata.sandboxID,
+                    workloadID: metadata.id
+                )
+            } catch {
+                try throwUnlessNotFound(error)
+            }
             await logManager.stop(containerID: metadata.id, removeState: true)
             try metadataStore.deleteContainer(id: metadata.id)
             return Runtime_V1_RemoveContainerResponse()
@@ -782,7 +787,13 @@ private func workloadSnapshotsByID(_ sandboxSnapshot: SandboxSnapshot?) -> [Stri
 }
 
 private func isNotFound(_ error: any Error) -> Bool {
-    CRIShimErrorMapper.disposition(for: error).kind == .notFound
+    if CRIShimErrorMapper.disposition(for: error).kind == .notFound {
+        return true
+    }
+    if let error = error as? ContainerizationError, let cause = error.cause {
+        return isNotFound(cause)
+    }
+    return false
 }
 
 private func throwUnlessNotFound(_ error: any Error) throws {

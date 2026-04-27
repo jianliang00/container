@@ -29,7 +29,7 @@ public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
     public init(
         runtimeName: String = "container-macos",
         runtimeVersion: String = ReleaseVersion.version(),
-        runtimeAPIVersion: String = CRIProtocol.runtimeAPIVersion
+        runtimeAPIVersion: String = CRIProtocol.runtimeImplementationAPIVersion
     ) {
         self.runtimeName = runtimeName
         self.runtimeVersion = runtimeVersion
@@ -83,7 +83,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_VersionResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.version.rawValue) {
             var response = Runtime_V1_VersionResponse()
-            response.version = versionInfo.runtimeAPIVersion
+            response.version =
+                request.version.isEmpty ? CRIProtocol.kubeletRuntimeAPIVersion : request.version
             response.runtimeName = versionInfo.runtimeName
             response.runtimeVersion = versionInfo.runtimeVersion
             response.runtimeApiVersion = versionInfo.runtimeAPIVersion
@@ -159,15 +160,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 metadata: metadata
             )
 
-            try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
             do {
+                try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
                 try metadataStore.upsertSandbox(metadata)
-            } catch {
-                try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
-                throw error
-            }
-
-            do {
                 let network = try await cniManager.add(
                     sandboxID: sandboxID,
                     networkName: handler.network,

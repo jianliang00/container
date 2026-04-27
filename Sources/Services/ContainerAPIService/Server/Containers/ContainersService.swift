@@ -504,9 +504,20 @@ public actor ContainersService {
             let sandboxSnapshot = try await sandboxClient.state()
             try await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
+                let runtimeStatus = Self.containerRuntimeStatus(from: sandboxSnapshot)
+                let shouldTrackExit = state.snapshot.status != .running && runtimeStatus == .running
+                if shouldTrackExit {
+                    try await self.registerContainerExitCallback(id: id)
+                    try await self.trackContainerExit(id: id, client: sandboxClient)
+                }
                 state.client = sandboxClient
                 state.sandboxStartTask = nil
+                state.snapshot.status = runtimeStatus
                 state.snapshot.networks = sandboxSnapshot.networks
+                state.snapshot.startedDate =
+                    runtimeStatus == .running
+                    ? (state.snapshot.startedDate ?? Date())
+                    : nil
                 await self.setContainerState(id, state, context: context)
             }
         } catch {
@@ -806,16 +817,30 @@ public actor ContainersService {
         let state = try self._getContainerState(id: sandboxID)
         try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
         if let task = state.bootstrapTask ?? state.sandboxStartTask {
-            let client = try await task.value
-            return try await client.inspectSandboxNetwork()
+            do {
+                let client = try await task.value
+                return try await client.inspectSandboxNetwork()
+            } catch {
+                return try self.storedSandboxNetworkState(
+                    id: sandboxID,
+                    state: state,
+                    fallbackError: error
+                )
+            }
         }
         if let client = state.client {
-            return try await client.inspectSandboxNetwork()
+            do {
+                return try await client.inspectSandboxNetwork()
+            } catch {
+                return try self.storedSandboxNetworkState(
+                    id: sandboxID,
+                    state: state,
+                    fallbackError: error
+                )
+            }
         }
 
-        let root = self.containerRoot.appendingPathComponent(sandboxID)
-        let attachments = (try MacOSGuestNetworkLeaseStore.load(from: root))?.attachments ?? state.snapshot.networks
-        return SandboxNetworkState(attachments: attachments)
+        return try self.storedSandboxNetworkState(id: sandboxID, state: state)
     }
 
     public func releaseSandboxNetwork(sandboxID: String) async throws {
@@ -842,6 +867,29 @@ public actor ContainersService {
             state.snapshot.networks = []
             await self.setContainerState(id, state, context: context)
         }
+    }
+
+    private func storedSandboxNetworkState(
+        id: String,
+        state: ContainerState,
+        fallbackError: Error? = nil
+    ) throws -> SandboxNetworkState {
+        let root = self.containerRoot.appendingPathComponent(id)
+        let attachments = (try MacOSGuestNetworkLeaseStore.load(from: root))?.attachments ?? state.snapshot.networks
+        guard !attachments.isEmpty || fallbackError == nil else {
+            throw fallbackError!
+        }
+        if let fallbackError {
+            self.log.debug(
+                "using persisted sandbox network state after live inspect failed",
+                metadata: [
+                    "id": "\(id)",
+                    "attachments": "\(attachments.count)",
+                    "error": "\(fallbackError)",
+                ]
+            )
+        }
+        return SandboxNetworkState(attachments: attachments)
     }
 
     public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
@@ -1608,6 +1656,9 @@ public actor ContainersService {
     }
 
     private static func containerRuntimeStatus(from sandboxSnapshot: SandboxSnapshot) -> RuntimeStatus {
+        if sandboxSnapshot.status == .running {
+            return .running
+        }
         let containerID = sandboxSnapshot.configuration?.id ?? sandboxSnapshot.containers.first?.id
         if let containerID,
             let initWorkload = sandboxSnapshot.workloads.first(where: { $0.id == containerID })

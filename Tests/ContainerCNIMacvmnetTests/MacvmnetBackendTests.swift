@@ -25,7 +25,7 @@ import Testing
 private typealias NetworkAttachment = ContainerResource.Attachment
 
 struct MacvmnetBackendTests {
-    @Test func liveBackendPreparesAttachmentIntoCNIResult() async throws {
+    @Test func liveBackendReusesExistingAttachmentIntoCNIResult() async throws {
         let attachment = try makeAttachment(
             network: "default",
             hostname: "sandbox-1",
@@ -53,6 +53,48 @@ struct MacvmnetBackendTests {
 
         #expect(result == CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: plan.sandbox))
         #expect(sandboxFactory.requests == [.init(sandboxID: "sandbox-1", runtimeName: CNISpec.defaultRuntimeName)])
+        #expect(sandboxClient.inspectRequests == 1)
+        #expect(sandboxClient.prepareRequests == 0)
+        #expect(
+            ledger.recordsByNetwork["default"] == [
+                MacvmnetAttachmentRecord(
+                    identity: .init(containerID: "sandbox-1", ifName: "eth0"),
+                    networkName: "default",
+                    result: result
+                )
+            ])
+    }
+
+    @Test func liveBackendPreparesAttachmentWhenInspectHasNoAttachment() async throws {
+        let attachment = try makeAttachment(
+            network: "default",
+            hostname: "sandbox-1",
+            ipv4Address: "192.168.64.2/24",
+            ipv4Gateway: "192.168.64.1",
+            macAddress: "02:42:ac:11:00:02",
+            dnsNameservers: ["192.168.64.1"]
+        )
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let sandboxClient = FakeMacvmnetSandboxNetworkClient(
+            prepareState: SandboxNetworkState(attachments: [attachment]),
+            inspectState: SandboxNetworkState(attachments: [])
+        )
+        let sandboxFactory = FakeMacvmnetSandboxNetworkClientFactory(clientsBySandboxID: [
+            "sandbox-1": sandboxClient
+        ])
+        let ledger = FakeMacvmnetAttachmentLedger()
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: sandboxFactory.make,
+            makeAttachmentLedger: { _ in ledger }
+        )
+        let plan = try makePlan(command: .add, sandbox: "macvmnet://sandbox/sandbox-1")
+
+        let result = try await backend.prepare(plan)
+
+        #expect(result == CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: plan.sandbox))
+        #expect(sandboxFactory.requests == [.init(sandboxID: "sandbox-1", runtimeName: CNISpec.defaultRuntimeName)])
+        #expect(sandboxClient.inspectRequests == 1)
         #expect(sandboxClient.prepareRequests == 1)
         #expect(
             ledger.recordsByNetwork["default"] == [
@@ -334,28 +376,37 @@ private final class FakeMacvmnetNetworkHealthClient: MacvmnetNetworkHealthClient
 }
 
 private final class FakeMacvmnetSandboxNetworkClient: MacvmnetSandboxNetworkClient, @unchecked Sendable {
-    var state: SandboxNetworkState
+    var prepareState: SandboxNetworkState
+    var inspectState: SandboxNetworkState
     var prepareRequests = 0
     var inspectRequests = 0
     var releaseRequests = 0
 
     init(state: SandboxNetworkState) {
-        self.state = state
+        self.prepareState = state
+        self.inspectState = state
+    }
+
+    init(prepareState: SandboxNetworkState, inspectState: SandboxNetworkState) {
+        self.prepareState = prepareState
+        self.inspectState = inspectState
     }
 
     func prepareSandboxNetwork() async throws -> SandboxNetworkState {
         prepareRequests += 1
-        return state
+        inspectState = prepareState
+        return prepareState
     }
 
     func inspectSandboxNetwork() async throws -> SandboxNetworkState {
         inspectRequests += 1
-        return state
+        return inspectState
     }
 
     func releaseSandboxNetwork() async throws {
         releaseRequests += 1
-        state = SandboxNetworkState(attachments: [])
+        prepareState = SandboxNetworkState(attachments: [])
+        inspectState = SandboxNetworkState(attachments: [])
     }
 }
 

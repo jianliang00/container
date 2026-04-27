@@ -1052,6 +1052,7 @@ extension MacOSSandboxService {
             throw ContainerizationError(.exists, message: "workload \(workloadID) already exists")
         }
 
+        try stageWorkloadReadOnlyInjections(workloadConfiguration)
         try persistWorkloadConfiguration(workloadConfiguration)
         do {
             upsertWorkloadRecord(configuration: workloadConfiguration)
@@ -1059,6 +1060,7 @@ extension MacOSSandboxService {
         } catch {
             workloads.removeValue(forKey: workloadID)
             try? FileManager.default.removeItem(at: workloadConfigurationPath(for: workloadID))
+            try? FileManager.default.removeItem(at: layout.workloadReadonlyInjectionDirectoryURL(id: workloadID))
             throw error
         }
     }
@@ -1186,6 +1188,7 @@ extension MacOSSandboxService {
         #if arch(arm64)
         try await prepareGuestMountsIfNeeded(containerConfig: configuration)
         try await prepareReadOnlyInjectionsIfNeeded()
+        try await prepareWorkloadReadOnlyInjectionsIfNeeded(workloadID: workloadID)
         try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
         writeContainerLog(Data(("startWorkload using sidecar process stream path for \(workloadID) session=\(sessionID)\n").utf8))
         #else
@@ -1403,6 +1406,7 @@ extension MacOSSandboxService {
             id: configuration.id,
             processConfiguration: configuration.processConfiguration,
             mounts: configuration.mounts,
+            readOnlyFiles: configuration.readOnlyFiles,
             workloadImageReference: configuration.workloadImageReference,
             workloadImageDigest: configuration.workloadImageDigest,
             guestPayloadPath: configuration.guestPayloadPath ?? guestPayloadPath(for: configuration.id),
@@ -1488,6 +1492,7 @@ extension MacOSSandboxService {
             id: normalized.id,
             processConfiguration: processConfiguration,
             mounts: normalized.mounts,
+            readOnlyFiles: normalized.readOnlyFiles,
             workloadImageReference: normalized.workloadImageReference,
             workloadImageDigest: resolvedImage.imageDigest,
             guestPayloadPath: normalized.guestPayloadPath,
@@ -2209,6 +2214,14 @@ extension MacOSSandboxService {
             sessions[existingSessionID] = session
         }
         try persistWorkloadConfiguration(configuration)
+    }
+
+    private func stageWorkloadReadOnlyInjections(_ configuration: WorkloadConfiguration) throws {
+        try layout.prepareBaseDirectories()
+        try MacOSReadOnlyFileInjectionStore.stage(
+            configuration.readOnlyFiles,
+            in: layout.workloadReadonlyInjectionDirectoryURL(id: configuration.id)
+        )
     }
 
     private func openAppendLogHandle(at url: URL) throws -> FileHandle {

@@ -160,7 +160,7 @@ struct CRIShimRuntimeServerTests {
             versionInfo: CRIShimRuntimeVersionInfo(
                 runtimeName: "container-macos-test",
                 runtimeVersion: "1.2.3",
-                runtimeAPIVersion: CRIProtocol.runtimeAPIVersion
+                runtimeAPIVersion: CRIProtocol.runtimeImplementationAPIVersion
             ),
             eventLoopGroup: group,
             readinessChecker: StaticReadinessChecker(
@@ -200,10 +200,10 @@ struct CRIShimRuntimeServerTests {
 
         let version = try await client.version(Runtime_V1_VersionRequest())
 
-        #expect(version.version == CRIProtocol.runtimeAPIVersion)
+        #expect(version.version == CRIProtocol.kubeletRuntimeAPIVersion)
         #expect(version.runtimeName == "container-macos-test")
         #expect(version.runtimeVersion == "1.2.3")
-        #expect(version.runtimeApiVersion == CRIProtocol.runtimeAPIVersion)
+        #expect(version.runtimeApiVersion == CRIProtocol.runtimeImplementationAPIVersion)
 
         var statusRequest = Runtime_V1_StatusRequest()
         statusRequest.verbose = true
@@ -332,12 +332,16 @@ struct CRIShimRuntimeServerTests {
         #expect(createSandboxCall.id == runSandbox.podSandboxID)
         #expect(createSandboxCall.image.reference == "localhost/macos-sandbox:latest")
         #expect(createSandboxCall.image.digest == "sha256:sandbox")
+        #expect(createSandboxCall.initProcess.executable == "/bin/sh")
+        #expect(createSandboxCall.initProcess.arguments == ["-c", "trap : TERM INT; while :; do sleep 3600; done"])
         #expect(createSandboxCall.platform.os == "darwin")
         #expect(createSandboxCall.platform.architecture == "arm64")
         #expect(createSandboxCall.runtimeHandler == "container-runtime-macos")
         #expect(createSandboxCall.resources.cpus == 4)
         #expect(createSandboxCall.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
         #expect(createSandboxCall.macosGuest?.networkBackend == .vmnetShared)
+        #expect(createSandboxCall.networks.map(\.network) == ["default"])
+        #expect(createSandboxCall.networks.map(\.options.hostname) == [runSandbox.podSandboxID])
         #expect(cniManager.addCalls.count == 1)
         let cniAddCall = try #require(cniManager.addCalls.first)
         #expect(cniAddCall.sandboxID == runSandbox.podSandboxID)
@@ -482,11 +486,16 @@ struct CRIShimRuntimeServerTests {
         createRequest.config.logPath = "created/0.log"
         let mountedHostPath = stateDirectory.appendingPathComponent("mounted-host", isDirectory: true)
         try FileManager.default.createDirectory(at: mountedHostPath, withIntermediateDirectories: true)
+        let hostsPath = stateDirectory.appendingPathComponent("etc-hosts")
+        try "127.0.0.1 localhost\n".write(to: hostsPath, atomically: true, encoding: .utf8)
         var mount = Runtime_V1_Mount()
         mount.hostPath = mountedHostPath.path
         mount.containerPath = "/Users/demo/workspace"
         mount.readonly = true
-        createRequest.config.mounts = [mount]
+        var hostsMount = Runtime_V1_Mount()
+        hostsMount.hostPath = hostsPath.path
+        hostsMount.containerPath = "/etc/hosts"
+        createRequest.config.mounts = [mount, hostsMount]
         let created = try await client.createContainer(createRequest)
         #expect(!created.containerID.isEmpty)
         #expect(runtimeManager.createWorkloadCalls.count == 1)
@@ -503,6 +512,9 @@ struct CRIShimRuntimeServerTests {
         #expect(createCall.configuration.mounts[0].source == normalizedDirectoryPath(mountedHostPath))
         #expect(createCall.configuration.mounts[0].destination == "/Users/demo/workspace")
         #expect(createCall.configuration.mounts[0].options == ["ro"])
+        #expect(createCall.configuration.readOnlyFiles.count == 1)
+        #expect(createCall.configuration.readOnlyFiles[0].source == hostsPath.path)
+        #expect(createCall.configuration.readOnlyFiles[0].destination == "/etc/hosts")
 
         var createdStatusRequest = Runtime_V1_ContainerStatusRequest()
         createdStatusRequest.containerID = created.containerID

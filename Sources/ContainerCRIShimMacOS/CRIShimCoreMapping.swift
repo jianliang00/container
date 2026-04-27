@@ -64,8 +64,8 @@ func makeCRIShimSandboxConfiguration(
         id: sandboxID,
         image: try makeCRIShimImageDescription(sandboxImage, requestedReference: handler.sandboxImage),
         process: ProcessConfiguration(
-            executable: "/usr/bin/true",
-            arguments: [],
+            executable: "/bin/sh",
+            arguments: ["-c", "trap : TERM INT; while :; do sleep 3600; done"],
             environment: [],
             workingDirectory: "/",
             terminal: false,
@@ -78,6 +78,12 @@ func makeCRIShimSandboxConfiguration(
     )
     configuration.runtimeHandler = "container-runtime-macos"
     configuration.labels = request.config.labels
+    configuration.networks = [
+        AttachmentConfiguration(
+            network: handler.network,
+            options: AttachmentOptions(hostname: sandboxID)
+        )
+    ]
     if let cpus = handler.resources.cpus {
         configuration.resources.cpus = cpus
     }
@@ -187,10 +193,12 @@ func makeCRIShimWorkloadConfiguration(
 
     let config = request.config
     let image = try CRIShimImageReference.resolve(config.image)
+    let mounts = try makeCRIShimMountPlan(config.mounts)
     return WorkloadConfiguration(
         id: containerID,
         processConfiguration: makeProcessConfiguration(config),
-        mounts: try makeCRIShimMounts(config.mounts),
+        mounts: mounts.filesystems,
+        readOnlyFiles: mounts.readOnlyFiles,
         workloadImageReference: image,
         workloadImageDigest: emptyStringAsNil(workloadImageDigest ?? "")
     )
@@ -210,14 +218,52 @@ private func makeCRIShimMacOSNetworkBackend(
 }
 
 func makeCRIShimMounts(_ mounts: [Runtime_V1_Mount]) throws -> [Filesystem] {
+    try makeCRIShimMountPlan(mounts).filesystems
+}
+
+func makeCRIShimReadOnlyFileInjections(_ mounts: [Runtime_V1_Mount]) throws -> [ReadOnlyFileInjection] {
+    try makeCRIShimMountPlan(mounts).readOnlyFiles
+}
+
+private struct CRIShimMountPlan {
+    var filesystems: [Filesystem]
+    var readOnlyFiles: [ReadOnlyFileInjection]
+}
+
+private enum CRIShimHostPathMount {
+    case directory(Filesystem)
+    case regularFile(ReadOnlyFileInjection)
+    case ignored
+}
+
+private func makeCRIShimMountPlan(_ mounts: [Runtime_V1_Mount]) throws -> CRIShimMountPlan {
+    var filesystems: [Filesystem] = []
+    var readOnlyFiles: [ReadOnlyFileInjection] = []
+    filesystems.reserveCapacity(mounts.count)
+    readOnlyFiles.reserveCapacity(mounts.count)
+
+    for mount in mounts {
+        switch try makeCRIShimHostPathMount(mount) {
+        case .directory(let filesystem):
+            filesystems.append(filesystem)
+        case .regularFile(let injection):
+            readOnlyFiles.append(injection)
+        case .ignored:
+            break
+        }
+    }
+
     do {
-        return try MacOSGuestMountMapping.mergeHostPathMounts([mounts.map(makeCRIShimMount)])
+        return CRIShimMountPlan(
+            filesystems: try MacOSGuestMountMapping.mergeHostPathMounts([filesystems]),
+            readOnlyFiles: try mergeReadOnlyFileInjections(readOnlyFiles)
+        )
     } catch let error as MacOSGuestMountMapping.Error {
         throw CRIShimError.invalidArgument(error.localizedDescription)
     }
 }
 
-private func makeCRIShimMount(_ mount: Runtime_V1_Mount) throws -> Filesystem {
+private func makeCRIShimHostPathMount(_ mount: Runtime_V1_Mount) throws -> CRIShimHostPathMount {
     guard !mount.hasImage else {
         throw CRIShimError.unsupported("CRI image mounts are not supported for macOS guest workloads")
     }
@@ -250,11 +296,61 @@ private func makeCRIShimMount(_ mount: Runtime_V1_Mount) throws -> Filesystem {
         throw CRIShimError.invalidArgument("CRI mount container_path must be absolute")
     }
 
+    let hostURL = URL(fileURLWithPath: hostPath).standardizedFileURL
+    let containerURL = URL(fileURLWithPath: containerPath).standardizedFileURL
+    if containerURL.path == "/dev/termination-log" {
+        return .ignored
+    }
+
+    var isDirectory = ObjCBool(false)
+    guard FileManager.default.fileExists(atPath: hostURL.path, isDirectory: &isDirectory) else {
+        throw CRIShimError.invalidArgument("CRI mount host_path must exist: \(hostURL.path)")
+    }
+    if !isDirectory.boolValue {
+        return .regularFile(
+            ReadOnlyFileInjection(
+                source: hostURL.path,
+                destination: containerURL.path
+            )
+        )
+    }
+
     var options: MountOptions = []
     if mount.readonly {
         options.append("ro")
     }
-    return .virtiofs(source: hostPath, destination: containerPath, options: options)
+    return .directory(.virtiofs(source: hostURL.path, destination: containerURL.path, options: options))
+}
+
+private func mergeReadOnlyFileInjections(_ injections: [ReadOnlyFileInjection]) throws -> [ReadOnlyFileInjection] {
+    var merged: [ReadOnlyFileInjection] = []
+    var seenKeys: Set<String> = []
+    var sourcesByDestination: [String: String] = [:]
+
+    for injection in injections {
+        let source = URL(fileURLWithPath: injection.source).standardizedFileURL.path
+        let destination = URL(fileURLWithPath: injection.destination).standardizedFileURL.path
+        if let existingSource = sourcesByDestination[destination], existingSource != source {
+            throw CRIShimError.invalidArgument(
+                "macOS guest read-only file destination has conflicting hostPath mappings: \(destination)"
+            )
+        }
+
+        sourcesByDestination[destination] = source
+        let key = "\(source)\u{0}\(destination)\u{0}\(injection.overwrite)"
+        if seenKeys.insert(key).inserted {
+            merged.append(
+                ReadOnlyFileInjection(
+                    source: source,
+                    destination: destination,
+                    mode: injection.mode,
+                    overwrite: injection.overwrite
+                )
+            )
+        }
+    }
+
+    return merged
 }
 
 private func makeProcessConfiguration(_ config: Runtime_V1_ContainerConfig) -> ProcessConfiguration {

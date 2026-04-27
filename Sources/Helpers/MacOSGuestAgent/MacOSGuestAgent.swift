@@ -302,8 +302,14 @@ final class AgentConnection: @unchecked Sendable {
             connection: self
         )
         self.session = session
-        try session.start(stdoutHandle: nil, stderrHandle: nil)
-        try send(frame: .ack(id: processID))
+        do {
+            try send(frame: .ack(id: processID))
+            try session.start(stdoutHandle: nil, stderrHandle: nil)
+        } catch {
+            session.cleanup()
+            self.session = nil
+            throw error
+        }
     }
 
     private func beginFileTransaction(frame: GuestAgentFrame) throws {

@@ -444,7 +444,11 @@ extension MacOSSandboxService {
     @Sendable
     public func removeWorkload(_ message: XPCMessage) async throws -> XPCMessage {
         let workloadID = try message.id()
-        try await removeWorkloadIfNeeded(workloadID: workloadID)
+        do {
+            try await removeWorkloadIfNeeded(workloadID: workloadID)
+        } catch let error as ContainerizationError where error.isCode(.notFound) {
+            return message.reply()
+        }
         return message.reply()
     }
 

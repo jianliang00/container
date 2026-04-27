@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationError
 import ContainerizationExtras
 import Foundation
 import GRPC
@@ -586,6 +587,11 @@ struct CRIShimRuntimeServerTests {
 
         var removeRequest = Runtime_V1_RemoveContainerRequest()
         removeRequest.containerID = created.containerID
+        runtimeManager.removeWorkloadError = ContainerizationError(
+            .internalError,
+            message: "failed to remove workload from sandbox",
+            cause: ContainerizationError(.notFound, message: "workload already removed")
+        )
         _ = try await client.removeContainer(removeRequest)
         #expect(runtimeManager.removeWorkloadCalls.count == 1)
         let removeCall = try #require(runtimeManager.removeWorkloadCalls.first)
@@ -969,6 +975,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var streamExecCalls: [RecordingStreamExecCall] = []
     private(set) var portForwardCalls: [RecordingPortForwardCall] = []
     var stopWorkloadError: (any Error)?
+    var removeWorkloadError: (any Error)?
 
     init(
         execSyncResult: ExecSyncResult,
@@ -1139,10 +1146,13 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         workloadID: String
     ) async throws {
+        removeWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
+        if let removeWorkloadError {
+            throw removeWorkloadError
+        }
         workloadConfigurations.removeValue(forKey: workloadID)
         workloadSnapshots.removeValue(forKey: workloadID)
         removeWorkloadSnapshot(workloadID, sandboxID: sandboxID)
-        removeWorkloadCalls.append((sandboxID: sandboxID, workloadID: workloadID))
     }
 
     func inspectWorkload(

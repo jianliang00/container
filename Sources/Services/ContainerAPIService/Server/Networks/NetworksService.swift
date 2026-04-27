@@ -19,6 +19,7 @@ import ContainerNetworkServiceClient
 import ContainerPersistence
 import ContainerPlugin
 import ContainerResource
+import ContainerSandboxServiceClient
 import Containerization
 import ContainerizationError
 import ContainerizationExtras
@@ -268,6 +269,18 @@ public actor NetworksService {
 
     public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
         try await containersService.applySandboxPolicy(policy)
+    }
+
+    public func prepareSandboxNetwork(sandboxID: String) async throws -> SandboxNetworkState {
+        try await containersService.prepareSandboxNetwork(sandboxID: sandboxID)
+    }
+
+    public func inspectSandboxNetwork(sandboxID: String) async throws -> SandboxNetworkState {
+        try await containersService.inspectSandboxNetwork(sandboxID: sandboxID)
+    }
+
+    public func releaseSandboxNetwork(sandboxID: String) async throws {
+        try await containersService.releaseSandboxNetwork(sandboxID: sandboxID)
     }
 
     public func removeSandboxPolicy(sandboxID: String) async throws {

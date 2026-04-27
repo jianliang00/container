@@ -136,6 +136,8 @@ struct CRIShimCoreMappingTests {
         )
 
         #expect(configuration.labels["app"] == "demo")
+        #expect(configuration.resources.cpus == 6)
+        #expect(configuration.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
         let decodedMetadata = try #require(decodeCRIShimCoreSandboxMetadataLabel(configuration.labels))
         #expect(decodedMetadata.id == "sandbox-1")
         #expect(decodedMetadata.runtimeHandler == "macos")
@@ -218,7 +220,8 @@ private let resolvedRuntimeHandler = ResolvedRuntimeHandler(
     workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
     network: "default",
     networkBackend: "vmnetShared",
-    guiEnabled: false
+    guiEnabled: false,
+    resources: RuntimeResources(cpus: 6, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes)
 )
 
 private let sandboxMetadata = CRIShimSandboxMetadata(

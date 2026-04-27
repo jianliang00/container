@@ -293,6 +293,9 @@ extension APIServer {
             routes[XPCRoute.networkCreate] = harness.create
             routes[XPCRoute.networkDelete] = harness.delete
             routes[XPCRoute.networkList] = harness.list
+            routes[XPCRoute.networkPrepareSandbox] = harness.prepareSandboxNetwork
+            routes[XPCRoute.networkInspectSandbox] = harness.inspectSandboxNetwork
+            routes[XPCRoute.networkReleaseSandbox] = harness.releaseSandboxNetwork
             routes[XPCRoute.networkApplySandboxPolicy] = harness.applySandboxPolicy
             routes[XPCRoute.networkRemoveSandboxPolicy] = harness.removeSandboxPolicy
             routes[XPCRoute.networkInspectSandboxPolicy] = harness.inspectSandboxPolicy

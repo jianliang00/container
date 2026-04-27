@@ -139,6 +139,7 @@ private func validateRequiredRuntimeProfile(_ profile: RuntimeProfile, name: Str
     if profile.guiEnabled == nil {
         issues.append("\(name).guiEnabled is required")
     }
+    validateRuntimeResources(profile.resources, name: "\(name).resources", issues: &issues)
 }
 
 private func validateRuntimeHandlerOverride(_ profile: RuntimeProfile, name: String, issues: inout [String]) {
@@ -152,6 +153,7 @@ private func validateRuntimeHandlerOverride(_ profile: RuntimeProfile, name: Str
         }
     }
     validateNetworkBackend(profile.networkBackend, name: "\(name).networkBackend", required: false, issues: &issues)
+    validateRuntimeResources(profile.resources, name: "\(name).resources", issues: &issues)
 }
 
 private func validatePath(_ value: String?, name: String, allowUnixScheme: Bool = false, issues: inout [String]) {
@@ -206,6 +208,18 @@ private func validateNetworkBackend(_ value: String?, name: String, required: Bo
     guard value == "virtualizationNAT" || value == "vmnetShared" else {
         issues.append("\(name) must be virtualizationNAT or vmnetShared")
         return
+    }
+}
+
+private func validateRuntimeResources(_ resources: RuntimeResources?, name: String, issues: inout [String]) {
+    guard let resources else {
+        return
+    }
+    if let cpus = resources.cpus, cpus <= 0 {
+        issues.append("\(name).cpus must be greater than zero")
+    }
+    if let memoryInBytes = resources.memoryInBytes, memoryInBytes == 0 {
+        issues.append("\(name).memoryInBytes must be greater than zero")
     }
 }
 

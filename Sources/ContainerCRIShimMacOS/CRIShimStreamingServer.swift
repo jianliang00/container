@@ -639,8 +639,9 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             )
         )
 
+        var outputTasks: [Task<Void, Never>] = []
         if let stdoutPipe {
-            appendTask(
+            outputTasks.append(
                 Task {
                     await pumpExecOutput(
                         stream: 1,
@@ -649,13 +650,16 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 })
         }
         if let stderrPipe {
-            appendTask(
+            outputTasks.append(
                 Task {
                     await pumpExecOutput(
                         stream: 2,
                         handle: stderrPipe.fileHandleForReading
                     )
                 })
+        }
+        for task in outputTasks {
+            appendTask(task)
         }
 
         try await process.start()
@@ -664,6 +668,11 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             Task {
                 do {
                     let exitCode = try await process.wait()
+                    try? stdoutPipe?.fileHandleForWriting.close()
+                    try? stderrPipe?.fileHandleForWriting.close()
+                    for task in outputTasks {
+                        _ = await task.result
+                    }
                     await sendExecExitStatus(protocolVersion: protocolVersion, exitCode: exitCode)
                     await closeWebSocket(killProcess: false)
                 } catch {
@@ -908,7 +917,9 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func closeWebSocket(killProcess: Bool) async {
-        try? await writeFrame(opcode: .connectionClose, payload: ByteBuffer())
+        if let closePayload = makeWebSocketClosePayload() {
+            try? await writeFrame(opcode: .connectionClose, payload: closePayload)
+        }
         await cleanup(killProcess: killProcess)
         if let channel {
             try? await channel.close().get()
@@ -1022,6 +1033,15 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         var buffer = channel.allocator.buffer(capacity: payload.count + 1)
         buffer.writeInteger(stream)
         buffer.writeBytes(payload)
+        return buffer
+    }
+
+    private func makeWebSocketClosePayload() -> ByteBuffer? {
+        guard let channel else {
+            return nil
+        }
+        var buffer = channel.allocator.buffer(capacity: 2)
+        buffer.write(webSocketErrorCode: .normalClosure)
         return buffer
     }
 

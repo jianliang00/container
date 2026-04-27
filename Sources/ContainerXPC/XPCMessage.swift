@@ -81,16 +81,12 @@ extension XPCMessage {
             let item = try? JSONDecoder().decode(ContainerXPCError.self, from: data)
             precondition(item != nil, "expected to receive a ContainerXPCXPCError")
 
-            throw ContainerizationError(item!.code, message: item!.message)
+            throw item!.makeError()
         }
     }
 
     public func set(error: ContainerizationError) {
-        var message = error.message
-        if let cause = error.cause {
-            message += " (cause: \"\(cause)\")"
-        }
-        let serializableError = ContainerXPCError(code: error.code.description, message: message)
+        let serializableError = ContainerXPCError(error)
         let data = try? JSONEncoder().encode(serializableError)
         precondition(data != nil)
 
@@ -98,9 +94,35 @@ extension XPCMessage {
     }
 }
 
-struct ContainerXPCError: Codable {
+final class ContainerXPCError: Codable {
     let code: String
     let message: String
+    let cause: ContainerXPCError?
+
+    init(code: String, message: String, cause: ContainerXPCError? = nil) {
+        self.code = code
+        self.message = message
+        self.cause = cause
+    }
+
+    convenience init(_ error: ContainerizationError) {
+        var message = error.message
+        var cause: ContainerXPCError?
+        if let containerizationCause = error.cause as? ContainerizationError {
+            cause = ContainerXPCError(containerizationCause)
+        } else if let errorCause = error.cause {
+            message += " (cause: \"\(errorCause)\")"
+        }
+        self.init(code: error.code.description, message: message, cause: cause)
+    }
+
+    func makeError() -> ContainerizationError {
+        ContainerizationError(
+            code,
+            message: message,
+            cause: cause?.makeError()
+        )
+    }
 }
 
 extension XPCMessage {

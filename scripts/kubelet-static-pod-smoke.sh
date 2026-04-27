@@ -49,6 +49,12 @@ Optional:
   CONTAINER_CRI_MACOS_KUBELET_TIMEOUT_SECONDS
                                        static Pod start timeout
                                        default: 300
+  CONTAINER_CRI_MACOS_CLEANUP_TIMEOUT_SECONDS
+                                       static Pod runtime cleanup timeout
+                                       default: 120
+  CONTAINER_CRI_MACOS_EXECSYNC_TIMEOUT_SECONDS
+                                       synchronous exec timeout for crictl exec fallback
+                                       default: 30
   BUILD_CONFIGURATION=debug|release    Swift build configuration
   CRICTL=/path/to/crictl               crictl executable
   CRICTL_TIMEOUT=120s                  crictl request timeout
@@ -84,6 +90,8 @@ SKIP_PULL="${CONTAINER_CRI_MACOS_SKIP_PULL:-0}"
 KEEP_WORKDIR="${CONTAINER_CRI_MACOS_KEEP_WORKDIR:-0}"
 WORKDIR_PARENT="${CONTAINER_CRI_MACOS_WORKDIR_PARENT:-/tmp}"
 KUBELET_TIMEOUT_SECONDS="${CONTAINER_CRI_MACOS_KUBELET_TIMEOUT_SECONDS:-300}"
+CLEANUP_TIMEOUT_SECONDS="${CONTAINER_CRI_MACOS_CLEANUP_TIMEOUT_SECONDS:-120}"
+EXECSYNC_TIMEOUT_SECONDS="${CONTAINER_CRI_MACOS_EXECSYNC_TIMEOUT_SECONDS:-30}"
 NODE_NAME="${CONTAINER_CRI_MACOS_NODE_NAME:-macos-static-e2e}"
 POD_NAME="${CONTAINER_CRI_MACOS_STATIC_POD_NAME:-macos-static-smoke}"
 CONTAINER_NAME="${CONTAINER_CRI_MACOS_STATIC_CONTAINER_NAME:-workload}"
@@ -121,6 +129,16 @@ fi
 
 if [[ ! "${KUBELET_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: CONTAINER_CRI_MACOS_KUBELET_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 2
+fi
+
+if [[ ! "${CLEANUP_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: CONTAINER_CRI_MACOS_CLEANUP_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 2
+fi
+
+if [[ ! "${EXECSYNC_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: CONTAINER_CRI_MACOS_EXECSYNC_TIMEOUT_SECONDS must be a positive integer" >&2
     exit 2
 fi
 
@@ -191,7 +209,7 @@ run_crictl_execsync() {
     if "${CRICTL_BIN}" --help 2>/dev/null | grep -Eq '^[[:space:]]+execsync[[:space:]]'; then
         run_crictl execsync "$@"
     else
-        run_crictl exec --sync --transport websocket "$@"
+        run_crictl exec --sync --transport websocket --timeout "${EXECSYNC_TIMEOUT_SECONDS}" "$@"
     fi
 }
 
@@ -493,7 +511,7 @@ run_crictl_execsync "${CONTAINER_ID}" /bin/echo kubelet-execsync-ok | grep -F "k
 
 log "removing static Pod manifest"
 rm -f "${STATIC_POD_MANIFEST}"
-if wait_for_static_pod_cleanup 30; then
+if wait_for_static_pod_cleanup "${CLEANUP_TIMEOUT_SECONDS}"; then
     log "kubelet removed static Pod runtime objects"
 else
     log "kubelet did not fully remove static Pod runtime objects before timeout; forcing CRI cleanup"

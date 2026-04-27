@@ -507,6 +507,12 @@ public struct ContainerClient: Sendable {
             request.set(key: .id, value: containerId)
             request.set(key: .processIdentifier, value: workloadId)
             try await xpcClient.send(request)
+        } catch let error as ContainerizationError where error.isCode(.notFound) {
+            throw ContainerizationError(
+                .notFound,
+                message: "failed to remove workload from sandbox",
+                cause: error
+            )
         } catch {
             throw ContainerizationError(
                 .internalError,

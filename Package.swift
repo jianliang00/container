@@ -670,6 +670,13 @@ let package = Package(
                 "CAuditToken",
             ]
         ),
+        .testTarget(
+            name: "ContainerXPCTests",
+            dependencies: [
+                .product(name: "Containerization", package: "containerization"),
+                "ContainerXPC",
+            ]
+        ),
         .target(
             name: "TerminalProgress",
             dependencies: [

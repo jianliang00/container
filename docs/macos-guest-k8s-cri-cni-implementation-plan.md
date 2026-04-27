@@ -610,6 +610,9 @@ namespace, filesystem, or cgroup behavior.
 
 `crictl` validation:
 
+Run `scripts/cri-crictl-smoke.sh` for the direct CRI path. The script starts a
+temporary shim, CNI config, runtime socket, and state directory, then validates:
+
 - `crictl version`
 - `crictl info`
 - `crictl pull`
@@ -627,9 +630,17 @@ namespace, filesystem, or cgroup behavior.
 
 kubelet validation:
 
+Run `scripts/kubelet-static-pod-smoke.sh` for the standalone static Pod path.
+The script starts a temporary shim and local kubelet instance, then validates:
+
 - local kubelet starts with `--container-runtime-endpoint`
 - static Pod starts on the macOS node
 - single-container Pod starts on the macOS node
+- static Pod workload logs are readable through CRI log inspection
+- `crictl execsync` works against the kubelet-created container
+
+Additional kubelet and API validation goals:
+
 - exec probe works
 - HTTP probe works
 - TCP probe works
@@ -637,7 +648,8 @@ kubelet validation:
 - `kubectl exec` works
 - `kubectl port-forward` works
 - kube-proxy provides single-node Service reachability
-- Pod deletion cleans up workload, sandbox, network lease, and policy state
+- Pod deletion through kubelet or the API cleans up workload, sandbox, network
+  lease, and policy state
 
 NetworkPolicy validation:
 

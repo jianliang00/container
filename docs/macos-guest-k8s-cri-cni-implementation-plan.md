@@ -237,6 +237,7 @@ The config owns:
 - default macOS guest network backend
 - runtime handler profiles
 - GUI policy for kubelet-launched macOS guests
+- per-runtime sandbox resources: vCPU count and memory bytes
 - policy-controller kubeconfig path
 - policy-controller node name
 - policy-controller resync interval
@@ -278,14 +279,22 @@ Recommended initial shape:
     },
     "network": "default",
     "networkBackend": "vmnetShared",
-    "guiEnabled": false
+    "guiEnabled": false,
+    "resources": {
+      "cpus": 4,
+      "memoryInBytes": 8589934592
+    }
   },
   "runtimeHandlers": {
     "macos": {
       "sandboxImage": "localhost/macos-sandbox:latest",
       "network": "default",
       "networkBackend": "vmnetShared",
-      "guiEnabled": false
+      "guiEnabled": false,
+      "resources": {
+        "cpus": 4,
+        "memoryInBytes": 8589934592
+      }
     }
   },
   "networkPolicy": {
@@ -311,6 +320,9 @@ Image and handler selection rules:
    explicitly enables that policy.
 5. The implementation does not allow arbitrary Pod annotations to inject sandbox
    image references.
+6. `resources.cpus` and `resources.memoryInBytes` are resolved from the selected
+   runtime handler over `defaults`; when omitted, the shim uses the macOS guest
+   default of 4 vCPUs and 8 GiB memory.
 
 ## 8. RuntimeService Mapping
 

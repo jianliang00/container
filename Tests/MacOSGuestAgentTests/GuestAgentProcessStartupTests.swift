@@ -111,6 +111,61 @@ struct GuestAgentProcessStartupTests {
 
         try harness.waitForCompletion()
     }
+
+    @Test
+    func signalStopsShellChildProcessGroup() throws {
+        signal(SIGPIPE, SIG_IGN)
+
+        let harness = try AgentConnectionHarness()
+        defer { harness.closePeer() }
+
+        let ready = try readAgentFrame(from: harness.peerFD)
+        #expect(ready.type == .ready)
+
+        let processID = "signal-process-group"
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec,
+                id: processID,
+                executable: "/bin/sh",
+                arguments: ["-c", "echo child-started; sleep 30"],
+                environment: ["PATH=/usr/bin:/bin"],
+                workingDirectory: "/",
+                terminal: false,
+                uid: UInt32(geteuid()),
+                gid: UInt32(getegid())
+            ),
+            fd: harness.peerFD
+        )
+
+        var receivedAck = false
+        for _ in 0..<4 {
+            let frame = try readAgentFrame(from: harness.peerFD)
+            if frame.type == .ack {
+                receivedAck = true
+                #expect(frame.id == processID)
+                break
+            }
+        }
+        #expect(receivedAck)
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(type: .signal, id: processID, signal: SIGKILL),
+            fd: harness.peerFD
+        )
+
+        var receivedExit = false
+        for _ in 0..<8 {
+            let frame = try readAgentFrame(from: harness.peerFD)
+            if frame.type == .exit {
+                receivedExit = true
+                break
+            }
+        }
+        #expect(receivedExit)
+
+        try harness.waitForCompletion()
+    }
 }
 
 extension GuestAgentProcessStartupTests {
@@ -183,5 +238,17 @@ private func makeSocketPair() throws -> (server: Int32, peer: Int32) {
 private func closeIfValid(_ fd: Int32?) {
     guard let fd, fd >= 0 else { return }
     Darwin.close(fd)
+}
+
+private func readAgentFrame(from fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> GuestAgentFrame {
+    var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+    let result = Darwin.poll(&pollFD, 1, timeoutMilliseconds)
+    guard result > 0 else {
+        if result == 0 {
+            throw POSIXError(.ETIMEDOUT)
+        }
+        throw POSIXError.fromErrno()
+    }
+    return try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: fd)
 }
 #endif

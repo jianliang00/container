@@ -184,19 +184,38 @@ public struct RuntimeProfile: Codable, Equatable, Sendable {
     public var network: String?
     public var networkBackend: String?
     public var guiEnabled: Bool?
+    public var resources: RuntimeResources?
 
     public init(
         sandboxImage: String? = nil,
         workloadPlatform: WorkloadPlatform? = nil,
         network: String? = nil,
         networkBackend: String? = nil,
-        guiEnabled: Bool? = nil
+        guiEnabled: Bool? = nil,
+        resources: RuntimeResources? = nil
     ) {
         self.sandboxImage = sandboxImage
         self.workloadPlatform = workloadPlatform
         self.network = network
         self.networkBackend = networkBackend
         self.guiEnabled = guiEnabled
+        self.resources = resources
+    }
+}
+
+public struct RuntimeResources: Codable, Equatable, Sendable {
+    public static let defaultMacOSMemoryInBytes: UInt64 = 8 * 1024 * 1024 * 1024
+
+    public var cpus: Int?
+    public var memoryInBytes: UInt64?
+
+    public init(cpus: Int? = nil, memoryInBytes: UInt64? = nil) {
+        self.cpus = cpus
+        self.memoryInBytes = memoryInBytes
+    }
+
+    public static var macOSDefault: RuntimeResources {
+        RuntimeResources(cpus: 4, memoryInBytes: defaultMacOSMemoryInBytes)
     }
 }
 

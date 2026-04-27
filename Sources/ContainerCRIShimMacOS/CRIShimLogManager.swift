@@ -198,38 +198,13 @@ public final actor CRIShimLogManager: CRIShimLogManaging {
         guard let sourcePath = normalizedSourcePath(sourcePath) else {
             return
         }
-        let sourceURL = URL(fileURLWithPath: sourcePath)
         while !Task.isCancelled {
-            if !FileManager.default.fileExists(atPath: sourceURL.path) {
-                try await Task.sleep(for: .milliseconds(100))
-                continue
-            }
-
-            let handle = try FileHandle(forReadingFrom: sourceURL)
-            do {
-                let desiredOffset = await controller.offset(for: stream)
-                let fileSize = try fileSize(of: sourceURL)
-                let offset = min(desiredOffset, fileSize)
-                if offset != desiredOffset {
-                    try await controller.resetOffset(offset, for: stream)
-                }
-                try handle.seek(toOffset: offset)
-
-                while !Task.isCancelled {
-                    if let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty {
-                        try await controller.consume(data, stream: stream)
-                        continue
-                    }
-                    try await Task.sleep(for: .milliseconds(100))
-                }
-            } catch is CancellationError {
-                try? handle.close()
-                throw CancellationError()
-            } catch {
-                try? handle.close()
-                throw error
-            }
-            try? handle.close()
+            try await drainAvailableBytes(
+                controller: controller,
+                stream: stream,
+                sourcePath: sourcePath
+            )
+            try await Task.sleep(for: .milliseconds(100))
         }
     }
 
@@ -242,25 +217,51 @@ public final actor CRIShimLogManager: CRIShimLogManaging {
             try await controller.finish(stream: stream)
             return
         }
+        guard FileManager.default.fileExists(atPath: sourcePath) else {
+            try await controller.finish(stream: stream)
+            return
+        }
+
+        try await drainAvailableBytes(
+            controller: controller,
+            stream: stream,
+            sourcePath: sourcePath
+        )
+        try await controller.finish(stream: stream)
+    }
+
+    private func drainAvailableBytes(
+        controller: CRIShimLogSessionController,
+        stream: CRIShimLogStream,
+        sourcePath: String
+    ) async throws {
         let sourceURL = URL(fileURLWithPath: sourcePath)
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
-            try await controller.finish(stream: stream)
+            return
+        }
+
+        let desiredOffset = await controller.offset(for: stream)
+        let fileSize = try fileSize(of: sourceURL)
+        let offset = desiredOffset > fileSize ? 0 : desiredOffset
+        if offset != desiredOffset {
+            try await controller.resetOffset(offset, for: stream)
+        }
+        guard offset < fileSize else {
             return
         }
 
         let handle = try FileHandle(forReadingFrom: sourceURL)
         defer { try? handle.close() }
-        let desiredOffset = await controller.offset(for: stream)
-        let fileSize = try fileSize(of: sourceURL)
-        let offset = min(desiredOffset, fileSize)
-        if offset != desiredOffset {
-            try await controller.resetOffset(offset, for: stream)
-        }
         try handle.seek(toOffset: offset)
-        while let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty {
+        var remainingBytes = fileSize - offset
+        while remainingBytes > 0 {
+            let readSize = min(Int(remainingBytes), 64 * 1024)
+            guard let data = try handle.read(upToCount: readSize), !data.isEmpty else {
+                return
+            }
             try await controller.consume(data, stream: stream)
+            remainingBytes -= UInt64(data.count)
         }
-        try await controller.finish(stream: stream)
     }
 
     private func normalizedDestinationPath(

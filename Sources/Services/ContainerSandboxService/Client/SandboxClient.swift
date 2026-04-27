@@ -342,6 +342,12 @@ extension SandboxClient {
         request.set(key: SandboxKeys.id.rawValue, value: id)
         do {
             try await self.client.send(request)
+        } catch let error as ContainerizationError where error.isCode(.notFound) {
+            throw ContainerizationError(
+                .notFound,
+                message: "failed to remove workload \(id) in container \(self.id)",
+                cause: error
+            )
         } catch {
             throw ContainerizationError(
                 .internalError,

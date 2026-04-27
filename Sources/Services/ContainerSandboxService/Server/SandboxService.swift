@@ -436,7 +436,12 @@ public actor SandboxService {
         self.log.info("`removeWorkload` xpc handler")
         return try await self.lock.withLock { [self] _ in
             let id = try message.id()
-            let processInfo = try await self.removeStoppedWorkloadProcessInfo(id: id)
+            let processInfo: ProcessInfo
+            do {
+                processInfo = try await self.removeStoppedWorkloadProcessInfo(id: id)
+            } catch let error as ContainerizationError where error.isCode(.notFound) {
+                return message.reply()
+            }
             for handle in processInfo.io {
                 handle?.readabilityHandler = nil
                 try? handle?.close()

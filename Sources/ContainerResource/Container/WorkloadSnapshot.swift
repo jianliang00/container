@@ -37,6 +37,8 @@ public struct WorkloadConfiguration: Sendable, Codable {
     public var processConfiguration: ProcessConfiguration
     /// Host filesystems required by this workload inside the macOS guest.
     public var mounts: [Filesystem]
+    /// Read-only host files injected into the guest before this workload starts.
+    public var readOnlyFiles: [ReadOnlyFileInjection]
     /// Source reference of the workload image when the workload is image-backed.
     public var workloadImageReference: String?
     /// Resolved digest of the workload image when the workload is image-backed.
@@ -58,6 +60,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         case id
         case processConfiguration
         case mounts
+        case readOnlyFiles
         case workloadImageReference
         case workloadImageDigest
         case guestPayloadPath
@@ -69,6 +72,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         id: String,
         processConfiguration: ProcessConfiguration,
         mounts: [Filesystem] = [],
+        readOnlyFiles: [ReadOnlyFileInjection] = [],
         workloadImageReference: String? = nil,
         workloadImageDigest: String? = nil,
         guestPayloadPath: String? = nil,
@@ -79,6 +83,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         self.id = id
         self.processConfiguration = processConfiguration
         self.mounts = mounts
+        self.readOnlyFiles = readOnlyFiles
         self.workloadImageReference = workloadImageReference
         self.workloadImageDigest = workloadImageDigest
         self.guestPayloadPath = guestPayloadPath
@@ -100,6 +105,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         self.id = try container.decode(String.self, forKey: .id)
         self.processConfiguration = try container.decode(ProcessConfiguration.self, forKey: .processConfiguration)
         self.mounts = try container.decodeIfPresent([Filesystem].self, forKey: .mounts) ?? []
+        self.readOnlyFiles = try container.decodeIfPresent([ReadOnlyFileInjection].self, forKey: .readOnlyFiles) ?? []
         self.workloadImageReference = try container.decodeIfPresent(String.self, forKey: .workloadImageReference)
         self.workloadImageDigest = try container.decodeIfPresent(String.self, forKey: .workloadImageDigest)
         self.guestPayloadPath = try container.decodeIfPresent(String.self, forKey: .guestPayloadPath)

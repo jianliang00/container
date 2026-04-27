@@ -77,11 +77,16 @@ struct CRIShimCoreMappingTests {
         let mountRoot = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: mountRoot) }
         let workspace = mountRoot.appendingPathComponent("workspace")
+        let hosts = mountRoot.appendingPathComponent("etc-hosts")
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try "127.0.0.1 localhost\n".write(to: hosts, atomically: true, encoding: .utf8)
         var mount = Runtime_V1_Mount()
         mount.hostPath = workspace.path
         mount.containerPath = "/Users/demo/workspace"
-        request.config.mounts = [mount]
+        var hostsMount = Runtime_V1_Mount()
+        hostsMount.hostPath = hosts.path
+        hostsMount.containerPath = "/etc/hosts"
+        request.config.mounts = [mount, hostsMount]
 
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let metadata = try makeCRIShimContainerMetadata(
@@ -117,6 +122,9 @@ struct CRIShimCoreMappingTests {
         #expect(workload.mounts.count == 1)
         #expect(workload.mounts[0].source == normalizedDirectoryPath(workspace))
         #expect(workload.mounts[0].destination == "/Users/demo/workspace")
+        #expect(workload.readOnlyFiles.count == 1)
+        #expect(workload.readOnlyFiles[0].source == hosts.path)
+        #expect(workload.readOnlyFiles[0].destination == "/etc/hosts")
     }
 
     @Test
@@ -165,8 +173,12 @@ struct CRIShimCoreMappingTests {
         defer { try? FileManager.default.removeItem(at: tempRoot) }
         let workspace = tempRoot.appendingPathComponent("host-workspace")
         let config = tempRoot.appendingPathComponent("host-config")
+        let hosts = tempRoot.appendingPathComponent("etc-hosts")
+        let terminationLog = tempRoot.appendingPathComponent("termination-log")
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        try "127.0.0.1 localhost\n".write(to: hosts, atomically: true, encoding: .utf8)
+        try Data().write(to: terminationLog)
 
         var writable = Runtime_V1_Mount()
         writable.hostPath = workspace.path
@@ -177,7 +189,16 @@ struct CRIShimCoreMappingTests {
         readonly.containerPath = "/opt/config"
         readonly.readonly = true
 
-        let mounts = try makeCRIShimMounts([writable, readonly])
+        var hostsMount = Runtime_V1_Mount()
+        hostsMount.hostPath = hosts.path
+        hostsMount.containerPath = "/etc/hosts"
+
+        var terminationLogMount = Runtime_V1_Mount()
+        terminationLogMount.hostPath = terminationLog.path
+        terminationLogMount.containerPath = "/dev/termination-log"
+
+        let mounts = try makeCRIShimMounts([writable, readonly, hostsMount, terminationLogMount])
+        let readOnlyFiles = try makeCRIShimReadOnlyFileInjections([writable, readonly, hostsMount, terminationLogMount])
 
         #expect(mounts.count == 2)
         #expect(mounts[0].isVirtiofs)
@@ -188,6 +209,9 @@ struct CRIShimCoreMappingTests {
         #expect(mounts[1].source == normalizedDirectoryPath(config))
         #expect(mounts[1].destination == "/opt/config")
         #expect(mounts[1].options == ["ro"])
+        #expect(readOnlyFiles.count == 1)
+        #expect(readOnlyFiles[0].source == hosts.path)
+        #expect(readOnlyFiles[0].destination == "/etc/hosts")
     }
 
     @Test

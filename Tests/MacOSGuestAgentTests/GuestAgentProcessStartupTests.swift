@@ -113,6 +113,48 @@ struct GuestAgentProcessStartupTests {
     }
 
     @Test
+    func fastProcessSendsAckBeforeExit() throws {
+        signal(SIGPIPE, SIG_IGN)
+
+        let harness = try AgentConnectionHarness()
+        defer { harness.closePeer() }
+
+        let ready = try readAgentFrame(from: harness.peerFD)
+        #expect(ready.type == .ready)
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec,
+                id: "fast-process",
+                executable: "/bin/echo",
+                arguments: ["fast-ok"],
+                environment: ["PATH=/usr/bin:/bin"],
+                workingDirectory: "/",
+                terminal: false,
+                uid: UInt32(geteuid()),
+                gid: UInt32(getegid())
+            ),
+            fd: harness.peerFD
+        )
+
+        var frames: [GuestAgentFrame] = []
+        for _ in 0..<6 {
+            let frame = try readAgentFrame(from: harness.peerFD)
+            frames.append(frame)
+            if frames.contains(where: { $0.type == .ack }) && frames.contains(where: { $0.type == .exit }) {
+                break
+            }
+        }
+
+        let ackIndex = try #require(frames.firstIndex(where: { $0.type == .ack }))
+        let exitIndex = try #require(frames.firstIndex(where: { $0.type == .exit }))
+        #expect(frames[ackIndex].id == "fast-process")
+        #expect(ackIndex < exitIndex)
+
+        try harness.waitForCompletion()
+    }
+
+    @Test
     func signalStopsShellChildProcessGroup() throws {
         signal(SIGPIPE, SIG_IGN)
 

@@ -93,8 +93,35 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     public func prepare(_ plan: MacvmnetOperationPlan) async throws -> CNIResult {
         let identity = try requireAttachmentIdentity(plan)
         let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
+        do {
+            let existingState = try await client.inspectSandboxNetwork()
+            if let attachment = try optionalAttachment(from: existingState, for: plan) {
+                return try persistResult(
+                    attachment: attachment,
+                    identity: identity,
+                    plan: plan
+                )
+            }
+        } catch let error as CNIError {
+            throw error
+        } catch {
+            // A sandbox with no live network endpoint can still be prepared below.
+        }
+
         let state = try await client.prepareSandboxNetwork()
         let attachment = try attachment(from: state, for: plan)
+        return try persistResult(
+            attachment: attachment,
+            identity: identity,
+            plan: plan
+        )
+    }
+
+    private func persistResult(
+        attachment: Attachment,
+        identity: MacvmnetAttachmentIdentity,
+        plan: MacvmnetOperationPlan
+    ) throws -> CNIResult {
         let result = CNIResult(
             attachment: attachment,
             interfaceName: identity.ifName,
@@ -169,6 +196,28 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
             throw CNIError.backendUnavailable(
                 "no sandbox network attachment found for sandbox \(identity.containerID) on network \(plan.networkName)"
             )
+        }
+
+        throw CNIError.backendUnavailable(
+            "multiple sandbox network attachments found for sandbox \(identity.containerID) on network \(plan.networkName)"
+        )
+    }
+
+    private func optionalAttachment(
+        from state: SandboxNetworkState,
+        for plan: MacvmnetOperationPlan
+    ) throws -> Attachment? {
+        let identity = try requireAttachmentIdentity(plan)
+        let networkAttachments = state.attachments.filter { $0.network == plan.networkName }
+        if let attachment = networkAttachments.first(where: { $0.hostname == identity.containerID }) {
+            return attachment
+        }
+        if networkAttachments.count == 1, let attachment = networkAttachments.first {
+            return attachment
+        }
+
+        if networkAttachments.isEmpty {
+            return nil
         }
 
         throw CNIError.backendUnavailable(

@@ -89,15 +89,25 @@ public enum MacOSReadOnlyFileInjectionStore {
         fileManager: FileManager = .default
     ) throws {
         try layout.prepareBaseDirectories(fileManager: fileManager)
+        try stage(injections, in: layout.readonlyInjectionDirectoryURL, fileManager: fileManager)
+    }
 
-        let stagedFilesDirectory = layout.readonlyInjectionDirectoryURL.appendingPathComponent("files")
+    public static func stage(
+        _ injections: [ReadOnlyFileInjection],
+        in directoryURL: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+
+        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
+        let stagedFilesDirectory = directoryURL.appendingPathComponent("files")
         if fileManager.fileExists(atPath: stagedFilesDirectory.path) {
             try fileManager.removeItem(at: stagedFilesDirectory)
         }
         try fileManager.createDirectory(at: stagedFilesDirectory, withIntermediateDirectories: true)
 
         guard !injections.isEmpty else {
-            try? fileManager.removeItem(at: layout.readonlyInjectionManifestURL)
+            try? fileManager.removeItem(at: manifestURL)
             return
         }
 
@@ -116,7 +126,7 @@ public enum MacOSReadOnlyFileInjectionStore {
 
             let stagedName = stagedFileName(for: sourceURL, index: index)
             let stagedPath = "files/\(stagedName)"
-            let stagedURL = layout.readonlyInjectionDirectoryURL.appendingPathComponent(stagedPath)
+            let stagedURL = directoryURL.appendingPathComponent(stagedPath)
             let data = try Data(contentsOf: sourceURL)
             try data.write(to: stagedURL, options: .atomic)
 
@@ -133,21 +143,29 @@ public enum MacOSReadOnlyFileInjectionStore {
 
         let manifest = Manifest(entries: manifestEntries)
         let data = try JSONEncoder().encode(manifest)
-        try data.write(to: layout.readonlyInjectionManifestURL, options: .atomic)
+        try data.write(to: manifestURL, options: .atomic)
     }
 
     public static func load(
         from layout: MacOSSandboxLayout,
         fileManager: FileManager = .default
     ) throws -> [PreparedEntry] {
-        guard fileManager.fileExists(atPath: layout.readonlyInjectionManifestURL.path) else {
+        try load(from: layout.readonlyInjectionDirectoryURL, fileManager: fileManager)
+    }
+
+    public static func load(
+        from directoryURL: URL,
+        fileManager: FileManager = .default
+    ) throws -> [PreparedEntry] {
+        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
+        guard fileManager.fileExists(atPath: manifestURL.path) else {
             return []
         }
 
-        let data = try Data(contentsOf: layout.readonlyInjectionManifestURL)
+        let data = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode(Manifest.self, from: data)
         return try manifest.entries.map { entry in
-            let sourceURL = layout.readonlyInjectionDirectoryURL.appendingPathComponent(entry.stagedPath)
+            let sourceURL = directoryURL.appendingPathComponent(entry.stagedPath)
             guard fileManager.fileExists(atPath: sourceURL.path) else {
                 throw Error.stagedFileMissing(sourceURL.path)
             }

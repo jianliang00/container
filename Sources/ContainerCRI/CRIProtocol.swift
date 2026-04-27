@@ -16,6 +16,8 @@
 
 public enum CRIProtocol {
     public static let runtimeAPIVersion = "runtime.v1"
+    public static let kubeletRuntimeAPIVersion = "0.1.0"
+    public static let runtimeImplementationAPIVersion = "1.0.0"
 }
 
 public enum CRIRuntimeOperation: String, CaseIterable, Sendable {

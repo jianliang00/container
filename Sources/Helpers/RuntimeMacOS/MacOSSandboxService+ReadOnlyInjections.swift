@@ -25,38 +25,53 @@ extension MacOSSandboxService {
         }
 
         let entries = try MacOSReadOnlyFileInjectionStore.load(from: MacOSSandboxLayout(root: root))
+        try await prepareReadOnlyInjections(
+            entries,
+            description: "macOS guest read-only injections"
+        )
+        readOnlyInjectionsPrepared = true
+    }
+
+    func prepareWorkloadReadOnlyInjectionsIfNeeded(workloadID: String) async throws {
+        let layout = MacOSSandboxLayout(root: root)
+        let entries = try MacOSReadOnlyFileInjectionStore.load(
+            from: layout.workloadReadonlyInjectionDirectoryURL(id: workloadID)
+        )
+        try await prepareReadOnlyInjections(
+            entries,
+            description: "macOS guest workload \(workloadID) read-only injections"
+        )
+    }
+
+    private func prepareReadOnlyInjections(
+        _ entries: [MacOSReadOnlyFileInjectionStore.PreparedEntry],
+        description: String
+    ) async throws {
         guard !entries.isEmpty else {
-            readOnlyInjectionsPrepared = true
             return
         }
 
         writeContainerLog(
             Data(
-                ("preparing macOS guest read-only injections: " + entries.map { "\($0.sourceURL.lastPathComponent)->\($0.destination)" }.joined(separator: ", ") + "\n").utf8
+                ("preparing \(description): " + entries.map { "\($0.sourceURL.lastPathComponent)->\($0.destination)" }.joined(separator: ", ") + "\n").utf8
             )
         )
 
-        do {
-            for entry in entries {
-                try await MacOSSidecarFileTransfer.writeFile(
-                    from: entry.sourceURL,
-                    to: entry.destination,
-                    options: .init(mode: entry.mode, overwrite: entry.overwrite),
-                    begin: { payload in
-                        try await self.sendFSBegin(payload)
-                    },
-                    chunk: { payload in
-                        try await self.sendFSChunk(payload)
-                    },
-                    end: { payload in
-                        try await self.sendFSEnd(payload)
-                    }
-                )
-            }
-            readOnlyInjectionsPrepared = true
-        } catch {
-            readOnlyInjectionsPrepared = false
-            throw error
+        for entry in entries {
+            try await MacOSSidecarFileTransfer.writeFile(
+                from: entry.sourceURL,
+                to: entry.destination,
+                options: .init(mode: entry.mode, overwrite: entry.overwrite),
+                begin: { payload in
+                    try await self.sendFSBegin(payload)
+                },
+                chunk: { payload in
+                    try await self.sendFSChunk(payload)
+                },
+                end: { payload in
+                    try await self.sendFSEnd(payload)
+                }
+            )
         }
     }
 }

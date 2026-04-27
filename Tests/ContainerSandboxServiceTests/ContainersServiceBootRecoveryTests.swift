@@ -71,11 +71,65 @@ struct ContainersServiceBootRecoveryTests {
         #expect(recovered.snapshot.startedDate == startedDate)
     }
 
+    @Test
+    func bootRecoveryTreatsBootedSandboxAsRunningWhenInitWorkloadIsStopped() throws {
+        let configuration = try makeContainerConfiguration(id: "boot-recovery")
+        let existing = ContainersService.ContainerState(
+            snapshot: ContainerSnapshot(
+                configuration: configuration,
+                status: .stopped,
+                networks: [],
+                startedDate: nil
+            )
+        )
+        let sandboxSnapshot = SandboxSnapshot(
+            configuration: SandboxConfiguration(containerConfiguration: configuration),
+            status: .running,
+            networks: [],
+            containers: [
+                ContainerSnapshot(
+                    configuration: configuration,
+                    status: .running,
+                    networks: [],
+                    startedDate: nil
+                )
+            ],
+            workloads: [
+                WorkloadSnapshot(
+                    configuration: WorkloadConfiguration(
+                        id: configuration.id,
+                        processConfiguration: configuration.initProcess
+                    ),
+                    status: .stopped
+                )
+            ]
+        )
+
+        let recovered = ContainersService.makeBootRecoveredState(
+            existing: existing,
+            sandboxSnapshot: sandboxSnapshot,
+            client: makeSandboxClient(id: configuration.id)
+        )
+
+        #expect(recovered.snapshot.status == .running)
+    }
+
     private func makeContainerState(
         status: RuntimeStatus,
         networks: [ContainerResource.Attachment],
         startedDate: Date?
     ) throws -> ContainersService.ContainerState {
+        let config = try makeContainerConfiguration(id: "boot-recovery")
+        let snapshot = ContainerSnapshot(
+            configuration: config,
+            status: status,
+            networks: networks,
+            startedDate: startedDate
+        )
+        return ContainersService.ContainerState(snapshot: snapshot)
+    }
+
+    private func makeContainerConfiguration(id: String) throws -> ContainerConfiguration {
         let imageJSON = """
             {
               "reference": "example/test:latest",
@@ -95,14 +149,7 @@ struct ContainersServiceBootRecoveryTests {
             terminal: false,
             user: .id(uid: 0, gid: 0)
         )
-        let config = ContainerConfiguration(id: "boot-recovery", image: image, process: process)
-        let snapshot = ContainerSnapshot(
-            configuration: config,
-            status: status,
-            networks: networks,
-            startedDate: startedDate
-        )
-        return ContainersService.ContainerState(snapshot: snapshot)
+        return ContainerConfiguration(id: id, image: image, process: process)
     }
 
     private func makeAttachment() throws -> ContainerResource.Attachment {

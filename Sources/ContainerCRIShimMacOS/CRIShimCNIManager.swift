@@ -158,8 +158,8 @@ public struct ProcessCRIShimCNIManager: CRIShimCNIManaging {
             .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
         for candidate in candidates {
             let data = try Data(contentsOf: candidate)
-            if try configData(data, usesPlugin: plugin, networkName: networkName) {
-                return data
+            if let config = try pluginConfigData(data, plugin: plugin, networkName: networkName) {
+                return config
             }
         }
         throw CRIShimError.notFound(
@@ -167,19 +167,28 @@ public struct ProcessCRIShimCNIManager: CRIShimCNIManaging {
         )
     }
 
-    private func configData(_ data: Data, usesPlugin plugin: String, networkName: String) throws -> Bool {
+    private func pluginConfigData(_ data: Data, plugin: String, networkName: String) throws -> Data? {
         let json = try JSONSerialization.jsonObject(with: data)
         guard let object = json as? [String: Any] else {
-            return false
+            return nil
         }
         guard object["name"] as? String == networkName else {
-            return false
+            return nil
         }
         if object["type"] as? String == plugin {
-            return true
+            return data
         }
+
         let plugins = object["plugins"] as? [[String: Any]] ?? []
-        return plugins.contains { $0["type"] as? String == plugin }
+        guard var pluginConfig = plugins.first(where: { $0["type"] as? String == plugin }) else {
+            return nil
+        }
+
+        pluginConfig["name"] = networkName
+        if pluginConfig["cniVersion"] == nil {
+            pluginConfig["cniVersion"] = object["cniVersion"]
+        }
+        return try JSONSerialization.data(withJSONObject: pluginConfig, options: [.sortedKeys])
     }
 
     private func run(_ invocation: CNIInvocation) async throws -> Data {

@@ -292,73 +292,18 @@ final class AgentConnection: @unchecked Sendable {
         let spawnedIdentity = explicitIdentity.flatMap { identity in
             identity.requiresSpawnedSession() ? identity : nil
         }
-        if terminal || spawnedIdentity != nil {
-            let session = try SpawnedProcessSession.spawn(
-                executable: executable,
-                arguments: frame.arguments ?? [],
-                environment: frame.environment ?? [],
-                workingDirectory: frame.workingDirectory,
-                terminal: terminal,
-                identity: spawnedIdentity ?? .currentProcess(),
-                connection: self
-            )
-            self.session = session
-            try session.start(stdoutHandle: nil, stderrHandle: nil)
-            try send(frame: .ack(id: processID))
-            return
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = frame.arguments ?? []
-        process.environment = environmentDictionary(from: frame.environment ?? [])
-        if let workingDirectory = frame.workingDirectory {
-            process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
-        }
-
-        if terminal {
-            var master: Int32 = 0
-            var slave: Int32 = 0
-            guard openpty(&master, &slave, nil, nil, nil) == 0 else {
-                throw POSIXError.fromErrno()
-            }
-
-            let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: true)
-            let masterHandle = FileHandle(fileDescriptor: master, closeOnDealloc: true)
-            process.standardInput = slaveHandle
-            process.standardOutput = slaveHandle
-            process.standardError = slaveHandle
-
-            let session = ProcessSession(
-                process: process,
-                terminal: true,
-                connection: self,
-                masterHandle: masterHandle,
-                stdinPipe: nil
-            )
-            self.session = session
-            try session.start()
-            try send(frame: .ack(id: processID))
-        } else {
-            let stdinPipe = Pipe()
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-
-            process.standardInput = stdinPipe
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            let session = ProcessSession(
-                process: process,
-                terminal: false,
-                connection: self,
-                masterHandle: nil,
-                stdinPipe: stdinPipe
-            )
-            self.session = session
-            try session.start(stdoutHandle: stdoutPipe.fileHandleForReading, stderrHandle: stderrPipe.fileHandleForReading)
-            try send(frame: .ack(id: processID))
-        }
+        let session = try SpawnedProcessSession.spawn(
+            executable: executable,
+            arguments: frame.arguments ?? [],
+            environment: frame.environment ?? [],
+            workingDirectory: frame.workingDirectory,
+            terminal: terminal,
+            identity: spawnedIdentity ?? .currentProcess(),
+            connection: self
+        )
+        self.session = session
+        try session.start(stdoutHandle: nil, stderrHandle: nil)
+        try send(frame: .ack(id: processID))
     }
 
     private func beginFileTransaction(frame: GuestAgentFrame) throws {
@@ -1053,10 +998,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
     }
 
     func sendSignal(_ signal: Int32) throws {
-        guard kill(pid, 0) == 0 else { return }
-        guard Darwin.kill(pid, signal) == 0 else {
-            throw POSIXError.fromErrno()
-        }
+        try sendSignalToProcessTree(pid: pid, signal: signal)
     }
 
     func resize(width: UInt16, height: UInt16) throws {
@@ -1071,9 +1013,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         stdoutHandle?.readabilityHandler = nil
         stderrHandle?.readabilityHandler = nil
         masterHandle?.readabilityHandler = nil
-        if kill(pid, 0) == 0 {
-            _ = Darwin.kill(pid, SIGKILL)
-        }
+        try? sendSignalToProcessTree(pid: pid, signal: SIGKILL)
         try? masterHandle?.close()
         try? stdinHandle?.close()
         try? stdoutHandle?.close()
@@ -1292,10 +1232,11 @@ private func runChild(
         _exit(127)
     }
 
+    if setsid() == -1 {
+        fail(Int32(errno))
+    }
+
     if terminal {
-        if setsid() == -1 {
-            fail(Int32(errno))
-        }
         _ = ioctl(stdinFD, TIOCSCTTY, 0)
     }
 
@@ -1348,163 +1289,21 @@ private func runChild(
     fail(Int32(errno))
 }
 
-private final class ProcessSession: GuestAgentProcessSession, @unchecked Sendable {
-    private enum OutputChannel {
-        case stdout
-        case stderr
+private func sendSignalToProcessTree(pid: pid_t, signal: Int32) throws {
+    if Darwin.kill(-pid, signal) == 0 {
+        return
     }
-
-    private let process: Process
-    private let terminal: Bool
-    private unowned let connection: AgentConnection
-    private let masterHandle: FileHandle?
-    private let stdinPipe: Pipe?
-    private var stdoutHandle: FileHandle?
-    private var stderrHandle: FileHandle?
-    private let outputLock = NSLock()
-    private var exitSent = false
-
-    init(process: Process, terminal: Bool, connection: AgentConnection, masterHandle: FileHandle?, stdinPipe: Pipe?) {
-        self.process = process
-        self.terminal = terminal
-        self.connection = connection
-        self.masterHandle = masterHandle
-        self.stdinPipe = stdinPipe
-    }
-
-    func start(stdoutHandle: FileHandle? = nil, stderrHandle: FileHandle? = nil) throws {
-        self.stdoutHandle = stdoutHandle
-        self.stderrHandle = stderrHandle
-
-        if let masterHandle {
-            masterHandle.readabilityHandler = { [weak self] handle in
-                self?.forwardAvailableData(from: handle, channel: .stdout)
-            }
-        } else {
-            stdoutHandle?.readabilityHandler = { [weak self] handle in
-                self?.forwardAvailableData(from: handle, channel: .stdout)
-            }
-            stderrHandle?.readabilityHandler = { [weak self] handle in
-                self?.forwardAvailableData(from: handle, channel: .stderr)
-            }
+    let processGroupErrno = errno
+    if processGroupErrno == ESRCH {
+        guard Darwin.kill(pid, 0) == 0 else {
+            return
         }
-
-        process.terminationHandler = { [weak self] process in
-            self?.flushOutputAndSendExit(process.terminationStatus)
-        }
-
-        do {
-            try process.run()
-        } catch let error as CocoaError where error.code == .fileNoSuchFile {
-            throw POSIXError(.ENOENT)
-        } catch {
-            throw error
-        }
-    }
-
-    func writeStdin(_ data: Data) throws {
-        if terminal {
-            guard let masterHandle else { return }
-            try masterHandle.write(contentsOf: data)
-        } else {
-            try stdinPipe?.fileHandleForWriting.write(contentsOf: data)
-        }
-    }
-
-    func closeStdin() {
-        if terminal {
-            sendTerminalEOF(masterHandle)
-        } else {
-            try? stdinPipe?.fileHandleForWriting.close()
-        }
-    }
-
-    func sendSignal(_ signal: Int32) throws {
-        guard process.isRunning else { return }
-        guard Darwin.kill(process.processIdentifier, signal) == 0 else {
+        guard Darwin.kill(pid, signal) == 0 else {
             throw POSIXError.fromErrno()
         }
+        return
     }
-
-    func resize(width: UInt16, height: UInt16) throws {
-        guard terminal, let masterHandle else { return }
-        var ws = winsize(ws_row: height, ws_col: width, ws_xpixel: 0, ws_ypixel: 0)
-        guard ioctl(masterHandle.fileDescriptor, TIOCSWINSZ, &ws) == 0 else {
-            throw POSIXError.fromErrno()
-        }
-    }
-
-    func cleanup() {
-        stdoutHandle?.readabilityHandler = nil
-        stderrHandle?.readabilityHandler = nil
-        stdinPipe?.fileHandleForReading.readabilityHandler = nil
-        stdinPipe?.fileHandleForWriting.readabilityHandler = nil
-        masterHandle?.readabilityHandler = nil
-        if process.isRunning {
-            _ = Darwin.kill(process.processIdentifier, SIGKILL)
-        }
-        try? masterHandle?.close()
-        try? stdoutHandle?.close()
-        try? stderrHandle?.close()
-        try? stdinPipe?.fileHandleForReading.close()
-        try? stdinPipe?.fileHandleForWriting.close()
-    }
-
-    private func forwardAvailableData(from handle: FileHandle, channel: OutputChannel) {
-        outputLock.lock()
-        defer { outputLock.unlock() }
-
-        guard !exitSent else {
-            handle.readabilityHandler = nil
-            return
-        }
-
-        let data = handle.availableData
-        if data.isEmpty {
-            handle.readabilityHandler = nil
-            return
-        }
-
-        send(data, channel: channel)
-    }
-
-    private func flushOutputAndSendExit(_ status: Int32) {
-        outputLock.lock()
-        defer { outputLock.unlock() }
-
-        guard !exitSent else {
-            return
-        }
-
-        drainRemainingOutput(from: masterHandle, channel: .stdout)
-        drainRemainingOutput(from: stdoutHandle, channel: .stdout)
-        drainRemainingOutput(from: stderrHandle, channel: .stderr)
-
-        exitSent = true
-        try? connection.send(frame: .exit(status))
-    }
-
-    private func drainRemainingOutput(from handle: FileHandle?, channel: OutputChannel) {
-        guard let handle else { return }
-
-        while true {
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-                return
-            }
-            send(data, channel: channel)
-        }
-    }
-
-    private func send(_ data: Data, channel: OutputChannel) {
-        switch channel {
-        case .stdout:
-            try? connection.send(frame: .stdout(data))
-        case .stderr:
-            try? connection.send(frame: .stderr(data))
-        }
-    }
+    throw POSIXError(POSIXErrorCode(rawValue: processGroupErrno) ?? .EIO)
 }
 
 struct GuestAgentFrame: Codable {
@@ -1650,18 +1449,6 @@ struct GuestAgentFrame: Codable {
     static func networkResult(_ payload: MacOSGuestNetworkConfigurationResult) throws -> Self {
         .init(type: .networkResult, data: try JSONEncoder().encode(payload))
     }
-}
-
-private func environmentDictionary(from envList: [String]) -> [String: String] {
-    var result: [String: String] = [:]
-    for item in envList {
-        let parts = item.split(separator: "=", maxSplits: 1)
-        guard parts.count == 2 else {
-            continue
-        }
-        result[String(parts[0])] = String(parts[1])
-    }
-    return result
 }
 
 private func sendTerminalEOF(_ masterHandle: FileHandle?) {

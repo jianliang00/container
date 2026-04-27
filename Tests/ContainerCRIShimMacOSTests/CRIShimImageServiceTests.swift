@@ -17,9 +17,11 @@
 import Foundation
 import Testing
 
+@testable import ContainerAPIClient
 @testable import ContainerCRI
 @testable import ContainerCRIShimMacOS
 @testable import ContainerResource
+@testable import ContainerizationOCI
 
 struct CRIShimImageServiceTests {
     @Test
@@ -125,5 +127,41 @@ struct CRIShimImageServiceTests {
             }
             return message.contains("missing macOS image role annotation")
         }
+    }
+
+    @Test
+    func imageRecordUsesResolvedDetailAnnotations() throws {
+        let image = ClientImage(
+            description: ImageDescription(
+                reference: "localhost/macos-sandbox:latest",
+                descriptor: Descriptor(
+                    mediaType: MediaTypes.index,
+                    digest: "sha256:sandbox-index",
+                    size: 1
+                )
+            )
+        )
+        let detail = ImageDetail(
+            name: image.reference,
+            index: Descriptor(
+                mediaType: MediaTypes.index,
+                digest: "sha256:sandbox-index",
+                size: 1234,
+                annotations: MacOSImageContract.annotations(for: .sandbox)
+            ),
+            variants: []
+        )
+
+        let record = CRIShimImageRecord(image: image, detail: detail)
+
+        #expect(record.reference == image.reference)
+        #expect(record.digest == image.digest)
+        #expect(record.size == 1234)
+        #expect(record.annotations == MacOSImageContract.annotations(for: .sandbox))
+        try validateCRIShimImage(
+            record,
+            expectedRole: .sandbox,
+            requestedReference: record.reference
+        )
     }
 }

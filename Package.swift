@@ -196,6 +196,7 @@ let package = Package(
         .target(
             name: "ContainerCNIMacvmnet",
             dependencies: [
+                "ContainerAPIClient",
                 "ContainerNetworkServiceClient",
                 "ContainerResource",
                 "ContainerSandboxServiceClient",

@@ -238,6 +238,14 @@ else
 	}
 endif
 
+.PHONY: cri-crictl-smoke
+cri-crictl-smoke:
+ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
+	@echo Skipping CRI crictl smoke test because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
+else
+	@BUILD_CONFIGURATION=$(BUILD_CONFIGURATION) scripts/cri-crictl-smoke.sh
+endif
+
 .PHONY: fmt
 fmt: swift-fmt update-licenses
 

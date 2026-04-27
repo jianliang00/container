@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerSandboxServiceClient
 import Foundation
 
 extension ContainerKit {
@@ -32,6 +33,18 @@ extension ContainerKit {
 
     public func deleteNetwork(id: String) async throws {
         try await ClientNetwork.delete(id: id)
+    }
+
+    public func prepareSandboxNetwork(sandboxID: String) async throws -> SandboxNetworkState {
+        try await ClientNetwork.prepareSandboxNetwork(sandboxID: sandboxID)
+    }
+
+    public func inspectSandboxNetwork(sandboxID: String) async throws -> SandboxNetworkState {
+        try await ClientNetwork.inspectSandboxNetwork(sandboxID: sandboxID)
+    }
+
+    public func releaseSandboxNetwork(sandboxID: String) async throws {
+        try await ClientNetwork.releaseSandboxNetwork(sandboxID: sandboxID)
     }
 
     public func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {

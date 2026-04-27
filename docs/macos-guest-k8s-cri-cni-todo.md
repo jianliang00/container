@@ -71,7 +71,7 @@ NetworkPolicy controller:
 
 Tests:
 
-- [ ] Add integration validation for local `crictl` lifecycle.
+- [x] Add integration validation for local `crictl` lifecycle.
 - [ ] Add integration validation for local kubelet static Pod lifecycle.
 - [ ] Add integration validation for `kubectl logs`.
 - [ ] Add integration validation for `kubectl exec`.

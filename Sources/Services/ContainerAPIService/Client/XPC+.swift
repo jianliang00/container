@@ -177,6 +177,9 @@ public enum XPCRoute: String {
     case networkCreate
     case networkDelete
     case networkList
+    case networkPrepareSandbox
+    case networkInspectSandbox
+    case networkReleaseSandbox
     case networkApplySandboxPolicy
     case networkRemoveSandboxPolicy
     case networkInspectSandboxPolicy

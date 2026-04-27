@@ -80,7 +80,11 @@ public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
     }
 
     public func listImages() async throws -> [CRIShimImageRecord] {
-        try await kit.listImages().map(CRIShimImageRecord.init)
+        var records = [CRIShimImageRecord]()
+        for image in try await kit.listImages() {
+            records.append(try await CRIShimImageRecord.resolve(image: image))
+        }
+        return records
     }
 
     public func pullImage(
@@ -88,7 +92,7 @@ public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
         authentication: CRIShimImagePullAuthentication?
     ) async throws -> CRIShimImageRecord {
         let image = try await kit.pullImage(reference: reference, authentication: authentication?.clientAuthentication)
-        return CRIShimImageRecord(image: image)
+        return try await CRIShimImageRecord.resolve(image: image)
     }
 
     public func removeImage(reference: String) async throws {
@@ -172,6 +176,23 @@ extension CRIShimImageRecord {
             annotations: image.descriptor.annotations ?? [:],
             pinned: false
         )
+    }
+
+    init(image: ContainerAPIClient.ClientImage, detail: ImageDetail) {
+        let descriptorSize = detail.index.size
+        self.init(
+            reference: image.reference,
+            digest: image.digest,
+            mediaType: detail.index.mediaType,
+            size: UInt64(max(0, descriptorSize)),
+            annotations: detail.index.annotations ?? [:],
+            pinned: false
+        )
+    }
+
+    static func resolve(image: ContainerAPIClient.ClientImage) async throws -> CRIShimImageRecord {
+        let detail = try await image.details()
+        return CRIShimImageRecord(image: image, detail: detail)
     }
 
     func matches(reference: String) -> Bool {

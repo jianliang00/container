@@ -228,7 +228,7 @@ struct CRIShimRuntimeServerTests {
         #expect(execSync.stdout == Data("exec stdout".utf8))
         #expect(execSync.stderr == Data("exec stderr".utf8))
         #expect(runtimeManager.execSyncCalls.count == 1)
-        #expect(runtimeManager.execSyncCalls[0].containerID == "container-1")
+        #expect(runtimeManager.execSyncCalls[0].containerID == "sandbox-1")
         #expect(runtimeManager.execSyncCalls[0].configuration.executable == "/bin/echo")
         #expect(runtimeManager.execSyncCalls[0].configuration.arguments == ["hello"])
         #expect(runtimeManager.execSyncCalls[0].timeout == .seconds(3))
@@ -263,7 +263,7 @@ struct CRIShimRuntimeServerTests {
         #expect(execStatus.first == 3)
         #expect(String(decoding: execStatus.dropFirst(), as: UTF8.self).contains(#""status":"Success""#))
 
-        let recordedProcess = try #require(runtimeManager.streamExecProcesses["container-1"])
+        let recordedProcess = try #require(runtimeManager.streamExecProcesses["sandbox-1"])
         #expect(recordedProcess.started)
         #expect(recordedProcess.resizeCalls == [CRIShimTerminalSize(width: 120, height: 42)])
 
@@ -335,6 +335,8 @@ struct CRIShimRuntimeServerTests {
         #expect(createSandboxCall.platform.os == "darwin")
         #expect(createSandboxCall.platform.architecture == "arm64")
         #expect(createSandboxCall.runtimeHandler == "container-runtime-macos")
+        #expect(createSandboxCall.resources.cpus == 4)
+        #expect(createSandboxCall.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
         #expect(createSandboxCall.macosGuest?.networkBackend == .vmnetShared)
         #expect(cniManager.addCalls.count == 1)
         let cniAddCall = try #require(cniManager.addCalls.first)
@@ -556,6 +558,7 @@ struct CRIShimRuntimeServerTests {
         var stopRequest = Runtime_V1_StopContainerRequest()
         stopRequest.containerID = created.containerID
         stopRequest.timeout = 2
+        runtimeManager.stopWorkloadError = CRIShimError.internalError("stopWorkload timed out after workload stopped")
         _ = try await client.stopContainer(stopRequest)
         #expect(runtimeManager.stopWorkloadCalls.count == 1)
         let stopCall = try #require(runtimeManager.stopWorkloadCalls.first)
@@ -737,7 +740,7 @@ struct CRIShimRuntimeServerTests {
         try await resumeWebSocketTask(execTask)
 
         let process = try await waitForValue(description: "stream exec process") {
-            runtimeManager.streamExecProcesses["container-1"]
+            runtimeManager.streamExecProcesses["sandbox-1"]
         }
         try await waitForCondition(description: "stream exec process start") {
             process.started
@@ -953,6 +956,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var execSyncCalls: [RecordingExecSyncCall] = []
     private(set) var streamExecCalls: [RecordingStreamExecCall] = []
     private(set) var portForwardCalls: [RecordingPortForwardCall] = []
+    var stopWorkloadError: (any Error)?
 
     init(
         execSyncResult: ExecSyncResult,
@@ -1114,6 +1118,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
                 workloadID: workloadID,
                 options: options
             ))
+        if let stopWorkloadError {
+            throw stopWorkloadError
+        }
     }
 
     func removeWorkload(

@@ -69,6 +69,31 @@ public struct NetworksHarness: Sendable {
     }
 
     @Sendable
+    public func prepareSandboxNetwork(_ message: XPCMessage) async throws -> XPCMessage {
+        let id = try sandboxID(from: message)
+        let state = try await service.prepareSandboxNetwork(sandboxID: id)
+        let reply = message.reply()
+        reply.set(key: .networkState, value: try JSONEncoder().encode(state))
+        return reply
+    }
+
+    @Sendable
+    public func inspectSandboxNetwork(_ message: XPCMessage) async throws -> XPCMessage {
+        let id = try sandboxID(from: message)
+        let state = try await service.inspectSandboxNetwork(sandboxID: id)
+        let reply = message.reply()
+        reply.set(key: .networkState, value: try JSONEncoder().encode(state))
+        return reply
+    }
+
+    @Sendable
+    public func releaseSandboxNetwork(_ message: XPCMessage) async throws -> XPCMessage {
+        let id = try sandboxID(from: message)
+        try await service.releaseSandboxNetwork(sandboxID: id)
+        return message.reply()
+    }
+
+    @Sendable
     public func applySandboxPolicy(_ message: XPCMessage) async throws -> XPCMessage {
         guard let data = message.dataNoCopy(key: .networkPolicy) else {
             throw ContainerizationError(.invalidArgument, message: "network policy cannot be empty")
@@ -100,5 +125,12 @@ public struct NetworksHarness: Sendable {
             reply.set(key: .networkPolicyState, value: try JSONEncoder().encode(state))
         }
         return reply
+    }
+
+    private func sandboxID(from message: XPCMessage) throws -> String {
+        guard let id = message.string(key: .id), !id.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        return id
     }
 }

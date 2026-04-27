@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerSandboxServiceClient
 import ContainerXPC
 import ContainerizationError
 import ContainerizationOS
@@ -87,6 +88,32 @@ extension ClientNetwork {
         try await client.send(request)
     }
 
+    public static func prepareSandboxNetwork(sandboxID: String) async throws -> SandboxNetworkState {
+        let client = Self.newClient()
+        let request = XPCMessage(route: .networkPrepareSandbox)
+        request.set(key: .id, value: sandboxID)
+
+        let response = try await xpcSend(client: client, message: request)
+        return try response.sandboxNetworkState()
+    }
+
+    public static func inspectSandboxNetwork(sandboxID: String) async throws -> SandboxNetworkState {
+        let client = Self.newClient()
+        let request = XPCMessage(route: .networkInspectSandbox)
+        request.set(key: .id, value: sandboxID)
+
+        let response = try await xpcSend(client: client, message: request)
+        return try response.sandboxNetworkState()
+    }
+
+    public static func releaseSandboxNetwork(sandboxID: String) async throws {
+        let client = Self.newClient()
+        let request = XPCMessage(route: .networkReleaseSandbox)
+        request.set(key: .id, value: sandboxID)
+
+        _ = try await xpcSend(client: client, message: request)
+    }
+
     @discardableResult
     public static func applySandboxPolicy(_ policy: SandboxNetworkPolicy) async throws -> SandboxNetworkPolicyState {
         let client = Self.newClient()
@@ -126,5 +153,17 @@ extension ClientNetwork {
         get async throws {
             try await list().first { $0.isBuiltin }
         }
+    }
+}
+
+extension XPCMessage {
+    fileprivate func sandboxNetworkState() throws -> SandboxNetworkState {
+        guard let data = dataNoCopy(key: SandboxKeys.networkState.rawValue) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "sandbox network state not received"
+            )
+        }
+        return try JSONDecoder().decode(SandboxNetworkState.self, from: data)
     }
 }

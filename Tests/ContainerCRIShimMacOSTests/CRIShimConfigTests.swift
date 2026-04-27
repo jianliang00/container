@@ -36,8 +36,11 @@ struct CRIShimConfigTests {
         #expect(config.defaults?.workloadPlatform?.os == "darwin")
         #expect(config.defaults?.workloadPlatform?.architecture == "arm64")
         #expect(config.defaults?.networkBackend == "vmnetShared")
+        #expect(config.defaults?.resources?.cpus == 4)
+        #expect(config.defaults?.resources?.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
         #expect(config.runtimeHandlers["macos"]?.network == "default")
         #expect(config.runtimeHandlers["macos"]?.networkBackend == "vmnetShared")
+        #expect(config.runtimeHandlers["macos"]?.resources?.memoryInBytes == 17_179_869_184)
         #expect(config.networkPolicy?.enabled == true)
         #expect(config.kubeProxy?.enabled == true)
     }
@@ -61,10 +64,11 @@ struct CRIShimConfigTests {
                 workloadPlatform: WorkloadPlatform(os: "linux", architecture: ""),
                 network: nil,
                 networkBackend: "invalid",
-                guiEnabled: nil
+                guiEnabled: nil,
+                resources: RuntimeResources(cpus: 0, memoryInBytes: 0)
             ),
             runtimeHandlers: [
-                " ": RuntimeProfile(network: "", networkBackend: "")
+                " ": RuntimeProfile(network: "", networkBackend: "", resources: RuntimeResources(cpus: -1))
             ],
             networkPolicy: NetworkPolicyConfig(enabled: true, kubeconfig: "kubelet.conf", nodeName: "", resyncSeconds: 0),
             kubeProxy: KubeProxyConfig(enabled: true, configPath: "kube-proxy.conf")
@@ -84,8 +88,11 @@ struct CRIShimConfigTests {
         #expect(issues.contains("defaults.network is required"))
         #expect(issues.contains("defaults.networkBackend must be virtualizationNAT or vmnetShared"))
         #expect(issues.contains("defaults.guiEnabled is required"))
+        #expect(issues.contains("defaults.resources.cpus must be greater than zero"))
+        #expect(issues.contains("defaults.resources.memoryInBytes must be greater than zero"))
         #expect(issues.contains("runtimeHandlers contains an empty handler name"))
         #expect(issues.contains("runtimeHandlers. .network cannot be empty"))
+        #expect(issues.contains("runtimeHandlers. .resources.cpus must be greater than zero"))
         #expect(issues.contains("networkPolicy.kubeconfig must be an absolute path"))
         #expect(issues.contains("networkPolicy.nodeName is required"))
         #expect(issues.contains("networkPolicy.resyncSeconds must be greater than zero"))
@@ -104,6 +111,7 @@ struct CRIShimConfigTests {
         #expect(resolved.network == "default")
         #expect(resolved.networkBackend == "vmnetShared")
         #expect(resolved.guiEnabled == false)
+        #expect(resolved.resources == RuntimeResources(cpus: 4, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes))
     }
 
     @Test
@@ -118,6 +126,7 @@ struct CRIShimConfigTests {
         #expect(resolved.network == "gui")
         #expect(resolved.networkBackend == "vmnetShared")
         #expect(resolved.guiEnabled == true)
+        #expect(resolved.resources == RuntimeResources(cpus: 8, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes))
     }
 
     @Test
@@ -211,14 +220,21 @@ private let validConfigJSON = """
         },
         "network": "default",
         "networkBackend": "vmnetShared",
-        "guiEnabled": false
+        "guiEnabled": false,
+        "resources": {
+          "cpus": 4,
+          "memoryInBytes": 8589934592
+        }
       },
       "runtimeHandlers": {
         "macos": {
           "sandboxImage": "localhost/macos-sandbox:latest",
           "network": "default",
           "networkBackend": "vmnetShared",
-          "guiEnabled": false
+          "guiEnabled": false,
+          "resources": {
+            "memoryInBytes": 17179869184
+          }
         }
       },
       "networkPolicy": {
@@ -254,14 +270,21 @@ private let validConfigWithOverrideJSON = """
         },
         "network": "default",
         "networkBackend": "vmnetShared",
-        "guiEnabled": false
+        "guiEnabled": false,
+        "resources": {
+          "cpus": 4,
+          "memoryInBytes": 8589934592
+        }
       },
       "runtimeHandlers": {
         "macos-gui": {
           "sandboxImage": "localhost/macos-gui-sandbox:latest",
           "network": "gui",
           "networkBackend": "vmnetShared",
-          "guiEnabled": true
+          "guiEnabled": true,
+          "resources": {
+            "cpus": 8
+          }
         }
       },
       "networkPolicy": {

@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerNetworkServiceClient
 import ContainerResource
 import ContainerSandboxServiceClient
@@ -32,6 +33,26 @@ public protocol MacvmnetSandboxNetworkClient: Sendable {
 }
 
 extension SandboxClient: MacvmnetSandboxNetworkClient {}
+
+public struct MacvmnetAPISandboxNetworkClient: MacvmnetSandboxNetworkClient {
+    public var sandboxID: String
+
+    public init(sandboxID: String) {
+        self.sandboxID = sandboxID
+    }
+
+    public func prepareSandboxNetwork() async throws -> SandboxNetworkState {
+        try await ClientNetwork.prepareSandboxNetwork(sandboxID: sandboxID)
+    }
+
+    public func inspectSandboxNetwork() async throws -> SandboxNetworkState {
+        try await ClientNetwork.inspectSandboxNetwork(sandboxID: sandboxID)
+    }
+
+    public func releaseSandboxNetwork() async throws {
+        try await ClientNetwork.releaseSandboxNetwork(sandboxID: sandboxID)
+    }
+}
 
 public protocol MacvmnetBackend: Sendable {
     func health(networkName: String) async throws
@@ -53,7 +74,8 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     public init(
         makeNetworkClient: @escaping NetworkHealthClientFactory = { NetworkClient(id: $0) },
         makeSandboxClient: @escaping SandboxNetworkClientFactory = { sandboxID, runtimeName in
-            try await SandboxClient.create(id: sandboxID, runtime: runtimeName)
+            _ = runtimeName
+            return MacvmnetAPISandboxNetworkClient(sandboxID: sandboxID)
         },
         makeAttachmentLedger: @escaping AttachmentLedgerFactory = {
             FileMacvmnetAttachmentLedger(rootURL: URL(fileURLWithPath: $0.dataDirectory, isDirectory: true))

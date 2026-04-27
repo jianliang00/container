@@ -242,7 +242,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_ExecSyncResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.execSync.rawValue) {
-            let invocation = try makeCRIShimExecSyncInvocation(request)
+            var invocation = try makeCRIShimExecSyncInvocation(request)
+            let metadata = try containerMetadata(id: invocation.containerID, operation: "ExecSync")
+            invocation.containerID = metadata.sandboxID
             let result = try await runtimeManager.execSync(
                 containerID: invocation.containerID,
                 configuration: invocation.configuration,
@@ -260,8 +262,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             guard let streamingServer else {
                 throw CRIShimError.internalError("streaming server is not configured")
             }
-            let invocation = try makeCRIShimExecStreamingInvocation(request)
-            _ = try containerMetadata(id: invocation.containerID, operation: "Exec")
+            var invocation = try makeCRIShimExecStreamingInvocation(request)
+            let metadata = try containerMetadata(id: invocation.containerID, operation: "Exec")
+            invocation.containerID = metadata.sandboxID
             var response = Runtime_V1_ExecResponse()
             response.url = try await streamingServer.registerExecURL(invocation)
             return response
@@ -490,11 +493,17 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 )
             }
 
-            try await runtimeManager.stopWorkload(
-                sandboxID: metadata.sandboxID,
-                workloadID: metadata.id,
-                options: options
-            )
+            do {
+                try await runtimeManager.stopWorkload(
+                    sandboxID: metadata.sandboxID,
+                    workloadID: metadata.id,
+                    options: options
+                )
+            } catch {
+                guard await waitForStoppedWorkload(metadata: metadata, stopOptions: options) else {
+                    throw error
+                }
+            }
 
             metadata.state = .exited
             metadata.exitedAt = Date()
@@ -637,6 +646,23 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         )
     }
 
+    private func waitForStoppedWorkload(
+        metadata: CRIShimContainerMetadata,
+        stopOptions: ContainerStopOptions
+    ) async -> Bool {
+        let confirmationSeconds = max(30, Int(stopOptions.timeoutInSeconds) + 5)
+        let attempts = confirmationSeconds * 10
+        for attempt in 0..<attempts {
+            if let snapshot = await workloadSnapshot(for: metadata), snapshot.status == .stopped {
+                return true
+            }
+            if attempt < attempts - 1 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return false
+    }
+
     private func sandboxSnapshot(for metadata: CRIShimSandboxMetadata) async -> SandboxSnapshot? {
         try? await runtimeManager.inspectSandbox(id: metadata.id)
     }
@@ -699,11 +725,13 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             }
         }
 
-        do {
-            try await runtimeManager.removeSandboxPolicy(sandboxID: metadata.id)
-        } catch {
-            if !isNotFound(error) {
-                record(error)
+        if config.networkPolicy?.enabled == true {
+            do {
+                try await runtimeManager.removeSandboxPolicy(sandboxID: metadata.id)
+            } catch {
+                if !isNotFound(error) {
+                    record(error)
+                }
             }
         }
 

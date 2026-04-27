@@ -21,6 +21,7 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
     public var network: String
     public var networkBackend: String
     public var guiEnabled: Bool
+    public var resources: RuntimeResources
 
     public init(
         name: String?,
@@ -28,7 +29,8 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
         workloadPlatform: WorkloadPlatform,
         network: String,
         networkBackend: String,
-        guiEnabled: Bool
+        guiEnabled: Bool,
+        resources: RuntimeResources
     ) {
         self.name = name
         self.sandboxImage = sandboxImage
@@ -36,6 +38,7 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
         self.network = network
         self.networkBackend = networkBackend
         self.guiEnabled = guiEnabled
+        self.resources = resources
     }
 }
 
@@ -90,6 +93,11 @@ extension CRIShimConfig {
             os: override?.workloadPlatform?.os ?? defaultPlatform.os,
             architecture: override?.workloadPlatform?.architecture ?? defaultPlatform.architecture
         )
+        let defaultResources = defaults.resources ?? .macOSDefault
+        let resources = RuntimeResources(
+            cpus: override?.resources?.cpus ?? defaultResources.cpus,
+            memoryInBytes: override?.resources?.memoryInBytes ?? defaultResources.memoryInBytes
+        )
 
         return ResolvedRuntimeHandler(
             name: resolvedName,
@@ -97,7 +105,8 @@ extension CRIShimConfig {
             workloadPlatform: workloadPlatform,
             network: network,
             networkBackend: networkBackend,
-            guiEnabled: guiEnabled
+            guiEnabled: guiEnabled,
+            resources: resources
         )
     }
 }

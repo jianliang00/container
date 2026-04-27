@@ -72,7 +72,7 @@ NetworkPolicy controller:
 Tests:
 
 - [x] Add integration validation for local `crictl` lifecycle.
-- [ ] Add integration validation for local kubelet static Pod lifecycle.
+- [x] Add integration validation for local kubelet static Pod lifecycle.
 - [ ] Add integration validation for `kubectl logs`.
 - [ ] Add integration validation for `kubectl exec`.
 - [ ] Add integration validation for `kubectl port-forward`.
@@ -111,9 +111,9 @@ Operator docs:
 - [ ] `crictl ps` lists the workload.
 - [ ] `crictl inspect` reports stable sandbox and workload state.
 - [ ] `crictl execsync` works.
-- [ ] `crictl logs` or kubelet log-file inspection shows workload logs.
+- [x] `crictl logs` or kubelet log-file inspection shows workload logs.
 - [ ] `crictl stop/rm/stopp/rmp` cleans up workload, sandbox, and CNI state.
-- [ ] Local kubelet can start a static Pod with one macOS workload container.
+- [x] Local kubelet can start a static Pod with one macOS workload container.
 - [ ] Exec probe works.
 - [ ] HTTP probe works.
 - [ ] TCP probe works.

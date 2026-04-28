@@ -648,6 +648,7 @@ and kubelet processes, then validates:
 - API-backed Pod `kubectl logs`
 - API-backed Pod `kubectl exec`
 - API-backed Pod `kubectl port-forward`
+- API-backed Pod exec, HTTP, and TCP kubelet probes
 - API-backed Pod deletion cleans up the workload and sandbox runtime objects
 - static Pod mirror `kubectl logs`
 - static Pod mirror `kubectl exec`
@@ -657,9 +658,6 @@ and kubelet processes, then validates:
 
 Remaining kubelet and API validation goals:
 
-- exec probe works
-- HTTP probe works
-- TCP probe works
 - kube-proxy provides single-node Service reachability
 - Pod deletion cleans up network lease, log mux state, stream sessions, and
   policy state

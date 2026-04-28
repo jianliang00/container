@@ -56,6 +56,9 @@ extension Application {
         @Flag(name: .long, help: "Create a temporary seed directory and mount it as the virtiofs share")
         var autoSeed = false
 
+        @Flag(name: .long, help: "Start from macOS Recovery")
+        var recovery = false
+
         @Option(name: .long, help: "virtiofs tag visible in guest")
         var shareTag: String = MacOSGuestMountMapping.automountTag
 
@@ -101,9 +104,13 @@ extension Application {
                     throw ValidationError("use either --share or --auto-seed")
                 }
             } else {
-                if share == nil {
+                if share == nil && !recovery {
                     throw ValidationError("missing required option: --share (or use --auto-seed)")
                 }
+            }
+
+            if recovery && (agentREPL || agentProbe || controlSocket != nil) {
+                throw ValidationError("--recovery cannot be combined with guest-agent debugger options")
             }
 
             let helperURL = try helperBinaryURL()
@@ -140,6 +147,10 @@ extension Application {
 
         private func helperArguments() -> [String] {
             var args: [String] = ["start", "--image", image.standardizedFileURL.path]
+
+            if recovery {
+                args.append("--recovery")
+            }
 
             if autoSeed {
                 args.append("--auto-seed")

@@ -98,21 +98,21 @@ Operator docs:
 
 ## 2. Acceptance Criteria
 
-- [ ] `container-cri-shim-macos --config <path>` starts and listens on the
+- [x] `container-cri-shim-macos --config <path>` starts and listens on the
   configured Unix socket.
 - [ ] `container-cni-macvmnet` handles `VERSION`, `STATUS`, `ADD`, `CHECK`,
   `DEL`, and `GC`.
 - [ ] `container-k8s-networkpolicy-macos --config <path>` connects to the
   Kubernetes API and reconciles local sandbox policies.
-- [ ] `crictl version` succeeds.
-- [ ] `crictl info` succeeds.
+- [x] `crictl version` succeeds.
+- [x] `crictl info` succeeds.
 - [ ] `crictl pull` can resolve a configured macOS workload image.
-- [ ] `crictl runp` creates and starts one macOS VM-backed Pod sandbox.
-- [ ] `crictl create` creates one workload in that sandbox.
-- [ ] `crictl start` starts the workload.
-- [ ] `crictl ps` lists the workload.
-- [ ] `crictl inspect` reports stable sandbox and workload state.
-- [ ] `crictl execsync` works.
+- [x] `crictl runp` creates and starts one macOS VM-backed Pod sandbox.
+- [x] `crictl create` creates one workload in that sandbox.
+- [x] `crictl start` starts the workload.
+- [x] `crictl ps` lists the workload.
+- [x] `crictl inspect` reports stable sandbox and workload state.
+- [x] `crictl execsync` works.
 - [x] `crictl logs` or kubelet log-file inspection shows workload logs.
 - [ ] `crictl stop/rm/stopp/rmp` cleans up workload, sandbox, and CNI state.
 - [x] Local kubelet can start a static Pod with one macOS workload container.

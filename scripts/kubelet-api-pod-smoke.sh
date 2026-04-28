@@ -612,12 +612,52 @@ spec:
     command:
     - /bin/sh
     - -c
-    - 'echo kubelet-api-ready; while true; do sleep 30; done'
+    - |
+      nc_bin="\$(command -v nc || true)"
+      if [ -z "\${nc_bin}" ]; then
+        echo "nc not found" >&2
+        exit 1
+      fi
+      while true; do
+        printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok' | "\${nc_bin}" -l 8080
+      done &
+      echo kubelet-api-ready
+      while true; do sleep 30; done
+    ports:
+    - name: probe-http
+      containerPort: 8080
+    startupProbe:
+      tcpSocket:
+        port: 8080
+      periodSeconds: 2
+      failureThreshold: 60
+    readinessProbe:
+      exec:
+        command:
+        - /bin/sh
+        - -c
+        - echo kubelet-api-exec-probe-ok >/dev/null
+      periodSeconds: 2
+      failureThreshold: 30
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      periodSeconds: 2
+      failureThreshold: 30
 EOF
 
 log "waiting for Pod Ready"
 "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" wait --for=condition=Ready "pod/${POD_NAME}" --timeout=300s
 "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" get pod "${POD_NAME}" -o wide
+
+log "validating kubelet exec, TCP, and HTTP probes"
+sleep 8
+"${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" wait --for=condition=Ready "pod/${POD_NAME}" --timeout=60s >/dev/null
+restart_count="$("${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" get pod "${POD_NAME}" -o "jsonpath={.status.containerStatuses[?(@.name=='${CONTAINER_NAME}')].restartCount}")"
+if [[ "${restart_count}" != "0" ]]; then
+    fail "expected zero restarts after probe validation, got ${restart_count}"
+fi
 
 log "validating kubectl logs"
 if ! "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" logs "${POD_NAME}" | grep -F kubelet-api-ready >/dev/null; then

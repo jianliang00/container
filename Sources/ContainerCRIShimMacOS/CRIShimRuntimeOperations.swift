@@ -377,10 +377,6 @@ func makeCRIShimPortForwardInvocation(
         throw CRIShimError.invalidArgument("PortForward pod_sandbox_id is required")
     }
 
-    guard !request.port.isEmpty else {
-        throw CRIShimError.invalidArgument("PortForward requires at least one port")
-    }
-
     let ports = try request.port.map { rawPort in
         guard rawPort > 0, rawPort <= UInt32(UInt16.max) else {
             throw CRIShimError.invalidArgument("PortForward port \(rawPort) must be between 1 and 65535")

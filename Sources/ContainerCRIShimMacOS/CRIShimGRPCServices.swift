@@ -793,6 +793,10 @@ private func isNotFound(_ error: any Error) -> Bool {
     if let error = error as? ContainerizationError, let cause = error.cause {
         return isNotFound(cause)
     }
+    let description = String(describing: error)
+    if description.contains("notFound:") {
+        return true
+    }
     return false
 }
 

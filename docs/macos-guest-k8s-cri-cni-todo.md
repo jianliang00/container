@@ -116,9 +116,9 @@ Operator docs:
 - [x] `crictl logs` or kubelet log-file inspection shows workload logs.
 - [ ] `crictl stop/rm/stopp/rmp` cleans up workload, sandbox, and CNI state.
 - [x] Local kubelet can start a static Pod with one macOS workload container.
-- [ ] Exec probe works.
-- [ ] HTTP probe works.
-- [ ] TCP probe works.
+- [x] Exec probe works.
+- [x] HTTP probe works.
+- [x] TCP probe works.
 - [x] `kubectl logs` works for an API-backed Pod.
 - [x] `kubectl exec` works for an API-backed Pod.
 - [x] `kubectl port-forward` works for an API-backed Pod.

@@ -76,12 +76,12 @@ private enum CRIShimStreamingSessionDescriptor: Sendable {
     case portForward(CRIShimPortForwardInvocation)
 }
 
-private struct CRIShimPreparedWebSocketUpgrade {
+private struct CRIShimPreparedWebSocketUpgrade: Sendable {
     var subprotocol: String
     var handler: CRIShimStreamingWebSocketHandler
 }
 
-private struct CRIShimPreparedSPDYUpgrade {
+private struct CRIShimPreparedSPDYUpgrade: Sendable {
     var protocolVersion: String
     var handler: CRIShimPortForwardSPDYHandler
 }
@@ -446,16 +446,15 @@ private final class CRIShimStreamingHTTPRequestHandler: ChannelInboundHandler, R
         guard let preparedUpgrade else {
             return channel.eventLoop.makeFailedFuture(CRIShimError.internalError("missing prepared websocket upgrade"))
         }
-        return channel.pipeline.removeHandler(self).flatMap {
-            channel.pipeline.addHandler(
+        return channel.pipeline.removeHandler(self).flatMapThrowing {
+            try channel.pipeline.syncOperations.addHandler(
                 NIOWebSocketFrameAggregator(
                     minNonFinalFragmentSize: 1,
                     maxAccumulatedFrameCount: 64,
                     maxAccumulatedFrameSize: self.websocketMaxFrameSize
                 )
-            ).flatMap {
-                channel.pipeline.addHandler(preparedUpgrade.handler)
-            }
+            )
+            try channel.pipeline.syncOperations.addHandler(preparedUpgrade.handler)
         }
     }
 
@@ -556,14 +555,15 @@ private final class CRIShimSPDYServerUpgrader: HTTPServerProtocolUpgrader, @unch
         guard let preparedUpgrade = lock.withLock({ self.preparedUpgrade }) else {
             return context.eventLoop.makeFailedFuture(CRIShimError.internalError("missing prepared SPDY upgrade"))
         }
+        let pipeline = context.pipeline
         let removeRequestHandler: EventLoopFuture<Void>
         if let requestHandler {
-            removeRequestHandler = context.pipeline.removeHandler(requestHandler)
+            removeRequestHandler = pipeline.removeHandler(requestHandler)
         } else {
             removeRequestHandler = context.eventLoop.makeSucceededFuture(())
         }
-        return removeRequestHandler.flatMap {
-            context.pipeline.addHandler(preparedUpgrade.handler)
+        return removeRequestHandler.flatMapThrowing {
+            try pipeline.syncOperations.addHandler(preparedUpgrade.handler)
         }
     }
 }
@@ -1016,7 +1016,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         buffer.writeInteger(UInt32(0x8000_0000) | (UInt32(3) << 16) | UInt32(type), endianness: .big)
         writeSPDYLength(flags: flags, length: payload.count, to: &buffer)
         buffer.writeBytes(payload)
-        channel.writeAndFlush(Self.wrapOutboundOut(buffer), promise: nil)
+        channel.writeAndFlush(buffer, promise: nil)
     }
 
     private func writeDataFrame(
@@ -1031,7 +1031,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         buffer.writeInteger(streamID & 0x7FFF_FFFF, endianness: .big)
         writeSPDYLength(flags: flags, length: data.count, to: &buffer)
         buffer.writeBytes(data)
-        try await channel.writeAndFlush(Self.wrapOutboundOut(buffer)).get()
+        try await channel.writeAndFlush(buffer).get()
     }
 }
 

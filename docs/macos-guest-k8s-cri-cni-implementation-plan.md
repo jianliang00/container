@@ -310,6 +310,31 @@ Recommended initial shape:
 }
 ```
 
+`/etc/kubernetes/kube-proxy.conf` is consumed by
+`container-kube-proxy-macos`. The initial macOS dataplane is PF-backed,
+single-node, IPv4-only, and ClusterIP-focused:
+
+```json
+{
+  "kubeconfig": "/etc/kubernetes/kube-proxy.kubeconfig",
+  "nodeName": "macos-node-1",
+  "syncPeriodSeconds": 5,
+  "pf": {
+    "anchorName": "com.apple.container.kube-proxy",
+    "configPath": "/etc/pf.conf",
+    "anchorsPath": "/etc/pf.anchors",
+    "pfctlPath": "/sbin/pfctl"
+  }
+}
+```
+
+The controller periodically relists Services and EndpointSlices from the API,
+filters endpoints to the configured node, renders a complete PF anchor, validates
+it with `pfctl -n`, and reloads PF atomically through the configured anchor.
+The first supported Service surface is IPv4 `ClusterIP` for TCP and UDP. NodePort,
+LoadBalancer, external traffic policy, session affinity, multi-node routing, and
+dual-stack are explicit future work.
+
 Image and handler selection rules:
 
 1. If `RunPodSandboxRequest.runtime_handler` is set, it must match a configured
@@ -658,7 +683,7 @@ and kubelet processes, then validates:
 
 Remaining kubelet and API validation goals:
 
-- kube-proxy provides single-node Service reachability
+- `container-kube-proxy-macos` smoke validates single-node Service reachability
 - Pod deletion cleans up network lease, log mux state, stream sessions, and
   policy state
 

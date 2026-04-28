@@ -20,8 +20,9 @@ import Foundation
 
 struct Options {
     let imageURL: URL
-    let sharedDirectoryURL: URL
+    let sharedDirectoryURL: URL?
     let shareTag: String
+    let startFromRecovery: Bool
     let cpus: Int
     let memoryMiB: UInt64
     let headless: Bool
@@ -95,16 +96,18 @@ func printStartUsage(programName: String = executableName()) {
     let usage = """
         Usage:
           \(programName) start --image <path> (--share <path> | --auto-seed) [options]
+          \(programName) start --image <path> --recovery [--share <path> | --auto-seed] [options]
 
         Required:
           --image <path>        Image directory containing Disk.img/AuxiliaryStorage/HardwareModel.bin
-          (--share <path> | --auto-seed)
+          (--share <path> | --auto-seed), unless --recovery is set
 
         Optional:
           --share <path>        Host directory to mount into guest using virtiofs
           --template <path>     Alias for --image
           --share-tag <name>    virtiofs tag visible in guest (default: \(MacOSGuestMountMapping.automountTag))
           --auto-seed           Create a temporary seed directory and mount it as the virtiofs share
+          --recovery            Start from macOS Recovery
           --guest-agent-bin <p> Guest agent binary used with --auto-seed (default: best-effort auto-detect)
           --seed-scripts-dir <p>
                                Directory containing install.sh, container-macos-guest-agent.plist, install-in-guest-from-seed.sh
@@ -156,6 +159,7 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
     var agentPort: UInt32 = 27000
     var agentConnectRetries = 60
     var autoSeed = false
+    var startFromRecovery = false
     var guestAgentBinPath: String?
     var seedScriptsDirPath: String?
 
@@ -181,6 +185,8 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
             shareTag = args[index]
         case "--auto-seed":
             autoSeed = true
+        case "--recovery":
+            startFromRecovery = true
         case "--guest-agent-bin":
             index += 1
             guard index < args.count else { throw ArgumentError.missingValue(flag: flag) }
@@ -239,6 +245,10 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
     guard let imagePath else {
         throw ArgumentError.required("missing required argument: --image")
     }
+    if startFromRecovery && (agentREPL || agentProbe || controlSocketPath != nil) {
+        throw ArgumentError.required("--recovery cannot be combined with guest-agent debugger options")
+    }
+
     let temporaryShareURL: URL?
     if autoSeed {
         if sharePath != nil {
@@ -255,7 +265,7 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
         sharePath = tempDir.path
         temporaryShareURL = tempDir
     } else {
-        guard sharePath != nil else {
+        guard sharePath != nil || startFromRecovery else {
             throw ArgumentError.required("missing required argument: --share")
         }
         temporaryShareURL = nil
@@ -263,8 +273,9 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
 
     return Options(
         imageURL: URL(fileURLWithPath: imagePath).standardizedFileURL,
-        sharedDirectoryURL: URL(fileURLWithPath: sharePath!).standardizedFileURL,
+        sharedDirectoryURL: sharePath.map { URL(fileURLWithPath: $0).standardizedFileURL },
         shareTag: shareTag,
+        startFromRecovery: startFromRecovery,
         cpus: cpus,
         memoryMiB: memoryMiB,
         headless: headless,

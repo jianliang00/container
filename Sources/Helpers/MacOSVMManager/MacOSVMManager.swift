@@ -85,6 +85,59 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     }
 }
 
+private final class VMStartCompletionHandler: @unchecked Sendable {
+    private let exitStatus: ExitStatusController
+    private let options: Options
+    private let debugger: AgentDebugger?
+    private let controlServer: ControlCommandServer?
+
+    init(
+        exitStatus: ExitStatusController,
+        options: Options,
+        debugger: AgentDebugger?,
+        controlServer: ControlCommandServer?
+    ) {
+        self.exitStatus = exitStatus
+        self.options = options
+        self.debugger = debugger
+        self.controlServer = controlServer
+    }
+
+    @MainActor func succeeded() {
+        print("VM started.")
+        if let controlServer {
+            do {
+                try controlServer.start()
+            } catch {
+                fputs("failed to start control socket server: \(error)\n", stderr)
+                exitStatus.markFailed()
+                stopApplicationRunLoop()
+                return
+            }
+        }
+        if options.agentProbe {
+            debugger?.launchProbeAndTerminateApp()
+        } else if options.agentREPL {
+            debugger?.launchREPL()
+        }
+    }
+
+    @MainActor func failed(errorDescription: String) {
+        fputs("failed to start VM: \(errorDescription)\n", stderr)
+        exitStatus.markFailed()
+        stopApplicationRunLoop()
+    }
+
+    @MainActor func complete(_ result: Result<Void, any Error>) {
+        switch result {
+        case .success:
+            succeeded()
+        case .failure(let error):
+            failed(errorDescription: String(describing: error))
+        }
+    }
+}
+
 @MainActor func runStartCommand(options: Options) throws {
     #if !arch(arm64)
     fputs("error: macOS guest virtualization requires Apple Silicon (arm64)\n", stderr)
@@ -101,7 +154,9 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     }
 
     try ensureDirectoryExists(options.imageURL, message: "image directory does not exist")
-    try ensureDirectoryExists(options.sharedDirectoryURL, message: "shared directory does not exist")
+    if let sharedDirectoryURL = options.sharedDirectoryURL {
+        try ensureDirectoryExists(sharedDirectoryURL, message: "shared directory does not exist")
+    }
 
     let hardwareModelURL = options.imageURL.appendingPathComponent("HardwareModel.bin")
     let auxiliaryStorageURL = options.imageURL.appendingPathComponent("AuxiliaryStorage")
@@ -132,14 +187,20 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     let networkDevice = VZVirtioNetworkDeviceConfiguration()
     networkDevice.attachment = VZNATNetworkDeviceAttachment()
 
-    let sharedDirectory = VZSharedDirectory(url: options.sharedDirectoryURL, readOnly: false)
-    let fileSystemDevice = VZVirtioFileSystemDeviceConfiguration(tag: options.shareTag)
-    if options.shareTag == MacOSGuestMountMapping.automountTag {
-        fileSystemDevice.share = VZMultipleDirectoryShare(
-            directories: [MacOSGuestMountMapping.defaultSeedShareName: sharedDirectory]
-        )
+    let fileSystemDevice: VZVirtioFileSystemDeviceConfiguration?
+    if let sharedDirectoryURL = options.sharedDirectoryURL {
+        let sharedDirectory = VZSharedDirectory(url: sharedDirectoryURL, readOnly: false)
+        let device = VZVirtioFileSystemDeviceConfiguration(tag: options.shareTag)
+        if options.shareTag == MacOSGuestMountMapping.automountTag {
+            device.share = VZMultipleDirectoryShare(
+                directories: [MacOSGuestMountMapping.defaultSeedShareName: sharedDirectory]
+            )
+        } else {
+            device.share = VZSingleDirectoryShare(directory: sharedDirectory)
+        }
+        fileSystemDevice = device
     } else {
-        fileSystemDevice.share = VZSingleDirectoryShare(directory: sharedDirectory)
+        fileSystemDevice = nil
     }
 
     let vmConfiguration = VZVirtualMachineConfiguration()
@@ -150,7 +211,9 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     vmConfiguration.storageDevices = [blockDevice]
     vmConfiguration.networkDevices = [networkDevice]
     vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
-    vmConfiguration.directorySharingDevices = [fileSystemDevice]
+    if let fileSystemDevice {
+        vmConfiguration.directorySharingDevices = [fileSystemDevice]
+    }
     if !options.headless || options.headlessDisplay {
         let graphics = VZMacGraphicsDeviceConfiguration()
         let screen = NSScreen.main ?? NSScreen.screens.first
@@ -223,8 +286,15 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 
     print("Starting VM...")
     print("image (--image): \(options.imageURL.path)")
-    print("share: \(options.sharedDirectoryURL.path)")
-    print("share tag: \(options.shareTag)")
+    if let sharedDirectoryURL = options.sharedDirectoryURL {
+        print("share: \(sharedDirectoryURL.path)")
+        print("share tag: \(options.shareTag)")
+    } else {
+        print("share: disabled")
+    }
+    if options.startFromRecovery {
+        print("recovery: enabled")
+    }
     let displayMode: String
     if options.headlessDisplay {
         displayMode = "headless-display"
@@ -246,47 +316,48 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     if let controlSocketPath = options.controlSocketPath {
         print("control socket: \(controlSocketPath)")
     }
-    print("In guest:")
-    if options.shareTag == MacOSGuestMountMapping.automountTag {
-        print("  shared directory is available at \(MacOSGuestMountMapping.defaultSeedMountPath)")
-    } else {
-        print("  sudo mkdir -p /Volumes/\(options.shareTag)")
-        print("  sudo mount -t virtiofs \(options.shareTag) /Volumes/\(options.shareTag)")
+    if options.sharedDirectoryURL != nil {
+        print("In guest:")
+        if options.shareTag == MacOSGuestMountMapping.automountTag {
+            print("  shared directory is available at \(MacOSGuestMountMapping.defaultSeedMountPath)")
+        } else {
+            print("  sudo mkdir -p /Volumes/\(options.shareTag)")
+            print("  sudo mount -t virtiofs \(options.shareTag) /Volumes/\(options.shareTag)")
+        }
     }
 
-    virtualMachine.start { result in
-        switch result {
-        case .success:
-            print("VM started.")
-            if let controlServer {
-                do {
-                    try controlServer.start()
-                } catch {
-                    fputs("failed to start control socket server: \(error)\n", stderr)
-                    exitStatus.markFailed()
-                    Task { @MainActor in
-                        stopApplicationRunLoop()
-                    }
-                    return
+    let startHandler = VMStartCompletionHandler(
+        exitStatus: exitStatus,
+        options: options,
+        debugger: debugger,
+        controlServer: controlServer
+    )
+
+    if options.startFromRecovery {
+        let startOptions = VZMacOSVirtualMachineStartOptions()
+        startOptions.startUpFromMacOSRecovery = true
+        virtualMachine.start(options: startOptions) { error in
+            if let error {
+                let errorDescription = String(describing: error)
+                Task { @MainActor in
+                    startHandler.failed(errorDescription: errorDescription)
+                }
+            } else {
+                Task { @MainActor in
+                    startHandler.succeeded()
                 }
             }
-            if options.agentProbe {
-                debugger?.launchProbeAndTerminateApp()
-            } else if options.agentREPL {
-                debugger?.launchREPL()
-            }
-        case .failure(let error):
-            fputs("failed to start VM: \(error)\n", stderr)
-            exitStatus.markFailed()
-            Task { @MainActor in
-                stopApplicationRunLoop()
-            }
+        }
+    } else {
+        virtualMachine.start { result in
+            startHandler.complete(result)
         }
     }
 
     _ = delegate
     _ = debugger
     _ = controlServer
+    _ = startHandler
     _ = window
     _ = vmView
 

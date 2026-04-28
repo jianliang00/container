@@ -639,17 +639,27 @@ The script starts a temporary shim and local kubelet instance, then validates:
 - static Pod workload logs are readable through CRI log inspection
 - `crictl execsync` works against the kubelet-created container
 
-Additional kubelet and API validation goals:
+Run `scripts/kubelet-api-pod-smoke.sh` for the API-backed Pod path. The script
+starts temporary etcd, kube-apiserver, shim, CNI config, and kubelet processes,
+then validates:
+
+- node registration and `Ready` condition
+- RuntimeClass-backed macOS Pod creation through the API
+- `kubectl logs`
+- `kubectl exec`
+- `kubectl port-forward`
+- Pod deletion cleans up the workload and sandbox runtime objects
+
+Remaining kubelet and API validation goals:
 
 - exec probe works
 - HTTP probe works
 - TCP probe works
-- `kubectl logs` works
-- `kubectl exec` works
-- `kubectl port-forward` works
 - kube-proxy provides single-node Service reachability
-- Pod deletion through kubelet or the API cleans up workload, sandbox, network
-  lease, and policy state
+- static Pod mirror access supports `kubectl logs`, `kubectl exec`, and
+  `kubectl port-forward`
+- Pod deletion cleans up network lease, log mux state, stream sessions, and
+  policy state
 
 NetworkPolicy validation:
 

@@ -156,6 +156,38 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
+    func applierRequiresPFEnabledBeforeWritingFiles() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, pfEnabled: false)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        try "original pf config\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: "com.apple.container.kube-proxy.test",
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: pfctl.path
+            )
+        )
+        let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
+
+        do {
+            try applier.apply(ruleSet)
+            Issue.record("expected applier.apply to fail")
+        } catch {
+            #expect(String(describing: error).contains("PF is not enabled"))
+        }
+
+        #expect(try String(contentsOf: configURL, encoding: .utf8) == "original pf config\n")
+        #expect(!FileManager.default.fileExists(atPath: anchorsURL.path))
+    }
+
+    @Test
     func parsesTokenKubeconfig() throws {
         let kubeconfig = """
             apiVersion: v1
@@ -303,10 +335,15 @@ struct KubeProxyCompilerTests {
         return url
     }
 
-    private func makeFakePFCTL(in directory: URL, exitCode: Int32) throws -> URL {
+    private func makeFakePFCTL(in directory: URL, exitCode: Int32, pfEnabled: Bool = true) throws -> URL {
         let url = directory.appendingPathComponent("pfctl")
+        let pfStatus = pfEnabled ? "Enabled" : "Disabled"
         let script = """
             #!/bin/sh
+            if [ "$1" = "-s" ] && [ "$2" = "info" ]; then
+              echo "Status: \(pfStatus)"
+              exit 0
+            fi
             exit \(exitCode)
             """
         try script.write(to: url, atomically: true, encoding: .utf8)

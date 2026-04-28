@@ -89,6 +89,7 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
         let anchorsURL = URL(fileURLWithPath: config.anchorsPath)
         let anchorURL = anchorsURL.appendingPathComponent(config.anchorName)
 
+        try ensurePFEnabled()
         try fileManager.createDirectory(at: anchorsURL, withIntermediateDirectories: true)
 
         let originalConfigData = fileManager.contents(atPath: configURL.path)
@@ -115,6 +116,19 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
             restoreFile(at: anchorURL, originalData: originalAnchorData)
             restoreFile(at: configURL, originalData: originalConfigData)
             throw error
+        }
+    }
+
+    private func ensurePFEnabled() throws {
+        let output = try runPFCTLReturningStdout(arguments: ["-s", "info"], failureMessage: "pfctl status check failed")
+        guard
+            output
+                .split(separator: "\n")
+                .contains(where: { line in
+                    line.trimmingCharacters(in: .whitespaces).hasPrefix("Status: Enabled")
+                })
+        else {
+            throw KubeProxyMacOSError.applyFailed("PF is not enabled; enable PF before starting container-kube-proxy-macos")
         }
     }
 
@@ -186,6 +200,31 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
             let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             throw KubeProxyMacOSError.applyFailed("\(failureMessage) with status \(process.terminationStatus): \(output)")
         }
+    }
+
+    private func runPFCTLReturningStdout(arguments: [String], failureMessage: String) throws -> String {
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: config.pfctlPath)
+        process.arguments = arguments
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            throw KubeProxyMacOSError.applyFailed("\(failureMessage): \(error)")
+        }
+
+        process.waitUntilExit()
+        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw KubeProxyMacOSError.applyFailed("\(failureMessage) with status \(process.terminationStatus): \(output)")
+        }
+        return String(data: outputData, encoding: .utf8) ?? ""
     }
 }
 

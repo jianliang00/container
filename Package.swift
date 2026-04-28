@@ -34,6 +34,7 @@ let package = Package(
         .library(name: "ContainerCRIShimMacOS", targets: ["ContainerCRIShimMacOS"]),
         .library(name: "ContainerCNIMacvmnet", targets: ["ContainerCNIMacvmnet"]),
         .library(name: "ContainerK8sNetworkPolicyMacOS", targets: ["ContainerK8sNetworkPolicyMacOS"]),
+        .library(name: "ContainerK8sKubeProxyMacOS", targets: ["ContainerK8sKubeProxyMacOS"]),
         .library(name: "ContainerBuild", targets: ["ContainerBuild"]),
         .library(name: "ContainerAPIService", targets: ["ContainerAPIService"]),
         .library(name: "ContainerAPIClient", targets: ["ContainerAPIClient"]),
@@ -58,6 +59,7 @@ let package = Package(
         .executable(name: "container-cri-shim-macos", targets: ["container-cri-shim-macos"]),
         .executable(name: "container-cni-macvmnet", targets: ["container-cni-macvmnet"]),
         .executable(name: "container-k8s-networkpolicy-macos", targets: ["container-k8s-networkpolicy-macos"]),
+        .executable(name: "container-kube-proxy-macos", targets: ["container-kube-proxy-macos"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
@@ -241,6 +243,24 @@ let package = Package(
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerK8sNetworkPolicyMacOS",
                 "ContainerResource",
+            ]
+        ),
+        .target(
+            name: "ContainerK8sKubeProxyMacOS",
+            dependencies: []
+        ),
+        .executableTarget(
+            name: "container-kube-proxy-macos",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerK8sKubeProxyMacOS",
+            ],
+            path: "Sources/Helpers/KubeProxyMacOS"
+        ),
+        .testTarget(
+            name: "ContainerK8sKubeProxyMacOSTests",
+            dependencies: [
+                "ContainerK8sKubeProxyMacOS"
             ]
         ),
         .testTarget(

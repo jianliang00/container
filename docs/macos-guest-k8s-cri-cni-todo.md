@@ -73,9 +73,11 @@ Tests:
 
 - [x] Add integration validation for local `crictl` lifecycle.
 - [x] Add integration validation for local kubelet static Pod lifecycle.
-- [ ] Add integration validation for `kubectl logs`.
-- [ ] Add integration validation for `kubectl exec`.
-- [ ] Add integration validation for `kubectl port-forward`.
+- [x] Add integration validation for API-backed Pod `kubectl logs`.
+- [x] Add integration validation for API-backed Pod `kubectl exec`.
+- [x] Add integration validation for API-backed Pod `kubectl port-forward`.
+- [ ] Add integration validation for static Pod mirror `kubectl logs`,
+  `kubectl exec`, and `kubectl port-forward`.
 - [ ] Add integration validation for single-node Service reachability through
   kube-proxy.
 - [ ] Add integration validation for node-local ingress and egress
@@ -117,14 +119,19 @@ Operator docs:
 - [ ] Exec probe works.
 - [ ] HTTP probe works.
 - [ ] TCP probe works.
-- [ ] `kubectl logs` works for the static Pod.
-- [ ] `kubectl exec` works for the static Pod.
-- [ ] `kubectl port-forward` works for the static Pod.
+- [x] `kubectl logs` works for an API-backed Pod.
+- [x] `kubectl exec` works for an API-backed Pod.
+- [x] `kubectl port-forward` works for an API-backed Pod.
+- [ ] `kubectl logs` works for the static Pod mirror path.
+- [ ] `kubectl exec` works for the static Pod mirror path.
+- [ ] `kubectl port-forward` works for the static Pod mirror path.
 - [ ] Single-node Service reachability through kube-proxy works.
 - [ ] Ingress `NetworkPolicy` allows selected traffic.
 - [ ] Ingress `NetworkPolicy` denies unselected traffic.
 - [ ] Egress `NetworkPolicy` allows selected Pod or IPv4 CIDR traffic.
 - [ ] Egress `NetworkPolicy` denies traffic outside selected peers.
+- [x] Deleting an API-backed Pod cleans up workload and sandbox runtime
+  objects.
 - [ ] Deleting the static Pod cleans up workload, sandbox, network lease, stream
   sessions, log mux state, and policy state.
 - [ ] Restarting the NetworkPolicy controller reconciles the expected policy

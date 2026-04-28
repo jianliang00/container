@@ -15,7 +15,17 @@ Related docs:
 
 Configuration:
 
-- [ ] Decide kube-proxy launch settings for single-node Service reachability.
+- [x] Decide kube-proxy launch settings for single-node Service reachability.
+
+kube-proxy macOS:
+
+- [x] Add PF-backed `container-kube-proxy-macos` executable skeleton.
+- [x] Compile IPv4 ClusterIP Service and EndpointSlice snapshots into local PF
+  redirect rules.
+- [x] Load bearer-token kubeconfig and relist Services and EndpointSlices.
+- [x] Apply generated rules through a dedicated PF anchor.
+- [ ] Add event-driven Kubernetes watch support in addition to periodic relist.
+- [ ] Extend support beyond single-node IPv4 ClusterIP TCP/UDP.
 
 CRI server:
 

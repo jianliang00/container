@@ -310,8 +310,37 @@ struct CRIShimRuntimeServerTests {
                 RecordingPortForwardCall(sandboxID: "sandbox-1", port: 8081),
             ]
         )
+
+        var dynamicPortForwardRequest = Runtime_V1_PortForwardRequest()
+        dynamicPortForwardRequest.podSandboxID = "sandbox-1"
+        let dynamicPortForward = try await client.portForward(dynamicPortForwardRequest)
+        let dynamicPortForwardTask = try makeWebSocketTask(
+            from: dynamicPortForward.url,
+            protocols: ["portforward.k8s.io"]
+        )
+        try await resumeWebSocketTask(dynamicPortForwardTask)
+        try await dynamicPortForwardTask.send(
+            .data(Data([0]) + portPrefixData(9090) + Data("dynamic".utf8))
+        )
+        let dynamicPortForwardMessage = try await receiveBinaryMessage(from: dynamicPortForwardTask)
+        #expect(
+            ObservedPortForwardMessage(dynamicPortForwardMessage)
+                == ObservedPortForwardMessage(
+                    stream: 0,
+                    forwardedPort: 9090,
+                    payload: "echo:9090:dynamic"
+                )
+        )
+        #expect(
+            runtimeManager.portForwardCalls == [
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 8080),
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 8081),
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 9090),
+            ]
+        )
         execTask.cancel(with: .normalClosure, reason: nil)
         portForwardTask.cancel(with: .normalClosure, reason: nil)
+        dynamicPortForwardTask.cancel(with: .normalClosure, reason: nil)
 
         let runtimeConfig = try await client.runtimeConfig(Runtime_V1_RuntimeConfigRequest())
         #expect(!runtimeConfig.hasLinux)
@@ -590,7 +619,9 @@ struct CRIShimRuntimeServerTests {
         runtimeManager.removeWorkloadError = ContainerizationError(
             .internalError,
             message: "failed to remove workload from sandbox",
-            cause: ContainerizationError(.notFound, message: "workload already removed")
+            cause: OpaqueCRIShimError(
+                description: #"internalError: "failed to remove workload" (cause: "notFound: "workload already removed"")"#
+            )
         )
         _ = try await client.removeContainer(removeRequest)
         #expect(runtimeManager.removeWorkloadCalls.count == 1)
@@ -1582,6 +1613,10 @@ private func makeTemporaryDirectory() -> URL {
 private func normalizedDirectoryPath(_ url: URL) -> String {
     let path = url.path
     return path.hasSuffix("/") ? path : "\(path)/"
+}
+
+private struct OpaqueCRIShimError: Error, CustomStringConvertible {
+    var description: String
 }
 
 private let validConfigJSON = """

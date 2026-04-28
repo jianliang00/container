@@ -76,7 +76,7 @@ Tests:
 - [x] Add integration validation for API-backed Pod `kubectl logs`.
 - [x] Add integration validation for API-backed Pod `kubectl exec`.
 - [x] Add integration validation for API-backed Pod `kubectl port-forward`.
-- [ ] Add integration validation for static Pod mirror `kubectl logs`,
+- [x] Add integration validation for static Pod mirror `kubectl logs`,
   `kubectl exec`, and `kubectl port-forward`.
 - [ ] Add integration validation for single-node Service reachability through
   kube-proxy.
@@ -122,9 +122,9 @@ Operator docs:
 - [x] `kubectl logs` works for an API-backed Pod.
 - [x] `kubectl exec` works for an API-backed Pod.
 - [x] `kubectl port-forward` works for an API-backed Pod.
-- [ ] `kubectl logs` works for the static Pod mirror path.
-- [ ] `kubectl exec` works for the static Pod mirror path.
-- [ ] `kubectl port-forward` works for the static Pod mirror path.
+- [x] `kubectl logs` works for the static Pod mirror path.
+- [x] `kubectl exec` works for the static Pod mirror path.
+- [x] `kubectl port-forward` works for the static Pod mirror path.
 - [ ] Single-node Service reachability through kube-proxy works.
 - [ ] Ingress `NetworkPolicy` allows selected traffic.
 - [ ] Ingress `NetworkPolicy` denies unselected traffic.

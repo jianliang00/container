@@ -335,6 +335,16 @@ The first supported Service surface is IPv4 `ClusterIP` for TCP and UDP. NodePor
 LoadBalancer, external traffic policy, session affinity, multi-node routing, and
 dual-stack are explicit future work.
 
+Deployment is via a root-owned launchd service using
+`scripts/kube-proxy-macos/container-kube-proxy-macos.plist`. The installer
+scripts render the plist with the configured binary and JSON config path, can run
+in `--dry-run` mode for local verification, and require PF to already be enabled
+before bootstrapping the daemon. Neither the installer nor the daemon enables PF
+implicitly; operators must make that host-level decision outside the kube-proxy
+adapter. Uninstall removes the launchd plist and, unless told to keep it, removes
+the exact PF anchor references owned by `container-kube-proxy-macos` after
+validating the candidate PF config.
+
 Image and handler selection rules:
 
 1. If `RunPodSandboxRequest.runtime_handler` is set, it must match a configured

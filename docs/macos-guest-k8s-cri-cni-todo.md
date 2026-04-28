@@ -24,6 +24,8 @@ kube-proxy macOS:
   redirect rules.
 - [x] Load bearer-token kubeconfig and relist Services and EndpointSlices.
 - [x] Apply generated rules through a dedicated PF anchor.
+- [x] Add launchd installer and uninstaller scripts with dry-run support.
+- [x] Check PF enabled state before applying or starting the PF-backed daemon.
 - [ ] Add event-driven Kubernetes watch support in addition to periodic relist.
 - [ ] Extend support beyond single-node IPv4 ClusterIP TCP/UDP.
 

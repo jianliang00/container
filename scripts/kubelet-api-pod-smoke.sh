@@ -22,7 +22,8 @@ Usage: scripts/kubelet-api-pod-smoke.sh
 
 Runs an API-backed local kubelet smoke test against container-cri-shim-macos.
 The script starts temporary etcd, kube-apiserver, CRI shim, CNI config, and
-kubelet processes, then creates one macOS RuntimeClass Pod through kubectl.
+kubelet processes, then validates one macOS RuntimeClass Pod through kubectl
+and one static Pod through its mirror Pod API path.
 
 Required:
   CONTAINER_CRI_MACOS_WORKLOAD_IMAGE   macOS workload image used by the Pod
@@ -54,6 +55,11 @@ Optional:
                                        default: macos-api-smoke
   CONTAINER_CRI_MACOS_CONTAINER_NAME   workload container name
                                        default: workload
+  CONTAINER_CRI_MACOS_STATIC_POD_NAME  static Pod name used for mirror access
+                                       default: macos-static-smoke
+  CONTAINER_CRI_MACOS_STATIC_CONTAINER_NAME
+                                       static Pod workload container name
+                                       default: static-workload
   CONTAINER_CRI_MACOS_PORT_FORWARD_GUEST_PORT
                                        guest vsock port used for kubectl port-forward
                                        default: 27000
@@ -110,6 +116,8 @@ NODE_NAME="${CONTAINER_CRI_MACOS_NODE_NAME:-macos-api-e2e}"
 NODE_IP="${CONTAINER_CRI_MACOS_NODE_IP:-}"
 POD_NAME="${CONTAINER_CRI_MACOS_POD_NAME:-macos-api-smoke}"
 CONTAINER_NAME="${CONTAINER_CRI_MACOS_CONTAINER_NAME:-workload}"
+STATIC_POD_NAME="${CONTAINER_CRI_MACOS_STATIC_POD_NAME:-macos-static-smoke}"
+STATIC_CONTAINER_NAME="${CONTAINER_CRI_MACOS_STATIC_CONTAINER_NAME:-static-workload}"
 PORT_FORWARD_GUEST_PORT="${CONTAINER_CRI_MACOS_PORT_FORWARD_GUEST_PORT:-27000}"
 PORT_FORWARD_LOCAL_PORT="${CONTAINER_CRI_MACOS_PORT_FORWARD_LOCAL_PORT:-}"
 SKIP_PORT_FORWARD="${CONTAINER_CRI_MACOS_SKIP_PORT_FORWARD:-0}"
@@ -213,12 +221,15 @@ CNI_CONF_DIR="${WORK_DIR}/cni/net.d"
 CNI_STATE_DIR="${WORK_DIR}/cni/state"
 KUBELET_ROOT="${WORK_DIR}/kubelet-root"
 POD_LOG_DIR="${WORK_DIR}/pod-logs"
-mkdir -p "${CERT_DIR}" "${ETCD_DATA}" "${SHIM_STATE}" "${CNI_CONF_DIR}" "${CNI_STATE_DIR}" "${KUBELET_ROOT}" "${POD_LOG_DIR}"
+STATIC_POD_DIR="${WORK_DIR}/static-pods"
+mkdir -p "${CERT_DIR}" "${ETCD_DATA}" "${SHIM_STATE}" "${CNI_CONF_DIR}" "${CNI_STATE_DIR}" "${KUBELET_ROOT}" "${POD_LOG_DIR}" "${STATIC_POD_DIR}"
 
 RUNTIME_ENDPOINT="${WORK_DIR}/container-cri-shim-macos.sock"
 SHIM_CONFIG="${WORK_DIR}/container-cri-shim-macos-config.json"
 CNI_CONFIG="${CNI_CONF_DIR}/10-macvmnet.conflist"
 KUBELET_CONFIG="${WORK_DIR}/kubelet-config.yaml"
+STATIC_POD_MANIFEST="${STATIC_POD_DIR}/${STATIC_POD_NAME}.yaml"
+STATIC_MIRROR_POD_NAME="${STATIC_POD_NAME}-${NODE_NAME}"
 ADMIN_KUBECONFIG="${WORK_DIR}/admin.kubeconfig"
 KUBELET_KUBECONFIG="${WORK_DIR}/kubelet.kubeconfig"
 ETCD_LOG="${WORK_DIR}/etcd.log"
@@ -226,6 +237,7 @@ APISERVER_LOG="${WORK_DIR}/kube-apiserver.log"
 SHIM_LOG="${WORK_DIR}/shim.log"
 KUBELET_LOG="${WORK_DIR}/kubelet.log"
 PORT_FORWARD_LOG="${WORK_DIR}/kubectl-port-forward.log"
+STATIC_PORT_FORWARD_LOG="${WORK_DIR}/kubectl-static-port-forward.log"
 ETCD_PID=""
 APISERVER_PID=""
 SHIM_PID=""
@@ -265,6 +277,7 @@ cleanup() {
     set +e
 
     terminate_pid "${PORT_FORWARD_PID}"
+    rm -f "${STATIC_POD_MANIFEST}"
 
     if [[ -f "${ADMIN_KUBECONFIG}" && -x "${KUBECTL_BIN}" ]]; then
         "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" delete pod "${POD_NAME}" --wait=false >/dev/null 2>&1 || true
@@ -289,7 +302,7 @@ trap cleanup EXIT
 
 fail() {
     echo "error: $*" >&2
-    for log_file in "${ETCD_LOG}" "${APISERVER_LOG}" "${SHIM_LOG}" "${KUBELET_LOG}" "${PORT_FORWARD_LOG}"; do
+    for log_file in "${ETCD_LOG}" "${APISERVER_LOG}" "${SHIM_LOG}" "${KUBELET_LOG}" "${PORT_FORWARD_LOG}" "${STATIC_PORT_FORWARD_LOG}"; do
         if [[ -f "${log_file}" ]]; then
             echo "---- ${log_file} ----" >&2
             tail -n 180 "${log_file}" >&2 || true
@@ -307,8 +320,11 @@ wait_for_process() {
 }
 
 wait_for_port_forward_ready() {
+    local pid=$1
+    local local_port=$2
+    local process_name=$3
     for _ in $(seq 1 60); do
-        if "${PYTHON_BIN}" - "${PORT_FORWARD_LOCAL_PORT}" <<'PY' >/dev/null 2>&1
+        if "${PYTHON_BIN}" - "${local_port}" <<'PY' >/dev/null 2>&1
 import json
 import socket
 import struct
@@ -337,10 +353,10 @@ PY
         then
             return 0
         fi
-        wait_for_process "${PORT_FORWARD_PID}" "kubectl port-forward"
+        wait_for_process "${pid}" "${process_name}"
         sleep 1
     done
-    fail "timed out waiting for kubectl port-forward to return a guest-agent ready frame"
+    fail "timed out waiting for ${process_name} to return a guest-agent ready frame"
 }
 
 log "workdir=${WORK_DIR}"
@@ -356,6 +372,9 @@ NODE_NAME=${NODE_NAME}
 NODE_IP=${NODE_IP}
 POD_NAME=${POD_NAME}
 CONTAINER_NAME=${CONTAINER_NAME}
+STATIC_POD_NAME=${STATIC_POD_NAME}
+STATIC_CONTAINER_NAME=${STATIC_CONTAINER_NAME}
+STATIC_MIRROR_POD_NAME=${STATIC_MIRROR_POD_NAME}
 RUNTIME_ENDPOINT=${RUNTIME_ENDPOINT}
 ADMIN_KUBECONFIG=${ADMIN_KUBECONFIG}
 KUBELET_KUBECONFIG=${KUBELET_KUBECONFIG}
@@ -366,6 +385,7 @@ APISERVER_LOG=${APISERVER_LOG}
 SHIM_LOG=${SHIM_LOG}
 KUBELET_LOG=${KUBELET_LOG}
 PORT_FORWARD_LOG=${PORT_FORWARD_LOG}
+STATIC_PORT_FORWARD_LOG=${STATIC_PORT_FORWARD_LOG}
 EOF
 
 log "building CRI shim and CNI plugin"
@@ -451,10 +471,12 @@ EOF
 cat >"${KUBELET_CONFIG}" <<EOF
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
+staticPodPath: "${STATIC_POD_DIR}"
 podLogsDir: "${POD_LOG_DIR}"
 containerRuntimeEndpoint: "unix://${RUNTIME_ENDPOINT}"
 imageServiceEndpoint: "unix://${RUNTIME_ENDPOINT}"
 syncFrequency: 5s
+fileCheckFrequency: 2s
 runtimeRequestTimeout: 2m
 failSwapOn: false
 failCgroupV1: false
@@ -612,22 +634,101 @@ if [[ "${SKIP_PORT_FORWARD}" != "1" && "${SKIP_PORT_FORWARD}" != "true" ]]; then
     log "validating kubectl port-forward"
     "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" port-forward --address 127.0.0.1 "pod/${POD_NAME}" "${PORT_FORWARD_LOCAL_PORT}:${PORT_FORWARD_GUEST_PORT}" >"${PORT_FORWARD_LOG}" 2>&1 &
     PORT_FORWARD_PID=$!
-    wait_for_port_forward_ready
+    wait_for_port_forward_ready "${PORT_FORWARD_PID}" "${PORT_FORWARD_LOCAL_PORT}" "kubectl port-forward"
     terminate_pid "${PORT_FORWARD_PID}"
     PORT_FORWARD_PID=""
 fi
 
 log "deleting Pod and waiting for CRI cleanup"
 "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" delete pod "${POD_NAME}" --wait=false >/dev/null
+api_cleaned=0
 for i in $(seq 1 180); do
     containers="$(run_crictl ps -a --name "^${CONTAINER_NAME}$" -q 2>/dev/null || true)"
     pods="$(run_crictl pods --name "${POD_NAME}" -q 2>/dev/null || true)"
     if [[ -z "${containers}" && -z "${pods}" ]]; then
         log "kubelet cleaned API-backed Pod runtime objects"
-        log "API-backed kubelet smoke completed"
-        exit 0
+        api_cleaned=1
+        break
     fi
     sleep 1
     wait_for_process "${KUBELET_PID}" "kubelet"
-    [[ "${i}" != 180 ]] || fail "timed out waiting for Pod cleanup"
 done
+[[ "${api_cleaned}" == "1" ]] || fail "timed out waiting for Pod cleanup"
+
+log "creating static Pod manifest for mirror validation"
+cat >"${STATIC_POD_MANIFEST}" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${STATIC_POD_NAME}
+  namespace: default
+  labels:
+    app: ${STATIC_POD_NAME}
+spec:
+  runtimeClassName: macos
+  nodeSelector:
+    kubernetes.io/os: darwin
+  restartPolicy: Always
+  containers:
+  - name: ${STATIC_CONTAINER_NAME}
+    image: ${WORKLOAD_IMAGE}
+    imagePullPolicy: IfNotPresent
+    command:
+    - /bin/sh
+    - -c
+    - 'echo kubelet-static-mirror-ready; while true; do sleep 30; done'
+EOF
+
+log "waiting for static Pod mirror"
+for i in $(seq 1 300); do
+    "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" get pod "${STATIC_MIRROR_POD_NAME}" >/dev/null 2>&1 && break
+    sleep 1
+    wait_for_process "${KUBELET_PID}" "kubelet"
+    [[ "${i}" != 300 ]] || fail "timed out waiting for static Pod mirror ${STATIC_MIRROR_POD_NAME}"
+done
+"${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" wait --for=condition=Ready "pod/${STATIC_MIRROR_POD_NAME}" --timeout=300s >/dev/null
+"${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" get pod "${STATIC_MIRROR_POD_NAME}" -o wide
+
+log "validating static Pod mirror kubectl logs"
+if ! "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" logs "${STATIC_MIRROR_POD_NAME}" -c "${STATIC_CONTAINER_NAME}" | grep -F kubelet-static-mirror-ready >/dev/null; then
+    fail "static Pod mirror logs output did not contain kubelet-static-mirror-ready"
+fi
+
+log "validating static Pod mirror kubectl exec"
+static_exec_validation_script="echo kubelet-static-mirror-exec-ok"
+if ! KUBECTL_REMOTE_COMMAND_WEBSOCKETS=true "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" exec "${STATIC_MIRROR_POD_NAME}" -c "${STATIC_CONTAINER_NAME}" -- /bin/sh -lc "${static_exec_validation_script}" | grep -F kubelet-static-mirror-exec-ok >/dev/null; then
+    fail "static Pod mirror exec output did not contain kubelet-static-mirror-exec-ok"
+fi
+
+if [[ "${SKIP_PORT_FORWARD}" != "1" && "${SKIP_PORT_FORWARD}" != "true" ]]; then
+    log "validating static Pod mirror kubectl port-forward"
+    "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" port-forward --address 127.0.0.1 "pod/${STATIC_MIRROR_POD_NAME}" "${PORT_FORWARD_LOCAL_PORT}:${PORT_FORWARD_GUEST_PORT}" >"${STATIC_PORT_FORWARD_LOG}" 2>&1 &
+    PORT_FORWARD_PID=$!
+    wait_for_port_forward_ready "${PORT_FORWARD_PID}" "${PORT_FORWARD_LOCAL_PORT}" "kubectl static Pod port-forward"
+    terminate_pid "${PORT_FORWARD_PID}"
+    PORT_FORWARD_PID=""
+fi
+
+log "removing static Pod manifest and waiting for CRI cleanup"
+rm -f "${STATIC_POD_MANIFEST}"
+static_cleaned=0
+for i in $(seq 1 180); do
+    containers="$(run_crictl ps -a --name "^${STATIC_CONTAINER_NAME}$" -q 2>/dev/null || true)"
+    pods="$(
+        {
+            run_crictl pods --name "${STATIC_POD_NAME}" -q 2>/dev/null || true
+            run_crictl pods --name "${STATIC_MIRROR_POD_NAME}" -q 2>/dev/null || true
+        } | sort -u
+    )"
+    mirror_exists="$("${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" get pod "${STATIC_MIRROR_POD_NAME}" -o name 2>/dev/null || true)"
+    if [[ -z "${containers}" && -z "${pods}" && -z "${mirror_exists}" ]]; then
+        log "kubelet cleaned static Pod mirror runtime objects"
+        static_cleaned=1
+        break
+    fi
+    sleep 1
+    wait_for_process "${KUBELET_PID}" "kubelet"
+done
+[[ "${static_cleaned}" == "1" ]] || fail "timed out waiting for static Pod mirror cleanup"
+
+log "API-backed and static mirror kubelet smoke completed"

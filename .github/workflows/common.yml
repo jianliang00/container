@@ -10,6 +10,14 @@ on:
         type: boolean
         description: "Publish this build for release"
         default: false
+      sign_release_artifacts:
+        type: boolean
+        description: "Sign the release installer package with Developer ID certificates"
+        default: false
+      notarize_release_artifacts:
+        type: boolean
+        description: "Submit the signed release installer package for notarization"
+        default: false
       skip_virtualization_tests:
         type: boolean
         description: "Skip tests that require guest VM virtualization"
@@ -71,10 +79,114 @@ jobs:
             echo "BUILD_CONFIGURATION=release" >> $GITHUB_ENV
           fi
 
+      - name: Set package artifact name
+        run: |
+          echo "PACKAGE_ARTIFACT_NAME=container-installer-unsigned.pkg" >> "$GITHUB_ENV"
+          if [[ "${{ inputs.sign_release_artifacts }}" == "true" ]]; then
+            echo "PACKAGE_ARTIFACT_NAME=container-installer.pkg" >> "$GITHUB_ENV"
+          fi
+
+      - name: Validate release signing inputs
+        if: ${{ inputs.sign_release_artifacts }}
+        env:
+          APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}
+          APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          APP_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+          INSTALLER_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_P12_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_PASSWORD }}
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          required_values=(
+            APP_CERTIFICATE
+            APP_CERTIFICATE_PASSWORD
+            APP_IDENTITY
+            INSTALLER_CERTIFICATE
+            INSTALLER_CERTIFICATE_PASSWORD
+            INSTALLER_IDENTITY
+          )
+          if [[ "${{ inputs.notarize_release_artifacts }}" == "true" ]]; then
+            required_values+=(
+              APP_STORE_CONNECT_API_KEY
+              APP_STORE_CONNECT_API_KEY_ID
+              APP_STORE_CONNECT_API_ISSUER_ID
+            )
+          fi
+
+          for value_name in "${required_values[@]}"; do
+            if [[ -z "${!value_name}" ]]; then
+              echo "::error::Missing required secret ${value_name}"
+              exit 1
+            fi
+          done
+
+      - name: Import Apple Developer ID certificates
+        if: ${{ inputs.sign_release_artifacts }}
+        env:
+          APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}
+          APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          APP_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+          INSTALLER_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_P12_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_PASSWORD }}
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/container-release-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          APP_CERTIFICATE_PATH="${RUNNER_TEMP}/developer-id-application.p12"
+          INSTALLER_CERTIFICATE_PATH="${RUNNER_TEMP}/developer-id-installer.p12"
+
+          python3 -c 'import base64, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))' "${APP_CERTIFICATE_PATH}" <<< "${APP_CERTIFICATE}"
+          python3 -c 'import base64, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))' "${INSTALLER_CERTIFICATE_PATH}" <<< "${INSTALLER_CERTIFICATE}"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}"
+          security default-keychain -d user -s "${KEYCHAIN_PATH}"
+
+          security import "${APP_CERTIFICATE_PATH}" -k "${KEYCHAIN_PATH}" -P "${APP_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/productsign -T /usr/bin/xcrun
+          security import "${INSTALLER_CERTIFICATE_PATH}" -k "${KEYCHAIN_PATH}" -P "${INSTALLER_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/productsign -T /usr/bin/xcrun
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security find-identity -v -p codesigning "${KEYCHAIN_PATH}"
+
+          echo "CODESIGN_IDENTITY=${APP_IDENTITY}" >> "$GITHUB_ENV"
+          echo "CODESIGN_TIMESTAMP_OPTS=--timestamp" >> "$GITHUB_ENV"
+          echo "CODESIGN_EXTRA_OPTS=--options runtime" >> "$GITHUB_ENV"
+          echo "CODESIGN_KEYCHAIN=${KEYCHAIN_PATH}" >> "$GITHUB_ENV"
+          echo "PKG_SIGN_IDENTITY=${INSTALLER_IDENTITY}" >> "$GITHUB_ENV"
+          echo "PKG_SIGN_TIMESTAMP_OPTS=--timestamp" >> "$GITHUB_ENV"
+          echo "PKG_SIGN_KEYCHAIN=${KEYCHAIN_PATH}" >> "$GITHUB_ENV"
+
       - name: Make the container project and docs
         run: |
-          make container dsym docs
+          make container dsym docs PKG_PATH="bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
           tar cfz _site.tgz _site
+
+      - name: Verify signed installer package
+        if: ${{ inputs.sign_release_artifacts }}
+        run: |
+          pkgutil --check-signature "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
+
+      - name: Notarize signed installer package
+        if: ${{ inputs.notarize_release_artifacts }}
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          API_KEY_PATH="${RUNNER_TEMP}/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          python3 -c 'import base64, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))' "${API_KEY_PATH}" <<< "${APP_STORE_CONNECT_API_KEY}"
+
+          xcrun notarytool submit "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}" \
+            --key "${API_KEY_PATH}" \
+            --key-id "${APP_STORE_CONNECT_API_KEY_ID}" \
+            --issuer "${APP_STORE_CONNECT_API_ISSUER_ID}" \
+            --wait
+
+          xcrun stapler staple "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
+          spctl -a -vv --type install "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
 
       - name: Verify SwiftPM consumer integration
         if: ${{ inputs.verify_swiftpm_consumer }}
@@ -83,8 +195,8 @@ jobs:
       - name: Create package
         run: |
           mkdir -p outputs
-          mv "bin/${BUILD_CONFIGURATION}/container-installer-unsigned.pkg" outputs
-          mv "bin/${BUILD_CONFIGURATION}/bundle/container-dSYM.zip" outputs
+          mv "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}" outputs
+          mv bin/${{ env.BUILD_CONFIGURATION }}/bundle/container-dSYM.zip outputs
 
       - name: Test the container project
         env:

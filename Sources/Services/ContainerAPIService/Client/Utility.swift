@@ -209,7 +209,7 @@ public struct Utility {
                 .setItemsName("binary"),
             ])
 
-            kernel = try await self.getKernel(management: management)
+            kernel = try await self.getKernel(management: management, progressUpdate: progressUpdate)
 
             // Pull and unpack the initial filesystem for Linux runtime.
             await progressUpdate([
@@ -645,7 +645,7 @@ public struct Utility {
         return [AttachmentConfiguration(network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil, mtu: 1280))]
     }
 
-    private static func getKernel(management: Flags.Management) async throws -> Kernel {
+    private static func getKernel(management: Flags.Management, progressUpdate: ProgressUpdateHandler? = nil) async throws -> Kernel {
         // For the image itself we'll take the user input and try with it as we can do userspace
         // emulation for x86, but for the kernel we need it to match the hosts architecture.
         let s: SystemPlatform = .current
@@ -656,7 +656,52 @@ public struct Utility {
             let p = URL(filePath: userKernel)
             return .init(path: p, platform: s)
         }
-        return try await ClientKernel.getDefaultKernel(for: s)
+        do {
+            return try await ClientKernel.getDefaultKernel(for: s)
+        } catch let error as ContainerizationError {
+            guard error.isCode(.notFound) else {
+                throw error
+            }
+            try await installRecommendedKernelIfConfirmed(platform: s, progressUpdate: progressUpdate)
+            return try await ClientKernel.getDefaultKernel(for: s)
+        }
+    }
+
+    private static func installRecommendedKernelIfConfirmed(platform: SystemPlatform, progressUpdate: ProgressUpdateHandler?) async throws {
+        let url = DefaultsStore.get(key: .defaultKernelURL)
+        let path = DefaultsStore.get(key: .defaultKernelBinaryPath)
+
+        await progressUpdate?([
+            .setDescription("Waiting for kernel install confirmation"),
+            .setItemsName("binary"),
+        ])
+
+        print("No default kernel configured.")
+        print("Install the recommended default kernel from [\(url)]? [Y/n]: ", terminator: "")
+        guard let read = readLine(strippingNewline: true) else {
+            throw ContainerizationError(.internalError, message: "failed to read user input")
+        }
+
+        let answer = read.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard answer.isEmpty || answer == "y" || answer == "yes" else {
+            throw ContainerizationError(
+                .notFound,
+                message:
+                    "default kernel not configured for architecture \(platform.architecture), please use the `container system kernel set --recommended` command to configure it"
+            )
+        }
+
+        await progressUpdate?([
+            .setDescription("Installing kernel"),
+            .setItemsName("binary"),
+        ])
+        try await ClientKernel.installKernelFromTar(
+            tarFile: url,
+            kernelFilePath: path,
+            platform: platform,
+            progressUpdate: progressUpdate,
+            force: true
+        )
     }
 
     /// Parses key-value pairs from command line arguments.

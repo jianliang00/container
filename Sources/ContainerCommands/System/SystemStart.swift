@@ -47,7 +47,7 @@ extension Application {
         @Flag(
             name: .long,
             inversion: .prefixedEnableDisable,
-            help: "Specify whether the default kernel should be installed or not (default: prompt user)")
+            help: "Install the recommended default kernel during system start (default: defer until first Linux container)")
         var kernelInstall: Bool?
 
         @Option(
@@ -128,10 +128,12 @@ extension Application {
                 try? await installInitialFilesystem()
             }
 
-            guard await !kernelExists() else {
-                return
+            if kernelInstall == true {
+                guard await !kernelExists() else {
+                    return
+                }
+                try await installDefaultKernel()
             }
-            try await installDefaultKernel()
         }
 
         private func installInitialFilesystem() async throws {

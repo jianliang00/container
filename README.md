@@ -3,7 +3,7 @@
   &nbsp;container
 </h1>
 
-`container` is a tool that you can use to create and run Linux containers as lightweight virtual machines on your Mac. It's written in Swift, and optimized for Apple silicon.
+`container` is a tool that you can use to create and run containers as lightweight virtual machines on your Mac. Linux images run as lightweight Linux VMs, and `darwin/arm64` images can run as macOS guest VMs through the macOS runtime. It's written in Swift, and optimized for Apple silicon.
 
 The tool consumes and produces [OCI-compatible container images](https://github.com/opencontainers/image-spec), so you can pull and run images from any standard container registry. You can push images that you build to those registries as well, and run the images in any other OCI-compatible application.
 
@@ -31,34 +31,21 @@ Start the system service with:
 container system start
 ```
 
-### Upgrade or downgrade
+### macOS guest and GUI support
 
-For both upgrading and downgrading, you can manually download and install the signed installer package by following the steps from [initial install](#initial-install) or use the `update-container.sh` script (installed to `/usr/local/bin`).
-
-If you're upgrading or downgrading, you must stop your existing `container`:
+In addition to Linux containers, `container` can run supported `darwin/arm64` macOS guest images with the macOS runtime:
 
 ```bash
-container system stop
+container run --os darwin <image> <command>
 ```
 
-To upgrade to the latest release, simply run the command below:
+macOS guest workloads run headless by default. If you need to interact with the guest desktop, add `--gui` to show the VM in a local window:
 
 ```bash
-/usr/local/bin/update-container.sh
+container run --os darwin --gui <image>
 ```
 
-To downgrade, you must uninstall your existing `container` (the `-k` flag keeps your user data, while `-d` removes it):
-
-```bash
-/usr/local/bin/uninstall-container.sh -k
-/usr/local/bin/update-container.sh -v 0.3.0
-```
-
-Start the system service with:
-
-```bash
-container system start
-```
+The `container macos` command group includes tools for preparing a base macOS image from an IPSW, starting an image directory for guest-agent setup or debugging, and packaging a macOS image directory as an OCI layout tar.
 
 ### Uninstall
 

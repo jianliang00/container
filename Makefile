@@ -29,10 +29,17 @@ DEST_DIR ?= /usr/local/
 ROOT_DIR := $(shell git rev-parse --show-toplevel)
 BUILD_BIN_DIR = $(shell $(SWIFT) build -c $(BUILD_CONFIGURATION) --show-bin-path)
 STAGING_DIR := bin/$(BUILD_CONFIGURATION)/staging/
-PKG_PATH := bin/$(BUILD_CONFIGURATION)/container-installer-unsigned.pkg
+PKG_PATH ?= bin/$(BUILD_CONFIGURATION)/container-installer-unsigned.pkg
+PKG_UNSIGNED_PATH := $(if $(strip $(PKG_SIGN_IDENTITY)),$(basename $(PKG_PATH))-unsigned.pkg,$(PKG_PATH))
 DSYM_DIR := bin/$(BUILD_CONFIGURATION)/bundle/container-dSYM
 DSYM_PATH := bin/$(BUILD_CONFIGURATION)/bundle/container-dSYM.zip
-CODESIGN_OPTS ?= --force --sign - --timestamp=none
+CODESIGN_IDENTITY ?= -
+CODESIGN_TIMESTAMP_OPTS ?= --timestamp=none
+CODESIGN_EXTRA_OPTS ?=
+CODESIGN_KEYCHAIN ?=
+PKG_SIGN_IDENTITY ?=
+PKG_SIGN_TIMESTAMP_OPTS ?= --timestamp
+PKG_SIGN_KEYCHAIN ?=
 
 
 # Conditionally use a temporary data directory for integration tests
@@ -152,19 +159,24 @@ $(STAGING_DIR):
 .PHONY: installer-pkg
 installer-pkg: $(STAGING_DIR)
 	@echo Signing container binaries...
-	@codesign $(CODESIGN_OPTS) --identifier com.apple.container.cli "$(join $(STAGING_DIR), bin/container)"
-	@codesign $(CODESIGN_OPTS) --identifier com.apple.container.apiserver "$(join $(STAGING_DIR), bin/container-apiserver)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin/container-core-images)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-linux.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-network-vmnet.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/macos-image-prepare/bin/container-macos-image-prepare)"
-	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/macos-vm-manager/bin/container-macos-vm-manager)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --identifier com.apple.container.cli "$(join $(STAGING_DIR), bin/container)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --identifier com.apple.container.apiserver "$(join $(STAGING_DIR), bin/container-apiserver)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin/container-core-images)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-linux.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-network-vmnet.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/macos-image-prepare/bin/container-macos-image-prepare)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/macos-vm-manager/bin/container-macos-vm-manager)"
 
 	@echo Creating application installer
-	@pkgbuild --root "$(STAGING_DIR)" --identifier com.apple.container-installer --install-location /usr/local --version ${RELEASE_VERSION} $(PKG_PATH)
+	@pkgbuild --root "$(STAGING_DIR)" --identifier com.apple.container-installer --install-location /usr/local --version ${RELEASE_VERSION} "$(PKG_UNSIGNED_PATH)"
+	@if [ -n "$(PKG_SIGN_IDENTITY)" ] ; then \
+		echo Signing application installer ; \
+		productsign --sign "$(PKG_SIGN_IDENTITY)" $(PKG_SIGN_TIMESTAMP_OPTS) $(if $(strip $(PKG_SIGN_KEYCHAIN)),--keychain "$(PKG_SIGN_KEYCHAIN)") "$(PKG_UNSIGNED_PATH)" "$(PKG_PATH)" ; \
+		rm -f "$(PKG_UNSIGNED_PATH)" ; \
+	fi
 	@rm -rf "$(STAGING_DIR)"
 
 .PHONY: dsym

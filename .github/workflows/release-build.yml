@@ -14,6 +14,8 @@ jobs:
     uses: ./.github/workflows/common.yml
     with:
       release: true
+      sign_release_artifacts: true
+      notarize_release_artifacts: true
       skip_virtualization_tests: true
       verify_swiftpm_consumer: true
     secrets: inherit

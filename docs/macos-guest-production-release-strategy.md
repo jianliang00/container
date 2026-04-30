@@ -120,7 +120,7 @@ and `/etc/kubernetes/pki/ca.crt`, load the macOS sandbox image, validate PF
 policy, start the core container services through `container system start`, and
 then explicitly start the Kubernetes node services.
 
-Build the package with:
+Local validation can build the package with:
 
 ```sh
 scripts/macos-node-installer/build.sh \
@@ -131,6 +131,39 @@ scripts/macos-node-installer/build.sh \
 Unsigned packages are acceptable for local validation only. Production packages
 must be code signed, product signed, notarized if distributed outside controlled
 infrastructure, and accompanied by checksums, SBOM, and provenance metadata.
+
+Production macOS node packages are published by GitHub Actions, not by a local
+developer machine. The release workflow is `.github/workflows/macos-node-release.yml`.
+It runs on a macOS runner, downloads the kubelet tarball from the Kubernetes
+fork release, imports Developer ID signing material into an ephemeral runner
+keychain, builds the package, verifies the package payload, submits the package
+to Apple notarization, staples the ticket, writes a `.sha256` checksum, uploads
+workflow artifacts, and creates or updates the GitHub Release.
+
+The workflow is intentionally separate from the normal container installer
+release because the macOS node package embeds a forked kubelet artifact and has
+a different artifact name and release cadence. It can be triggered by:
+
+- Manually dispatching `container project - macOS node release` with a
+  `release_tag`, kubelet artifact URL, and default node name.
+- Pushing a tag that matches `container-macos-node-*`.
+
+The container repository must have these GitHub Actions secrets configured:
+
+- `APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64`
+- `APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD`
+- `APPLE_DEVELOPER_ID_APPLICATION_IDENTITY`
+- `APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_P12_BASE64`
+- `APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_PASSWORD`
+- `APPLE_DEVELOPER_ID_INSTALLER_IDENTITY`
+- `APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64`
+- `APP_STORE_CONNECT_API_KEY_ID`
+- `APP_STORE_CONNECT_API_ISSUER_ID`
+
+The `.p12` certificates and App Store Connect `.p8` key are stored as base64
+encoded secret values. The workflow must never write decoded signing material
+outside `RUNNER_TEMP`, and it must rely on GitHub's release artifacts rather
+than locally built packages for distribution.
 
 ## Log Directories
 

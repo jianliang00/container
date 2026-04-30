@@ -563,6 +563,15 @@ log file at:
 The shim bridges these models by writing CRI-formatted records to the kubelet
 path while preserving native core logs.
 
+The Darwin kubelet fork keeps the standard kubelet log directories:
+
+- `/var/log/pods`
+- `/var/log/containers`
+
+These paths are prepared by the production installer. Kubelet startup must not
+derive a Darwin-specific container log directory from `--root-dir` by mutating
+package globals.
+
 Adapter flow:
 
 1. `CreateContainer` records the target CRI log path.

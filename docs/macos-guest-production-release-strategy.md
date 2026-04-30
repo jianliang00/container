@@ -64,6 +64,18 @@ The Darwin kubelet artifact must be built with `CGO_ENABLED=1` because the
 node stats path reads Mach host counters through cgo. A `CGO_ENABLED=0` Darwin
 build is not a production artifact.
 
+## Log Directories
+
+The Darwin kubelet fork uses the standard kubelet CRI log layout:
+
+- `/var/log/pods`
+- `/var/log/containers`
+
+The installer owns creating these directories with root ownership and stable
+permissions before kubelet starts. Kubelet construction must not rewrite log
+directory package globals from `--root-dir`, because that leaks between repeated
+kubelet instances and tests.
+
 ## Rollback Policy
 
 Rollback is node-local and must not require control-plane changes:

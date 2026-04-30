@@ -50,6 +50,16 @@ class TestCLINetwork: CLITest {
             defer {
                 _ = try? run(arguments: networkDeleteArgs)
             }
+
+            let listResult = try? run(arguments: ["network", "ls", "--quiet"])
+            let networkIds =
+                listResult?.output
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter({ !$0.isEmpty })
+                ?? ["OUTPUT MISSING"]
+            #expect(networkIds == networkIds.sorted(), "network IDs should be sorted")
+
             let port = UInt16.random(in: 50000..<60000)
             try doLongRun(
                 name: name,

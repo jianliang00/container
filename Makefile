@@ -31,6 +31,9 @@ BUILD_BIN_DIR = $(shell $(SWIFT) build -c $(BUILD_CONFIGURATION) --show-bin-path
 STAGING_DIR := bin/$(BUILD_CONFIGURATION)/staging/
 PKG_PATH ?= bin/$(BUILD_CONFIGURATION)/container-installer-unsigned.pkg
 PKG_UNSIGNED_PATH := $(if $(strip $(PKG_SIGN_IDENTITY)),$(basename $(PKG_PATH))-unsigned.pkg,$(PKG_PATH))
+MACOS_NODE_KUBELET_ARTIFACT ?=
+MACOS_NODE_NAME ?= macos-node-1
+MACOS_NODE_PKG_PATH ?= bin/$(BUILD_CONFIGURATION)/container-macos-node-$(RELEASE_VERSION)-k8s-v1.27.2.pkg
 DSYM_DIR := bin/$(BUILD_CONFIGURATION)/bundle/container-dSYM
 DSYM_PATH := bin/$(BUILD_CONFIGURATION)/bundle/container-dSYM.zip
 CODESIGN_IDENTITY ?= -
@@ -178,6 +181,21 @@ installer-pkg: $(STAGING_DIR)
 		rm -f "$(PKG_UNSIGNED_PATH)" ; \
 	fi
 	@rm -rf "$(STAGING_DIR)"
+
+.PHONY: macos-node-installer-pkg
+macos-node-installer-pkg:
+	@if [ -z "$(MACOS_NODE_KUBELET_ARTIFACT)" ] ; then \
+		echo "MACOS_NODE_KUBELET_ARTIFACT is required" >&2 ; \
+		exit 2 ; \
+	fi
+	@BUILD_CONFIGURATION="$(BUILD_CONFIGURATION)" RELEASE_VERSION="$(RELEASE_VERSION)" \
+		CODESIGN_IDENTITY="$(CODESIGN_IDENTITY)" CODESIGN_TIMESTAMP_OPTS="$(CODESIGN_TIMESTAMP_OPTS)" \
+		CODESIGN_EXTRA_OPTS="$(CODESIGN_EXTRA_OPTS)" CODESIGN_KEYCHAIN="$(CODESIGN_KEYCHAIN)" \
+		PKG_SIGN_IDENTITY="$(PKG_SIGN_IDENTITY)" PKG_SIGN_TIMESTAMP_OPTS="$(PKG_SIGN_TIMESTAMP_OPTS)" \
+		PKG_SIGN_KEYCHAIN="$(PKG_SIGN_KEYCHAIN)" scripts/macos-node-installer/build.sh \
+		--kubelet-artifact "$(MACOS_NODE_KUBELET_ARTIFACT)" \
+		--node-name "$(MACOS_NODE_NAME)" \
+		--output "$(MACOS_NODE_PKG_PATH)"
 
 .PHONY: dsym
 dsym:

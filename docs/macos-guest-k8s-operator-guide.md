@@ -122,3 +122,32 @@ When the kubelet is connected to the API server and the RuntimeClass object is
 available, static Pod manifests may set `runtimeClassName: macos`. Standalone
 static Pod smoke tests should omit it and rely on the macOS-only CRI shim
 configuration.
+
+## First Rollout Workload Surface
+
+The first production rollout supports a conservative macOS worker-node surface:
+
+| Area | First rollout support |
+| --- | --- |
+| Control plane | Linux control plane only |
+| Node role | macOS worker nodes only |
+| Pod sources | API-backed Pods and kubelet static Pods |
+| Pod shape | One macOS workload container per Pod for the production validation gate |
+| Images | `darwin/arm64` macOS workload images |
+| Logs | `kubectl logs` through CRI log adaptation |
+| Exec | `kubectl exec` and CRI exec streaming |
+| Port-forward | `kubectl port-forward` through the loopback streaming server |
+| Probes | exec, HTTP, and TCP kubelet probes |
+| Mounts | Supported CRI mount subset backed by boot-time `virtiofs` shares |
+| Service | Single-node IPv4 ClusterIP TCP/UDP through `container-kube-proxy-macos`; production release is blocked until this passes real API server validation |
+| NetworkPolicy | Not part of the first production rollout; keep disabled unless a separate validation effort promotes it |
+
+Unsupported in the first production rollout:
+
+- multi-node Service routing
+- NodePort and LoadBalancer
+- dual-stack Service routing
+- session affinity
+- Kubernetes NetworkPolicy
+- Linux mount namespaces, cgroups, seccomp, user namespaces, and mount
+  propagation semantics

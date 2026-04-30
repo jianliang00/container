@@ -205,6 +205,7 @@ let package = Package(
                 "ContainerPlugin",
                 "ContainerResource",
                 "ContainerXPC",
+                "DNSServer",
                 "TerminalProgress",
             ],
             path: "Sources/Services/ContainerAPIService/Client"

@@ -71,6 +71,7 @@ jobs:
           fi
 
           package_version="${release_tag#container-macos-node-}"
+          package_version="${package_version%-k8s-${KUBERNETES_BASELINE}}"
           if [[ "$package_version" == "$release_tag" || -z "$package_version" ]]; then
             package_version="$(git describe --tags --always)"
           fi

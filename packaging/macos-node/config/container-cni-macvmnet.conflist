@@ -1,0 +1,12 @@
+{
+    "cniVersion": "1.1.0",
+    "name": "macvmnet",
+    "plugins": [
+        {
+            "type": "macvmnet",
+            "network": "default",
+            "runtime": "container-runtime-macos",
+            "stateDir": "/var/lib/container/cni/macvmnet"
+        }
+    ]
+}

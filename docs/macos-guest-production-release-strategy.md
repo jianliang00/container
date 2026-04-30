@@ -64,6 +64,74 @@ The Darwin kubelet artifact must be built with `CGO_ENABLED=1` because the
 node stats path reads Mach host counters through cgo. A `CGO_ENABLED=0` Darwin
 build is not a production artifact.
 
+## Kubelet Release Artifact
+
+The Kubernetes fork is responsible for producing the node-side kubelet artifact,
+not the container repo. The fork branch `macos-node/v1.27.2` publishes a GitHub
+Release artifact named:
+
+- `kubelet-darwin-arm64-k8s-v1.27.2-<patch-version>.tar.gz`
+
+That artifact contains:
+
+- `bin/kubelet`
+- `SHA256SUMS`
+- `manifest.json`
+- `LICENSES/kubernetes-LICENSE`
+
+The release workflow must build on a native macOS arm64 runner with
+`CGO_ENABLED=1`, run the Darwin kubelet package tests, and publish the tarball
+plus a `.sha256` checksum. Release metadata records the fork commit, Kubernetes
+baseline, build date, architecture, and cgo state.
+
+Kubelet release tags are immutable. If a bad kubelet build is found, publish a
+new `<patch-version>` and roll nodes forward or back by installing the matching
+macOS node package.
+
+## macOS Node Installer
+
+The container repo owns the full macOS node installer package. The installer
+takes the kubelet tarball from the Kubernetes fork as an input and embeds it
+alongside the container node components:
+
+- `container` and core runtime helpers
+- `container-cri-shim-macos`
+- `container-cni-macvmnet`
+- `container-kube-proxy-macos`
+- optional `container-k8s-networkpolicy-macos` binary, not enabled by default
+- forked `kubelet`
+- kubelet, CRI, CNI, and kube-proxy config templates
+- launchd plists for kubelet, CRI shim, and kube-proxy
+
+The installer package name is:
+
+- `container-macos-node-<container-version>-k8s-v1.27.2.pkg`
+
+The package stages files under system paths such as `/usr/local/bin`,
+`/opt/cni/bin`, `/etc/kubernetes`, `/etc/cni/net.d`,
+`/Library/LaunchDaemons`, `/var/lib/kubelet`, `/var/log/pods`, and
+`/var/log/containers`.
+
+The package does not include cluster credentials or certificates, does not load
+launchd services, and does not enable PF. Operators must install
+`/etc/kubernetes/bootstrap-kubelet.kubeconfig`,
+`/etc/kubernetes/kubelet.kubeconfig`, `/etc/kubernetes/kube-proxy.kubeconfig`,
+and `/etc/kubernetes/pki/ca.crt`, load the macOS sandbox image, validate PF
+policy, start the core container services through `container system start`, and
+then explicitly start the Kubernetes node services.
+
+Build the package with:
+
+```sh
+scripts/macos-node-installer/build.sh \
+  --kubelet-artifact /path/to/kubelet-darwin-arm64-k8s-v1.27.2-1.tar.gz \
+  --node-name macos-node-1
+```
+
+Unsigned packages are acceptable for local validation only. Production packages
+must be code signed, product signed, notarized if distributed outside controlled
+infrastructure, and accompanied by checksums, SBOM, and provenance metadata.
+
 ## Log Directories
 
 The Darwin kubelet fork uses the standard kubelet CRI log layout:

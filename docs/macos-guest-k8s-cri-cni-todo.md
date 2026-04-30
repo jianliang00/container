@@ -162,9 +162,12 @@ Installation and operations:
 
 - [x] Define initial production artifact naming and rollback policy in
   `docs/macos-guest-production-release-strategy.md`.
-- [ ] Build a root-owned installer package for `container`, the CRI shim, CNI
-  plugin, kube-proxy, optional NetworkPolicy controller, kubelet fork,
-  kubeconfigs, RBAC manifests, CNI config, and launchd plists.
+- [x] Add a macOS node installer package build path that embeds the forked
+  Darwin arm64 kubelet artifact with `container`, the CRI shim, CNI plugin,
+  kube-proxy, optional NetworkPolicy controller binary, CNI config, kubelet
+  config, kube-proxy config, and launchd plists.
+- [ ] Add RBAC manifests and operator-facing kubeconfig bootstrap material for
+  kubelet and kube-proxy without embedding cluster credentials in the package.
 - [ ] Add preflight checks for macOS version, virtualization support, PF state,
   required privileges, disk space, network reachability, certificates, and
   existing conflicting launchd or PF configuration.

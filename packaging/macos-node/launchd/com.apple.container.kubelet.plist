@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.apple.container.kubelet</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/kubelet</string>
+        <string>--config</string>
+        <string>/etc/kubernetes/kubelet-config.yaml</string>
+        <string>--kubeconfig</string>
+        <string>/etc/kubernetes/kubelet.kubeconfig</string>
+        <string>--bootstrap-kubeconfig</string>
+        <string>/etc/kubernetes/bootstrap-kubelet.kubeconfig</string>
+        <string>--hostname-override</string>
+        <string>__NODE_NAME__</string>
+        <string>--node-labels</string>
+        <string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true</string>
+        <string>--register-with-taints</string>
+        <string>node.kubernetes.io/macos=true:NoSchedule</string>
+        <string>--root-dir</string>
+        <string>/var/lib/kubelet</string>
+        <string>--pod-infra-container-image</string>
+        <string>localhost/macos-sandbox:latest</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/kubelet.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/kubelet.log</string>
+</dict>
+</plist>

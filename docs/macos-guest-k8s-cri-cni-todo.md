@@ -138,8 +138,10 @@ macOS kubelet fork:
   and keep Pod or workload stats owned by CRI stats calls.
 - [x] Define and test the Darwin CRI sandbox contract instead of relying on a
   PodSandboxConfig with neither Linux nor Windows platform fields.
-- [ ] Remove or isolate global kubelet log-directory mutation so repeated
-  kubelet construction and tests cannot leak state across instances.
+- [x] Remove global kubelet log-directory mutation. The Darwin kubelet fork
+  keeps the standard kubelet log paths (`/var/log/pods` and
+  `/var/log/containers`); production installers must create those directories
+  instead of relying on kubelet construction to rewrite package globals.
 - [ ] Define the Darwin mount and hostutil support matrix, including explicit
   unsupported behavior for Linux mount propagation semantics.
 

@@ -9,6 +9,7 @@ Related docs:
 - [`macos-guest-core-design.md`](./macos-guest-core-design.md)
 - [`macos-guest-networking-design.md`](./macos-guest-networking-design.md)
 - [`macos-guest-networkpolicy-design.md`](./macos-guest-networkpolicy-design.md)
+- [`macos-guest-production-release-strategy.md`](./macos-guest-production-release-strategy.md)
 - [`macos-guest-workload-image-design.md`](./macos-guest-workload-image-design.md)
 
 ## 1. Implementation Capabilities
@@ -108,7 +109,88 @@ Operator docs:
 - [ ] Document NetworkPolicy controller config and supported policy subset.
 - [ ] Document deterministic unsupported behavior for removed features.
 
-## 2. Acceptance Criteria
+## 2. Production Mac Worker Node Readiness
+
+Production scope:
+
+- [x] Keep the Kubernetes control plane on Linux and treat macOS as a worker
+  node pool only.
+- [x] Confirm the supported Kubernetes version, fork branch, rebase cadence, and
+  rollback policy for the macOS kubelet fork: production baseline is Kubernetes
+  `v1.27.2`; the fork branch is `macos-node/v1.27.2`.
+- [ ] Confirm the macOS workload scheduling contract: RuntimeClass,
+  `kubernetes.io/os=darwin`, a dedicated macOS node label, taint/toleration, and
+  admission rules that keep ordinary Pods off macOS nodes.
+- [ ] Confirm the Pod OS contract for macOS workloads. The current operating
+  assumption is that macOS Pods do not set `.spec.os.name`, and scheduling is
+  controlled by node labels, RuntimeClass, and admission policy.
+- [ ] Define the supported workload surface for the first production rollout:
+  static Pods, API-backed Pods, probes, logs, exec, port-forward, mounts,
+  Service, and NetworkPolicy support level.
+
+macOS kubelet fork:
+
+- [x] Create `macos-node/v1.27.2` from upstream Kubernetes tag `v1.27.2` and
+  port the current Darwin kubelet patches onto that branch.
+- [x] Fix Darwin failures in `go test ./pkg/kubelet/kuberuntime` and
+  `go test ./pkg/kubelet`.
+- [x] Replace fake or synthetic cAdvisor stats with real macOS node/root stats,
+  and keep Pod or workload stats owned by CRI stats calls.
+- [x] Define and test the Darwin CRI sandbox contract instead of relying on a
+  PodSandboxConfig with neither Linux nor Windows platform fields.
+- [ ] Remove or isolate global kubelet log-directory mutation so repeated
+  kubelet construction and tests cannot leak state across instances.
+- [ ] Define the Darwin mount and hostutil support matrix, including explicit
+  unsupported behavior for Linux mount propagation semantics.
+
+Node components and dataplane:
+
+- [ ] Finish CNI 1.1.0 command acceptance for `VERSION`, `STATUS`, `ADD`,
+  `CHECK`, `DEL`, and `GC`, including idempotent cleanup and restart recovery.
+- [ ] Validate `container-kube-proxy-macos` with a real API server and
+  single-node IPv4 ClusterIP TCP/UDP Service traffic.
+- [ ] Decide whether NetworkPolicy is required for the first production rollout.
+  If required, finish Kubernetes API watches and ingress/egress e2e validation;
+  if not required, document NetworkPolicy as unsupported for the rollout.
+- [ ] Decide the kube-proxy scope beyond the first rollout: watch-based updates,
+  multi-node routing, NodePort, LoadBalancer, session affinity, and dual-stack.
+
+Installation and operations:
+
+- [x] Define initial production artifact naming and rollback policy in
+  `docs/macos-guest-production-release-strategy.md`.
+- [ ] Build a root-owned installer package for `container`, the CRI shim, CNI
+  plugin, kube-proxy, optional NetworkPolicy controller, kubelet fork,
+  kubeconfigs, RBAC manifests, CNI config, and launchd plists.
+- [ ] Add preflight checks for macOS version, virtualization support, PF state,
+  required privileges, disk space, network reachability, certificates, and
+  existing conflicting launchd or PF configuration.
+- [ ] Add uninstall, upgrade, rollback, and node drain procedures that preserve
+  user data and restore PF configuration safely.
+- [ ] Add operator health checks for launchd services, kubelet Node readiness,
+  CRI socket readiness, CNI lease state, kube-proxy PF anchor state, and policy
+  reconciliation state.
+- [ ] Add production logging and metrics for kubelet fork health, CRI/CNI
+  lifecycle, stream sessions, kube-proxy reconciliation, policy reconciliation,
+  and cleanup failures.
+- [ ] Define code signing, notarization, SBOM, image signing, registry, and
+  release artifact provenance requirements.
+
+Production validation:
+
+- [ ] Run API-backed Pod and static Pod lifecycle e2e across create, start,
+  stop, delete, restart, and node reboot.
+- [ ] Run logs, exec, port-forward, exec/http/tcp probe, mount, and cleanup e2e
+  under concurrent workload churn.
+- [ ] Run CNI crash/restart recovery, duplicate `DEL`, stale lease cleanup, and
+  daemon restart recovery tests.
+- [ ] Run Service reachability, optional NetworkPolicy allow/deny, kubelet
+  restart, CRI shim restart, kube-proxy restart, API server restart, and host
+  reboot tests.
+- [ ] Run at least one multi-day soak test with repeated Pod create/delete,
+  stream sessions, Service traffic, and cleanup verification.
+
+## 3. Acceptance Criteria
 
 - [x] `container-cri-shim-macos --config <path>` starts and listens on the
   configured Unix socket.

@@ -5,6 +5,7 @@ Progress tracker for the current bounded CRI/CNI/NetworkPolicy delivery.
 Related docs:
 
 - [`macos-guest-k8s-cri-cni-implementation-plan.md`](./macos-guest-k8s-cri-cni-implementation-plan.md)
+- [`macos-guest-k8s-operator-guide.md`](./macos-guest-k8s-operator-guide.md)
 - [`macos-guest-k8s-cri-cni-roadmap.md`](./macos-guest-k8s-cri-cni-roadmap.md)
 - [`macos-guest-core-design.md`](./macos-guest-core-design.md)
 - [`macos-guest-networking-design.md`](./macos-guest-networking-design.md)
@@ -102,7 +103,7 @@ Operator docs:
 
 - [ ] Document local `crictl` commands.
 - [ ] Document local kubelet launch command.
-- [ ] Document RuntimeClass, `kubernetes.io/os=darwin`, node label, taint,
+- [x] Document RuntimeClass, `kubernetes.io/os=darwin`, node label, taint,
   toleration, and static Pod examples.
 - [ ] Document kube-proxy setup for single-node Service reachability.
 - [ ] Document sample CNI config installation.
@@ -118,10 +119,10 @@ Production scope:
 - [x] Confirm the supported Kubernetes version, fork branch, rebase cadence, and
   rollback policy for the macOS kubelet fork: production baseline is Kubernetes
   `v1.27.2`; the fork branch is `macos-node/v1.27.2`.
-- [ ] Confirm the macOS workload scheduling contract: RuntimeClass,
+- [x] Confirm the macOS workload scheduling contract: RuntimeClass,
   `kubernetes.io/os=darwin`, a dedicated macOS node label, taint/toleration, and
   admission rules that keep ordinary Pods off macOS nodes.
-- [ ] Confirm the Pod OS contract for macOS workloads. The current operating
+- [x] Confirm the Pod OS contract for macOS workloads. The current operating
   assumption is that macOS Pods do not set `.spec.os.name`, and scheduling is
   controlled by node labels, RuntimeClass, and admission policy.
 - [ ] Define the supported workload surface for the first production rollout:

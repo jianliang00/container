@@ -1,0 +1,297 @@
+name: container project - macOS node release
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub release tag to create or update"
+        required: true
+        type: string
+      kubelet_artifact_url:
+        description: "URL of the kubelet-darwin-arm64 tar.gz artifact"
+        required: true
+        default: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-3/kubelet-darwin-arm64-k8s-v1.27.2-3.tar.gz"
+        type: string
+      node_name:
+        description: "Default node name rendered into packaged templates"
+        required: true
+        default: "macos-node-1"
+        type: string
+      draft:
+        description: "Create the GitHub release as a draft"
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "container-macos-node-*"
+
+jobs:
+  build-sign-notarize-release:
+    name: Build, sign, notarize, and publish macOS node installer
+    timeout-minutes: 90
+    runs-on: macos-26
+    permissions:
+      contents: write
+      packages: read
+    env:
+      KUBERNETES_BASELINE: v1.27.2
+      DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-3/kubelet-darwin-arm64-k8s-v1.27.2-3.tar.gz"
+      DEFAULT_NODE_NAME: macos-node-1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release inputs
+        run: |
+          set -euo pipefail
+
+          release_tag="${GITHUB_REF_NAME}"
+          kubelet_artifact_url="${DEFAULT_KUBELET_ARTIFACT_URL}"
+          node_name="${DEFAULT_NODE_NAME}"
+          draft="false"
+          prerelease="false"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            release_tag="${{ inputs.release_tag }}"
+            kubelet_artifact_url="${{ inputs.kubelet_artifact_url }}"
+            node_name="${{ inputs.node_name }}"
+            draft="${{ inputs.draft }}"
+            prerelease="${{ inputs.prerelease }}"
+          fi
+
+          package_version="${release_tag#container-macos-node-}"
+          if [[ "$package_version" == "$release_tag" || -z "$package_version" ]]; then
+            package_version="$(git describe --tags --always)"
+          fi
+
+          package_name="container-macos-node-${package_version}-k8s-${KUBERNETES_BASELINE}.pkg"
+          package_path="bin/release/${package_name}"
+          kubelet_artifact_path="${RUNNER_TEMP}/$(basename "$kubelet_artifact_url")"
+
+          {
+            echo "RELEASE_TAG=${release_tag}"
+            echo "PACKAGE_VERSION=${package_version}"
+            echo "PACKAGE_NAME=${package_name}"
+            echo "PACKAGE_PATH=${package_path}"
+            echo "KUBELET_ARTIFACT_URL=${kubelet_artifact_url}"
+            echo "KUBELET_ARTIFACT_PATH=${kubelet_artifact_path}"
+            echo "MACOS_NODE_NAME=${node_name}"
+            echo "RELEASE_DRAFT=${draft}"
+            echo "RELEASE_PRERELEASE=${prerelease}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate signing and notarization secrets
+        env:
+          APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}
+          APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          APP_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+          INSTALLER_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_P12_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_PASSWORD }}
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+
+          required_values=(
+            APP_CERTIFICATE
+            APP_CERTIFICATE_PASSWORD
+            APP_IDENTITY
+            INSTALLER_CERTIFICATE
+            INSTALLER_CERTIFICATE_PASSWORD
+            INSTALLER_IDENTITY
+            APP_STORE_CONNECT_API_KEY
+            APP_STORE_CONNECT_API_KEY_ID
+            APP_STORE_CONNECT_API_ISSUER_ID
+          )
+
+          for value_name in "${required_values[@]}"; do
+            if [[ -z "${!value_name}" ]]; then
+              echo "::error::Missing required secret ${value_name}"
+              exit 1
+            fi
+          done
+
+      - name: Import Apple Developer ID certificates
+        env:
+          APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}
+          APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          APP_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+          INSTALLER_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_P12_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERTIFICATE_PASSWORD }}
+          INSTALLER_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_IDENTITY }}
+        run: |
+          set -euo pipefail
+
+          keychain_path="${RUNNER_TEMP}/container-macos-node-release.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          app_certificate_path="${RUNNER_TEMP}/developer-id-application.p12"
+          installer_certificate_path="${RUNNER_TEMP}/developer-id-installer.p12"
+
+          python3 -c 'import base64, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))' "${app_certificate_path}" <<< "${APP_CERTIFICATE}"
+          python3 -c 'import base64, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))' "${installer_certificate_path}" <<< "${INSTALLER_CERTIFICATE}"
+
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          security default-keychain -d user -s "${keychain_path}"
+
+          security import "${app_certificate_path}" -k "${keychain_path}" -P "${APP_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/productsign -T /usr/bin/xcrun
+          security import "${installer_certificate_path}" -k "${keychain_path}" -P "${INSTALLER_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/productsign -T /usr/bin/xcrun
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
+          security find-identity -v -p codesigning "${keychain_path}"
+          security find-identity -v -p basic "${keychain_path}"
+
+          {
+            echo "CODESIGN_IDENTITY=${APP_IDENTITY}"
+            echo "CODESIGN_TIMESTAMP_OPTS=--timestamp"
+            echo "CODESIGN_EXTRA_OPTS=--options runtime"
+            echo "CODESIGN_KEYCHAIN=${keychain_path}"
+            echo "PKG_SIGN_IDENTITY=${INSTALLER_IDENTITY}"
+            echo "PKG_SIGN_TIMESTAMP_OPTS=--timestamp"
+            echo "PKG_SIGN_KEYCHAIN=${keychain_path}"
+          } >> "$GITHUB_ENV"
+
+      - name: Download kubelet artifact
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-delay 5 \
+            --output "${KUBELET_ARTIFACT_PATH}" \
+            "${KUBELET_ARTIFACT_URL}"
+          shasum -a 256 "${KUBELET_ARTIFACT_PATH}"
+
+      - name: Build signed macOS node installer
+        run: |
+          set -euo pipefail
+          make macos-node-installer-pkg \
+            BUILD_CONFIGURATION=release \
+            RELEASE_VERSION="${PACKAGE_VERSION}" \
+            MACOS_NODE_KUBELET_ARTIFACT="${KUBELET_ARTIFACT_PATH}" \
+            MACOS_NODE_NAME="${MACOS_NODE_NAME}" \
+            MACOS_NODE_PKG_PATH="${PACKAGE_PATH}"
+
+      - name: Verify signed installer package
+        run: |
+          set -euo pipefail
+          pkgutil --check-signature "${PACKAGE_PATH}"
+
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "${work_dir}"' EXIT
+          pkgutil --expand-full "${PACKAGE_PATH}" "${work_dir}/pkg"
+
+          required_payload_paths=(
+            "usr/local/bin/container-cri-shim-macos"
+            "usr/local/bin/container-kube-proxy-macos"
+            "usr/local/bin/kubelet"
+            "etc/kubernetes/kubelet-config.yaml"
+            "Library/LaunchDaemons/com.apple.container.kubelet.plist"
+            "opt/cni/bin/container-cni-macvmnet"
+            "usr/local/share/container-macos-node/release-manifest.json"
+          )
+
+          for payload_path in "${required_payload_paths[@]}"; do
+            test -e "${work_dir}/pkg/Payload/${payload_path}"
+          done
+
+          signed_payload_binaries=(
+            "usr/local/bin/container-cri-shim-macos"
+            "usr/local/bin/container-kube-proxy-macos"
+            "usr/local/bin/kubelet"
+            "opt/cni/bin/container-cni-macvmnet"
+          )
+
+          for binary_path in "${signed_payload_binaries[@]}"; do
+            codesign --verify --strict --verbose=2 "${work_dir}/pkg/Payload/${binary_path}"
+            codesign -dv --verbose=2 "${work_dir}/pkg/Payload/${binary_path}" 2>&1 | grep "Authority=Developer ID Application"
+          done
+
+      - name: Notarize and staple installer package
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+
+          api_key_path="${RUNNER_TEMP}/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          python3 -c 'import base64, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))' "${api_key_path}" <<< "${APP_STORE_CONNECT_API_KEY}"
+
+          xcrun notarytool submit "${PACKAGE_PATH}" \
+            --key "${api_key_path}" \
+            --key-id "${APP_STORE_CONNECT_API_KEY_ID}" \
+            --issuer "${APP_STORE_CONNECT_API_ISSUER_ID}" \
+            --wait
+
+          xcrun stapler staple "${PACKAGE_PATH}"
+          xcrun stapler validate "${PACKAGE_PATH}"
+          spctl -a -vv --type install "${PACKAGE_PATH}"
+
+      - name: Create checksums and release notes
+        run: |
+          set -euo pipefail
+          shasum -a 256 "${PACKAGE_PATH}" > "${PACKAGE_PATH}.sha256"
+          cat > release-notes.md <<EOF
+          macOS Kubernetes worker-node installer.
+
+          - Container commit: ${GITHUB_SHA}
+          - Kubernetes baseline: ${KUBERNETES_BASELINE}
+          - Kubelet artifact: ${KUBELET_ARTIFACT_URL}
+          - Node template name: ${MACOS_NODE_NAME}
+          - Package: ${PACKAGE_NAME}
+          - Signing: Developer ID Application and Developer ID Installer
+          - Notarization: stapled
+          EOF
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: container-macos-node-installer
+          path: |
+            ${{ env.PACKAGE_PATH }}
+            ${{ env.PACKAGE_PATH }}.sha256
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_args=(
+            gh release create "${RELEASE_TAG}"
+            "${PACKAGE_PATH}"
+            "${PACKAGE_PATH}.sha256"
+            --repo "${GITHUB_REPOSITORY}"
+            --target "${GITHUB_SHA}"
+            --title "${RELEASE_TAG}"
+            --notes-file release-notes.md
+          )
+
+          if [[ "${RELEASE_DRAFT}" == "true" ]]; then
+            release_args+=(--draft)
+          fi
+          if [[ "${RELEASE_PRERELEASE}" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              "${PACKAGE_PATH}" \
+              "${PACKAGE_PATH}.sha256" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            "${release_args[@]}"
+          fi

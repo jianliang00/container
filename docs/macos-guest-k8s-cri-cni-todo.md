@@ -179,8 +179,10 @@ Installation and operations:
 - [ ] Add production logging and metrics for kubelet fork health, CRI/CNI
   lifecycle, stream sessions, kube-proxy reconciliation, policy reconciliation,
   and cleanup failures.
-- [ ] Define code signing, notarization, SBOM, image signing, registry, and
-  release artifact provenance requirements.
+- [x] Add a GitHub Actions release path for signed and notarized macOS node
+  installer packages that embed the forked kubelet artifact.
+- [ ] Define SBOM, image signing, registry, and release artifact provenance
+  requirements.
 
 Production validation:
 

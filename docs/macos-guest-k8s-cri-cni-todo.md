@@ -125,7 +125,7 @@ Production scope:
 - [x] Confirm the Pod OS contract for macOS workloads. The current operating
   assumption is that macOS Pods do not set `.spec.os.name`, and scheduling is
   controlled by node labels, RuntimeClass, and admission policy.
-- [ ] Define the supported workload surface for the first production rollout:
+- [x] Define the supported workload surface for the first production rollout:
   static Pods, API-backed Pods, probes, logs, exec, port-forward, mounts,
   Service, and NetworkPolicy support level.
 
@@ -152,7 +152,7 @@ Node components and dataplane:
   `CHECK`, `DEL`, and `GC`, including idempotent cleanup and restart recovery.
 - [ ] Validate `container-kube-proxy-macos` with a real API server and
   single-node IPv4 ClusterIP TCP/UDP Service traffic.
-- [ ] Decide whether NetworkPolicy is required for the first production rollout.
+- [x] Decide whether NetworkPolicy is required for the first production rollout.
   If required, finish Kubernetes API watches and ingress/egress e2e validation;
   if not required, document NetworkPolicy as unsupported for the rollout.
 - [ ] Decide the kube-proxy scope beyond the first rollout: watch-based updates,

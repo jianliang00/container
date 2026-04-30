@@ -405,6 +405,30 @@ allocation comes from the configured vmnet network.
 Unsupported Linux-specific request fields must fail before sandbox or workload
 creation when accepting them would make Pod behavior misleading.
 
+The macOS kubelet fork uses a CRI v1.27.2-compatible Darwin extension contract
+instead of populating Linux or Windows platform fields. `PodSandboxConfig` and
+`ContainerConfig` sent to the shim must leave `linux` and `windows` unset and
+must include these kubelet-owned annotations:
+
+- `io.kubernetes.cri.macos/platform=darwin`
+- `io.kubernetes.cri.macos/pod-sandbox-config-version=v1alpha1` on
+  `PodSandboxConfig`
+- `io.kubernetes.cri.macos/container-config-version=v1alpha1` on
+  `ContainerConfig`
+
+`UpdateContainerResources` sends an empty platform resource body on Darwin.
+The shim accepts it as a deterministic no-op for the first production rollout;
+in-place CPU and memory resize are not part of the supported macOS workload
+surface until the CRI fork gains typed Darwin resource fields or an explicitly
+versioned resource extension.
+
+The Darwin kubelet cAdvisor implementation must not synthesize healthy stats.
+It reads real host CPU counters from Mach `host_processor_info`, real host
+memory counters from Mach `host_statistics64`, filesystem capacity and usage
+from `statfs`, and process count from `kern.proc.all`. cAdvisor is the source
+for node/root filesystem and host-level CPU/memory stats only; Pod sandbox and
+workload-level stats are owned by the CRI shim stats calls.
+
 ## 9. ImageService Mapping
 
 | CRI call | Shim behavior |

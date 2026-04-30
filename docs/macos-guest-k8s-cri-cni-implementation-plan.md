@@ -645,6 +645,15 @@ Supported CRI mount subset:
 - image mounts, SELinux relabel, ID-mapped mounts, and recursive read-only
   mounts are rejected
 
+Darwin kubelet mount and host utility matrix:
+
+| Area | Supported behavior | Unsupported behavior |
+| --- | --- | --- |
+| kubelet root dir setup | Create kubelet root, pod, plugin, plugin registration, pod resource, checkpoint, and log directories | Linux `rshared` propagation setup is skipped on Darwin |
+| `hostutil` path checks | File type, path existence, symlink evaluation, owner, mode, mount refs, and device-path classification from Darwin stat data | `MakeRShared` returns deterministic unsupported; SELinux support and mount context are absent |
+| `mount-utils` inspection | Mount table listing from `getfsstat(2)`, mount-point checks, mount refs, and safe cleanup `Unmount` for real mount points | `Mount`, `MountSensitive`, systemd mount variants, format-and-mount, and Linux propagation semantics |
+| Kubernetes volumes | Volumes that kubelet can materialize as host directories and pass through CRI mounts before VM boot | Volume plugins requiring host bind mounts, device mounts, attach/detach device staging, mount propagation, or Linux namespaces |
+
 Important limitation:
 
 - the Pod sandbox is one macOS VM

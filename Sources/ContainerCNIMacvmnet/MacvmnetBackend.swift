@@ -18,6 +18,7 @@ import ContainerAPIClient
 import ContainerNetworkServiceClient
 import ContainerResource
 import ContainerSandboxServiceClient
+import ContainerizationError
 import Foundation
 
 public protocol MacvmnetNetworkHealthClient: Sendable {
@@ -155,9 +156,16 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
 
     public func release(_ plan: MacvmnetOperationPlan) async throws {
         let identity = try requireAttachmentIdentity(plan)
-        let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
-        try await client.releaseSandboxNetwork()
-        try makeAttachmentLedger(plan).remove(identity: identity, networkName: plan.networkName)
+        let ledger = makeAttachmentLedger(plan)
+        do {
+            let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
+            try await client.releaseSandboxNetwork()
+        } catch {
+            guard Self.isAlreadyGone(error) else {
+                throw error
+            }
+        }
+        try ledger.remove(identity: identity, networkName: plan.networkName)
     }
 
     public func garbageCollect(_ plan: MacvmnetOperationPlan) async throws {
@@ -166,10 +174,23 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
             .filter { !plan.validAttachments.contains($0.identity) }
 
         for record in staleRecords {
-            let client = try await makeSandboxClient(record.identity.containerID, plan.runtimeName)
-            try await client.releaseSandboxNetwork()
+            do {
+                let client = try await makeSandboxClient(record.identity.containerID, plan.runtimeName)
+                try await client.releaseSandboxNetwork()
+            } catch {
+                guard Self.isAlreadyGone(error) else {
+                    throw error
+                }
+            }
             try ledger.remove(identity: record.identity, networkName: record.networkName)
         }
+    }
+
+    private static func isAlreadyGone(_ error: Error) -> Bool {
+        guard let error = error as? ContainerizationError else {
+            return false
+        }
+        return error.code == .notFound
     }
 
     private func requireAttachmentIdentity(_ plan: MacvmnetOperationPlan) throws -> MacvmnetAttachmentIdentity {

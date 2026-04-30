@@ -16,6 +16,7 @@
 
 import ContainerResource
 import ContainerSandboxServiceClient
+import ContainerizationError
 import ContainerizationExtras
 import Foundation
 import Testing
@@ -174,6 +175,39 @@ struct MacvmnetBackendTests {
         #expect(ledger.recordsByNetwork["default"]?.isEmpty == true)
     }
 
+    @Test func liveBackendDeleteIsIdempotentWhenSandboxIsAlreadyGone() async throws {
+        let identity = MacvmnetAttachmentIdentity(containerID: "sandbox-1", ifName: "eth0")
+        let attachment = try makeAttachment(
+            network: "default",
+            hostname: "sandbox-1",
+            ipv4Address: "192.168.64.2/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let ledger = FakeMacvmnetAttachmentLedger(
+            recordsByNetwork: [
+                "default": [
+                    MacvmnetAttachmentRecord(
+                        identity: identity,
+                        networkName: "default",
+                        result: CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: nil)
+                    )
+                ]
+            ])
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: { sandboxID, _ in
+                throw ContainerizationError(.notFound, message: "container with ID \(sandboxID) not found")
+            },
+            makeAttachmentLedger: { _ in ledger }
+        )
+        let plan = try makePlan(command: .delete, sandbox: nil)
+
+        try await backend.release(plan)
+
+        #expect(ledger.recordsByNetwork["default"]?.isEmpty == true)
+    }
+
     @Test func liveBackendStatusChecksNetworkState() async throws {
         let client = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
         let backend = MacvmnetLiveBackend { _ in client }
@@ -236,6 +270,59 @@ struct MacvmnetBackendTests {
 
         #expect(sandboxFactory.requests == [.init(sandboxID: "sandbox-stale", runtimeName: CNISpec.defaultRuntimeName)])
         #expect(staleSandboxClient.releaseRequests == 1)
+        #expect(liveSandboxClient.releaseRequests == 0)
+        #expect(ledger.recordsByNetwork["default"]?.map(\.identity) == [liveIdentity])
+    }
+
+    @Test func liveBackendGarbageCollectDropsMissingSandboxLedgerRecords() async throws {
+        let staleIdentity = MacvmnetAttachmentIdentity(containerID: "sandbox-stale", ifName: "eth0")
+        let liveIdentity = MacvmnetAttachmentIdentity(containerID: "sandbox-live", ifName: "eth0")
+        let staleAttachment = try makeAttachment(
+            network: "default",
+            hostname: "sandbox-stale",
+            ipv4Address: "192.168.64.21/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let liveAttachment = try makeAttachment(
+            network: "default",
+            hostname: "sandbox-live",
+            ipv4Address: "192.168.64.22/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let liveSandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [liveAttachment])
+        )
+        let ledger = FakeMacvmnetAttachmentLedger(
+            recordsByNetwork: [
+                "default": [
+                    MacvmnetAttachmentRecord(
+                        identity: staleIdentity,
+                        networkName: "default",
+                        result: CNIResult(attachment: staleAttachment, interfaceName: staleIdentity.ifName, sandbox: nil)
+                    ),
+                    MacvmnetAttachmentRecord(
+                        identity: liveIdentity,
+                        networkName: "default",
+                        result: CNIResult(attachment: liveAttachment, interfaceName: liveIdentity.ifName, sandbox: nil)
+                    ),
+                ]
+            ])
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: { sandboxID, runtimeName in
+                if sandboxID == "sandbox-stale" {
+                    throw ContainerizationError(.notFound, message: "container with ID \(sandboxID) not found")
+                }
+                #expect(runtimeName == CNISpec.defaultRuntimeName)
+                return liveSandboxClient
+            },
+            makeAttachmentLedger: { _ in ledger }
+        )
+        let plan = MacvmnetOperationPlan(request: try makeGCRequest(validAttachments: [liveIdentity]))
+
+        try await backend.garbageCollect(plan)
+
         #expect(liveSandboxClient.releaseRequests == 0)
         #expect(ledger.recordsByNetwork["default"]?.map(\.identity) == [liveIdentity])
     }

@@ -147,7 +147,7 @@ macOS kubelet fork:
 
 Node components and dataplane:
 
-- [ ] Finish CNI 1.1.0 command acceptance for `VERSION`, `STATUS`, `ADD`,
+- [x] Finish CNI 1.1.0 command acceptance for `VERSION`, `STATUS`, `ADD`,
   `CHECK`, `DEL`, and `GC`, including idempotent cleanup and restart recovery.
 - [ ] Validate `container-kube-proxy-macos` with a real API server and
   single-node IPv4 ClusterIP TCP/UDP Service traffic.

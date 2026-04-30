@@ -198,6 +198,7 @@ let package = Package(
         .target(
             name: "ContainerCNIMacvmnet",
             dependencies: [
+                .product(name: "Containerization", package: "containerization"),
                 "ContainerAPIClient",
                 "ContainerNetworkServiceClient",
                 "ContainerResource",

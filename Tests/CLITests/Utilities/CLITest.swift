@@ -46,9 +46,8 @@ class CLITest {
 
     struct NetworkInspectOutput: Codable {
         let id: String
-        let state: String
         let config: NetworkConfiguration
-        let status: NetworkStatus?
+        let status: NetworkStatus
     }
 
     let testName: String

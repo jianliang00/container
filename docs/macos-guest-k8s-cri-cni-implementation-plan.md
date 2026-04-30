@@ -665,6 +665,9 @@ Important limitation:
 
 Because this is an experimental macOS node path, workloads must opt in.
 
+Operator-facing manifests and examples are maintained in
+[`macos-guest-k8s-operator-guide.md`](./macos-guest-k8s-operator-guide.md).
+
 Recommended node setup:
 
 - label: `apple.com/macos-container=true`

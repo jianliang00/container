@@ -142,7 +142,7 @@ macOS kubelet fork:
   keeps the standard kubelet log paths (`/var/log/pods` and
   `/var/log/containers`); production installers must create those directories
   instead of relying on kubelet construction to rewrite package globals.
-- [ ] Define the Darwin mount and hostutil support matrix, including explicit
+- [x] Define the Darwin mount and hostutil support matrix, including explicit
   unsupported behavior for Linux mount propagation semantics.
 
 Node components and dataplane:

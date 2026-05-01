@@ -38,6 +38,7 @@ public enum MacOSKubeadmAction: Sendable, Equatable {
     case createDirectory(path: String, mode: Int)
     case copyFile(source: String, destination: String, mode: Int, sensitive: Bool)
     case writeFile(path: String, contents: String, mode: Int, sensitive: Bool)
+    case removePath(path: String, recursive: Bool, bestEffort: Bool, sensitive: Bool)
     case runCommand(arguments: [String], bestEffort: Bool)
     case waitForPath(path: String, timeoutSeconds: Int)
 
@@ -53,6 +54,15 @@ public enum MacOSKubeadmAction: Sendable, Equatable {
             return sensitive
                 ? "write sensitive file \(path) mode \(String(mode, radix: 8))"
                 : "write file \(path) mode \(String(mode, radix: 8))"
+        case .removePath(let path, let recursive, let bestEffort, let sensitive):
+            var description = sensitive ? "remove sensitive path \(path)" : "remove \(path)"
+            if recursive {
+                description += " recursively"
+            }
+            if bestEffort {
+                description += " (best effort)"
+            }
+            return description
         case .runCommand(let arguments, let bestEffort):
             let command = Self.shellEscaped(arguments)
             return bestEffort ? "\(command) (best effort)" : command
@@ -230,6 +240,86 @@ public enum MacOSKubeadmPlanner {
         return MacOSKubeadmPlan(steps: steps)
     }
 
+    public static func resetPlan(options: MacOSKubeadmResetOptions) throws -> MacOSKubeadmPlan {
+        try validate(options)
+
+        var steps = [
+            MacOSKubeadmStep(
+                message: "stop kubelet launchd job if present",
+                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kubelet"], bestEffort: true)
+            ),
+            MacOSKubeadmStep(
+                message: "stop kube-proxy launchd job if present",
+                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kube-proxy-macos"], bestEffort: true)
+            ),
+            MacOSKubeadmStep(
+                message: "stop CRI shim launchd job if present",
+                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.cri-shim-macos"], bestEffort: true)
+            ),
+            MacOSKubeadmStep(
+                message: "flush kube-proxy PF anchor if present",
+                action: .runCommand(arguments: ["/sbin/pfctl", "-a", "com.apple.container.kube-proxy", "-F", "all"], bestEffort: true)
+            ),
+        ]
+
+        let generatedPaths: [(path: String, recursive: Bool, sensitive: Bool)] = [
+            ("/Library/LaunchDaemons/com.apple.container.kubelet.plist", false, false),
+            ("/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist", false, false),
+            ("/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist", false, false),
+            ("/etc/kubernetes/bootstrap-kubelet.kubeconfig", false, true),
+            ("/etc/kubernetes/kubelet.kubeconfig", false, true),
+            ("/etc/kubernetes/kube-proxy.kubeconfig", false, true),
+            ("/etc/kubernetes/kubelet-config.yaml", false, false),
+            ("/etc/kubernetes/container-cri-shim-macos-config.json", false, false),
+            ("/etc/kubernetes/kube-proxy.conf", false, false),
+            ("/etc/kubernetes/pki/ca.crt", false, false),
+            ("/etc/cni/net.d/10-macvmnet.conflist", false, false),
+            ("/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml", false, false),
+        ]
+
+        for entry in generatedPaths {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "remove \(entry.path)",
+                    action: .removePath(
+                        path: options.rooted(entry.path),
+                        recursive: entry.recursive,
+                        bestEffort: true,
+                        sensitive: entry.sensitive
+                    )
+                )
+            )
+        }
+
+        if options.purgeState {
+            let statePaths = [
+                "/var/lib/kubelet",
+                "/var/lib/container/cri-shim-macos",
+                "/var/lib/container/cni/macvmnet",
+                "/var/log/pods",
+                "/var/log/containers",
+                "/var/log/kubelet.log",
+                "/var/log/container-cri-shim-macos.log",
+                "/var/log/container-kube-proxy-macos.log",
+            ]
+            for path in statePaths {
+                steps.append(
+                    MacOSKubeadmStep(
+                        message: "purge \(path)",
+                        action: .removePath(
+                            path: options.rooted(path),
+                            recursive: true,
+                            bestEffort: true,
+                            sensitive: false
+                        )
+                    )
+                )
+            }
+        }
+
+        return MacOSKubeadmPlan(steps: steps)
+    }
+
     private static func validate(_ options: MacOSKubeadmJoinOptions) throws {
         guard ["https", "http"].contains(options.apiServer.scheme?.lowercased() ?? "") else {
             throw MacOSKubeadmError.invalidInput("--apiserver must use http or https")
@@ -254,6 +344,18 @@ public enum MacOSKubeadmPlanner {
         }
         if options.startServices && !options.rootPrefix.isEmpty && !options.dryRun {
             throw MacOSKubeadmError.invalidInput("--install-root cannot be combined with service start; pass --skip-start")
+        }
+    }
+
+    private static func validate(_ options: MacOSKubeadmResetOptions) throws {
+        guard options.installRoot.hasPrefix("/") else {
+            throw MacOSKubeadmError.invalidInput("--install-root must be an absolute path")
+        }
+        if !options.dryRun && !options.force {
+            throw MacOSKubeadmError.invalidInput("reset requires --force unless --dry-run is set")
+        }
+        if !options.rootPrefix.isEmpty && !options.dryRun {
+            throw MacOSKubeadmError.invalidInput("--install-root cannot be used for a real reset; pass --dry-run")
         }
     }
 

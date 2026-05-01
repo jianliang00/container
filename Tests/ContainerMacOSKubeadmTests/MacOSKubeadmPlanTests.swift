@@ -88,6 +88,88 @@ struct MacOSKubeadmPlanTests {
         #expect(waitIndex < kubeletIndex)
     }
 
+    @Test func resetRequiresForceUnlessDryRun() throws {
+        #expect(throws: MacOSKubeadmError.invalidInput("reset requires --force unless --dry-run is set")) {
+            try MacOSKubeadmPlanner.resetPlan(
+                options: MacOSKubeadmResetOptions(
+                    installRoot: "/",
+                    dryRun: false
+                )
+            )
+        }
+
+        let dryRunPlan = try MacOSKubeadmPlanner.resetPlan(
+            options: MacOSKubeadmResetOptions(
+                installRoot: "/tmp/macos-node",
+                dryRun: true
+            )
+        )
+        #expect(!dryRunPlan.steps.isEmpty)
+    }
+
+    @Test func resetStopsServicesBeforeRemovingConfiguration() throws {
+        let plan = try MacOSKubeadmPlanner.resetPlan(
+            options: MacOSKubeadmResetOptions(
+                installRoot: "/",
+                force: true
+            )
+        )
+        let descriptions = plan.steps.map(\.message)
+
+        let stopKubeletIndex = try #require(descriptions.firstIndex(of: "stop kubelet launchd job if present"))
+        let firstRemoveIndex = try #require(descriptions.firstIndex { $0.hasPrefix("remove ") })
+
+        #expect(stopKubeletIndex < firstRemoveIndex)
+    }
+
+    @Test func resetPurgeStateRemovesRuntimeStateRecursively() throws {
+        let plan = try MacOSKubeadmPlanner.resetPlan(
+            options: MacOSKubeadmResetOptions(
+                installRoot: "/tmp/macos-node",
+                purgeState: true,
+                dryRun: true
+            )
+        )
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .removePath(let path, let recursive, let bestEffort, let sensitive) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/kubelet"
+                    && recursive
+                    && bestEffort
+                    && !sensitive
+            })
+    }
+
+    @Test func resetKubeconfigRemovalIsMarkedSensitive() throws {
+        let plan = try MacOSKubeadmPlanner.resetPlan(
+            options: MacOSKubeadmResetOptions(
+                installRoot: "/tmp/macos-node",
+                dryRun: true
+            )
+        )
+        let kubeconfigSteps = plan.steps.filter { step in
+            guard case .removePath(let path, _, _, _) = step.action else {
+                return false
+            }
+            return path.hasSuffix(".kubeconfig")
+        }
+
+        #expect(kubeconfigSteps.count == 3)
+        for step in kubeconfigSteps {
+            guard case .removePath(_, let recursive, let bestEffort, let sensitive) = step.action,
+                !recursive && bestEffort && sensitive
+            else {
+                Issue.record("kubeconfig removal should be best-effort and sensitive")
+                continue
+            }
+            #expect(step.action.safeDescription.contains("sensitive"))
+            #expect(!step.action.safeDescription.contains("token:"))
+        }
+    }
+
     private func makeOptions(startServices: Bool) throws -> MacOSKubeadmJoinOptions {
         try MacOSKubeadmJoinOptions(
             apiServer: #require(URL(string: "https://127.0.0.1:6443")),

@@ -24,7 +24,9 @@ struct MacOSKubeadm: AsyncParsableCommand {
         commandName: "container-macos-kubeadm",
         abstract: "Bootstrap a macOS Kubernetes worker node for container.",
         subcommands: [
-            Join.self
+            Join.self,
+            Reset.self,
+            Status.self,
         ]
     )
 }
@@ -102,6 +104,66 @@ extension MacOSKubeadm {
 
             let log = MacOSKubeadmLog(debugEnabled: debug)
             let runner = MacOSKubeadmJoinRunner()
+            try runner.run(options: options, log: log)
+        }
+    }
+
+    struct Reset: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "reset",
+            abstract: "Stop Kubernetes node services and remove generated node configuration."
+        )
+
+        @Option(help: "Alternate filesystem root for tests and image assembly. Real resets only support '/'.")
+        var installRoot: String = "/"
+
+        @Flag(help: "Also remove kubelet, CRI/CNI state, and node logs.")
+        var purgeState: Bool = false
+
+        @Flag(help: "Required for a real reset. Not required with --dry-run.")
+        var force: Bool = false
+
+        @Flag(help: "Remove no files and stop no services; print the planned actions.")
+        var dryRun: Bool = false
+
+        @Flag(help: "Enable debug logs, including command output and planned actions.")
+        var debug: Bool = false
+
+        func run() throws {
+            let options = MacOSKubeadmResetOptions(
+                installRoot: installRoot,
+                purgeState: purgeState,
+                force: force,
+                dryRun: dryRun,
+                debug: debug
+            )
+
+            let log = MacOSKubeadmLog(debugEnabled: debug)
+            let runner = MacOSKubeadmResetRunner()
+            try runner.run(options: options, log: log)
+        }
+    }
+
+    struct Status: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "status",
+            abstract: "Check macOS Kubernetes node files, socket, and launchd services."
+        )
+
+        @Option(help: "Alternate filesystem root for tests and image assembly. Launchd checks are skipped outside '/'.")
+        var installRoot: String = "/"
+
+        @Flag(help: "Enable debug logs, including launchctl errors.")
+        var debug: Bool = false
+
+        func run() throws {
+            let options = MacOSKubeadmStatusOptions(
+                installRoot: installRoot,
+                debug: debug
+            )
+
+            let log = MacOSKubeadmLog(debugEnabled: debug)
+            let runner = MacOSKubeadmStatusRunner()
             try runner.run(options: options, log: log)
         }
     }

@@ -233,11 +233,46 @@ jobs:
           api_key_path="${RUNNER_TEMP}/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
           python3 -c 'import base64, pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))' "${api_key_path}" <<< "${APP_STORE_CONNECT_API_KEY}"
 
+          notary_auth=(
+            --key "${api_key_path}"
+            --key-id "${APP_STORE_CONNECT_API_KEY_ID}"
+            --issuer "${APP_STORE_CONNECT_API_ISSUER_ID}"
+          )
+
+          submit_output="${RUNNER_TEMP}/notary-submit.json"
           xcrun notarytool submit "${PACKAGE_PATH}" \
-            --key "${api_key_path}" \
-            --key-id "${APP_STORE_CONNECT_API_KEY_ID}" \
-            --issuer "${APP_STORE_CONNECT_API_ISSUER_ID}" \
-            --wait
+            "${notary_auth[@]}" \
+            --output-format json \
+            --no-progress > "${submit_output}"
+
+          submission_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "${submit_output}")"
+          echo "Notary submission id: ${submission_id}"
+
+          status=""
+          for attempt in {1..90}; do
+            info_output="${RUNNER_TEMP}/notary-info-${attempt}.json"
+            if xcrun notarytool info "${submission_id}" "${notary_auth[@]}" --output-format json > "${info_output}"; then
+              status="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("status", ""))' "${info_output}")"
+              echo "Notary status attempt ${attempt}: ${status}"
+              case "${status}" in
+                Accepted)
+                  break
+                  ;;
+                Invalid|Rejected)
+                  xcrun notarytool log "${submission_id}" "${notary_auth[@]}" || true
+                  exit 1
+                  ;;
+              esac
+            else
+              echo "notarytool info failed on attempt ${attempt}; retrying"
+            fi
+            sleep 20
+          done
+
+          if [[ "${status}" != "Accepted" ]]; then
+            echo "::error::Notary submission ${submission_id} did not reach Accepted status"
+            exit 1
+          fi
 
           xcrun stapler staple "${PACKAGE_PATH}"
           xcrun stapler validate "${PACKAGE_PATH}"

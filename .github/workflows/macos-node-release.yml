@@ -196,6 +196,7 @@ jobs:
           required_payload_paths=(
             "usr/local/bin/container-cri-shim-macos"
             "usr/local/bin/container-kube-proxy-macos"
+            "usr/local/bin/container-macos-kubeadm"
             "usr/local/bin/kubelet"
             "etc/kubernetes/kubelet-config.yaml"
             "Library/LaunchDaemons/com.apple.container.kubelet.plist"
@@ -210,6 +211,7 @@ jobs:
           signed_payload_binaries=(
             "usr/local/bin/container-cri-shim-macos"
             "usr/local/bin/container-kube-proxy-macos"
+            "usr/local/bin/container-macos-kubeadm"
             "usr/local/bin/kubelet"
             "opt/cni/bin/container-cni-macvmnet"
           )

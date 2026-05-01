@@ -98,6 +98,7 @@ alongside the container node components:
 - `container-cri-shim-macos`
 - `container-cni-macvmnet`
 - `container-kube-proxy-macos`
+- `container-macos-kubeadm`
 - optional `container-k8s-networkpolicy-macos` binary, not enabled by default
 - forked `kubelet`
 - kubelet, CRI, CNI, and kube-proxy config templates
@@ -119,6 +120,28 @@ launchd services, and does not enable PF. Operators must install
 and `/etc/kubernetes/pki/ca.crt`, load the macOS sandbox image, validate PF
 policy, start the core container services through `container system start`, and
 then explicitly start the Kubernetes node services.
+
+The supported deployment path is to install the package and then run the
+packaged bootstrap helper:
+
+```sh
+sudo container-macos-kubeadm join \
+  --apiserver https://10.0.0.10:6443 \
+  --bootstrap-token abcdef.0123456789abcdef \
+  --kube-proxy-token <kube-proxy-bearer-token> \
+  --ca-cert /path/to/ca.crt \
+  --node-name macos-node-1 \
+  --cluster-dns 10.96.0.10
+```
+
+`container-macos-kubeadm join` logs each deployment step, writes the CA
+certificate, kubelet bootstrap kubeconfig, kube-proxy kubeconfig, kubelet
+configuration, CRI/CNI/kube-proxy configuration, and launchd plists, then starts
+`container system`, `container-cri-shim-macos`, `container-kube-proxy-macos`,
+and kubelet in dependency order. Token-bearing kubeconfig contents are never
+expanded in logs. Operators can pass `--dry-run` to inspect the full plan without
+writing files or starting services, and `--skip-start` to render files without
+loading launchd jobs.
 
 Local validation can build the package with:
 

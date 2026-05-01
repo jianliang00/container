@@ -1,0 +1,84 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2026 Apple Inc. and the container project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
+    public var apiServer: URL
+    public var nodeName: String
+    public var bootstrapToken: String
+    public var kubeProxyToken: String
+    public var caCertificatePath: String
+    public var caCertificateSHA256: String?
+    public var clusterName: String
+    public var clusterDNS: String
+    public var clusterDomain: String
+    public var sandboxImage: String
+    public var installRoot: String
+    public var startServices: Bool
+    public var dryRun: Bool
+    public var debug: Bool
+
+    public init(
+        apiServer: URL,
+        nodeName: String,
+        bootstrapToken: String,
+        kubeProxyToken: String,
+        caCertificatePath: String,
+        caCertificateSHA256: String? = nil,
+        clusterName: String = "kubernetes",
+        clusterDNS: String = "10.96.0.10",
+        clusterDomain: String = "cluster.local",
+        sandboxImage: String = "localhost/macos-sandbox:latest",
+        installRoot: String = "/",
+        startServices: Bool = true,
+        dryRun: Bool = false,
+        debug: Bool = false
+    ) {
+        self.apiServer = apiServer
+        self.nodeName = nodeName
+        self.bootstrapToken = bootstrapToken
+        self.kubeProxyToken = kubeProxyToken
+        self.caCertificatePath = caCertificatePath
+        self.caCertificateSHA256 = caCertificateSHA256
+        self.clusterName = clusterName
+        self.clusterDNS = clusterDNS
+        self.clusterDomain = clusterDomain
+        self.sandboxImage = sandboxImage
+        self.installRoot = installRoot
+        self.startServices = startServices
+        self.dryRun = dryRun
+        self.debug = debug
+    }
+}
+
+extension MacOSKubeadmJoinOptions {
+    public var rootPrefix: String {
+        let trimmed = installRoot.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed.isEmpty {
+            return ""
+        }
+        return "/" + trimmed
+    }
+
+    public func rooted(_ absolutePath: String) -> String {
+        precondition(absolutePath.hasPrefix("/"), "path must be absolute")
+        guard !rootPrefix.isEmpty else {
+            return absolutePath
+        }
+        return rootPrefix + absolutePath
+    }
+}

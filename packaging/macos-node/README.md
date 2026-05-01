@@ -11,16 +11,18 @@ needed by the first rollout:
 - `container-cri-shim-macos`
 - `container-cni-macvmnet`
 - `container-kube-proxy-macos`
+- `container-macos-kubeadm`
 - forked `kubelet`
 - kubelet, CRI, CNI, and kube-proxy config templates
 - launchd plists for kubelet, CRI shim, and kube-proxy
 
 The package does not include cluster credentials, does not load launchd
-services, and does not enable PF. Operators must install kubeconfigs,
-certificates, the macOS sandbox image, and PF policy explicitly before starting
-the services. Core container services are still started through the normal
-`container system start` path; the Kubernetes launchd plists assume those
-services are already available.
+services, and does not enable PF during package installation. Operators should
+use `container-macos-kubeadm join` after installing the package to install
+kubeconfigs, render node-specific configuration, and start the local services.
+Core container services are still started through the normal `container system
+start` path; `container-macos-kubeadm join` runs that command before starting
+the Kubernetes launchd jobs.
 
 Build an unsigned package:
 

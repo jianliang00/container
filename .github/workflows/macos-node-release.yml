@@ -201,6 +201,7 @@ jobs:
             "etc/kubernetes/kubelet-config.yaml"
             "Library/LaunchDaemons/com.apple.container.kubelet.plist"
             "opt/cni/bin/container-cni-macvmnet"
+            "usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml"
             "usr/local/share/container-macos-node/release-manifest.json"
           )
 

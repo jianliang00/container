@@ -171,7 +171,7 @@ Installation and operations:
 - [x] Add `container-macos-kubeadm status` and `reset` as operational helpers
   for read-only node inspection and guarded removal of generated node
   configuration.
-- [ ] Add RBAC manifests and operator-facing kubeconfig bootstrap material for
+- [x] Add RBAC manifests and operator-facing kubeconfig bootstrap material for
   kubelet and kube-proxy without embedding cluster credentials in the package.
 - [ ] Add preflight checks for macOS version, virtualization support, PF state,
   required privileges, disk space, network reachability, certificates, and

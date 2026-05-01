@@ -115,33 +115,47 @@ The package stages files under system paths such as `/usr/local/bin`,
 
 The package does not include cluster credentials or certificates, does not load
 launchd services, and does not enable PF. Operators must install
-`/etc/kubernetes/bootstrap-kubelet.kubeconfig`,
-`/etc/kubernetes/kubelet.kubeconfig`, `/etc/kubernetes/kube-proxy.kubeconfig`,
-and `/etc/kubernetes/pki/ca.crt`, load the macOS sandbox image, validate PF
-policy, start the core container services through `container system start`, and
-then explicitly start the Kubernetes node services.
+load the macOS sandbox image, validate PF policy, and run the packaged
+bootstrap helper to discover cluster settings, write node-local credentials and
+configuration, start the core container services through `container system
+start`, and then explicitly start the Kubernetes node services.
 
-The supported deployment path is to install the package and then run the
-packaged bootstrap helper:
+Before joining the first macOS node, apply the cluster prep manifest from an
+admin workstation. In the source tree it lives at
+`packaging/macos-node/manifests/macos-node-bootstrap-rbac.yaml`; in an installed
+node package it is also staged at
+`/usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml`.
 
 ```sh
-sudo container-macos-kubeadm join \
-  --apiserver https://10.0.0.10:6443 \
-  --bootstrap-token abcdef.0123456789abcdef \
-  --kube-proxy-token <kube-proxy-bearer-token> \
-  --ca-cert /path/to/ca.crt \
-  --node-name macos-node-1 \
-  --cluster-dns 10.96.0.10
+kubectl apply -f packaging/macos-node/manifests/macos-node-bootstrap-rbac.yaml
 ```
 
-`container-macos-kubeadm join` logs each deployment step, writes the CA
-certificate, kubelet bootstrap kubeconfig, kube-proxy kubeconfig, kubelet
-configuration, CRI/CNI/kube-proxy configuration, and launchd plists, then starts
-`container system`, `container-cri-shim-macos`, `container-kube-proxy-macos`,
-and kubelet in dependency order. Token-bearing kubeconfig contents are never
-expanded in logs. Operators can pass `--dry-run` to inspect the full plan without
-writing files or starting services, and `--skip-start` to render files without
-loading launchd jobs.
+That manifest creates the `kube-system/kube-proxy-macos` ServiceAccount, binds
+it to `system:node-proxier`, and allows kubeadm bootstrap tokens in
+`system:bootstrappers:kubeadm:default-node-token` to read the kubelet config
+ConfigMap and request a bounded kube-proxy ServiceAccount token during join.
+
+The supported deployment path is to install the package and then run the
+packaged bootstrap helper with kubeadm-compatible join arguments:
+
+```sh
+sudo container-macos-kubeadm join 10.0.0.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --node-name macos-node-1
+```
+
+`container-macos-kubeadm join` uses the bootstrap token to read
+`kube-public/cluster-info`, validates the discovered CA with
+`--discovery-token-ca-cert-hash`, reads the kubelet config ConfigMap when
+available, requests a kube-proxy ServiceAccount token, writes the CA certificate,
+kubelet bootstrap kubeconfig, kube-proxy kubeconfig, kubelet configuration,
+CRI/CNI/kube-proxy configuration, and launchd plists, then starts `container
+system`, `container-cri-shim-macos`, `container-kube-proxy-macos`, and kubelet
+in dependency order. Token-bearing kubeconfig contents are never expanded in
+logs. Operators can pass `--dry-run` to inspect the full plan without writing
+files, contacting the API server, or starting services, and `--skip-start` to
+render files without loading launchd jobs.
 
 Operators can inspect a node with:
 

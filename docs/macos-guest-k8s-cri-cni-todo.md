@@ -168,6 +168,9 @@ Installation and operations:
   config, kube-proxy config, and launchd plists.
 - [x] Add `container-macos-kubeadm join` as the one-command node bootstrap path
   for rendering node-specific kubeconfigs/configs and starting launchd services.
+- [x] Add `container-macos-kubeadm status` and `reset` as operational helpers
+  for read-only node inspection and guarded removal of generated node
+  configuration.
 - [ ] Add RBAC manifests and operator-facing kubeconfig bootstrap material for
   kubelet and kube-proxy without embedding cluster credentials in the package.
 - [ ] Add preflight checks for macOS version, virtualization support, PF state,

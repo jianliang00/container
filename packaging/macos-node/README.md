@@ -24,6 +24,23 @@ Core container services are still started through the normal `container system
 start` path; `container-macos-kubeadm join` runs that command before starting
 the Kubernetes launchd jobs.
 
+Before joining the first macOS node, apply
+`packaging/macos-node/manifests/macos-node-bootstrap-rbac.yaml` to the Linux
+control plane from an admin workstation. The same manifest is also staged in
+installed packages under
+`/usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml`.
+It creates the `kube-proxy-macos` ServiceAccount and allows kubeadm bootstrap
+tokens to request the kube-proxy token needed by the host launchd service.
+
+The join command follows the Linux kubeadm shape:
+
+```sh
+sudo container-macos-kubeadm join 10.0.0.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --node-name macos-node-1
+```
+
 Use `container-macos-kubeadm status` to inspect installed files, generated
 configuration, the CRI socket, and launchd state. Use
 `container-macos-kubeadm reset --force` to stop node services and remove

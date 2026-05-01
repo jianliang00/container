@@ -19,10 +19,10 @@ import Foundation
 public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var apiServer: URL
     public var nodeName: String
-    public var bootstrapToken: String
-    public var kubeProxyToken: String
-    public var caCertificatePath: String
-    public var caCertificateSHA256: String?
+    public var token: String
+    public var discoveryTokenCACertHashes: [String]
+    public var certificateAuthorityPEM: String?
+    public var kubeProxyToken: String?
     public var clusterName: String
     public var clusterDNS: String
     public var clusterDomain: String
@@ -35,10 +35,10 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public init(
         apiServer: URL,
         nodeName: String,
-        bootstrapToken: String,
-        kubeProxyToken: String,
-        caCertificatePath: String,
-        caCertificateSHA256: String? = nil,
+        token: String,
+        discoveryTokenCACertHashes: [String],
+        certificateAuthorityPEM: String? = nil,
+        kubeProxyToken: String? = nil,
         clusterName: String = "kubernetes",
         clusterDNS: String = "10.96.0.10",
         clusterDomain: String = "cluster.local",
@@ -50,10 +50,10 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     ) {
         self.apiServer = apiServer
         self.nodeName = nodeName
-        self.bootstrapToken = bootstrapToken
+        self.token = token
+        self.discoveryTokenCACertHashes = discoveryTokenCACertHashes
+        self.certificateAuthorityPEM = certificateAuthorityPEM
         self.kubeProxyToken = kubeProxyToken
-        self.caCertificatePath = caCertificatePath
-        self.caCertificateSHA256 = caCertificateSHA256
         self.clusterName = clusterName
         self.clusterDNS = clusterDNS
         self.clusterDomain = clusterDomain

@@ -110,10 +110,10 @@ public enum MacOSKubeadmPlanner {
 
         steps.append(
             MacOSKubeadmStep(
-                message: "install Kubernetes CA certificate",
-                action: .copyFile(
-                    source: options.caCertificatePath,
-                    destination: options.rooted(caPath),
+                message: "write Kubernetes CA certificate",
+                action: .writeFile(
+                    path: options.rooted(caPath),
+                    contents: options.certificateAuthorityPEM ?? "",
                     mode: 0o644,
                     sensitive: false
                 )
@@ -131,7 +131,7 @@ public enum MacOSKubeadmPlanner {
                         userName: "kubelet-bootstrap",
                         server: options.apiServer,
                         certificateAuthorityPath: caPath,
-                        token: options.bootstrapToken
+                        token: options.token
                     ),
                     mode: 0o600,
                     sensitive: true
@@ -147,7 +147,7 @@ public enum MacOSKubeadmPlanner {
                         userName: "kube-proxy",
                         server: options.apiServer,
                         certificateAuthorityPath: caPath,
-                        token: options.kubeProxyToken
+                        token: options.kubeProxyToken ?? ""
                     ),
                     mode: 0o600,
                     sensitive: true
@@ -327,14 +327,17 @@ public enum MacOSKubeadmPlanner {
         guard options.nodeName.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
             throw MacOSKubeadmError.invalidInput("--node-name may only contain letters, numbers, '.', '_', and '-'")
         }
-        guard !options.bootstrapToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw MacOSKubeadmError.invalidInput("--bootstrap-token is required")
+        guard !options.token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MacOSKubeadmError.invalidInput("--token is required")
         }
-        guard !options.kubeProxyToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw MacOSKubeadmError.invalidInput("--kube-proxy-token is required")
+        guard !options.discoveryTokenCACertHashes.isEmpty else {
+            throw MacOSKubeadmError.invalidInput("--discovery-token-ca-cert-hash is required")
         }
-        guard !options.caCertificatePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw MacOSKubeadmError.invalidInput("--ca-cert is required")
+        guard !(options.certificateAuthorityPEM ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MacOSKubeadmError.invalidInput("discovered Kubernetes CA certificate is required")
+        }
+        guard !(options.kubeProxyToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MacOSKubeadmError.invalidInput("discovered kube-proxy token is required")
         }
         guard !options.clusterDNS.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("--cluster-dns is required")

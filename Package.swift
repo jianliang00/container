@@ -65,6 +65,7 @@ let package = Package(
         .executable(name: "container-cni-macvmnet", targets: ["container-cni-macvmnet"]),
         .executable(name: "container-k8s-networkpolicy-macos", targets: ["container-k8s-networkpolicy-macos"]),
         .executable(name: "container-kube-proxy-macos", targets: ["container-kube-proxy-macos"]),
+        .executable(name: "container-macos-kubeadm", targets: ["container-macos-kubeadm"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
@@ -287,6 +288,29 @@ let package = Package(
             name: "ContainerK8sKubeProxyMacOSTests",
             dependencies: [
                 "ContainerK8sKubeProxyMacOS"
+            ]
+        ),
+        .target(
+            name: "ContainerMacOSKubeadm",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+                "ContainerLog",
+            ]
+        ),
+        .executableTarget(
+            name: "container-macos-kubeadm",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                "ContainerLog",
+                "ContainerMacOSKubeadm",
+            ],
+            path: "Sources/Helpers/MacOSKubeadm"
+        ),
+        .testTarget(
+            name: "ContainerMacOSKubeadmTests",
+            dependencies: [
+                "ContainerMacOSKubeadm"
             ]
         ),
         .testTarget(

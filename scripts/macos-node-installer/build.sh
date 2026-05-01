@@ -279,6 +279,7 @@ stage_file "${BUILD_BIN_DIR}/container-cni-macvmnet" "${PKGROOT}/usr/local/bin/c
 stage_file "${BUILD_BIN_DIR}/container-cni-macvmnet" "${PKGROOT}/opt/cni/bin/container-cni-macvmnet" 0755
 stage_file "${BUILD_BIN_DIR}/container-kube-proxy-macos" "${PKGROOT}/usr/local/bin/container-kube-proxy-macos" 0755
 stage_file "${BUILD_BIN_DIR}/container-k8s-networkpolicy-macos" "${PKGROOT}/usr/local/bin/container-k8s-networkpolicy-macos" 0755
+stage_file "${BUILD_BIN_DIR}/container-macos-kubeadm" "${PKGROOT}/usr/local/bin/container-macos-kubeadm" 0755
 stage_file "$KUBELET_BINARY" "${PKGROOT}/usr/local/bin/kubelet" 0755
 
 stage_file "${BUILD_BIN_DIR}/container-runtime-macos" "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos" 0755
@@ -323,6 +324,7 @@ if [[ "$SKIP_CODESIGN" != true ]]; then
     codesign_path "${PKGROOT}/opt/cni/bin/container-cni-macvmnet" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-kube-proxy-macos" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-k8s-networkpolicy-macos" --prefix=com.apple.container.
+    codesign_path "${PKGROOT}/usr/local/bin/container-macos-kubeadm" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/kubelet" --identifier com.apple.container.kubelet
     codesign_path "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos" --prefix=com.apple.container. --entitlements="${ROOT_DIR}/signing/container-runtime-macos.entitlements"
     codesign_path "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar" --prefix=com.apple.container. --entitlements="${ROOT_DIR}/signing/container-runtime-macos.entitlements"

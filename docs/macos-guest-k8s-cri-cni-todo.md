@@ -166,6 +166,8 @@ Installation and operations:
   Darwin arm64 kubelet artifact with `container`, the CRI shim, CNI plugin,
   kube-proxy, optional NetworkPolicy controller binary, CNI config, kubelet
   config, kube-proxy config, and launchd plists.
+- [x] Add `container-macos-kubeadm join` as the one-command node bootstrap path
+  for rendering node-specific kubeconfigs/configs and starting launchd services.
 - [ ] Add RBAC manifests and operator-facing kubeconfig bootstrap material for
   kubelet and kube-proxy without embedding cluster credentials in the package.
 - [ ] Add preflight checks for macOS version, virtualization support, PF state,

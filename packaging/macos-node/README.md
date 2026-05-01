@@ -48,6 +48,22 @@ generated node configuration while preserving installed binaries. Add
 `--purge-state` only when kubelet, CRI/CNI state, and node logs should also be
 removed.
 
+Runtime logs are written to stable host paths:
+
+- `kubelet`: `/var/log/kubelet.log`
+- `container-cri-shim-macos`: `/var/log/container-cri-shim-macos.log`
+- `container-kube-proxy-macos`: `/var/log/container-kube-proxy-macos.log`
+- Pod log root: `/var/log/pods`
+- Container log symlinks: `/var/log/containers`
+
+For process state, inspect the matching launchd labels:
+
+```sh
+sudo launchctl print system/com.apple.container.kubelet
+sudo launchctl print system/com.apple.container.cri-shim-macos
+sudo launchctl print system/com.apple.container.kube-proxy-macos
+```
+
 Build an unsigned package:
 
 ```sh

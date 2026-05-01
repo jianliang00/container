@@ -28,6 +28,15 @@ struct MacOSKubeadmPlanTests {
                 guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
                     return false
                 }
+                return path == "/tmp/macos-node/etc/kubernetes/pki/ca.crt"
+                    && contents.contains("BEGIN CERTIFICATE")
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
                 return path == "/tmp/macos-node/etc/kubernetes/kube-proxy.conf"
                     && contents.contains(#""nodeName": "macos-ci-1""#)
             })
@@ -86,6 +95,15 @@ struct MacOSKubeadmPlanTests {
 
         #expect(criIndex < waitIndex)
         #expect(waitIndex < kubeletIndex)
+    }
+
+    @Test func joinPlanRequiresDiscoveryHash() throws {
+        var options = try makeOptions(startServices: false)
+        options.discoveryTokenCACertHashes = []
+
+        #expect(throws: MacOSKubeadmError.invalidInput("--discovery-token-ca-cert-hash is required")) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
     }
 
     @Test func resetRequiresForceUnlessDryRun() throws {
@@ -174,9 +192,15 @@ struct MacOSKubeadmPlanTests {
         try MacOSKubeadmJoinOptions(
             apiServer: #require(URL(string: "https://127.0.0.1:6443")),
             nodeName: "macos-ci-1",
-            bootstrapToken: "abcdef.0123456789abcdef",
+            token: "abcdef.0123456789abcdef",
+            discoveryTokenCACertHashes: [String(repeating: "a", count: 64)],
+            certificateAuthorityPEM: """
+                -----BEGIN CERTIFICATE-----
+                dGVzdC1jYQ==
+                -----END CERTIFICATE-----
+
+                """,
             kubeProxyToken: "proxy-token",
-            caCertificatePath: "/tmp/ca.crt",
             clusterDNS: "10.96.0.53",
             sandboxImage: "localhost/macos-sandbox:test",
             installRoot: "/tmp/macos-node",

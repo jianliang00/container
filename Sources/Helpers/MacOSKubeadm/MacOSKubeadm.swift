@@ -38,32 +38,17 @@ extension MacOSKubeadm {
             abstract: "Configure and start a macOS Kubernetes worker node."
         )
 
-        @Option(help: "Kubernetes API server URL, for example https://10.0.0.10:6443.")
-        var apiserver: String
+        @Argument(help: "Kubernetes API server endpoint, for example 10.0.0.10:6443.")
+        var apiServerEndpoint: String
 
         @Option(help: "Node name used by kubelet and kube-proxy.")
         var nodeName: String = "macos-node-1"
 
-        @Option(help: "Kubelet TLS bootstrap token. This value is written to bootstrap-kubelet.kubeconfig and is never logged.")
-        var bootstrapToken: String
+        @Option(help: "Kubelet TLS bootstrap token from kubeadm token create.")
+        var token: String
 
-        @Option(help: "Bearer token used by container-kube-proxy-macos. This value is written to kube-proxy.kubeconfig and is never logged.")
-        var kubeProxyToken: String
-
-        @Option(help: "Path to the cluster CA certificate.")
-        var caCert: String
-
-        @Option(help: "Optional sha256:<hex> or <hex> checksum for the CA certificate file.")
-        var caCertSha256: String?
-
-        @Option(help: "Kubernetes cluster name rendered into generated kubeconfigs.")
-        var clusterName: String = "kubernetes"
-
-        @Option(help: "Cluster DNS service IP rendered into kubelet-config.yaml.")
-        var clusterDNS: String = "10.96.0.10"
-
-        @Option(help: "Cluster DNS domain rendered into kubelet-config.yaml.")
-        var clusterDomain: String = "cluster.local"
+        @Option(help: "Kubernetes discovery CA public key hash, for example sha256:<hex>.")
+        var discoveryTokenCACertHash: [String] = []
 
         @Option(help: "macOS sandbox image used by CRI shim and kubelet.")
         var sandboxImage: String = "localhost/macos-sandbox:latest"
@@ -81,20 +66,13 @@ extension MacOSKubeadm {
         var debug: Bool = false
 
         func run() throws {
-            guard let apiServer = URL(string: apiserver) else {
-                throw ValidationError("--apiserver must be a valid URL")
-            }
+            let apiServer = try parseAPIServerEndpoint(apiServerEndpoint)
 
             let options = MacOSKubeadmJoinOptions(
                 apiServer: apiServer,
                 nodeName: nodeName,
-                bootstrapToken: bootstrapToken,
-                kubeProxyToken: kubeProxyToken,
-                caCertificatePath: caCert,
-                caCertificateSHA256: caCertSha256,
-                clusterName: clusterName,
-                clusterDNS: clusterDNS,
-                clusterDomain: clusterDomain,
+                token: token,
+                discoveryTokenCACertHashes: discoveryTokenCACertHash,
                 sandboxImage: sandboxImage,
                 installRoot: installRoot,
                 startServices: !skipStart,
@@ -105,6 +83,18 @@ extension MacOSKubeadm {
             let log = MacOSKubeadmLog(debugEnabled: debug)
             let runner = MacOSKubeadmJoinRunner()
             try runner.run(options: options, log: log)
+        }
+
+        private func parseAPIServerEndpoint(_ value: String) throws -> URL {
+            let candidate = value.contains("://") ? value : "https://\(value)"
+            guard let url = URL(string: candidate),
+                let scheme = url.scheme?.lowercased(),
+                ["https", "http"].contains(scheme),
+                url.host != nil
+            else {
+                throw ValidationError("api-server-endpoint must be a valid host:port or URL")
+            }
+            return url
         }
     }
 

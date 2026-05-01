@@ -14,20 +14,22 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import CryptoKit
 import Darwin
 import Foundation
 
 public struct MacOSKubeadmJoinRunner {
     private let fileManager: FileManager
+    private let discoveryClient: MacOSKubeadmDiscoveryClient
 
-    public init(fileManager: FileManager = .default) {
+    public init(fileManager: FileManager = .default, discoveryClient: MacOSKubeadmDiscoveryClient = .init()) {
         self.fileManager = fileManager
+        self.discoveryClient = discoveryClient
     }
 
     public func run(options: MacOSKubeadmJoinOptions, log: MacOSKubeadmLog) throws {
         try runPreflight(options: options, log: log)
-        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let resolvedOptions = try resolve(options: options, log: log)
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: resolvedOptions)
 
         log.info("prepared join plan with \(plan.steps.count) steps")
         if options.dryRun {
@@ -66,21 +68,8 @@ public struct MacOSKubeadmJoinRunner {
         throw MacOSKubeadmError.preflightFailed("macOS node packages currently require arm64")
         #endif
 
-        if options.bootstrapToken.range(of: #"^[a-z0-9]{6}\.[a-z0-9]{16}$"#, options: .regularExpression) == nil {
+        if options.token.range(of: #"^[a-z0-9]{6}\.[a-z0-9]{16}$"#, options: .regularExpression) == nil {
             log.warning("bootstrap token does not match Kubernetes bootstrap-token format abcdef.0123456789abcdef")
-        }
-
-        try validateReadableFile(options.caCertificatePath, name: "CA certificate")
-
-        if let expectedSHA256 = options.caCertificateSHA256 {
-            let actual = try sha256Hex(path: options.caCertificatePath)
-            let normalized = expectedSHA256.replacingOccurrences(of: "sha256:", with: "").lowercased()
-            guard actual == normalized else {
-                throw MacOSKubeadmError.preflightFailed(
-                    "CA certificate sha256 mismatch: expected \(normalized), got \(actual)"
-                )
-            }
-            log.info("validated CA certificate sha256")
         }
 
         let requiredExecutables = [
@@ -97,6 +86,32 @@ public struct MacOSKubeadmJoinRunner {
                 log.debug("would validate executable \(options.rooted(executable))")
             }
         }
+    }
+
+    private func resolve(options: MacOSKubeadmJoinOptions, log: MacOSKubeadmLog) throws -> MacOSKubeadmJoinOptions {
+        if options.dryRun {
+            log.info("dry-run enabled; bootstrap discovery and kube-proxy token request will be skipped")
+            var resolved = options
+            resolved.certificateAuthorityPEM = MacOSKubeadmDiscoveryClient.dryRunCertificateAuthorityPEM
+            resolved.kubeProxyToken = "dry-run-kube-proxy-token"
+            return resolved
+        }
+
+        log.info("discovering cluster CA and kubelet settings")
+        let discovered = try discoveryClient.discover(
+            apiServer: options.apiServer,
+            token: options.token,
+            expectedCACertHashes: options.discoveryTokenCACertHashes,
+            log: log
+        )
+
+        var resolved = options
+        resolved.apiServer = discovered.apiServer
+        resolved.certificateAuthorityPEM = discovered.certificateAuthorityPEM
+        resolved.clusterDNS = discovered.clusterDNS
+        resolved.clusterDomain = discovered.clusterDomain
+        resolved.kubeProxyToken = discovered.kubeProxyToken
+        return resolved
     }
 
     private func execute(_ action: MacOSKubeadmAction, dryRun: Bool, log: MacOSKubeadmLog) throws {
@@ -175,12 +190,6 @@ public struct MacOSKubeadmJoinRunner {
         throw MacOSKubeadmError.timedOut("path did not appear: \(path)")
     }
 
-    private func validateReadableFile(_ path: String, name: String) throws {
-        guard fileManager.isReadableFile(atPath: path) else {
-            throw MacOSKubeadmError.preflightFailed("\(name) is not readable: \(path)")
-        }
-    }
-
     private func validateExecutable(_ path: String, name: String) throws {
         guard fileManager.isExecutableFile(atPath: path) else {
             throw MacOSKubeadmError.preflightFailed("\(name) is not executable at \(path)")
@@ -191,11 +200,6 @@ public struct MacOSKubeadmJoinRunner {
         if chmod(path, mode_t(mode)) != 0 {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
-    }
-
-    private func sha256Hex(path: String) throws -> String {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

@@ -298,6 +298,7 @@ stage_file "${PACKAGING_DIR}/config/container-cni-macvmnet.conflist" "${PKGROOT}
 install_template "${PACKAGING_DIR}/config/kube-proxy.conf" "${PKGROOT}/etc/kubernetes/kube-proxy.conf" 0644
 stage_file "${PACKAGING_DIR}/config/kubelet-config.yaml" "${PKGROOT}/etc/kubernetes/kubelet-config.yaml" 0644
 stage_file "${PACKAGING_DIR}/manifests/runtimeclass-macos.yaml" "${PKGROOT}/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml" 0644
+stage_file "${PACKAGING_DIR}/manifests/macos-node-bootstrap-rbac.yaml" "${PKGROOT}/usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml" 0644
 
 install_template "${PACKAGING_DIR}/launchd/com.apple.container.cri-shim-macos.plist" "${PKGROOT}/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist" 0644
 install_template "${PACKAGING_DIR}/launchd/com.apple.container.kube-proxy-macos.plist" "${PKGROOT}/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist" 0644

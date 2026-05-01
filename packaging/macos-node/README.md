@@ -24,6 +24,13 @@ Core container services are still started through the normal `container system
 start` path; `container-macos-kubeadm join` runs that command before starting
 the Kubernetes launchd jobs.
 
+Use `container-macos-kubeadm status` to inspect installed files, generated
+configuration, the CRI socket, and launchd state. Use
+`container-macos-kubeadm reset --force` to stop node services and remove
+generated node configuration while preserving installed binaries. Add
+`--purge-state` only when kubelet, CRI/CNI state, and node logs should also be
+removed.
+
 Build an unsigned package:
 
 ```sh

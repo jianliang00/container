@@ -124,6 +124,8 @@ public struct MacOSKubeadmJoinRunner {
             try runCommand(arguments, bestEffort: bestEffort, log: log)
         case .waitForPath(let path, let timeoutSeconds):
             try waitForPath(path, timeoutSeconds: timeoutSeconds)
+        case .removePath:
+            throw MacOSKubeadmError.invalidInput("join plan cannot remove paths")
         }
     }
 
@@ -194,5 +196,213 @@ public struct MacOSKubeadmJoinRunner {
     private func sha256Hex(path: String) throws -> String {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+public struct MacOSKubeadmResetRunner {
+    private let fileManager: FileManager
+
+    public init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+    }
+
+    public func run(options: MacOSKubeadmResetOptions, log: MacOSKubeadmLog) throws {
+        let plan = try MacOSKubeadmPlanner.resetPlan(options: options)
+        try runPreflight(options: options, log: log)
+
+        log.info("prepared reset plan with \(plan.steps.count) steps")
+        if options.dryRun {
+            log.info("dry-run enabled; no files will be removed and no services will be stopped")
+        } else if options.purgeState {
+            log.warning("purge-state enabled; kubelet, CRI/CNI state, and node logs will be removed")
+        }
+
+        for (offset, step) in plan.steps.enumerated() {
+            log.step(offset + 1, total: plan.steps.count, step.message)
+            log.debug(step.action.safeDescription)
+            try execute(step.action, dryRun: options.dryRun, log: log)
+        }
+
+        if options.dryRun {
+            log.info("dry-run completed; no changes made")
+        } else {
+            log.info("reset completed")
+            log.info("binaries and installed package files were preserved")
+        }
+    }
+
+    private func runPreflight(options: MacOSKubeadmResetOptions, log: MacOSKubeadmLog) throws {
+        log.info("running reset preflight checks")
+
+        if !options.dryRun && geteuid() != 0 {
+            throw MacOSKubeadmError.preflightFailed("reset must run as root; rerun with sudo or pass --dry-run")
+        }
+    }
+
+    private func execute(_ action: MacOSKubeadmAction, dryRun: Bool, log: MacOSKubeadmLog) throws {
+        if dryRun {
+            log.info("would \(action.safeDescription)")
+            return
+        }
+
+        switch action {
+        case .removePath(let path, _, let bestEffort, _):
+            do {
+                guard fileManager.fileExists(atPath: path) else {
+                    return
+                }
+                try fileManager.removeItem(atPath: path)
+            } catch {
+                if bestEffort {
+                    log.debug("best-effort remove failed for \(path): \(error)")
+                    return
+                }
+                throw error
+            }
+        case .runCommand(let arguments, let bestEffort):
+            try MacOSKubeadmProcess.run(arguments, bestEffort: bestEffort, log: log)
+        case .createDirectory, .copyFile, .writeFile, .waitForPath:
+            throw MacOSKubeadmError.invalidInput("unsupported reset action: \(action.safeDescription)")
+        }
+    }
+}
+
+public struct MacOSKubeadmStatusOptions: Sendable, Equatable {
+    public var installRoot: String
+    public var debug: Bool
+
+    public init(installRoot: String = "/", debug: Bool = false) {
+        self.installRoot = installRoot
+        self.debug = debug
+    }
+}
+
+extension MacOSKubeadmStatusOptions {
+    public var rootPrefix: String {
+        let trimmed = installRoot.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed.isEmpty {
+            return ""
+        }
+        return "/" + trimmed
+    }
+
+    public func rooted(_ absolutePath: String) -> String {
+        precondition(absolutePath.hasPrefix("/"), "path must be absolute")
+        guard !rootPrefix.isEmpty else {
+            return absolutePath
+        }
+        return rootPrefix + absolutePath
+    }
+}
+
+public struct MacOSKubeadmStatusRunner {
+    private let fileManager: FileManager
+
+    public init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+    }
+
+    public func run(options: MacOSKubeadmStatusOptions, log: MacOSKubeadmLog) throws {
+        guard options.installRoot.hasPrefix("/") else {
+            throw MacOSKubeadmError.invalidInput("--install-root must be an absolute path")
+        }
+
+        log.info("checking macOS Kubernetes node status")
+
+        let files = [
+            "/usr/local/bin/container-macos-kubeadm",
+            "/usr/local/bin/container-cri-shim-macos",
+            "/usr/local/bin/container-kube-proxy-macos",
+            "/usr/local/bin/kubelet",
+            "/opt/cni/bin/container-cni-macvmnet",
+            "/etc/kubernetes/pki/ca.crt",
+            "/etc/kubernetes/bootstrap-kubelet.kubeconfig",
+            "/etc/kubernetes/kubelet.kubeconfig",
+            "/etc/kubernetes/kube-proxy.kubeconfig",
+            "/etc/kubernetes/kubelet-config.yaml",
+            "/etc/kubernetes/container-cri-shim-macos-config.json",
+            "/etc/kubernetes/kube-proxy.conf",
+            "/etc/cni/net.d/10-macvmnet.conflist",
+        ]
+
+        for file in files {
+            let rooted = options.rooted(file)
+            log.info("\(file): \(fileManager.fileExists(atPath: rooted) ? "present" : "missing")")
+        }
+
+        let socket = "/var/run/container-cri-macos.sock"
+        log.info("\(socket): \(fileManager.fileExists(atPath: options.rooted(socket)) ? "present" : "missing")")
+
+        if options.rootPrefix.isEmpty {
+            for label in [
+                "com.apple.container.cri-shim-macos",
+                "com.apple.container.kube-proxy-macos",
+                "com.apple.container.kubelet",
+            ] {
+                log.info("\(label): \(serviceStatus(label: label, log: log))")
+            }
+        } else {
+            log.info("launchd services: skipped for install root \(options.installRoot)")
+        }
+    }
+
+    private func serviceStatus(label: String, log: MacOSKubeadmLog) -> String {
+        do {
+            let output = try MacOSKubeadmProcess.runCapturing(arguments: ["/bin/launchctl", "print", "system/\(label)"])
+            if output.contains("state = running") {
+                return "running"
+            }
+            return "loaded"
+        } catch {
+            log.debug("launchctl status failed for \(label): \(error)")
+            return "not loaded"
+        }
+    }
+}
+
+enum MacOSKubeadmProcess {
+    static func run(_ arguments: [String], bestEffort: Bool, log: MacOSKubeadmLog) throws {
+        do {
+            let output = try runCapturing(arguments: arguments)
+            if !output.isEmpty {
+                log.debug(output)
+            }
+        } catch {
+            if bestEffort {
+                log.debug("best-effort command failed: \(error)")
+                return
+            }
+            throw error
+        }
+    }
+
+    static func runCapturing(arguments: [String]) throws -> String {
+        guard let executable = arguments.first else {
+            throw MacOSKubeadmError.invalidInput("empty command")
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = Array(arguments.dropFirst())
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard process.terminationStatus == 0 else {
+            throw MacOSKubeadmError.commandFailed(
+                command: MacOSKubeadmAction.runCommand(arguments: arguments, bestEffort: false).safeDescription,
+                status: process.terminationStatus,
+                output: output
+            )
+        }
+
+        return output
     }
 }

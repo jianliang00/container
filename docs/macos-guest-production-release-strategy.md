@@ -143,6 +143,33 @@ expanded in logs. Operators can pass `--dry-run` to inspect the full plan withou
 writing files or starting services, and `--skip-start` to render files without
 loading launchd jobs.
 
+Operators can inspect a node with:
+
+```sh
+sudo container-macos-kubeadm status
+```
+
+`status` is read-only. It reports the presence of packaged binaries,
+node-specific Kubernetes configuration, the CRI socket, and launchd jobs for
+the CRI shim, kube-proxy, and kubelet.
+
+Operators can reset node-local Kubernetes configuration with:
+
+```sh
+sudo container-macos-kubeadm reset --force
+```
+
+`reset` stops kubelet, kube-proxy, and the CRI shim, flushes the kube-proxy PF
+anchor, and removes kubeadm-generated kubelet, CRI, CNI, kube-proxy, CA, and
+launchd configuration. It preserves the installed binaries and package payload.
+Use `--dry-run` to inspect the exact plan without changing the host. Use
+`--purge-state` only when intentionally removing kubelet, CRI/CNI state, and
+node logs:
+
+```sh
+sudo container-macos-kubeadm reset --force --purge-state
+```
+
 Local validation can build the package with:
 
 ```sh

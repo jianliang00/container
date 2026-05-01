@@ -231,15 +231,44 @@ than locally built packages for distribution.
 
 ## Log Directories
 
-The Darwin kubelet fork uses the standard kubelet CRI log layout:
+The macOS node package writes each launchd-managed process to a stable log
+path:
 
-- `/var/log/pods`
-- `/var/log/containers`
+| Process | launchd label | stdout/stderr log |
+| --- | --- | --- |
+| `kubelet` | `com.apple.container.kubelet` | `/var/log/kubelet.log` |
+| `container-cri-shim-macos` | `com.apple.container.cri-shim-macos` | `/var/log/container-cri-shim-macos.log` |
+| `container-kube-proxy-macos` | `com.apple.container.kube-proxy-macos` | `/var/log/container-kube-proxy-macos.log` |
+
+Use the kubelet log for node registration, pod lifecycle, probe, CRI, and log
+streaming failures. Use the CRI shim log for runtime, image, sandbox, container,
+exec, attach, and port-forward requests. Use the kube-proxy log for Service and
+EndpointSlice watch state, generated PF rules, and PF apply failures.
+
+The Darwin kubelet fork also uses the standard kubelet CRI log layout:
+
+- Pod log root: `/var/log/pods`
+- Container log symlinks: `/var/log/containers`
 
 The installer owns creating these directories with root ownership and stable
 permissions before kubelet starts. Kubelet construction must not rewrite log
 directory package globals from `--root-dir`, because that leaks between repeated
 kubelet instances and tests.
+
+Common node-local troubleshooting commands:
+
+```sh
+sudo tail -n 200 /var/log/kubelet.log
+sudo tail -n 200 /var/log/container-cri-shim-macos.log
+sudo tail -n 200 /var/log/container-kube-proxy-macos.log
+sudo launchctl print system/com.apple.container.kubelet
+sudo launchctl print system/com.apple.container.cri-shim-macos
+sudo launchctl print system/com.apple.container.kube-proxy-macos
+```
+
+`container-macos-kubeadm reset --force --purge-state` removes these process
+logs, `/var/log/pods`, and `/var/log/containers` together with the kubelet and
+CRI/CNI state directories.
 
 ## Rollback Policy
 

@@ -466,6 +466,14 @@ class TestCLIVolumes: CLITest {
         #expect(error.contains("conflict"))
     }
 
+    // MARK: - Inspect validation tests
+
+    @Test func testVolumeInspectMissingFails() throws {
+        let (_, _, error, status) = try run(arguments: ["volume", "inspect", "definitely-missing-volume"])
+        #expect(status != 0, "Expected non-zero exit for missing volume")
+        #expect(error.contains("volume not found"))
+    }
+
     // MARK: - Journal option tests
 
     @Test func testVolumeCreateWithJournalOrdered() throws {

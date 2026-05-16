@@ -313,4 +313,10 @@ class TestCLINetwork: CLITest {
         }
         #expect(json.contains { ($0["id"] as? String) == name }, "JSON should contain the created network")
     }
+
+    @Test func testInspectMissingNetworkFails() throws {
+        let (_, _, error, status) = try run(arguments: ["network", "inspect", "definitely-missing-network"])
+        #expect(status != 0, "Expected non-zero exit for missing network")
+        #expect(error.contains("network not found"))
+    }
 }

@@ -19,7 +19,7 @@ import ContainerAPIClient
 import ContainerPersistence
 import ContainerPlugin
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import ContainerXPC
 import Containerization
 import ContainerizationEXT4
@@ -34,11 +34,11 @@ import SystemPackage
 public actor ContainersService {
     struct ContainerState {
         var snapshot: ContainerSnapshot
-        var client: SandboxClient? = nil
+        var client: RuntimeClient? = nil
 
-        func getClient() throws -> SandboxClient {
+        func getClient() throws -> RuntimeClient {
             guard let client else {
-                var message = "no sandbox client exists"
+                var message = "no runtime client exists"
                 if snapshot.status == .stopped {
                     message += ": container is stopped"
                 }
@@ -335,7 +335,7 @@ public actor ContainersService {
             // to boot. We can go lower, but this is a somewhat safe threshold. Containerization
             // also gives a little bit extra than the user asked for to account for guest agent overhead.
             //
-            // NOTE: We could potentially leave this validation to the sandbox service(s), as
+            // NOTE: We could potentially leave this validation to the runtime service(s), as
             // it's possible there could be an implementation that can get away with a lower
             // amount and be perfectly safe.
             let minimumMemory: UInt64 = 200.mib()
@@ -451,18 +451,18 @@ public actor ContainersService {
                 )
 
                 let runtime = state.snapshot.configuration.runtimeHandler
-                let sandboxClient = try await SandboxClient.create(
+                let runtimeClient = try await RuntimeClient.create(
                     id: id,
                     runtime: runtime
                 )
-                try await sandboxClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
+                try await runtimeClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
 
                 try await self.exitMonitor.registerProcess(
                     id: id,
                     onExit: self.handleContainerExit
                 )
 
-                state.client = sandboxClient
+                state.client = runtimeClient
                 await self.setContainerState(id, state, context: context)
             } catch {
                 let label = Self.fullLaunchdServiceLabel(
@@ -629,7 +629,7 @@ public actor ContainersService {
         let state = try self._getContainerState(id: id)
 
         // Stop should be idempotent.
-        let client: SandboxClient
+        let client: RuntimeClient
         do {
             client = try state.getClient()
         } catch {
@@ -941,8 +941,8 @@ public actor ContainersService {
 
         await self.exitMonitor.stopTracking(id: id)
 
-        // Shutdown and deregister the sandbox service
-        self.log.info("shutting down sandbox service", metadata: ["id": "\(id)"])
+        // Shutdown and deregister the runtime service
+        self.log.info("shutting down runtime service", metadata: ["id": "\(id)"])
 
         let path = self.containerRoot.appendingPathComponent(id)
         let bundle = ContainerResource.Bundle(path: path)
@@ -952,7 +952,7 @@ public actor ContainersService {
             instanceId: id
         )
 
-        // Try to shutdown the client gracefully, but if the sandbox service
+        // Try to shutdown the client gracefully, but if the runtime service
         // is already dead (e.g., killed externally), we should still continue
         // with state cleanup.
         if let client = state.client {
@@ -960,7 +960,7 @@ public actor ContainersService {
                 try await client.shutdown()
             } catch {
                 self.log.error(
-                    "failed to shutdown sandbox service",
+                    "failed to shutdown runtime service",
                     metadata: [
                         "id": "\(id)",
                         "error": "\(error)",
@@ -973,10 +973,10 @@ public actor ContainersService {
         // the process was killed externally.
         do {
             try ServiceManager.deregister(fullServiceLabel: label)
-            self.log.info("deregistered sandbox service", metadata: ["id": "\(id)"])
+            self.log.info("deregistered runtime service", metadata: ["id": "\(id)"])
         } catch {
             self.log.error(
-                "failed to deregister sandbox service",
+                "failed to deregister runtime service",
                 metadata: [
                     "id": "\(id)",
                     "error": "\(error)",

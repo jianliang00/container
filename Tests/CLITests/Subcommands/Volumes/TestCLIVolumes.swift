@@ -329,12 +329,12 @@ class TestCLIVolumes: CLITest {
 
     @Test func testVolumePruneNoVolumes() throws {
         // Prune with no volumes should succeed with 0 reclaimed
-        let (_, output, error, status) = try run(arguments: ["volume", "prune"])
+        let (_, _, error, status) = try run(arguments: ["volume", "prune"])
         if status != 0 {
             throw CLIError.executionFailed("volume prune failed: \(error)")
         }
 
-        #expect(output.contains("Zero KB"), "should show no space reclaimed")
+        #expect(error.contains("Zero KB"), "should show no space reclaimed")
     }
 
     @Test func testVolumePruneUnusedVolumes() throws {
@@ -366,7 +366,7 @@ class TestCLIVolumes: CLITest {
 
         #expect(output.contains(volumeName1) || !output.contains("No volumes to prune"), "should prune volume1")
         #expect(output.contains(volumeName2) || !output.contains("No volumes to prune"), "should prune volume2")
-        #expect(output.contains("Reclaimed"), "should show reclaimed space")
+        #expect(error.contains("Reclaimed"), "should show reclaimed space")
 
         // Verify volumes are gone
         let (_, listAfter, _, statusAfter) = try run(arguments: ["volume", "list", "--quiet"])

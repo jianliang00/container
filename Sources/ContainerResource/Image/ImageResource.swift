@@ -69,8 +69,14 @@ public struct ImageResource: ManagedResource {
 
     // MARK: ManagedResource
 
-    /// The unique identifier for this image. Identical to the image's index digest.
-    public var id: String { configuration.descriptor.digest }
+    /// The scheme-specific value of `configuration.descriptor.digest` (the hex portion
+    /// after the algorithm prefix). The fully-qualified digest — needed for content-store
+    /// lookups and XPC transport — is always recoverable as `configuration.descriptor.digest`.
+    public var id: String {
+        let digest = configuration.descriptor.digest
+        guard let colonIndex = digest.firstIndex(of: ":") else { return digest }
+        return String(digest[digest.index(after: colonIndex)...])
+    }
 
     /// The user-facing reference (`name:tag`) for this image.
     public var name: String { configuration.name }

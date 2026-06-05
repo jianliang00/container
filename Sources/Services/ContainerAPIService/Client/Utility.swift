@@ -44,12 +44,11 @@ public struct Utility {
     }
 
     public static func trimDigest(digest: String) -> String {
-        var digest = digest
-        digest.trimPrefix("sha256:")
-        if digest.count > 24 {
-            digest = String(digest.prefix(24)) + "..."
+        var hex = digest
+        if let colonIndex = digest.firstIndex(of: ":") {
+            hex = String(digest[digest.index(after: colonIndex)...])
         }
-        return digest
+        return String(hex.prefix(12))
     }
 
     public static func validEntityName(_ name: String) throws {

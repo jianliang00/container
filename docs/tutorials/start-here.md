@@ -163,8 +163,8 @@ After the build completes, list the images. You should see both the base image a
 <pre>
 % container image list
 NAME      TAG     DIGEST
-python    alpine  b4d299311845147e7e47c970...
-web-test  latest  25b99501f174803e21c58f9c...
+python    alpine  b4d299311845
+web-test  latest  25b99501f174
 %
 </pre>
 

@@ -48,7 +48,15 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
 
         """
 
-    public init() {}
+    private let makeSessionConfiguration: @Sendable () -> URLSessionConfiguration
+
+    public init() {
+        self.init(sessionConfiguration: { Self.sessionConfiguration() })
+    }
+
+    init(sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration) {
+        self.makeSessionConfiguration = sessionConfiguration
+    }
 
     public func discover(
         apiServer: URL,
@@ -59,14 +67,13 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         let normalizedHashes = try expectedCACertHashes.map(Self.normalizeDiscoveryHash)
 
         let insecureSession = URLSession(
-            configuration: Self.sessionConfiguration(),
+            configuration: makeSessionConfiguration(),
             delegate: MacOSKubeadmInsecureURLSessionDelegate(),
             delegateQueue: nil
         )
         let clusterInfo: MacOSKubeadmClusterInfoConfigMap = try get(
             "/api/v1/namespaces/kube-public/configmaps/cluster-info",
             apiServer: apiServer,
-            token: token,
             session: insecureSession
         )
         guard let kubeconfig = clusterInfo.data?["kubeconfig"] else {
@@ -84,7 +91,7 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         log.info("validated discovery-token-ca-cert-hash")
 
         let trustedSession = URLSession(
-            configuration: Self.sessionConfiguration(),
+            configuration: makeSessionConfiguration(),
             delegate: MacOSKubeadmPinnedCAURLSessionDelegate(
                 certificateAuthorityDER: certificateAuthorityDER,
                 serverHost: parsedClusterInfo.apiServer.host ?? apiServer.host
@@ -162,12 +169,14 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         return token
     }
 
-    private func get<T: Decodable>(_ path: String, apiServer: URL, token: String, session: URLSession) throws -> T {
+    private func get<T: Decodable>(_ path: String, apiServer: URL, token: String? = nil, session: URLSession) throws -> T {
         let url = try Self.url(apiServer: apiServer, path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.addValue("application/json", forHTTPHeaderField: "Accept")
-        request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let token {
+            request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         let data = try Self.execute(request, session: session)
         return try JSONDecoder().decode(T.self, from: data)
     }

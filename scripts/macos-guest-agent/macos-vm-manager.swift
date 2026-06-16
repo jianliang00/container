@@ -1,4 +1,5 @@
 #!/usr/bin/swift
+// swift-format-ignore-file
 //===----------------------------------------------------------------------===//
 // Copyright © 2026 Apple Inc. and the container project authors.
 //

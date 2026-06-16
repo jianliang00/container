@@ -1,5 +1,4 @@
 #!/usr/bin/swift
-
 //===----------------------------------------------------------------------===//
 // Copyright © 2026 Apple Inc. and the container project authors.
 //

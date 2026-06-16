@@ -373,6 +373,7 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
     guard let imagePath else {
         throw ArgumentError.required("missing required argument: --image")
     }
+    let sharedDirectoryPath: String
     let temporaryShareURL: URL?
     if autoSeed {
         if sharePath != nil {
@@ -387,17 +388,19 @@ func parseStartOptions(_ args: [String], programName: String = executableName())
         )
 
         sharePath = tempDir.path
+        sharedDirectoryPath = sharePath
         temporaryShareURL = tempDir
     } else {
-        guard sharePath != nil else {
+        guard let configuredSharePath = sharePath else {
             throw ArgumentError.required("missing required argument: --share")
         }
+        sharedDirectoryPath = configuredSharePath
         temporaryShareURL = nil
     }
 
     return Options(
         imageURL: URL(fileURLWithPath: imagePath).standardizedFileURL,
-        sharedDirectoryURL: URL(fileURLWithPath: sharePath!).standardizedFileURL,
+        sharedDirectoryURL: URL(fileURLWithPath: sharedDirectoryPath).standardizedFileURL,
         shareTag: shareTag,
         cpus: cpus,
         memoryMiB: memoryMiB,
@@ -1628,7 +1631,9 @@ func runStartCommand(options: Options) throws {
     let app = NSApplication.shared
     app.setActivationPolicy(options.headless ? .prohibited : .regular)
     print(
-        "host context: pid=\(getpid()) uid=\(getuid()) stdinTTY=\(isatty(STDIN_FILENO) == 1) session={\(currentSessionSummary())} screens=\(NSScreen.screens.count) hasMainScreen=\(NSScreen.main != nil)"
+        "host context: pid=\(getpid()) uid=\(getuid()) stdinTTY=\(isatty(STDIN_FILENO) == 1) "
+            + "session={\(currentSessionSummary())} screens=\(NSScreen.screens.count) "
+            + "hasMainScreen=\(NSScreen.main != nil)"
     )
 
     var window: NSWindow?

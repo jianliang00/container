@@ -283,7 +283,7 @@ fmt: swift-fmt update-licenses
 check: swift-fmt-check check-licenses
 
 .PHONY: swift-fmt
-SWIFT_SRC = $(shell find . -type f -name '*.swift' -not -path "*/.*" -not -path "*.pb.swift" -not -path "*.grpc.swift" -not -path "*/checkouts/*")
+SWIFT_SRC = $(shell find . -type f -name '*.swift' -not -path "*/.*" -not -path "*.pb.swift" -not -path "*.grpc.swift" -not -path "*/checkouts/*" -not -path "*/scripts/macos-guest-agent/macos-vm-manager.swift")
 swift-fmt:
 	@echo Applying the standard code formatting...
 	@$(SWIFT) format --recursive --configuration .swift-format -i $(SWIFT_SRC)

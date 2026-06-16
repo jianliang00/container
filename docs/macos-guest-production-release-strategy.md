@@ -145,17 +145,17 @@ sudo container-macos-kubeadm join 10.0.0.10:6443 \
   --node-name macos-node-1
 ```
 
-`container-macos-kubeadm join` uses the bootstrap token to read
-`kube-public/cluster-info`, validates the discovered CA with
-`--discovery-token-ca-cert-hash`, reads the kubelet config ConfigMap when
-available, requests a kube-proxy ServiceAccount token, writes the CA certificate,
-kubelet bootstrap kubeconfig, kube-proxy kubeconfig, kubelet configuration,
-CRI/CNI/kube-proxy configuration, and launchd plists, then starts `container
-system`, `container-cri-shim-macos`, `container-kube-proxy-macos`, and kubelet
-in dependency order. Token-bearing kubeconfig contents are never expanded in
-logs. Operators can pass `--dry-run` to inspect the full plan without writing
-files, contacting the API server, or starting services, and `--skip-start` to
-render files without loading launchd jobs.
+`container-macos-kubeadm join` reads the public `kube-public/cluster-info`
+ConfigMap, validates the discovered CA with `--discovery-token-ca-cert-hash`,
+then uses the bootstrap token to read the kubelet config ConfigMap when
+available and request a kube-proxy ServiceAccount token. It writes the CA
+certificate, kubelet bootstrap kubeconfig, kube-proxy kubeconfig, kubelet
+configuration, CRI/CNI/kube-proxy configuration, and launchd plists, then starts
+`container system`, `container-cri-shim-macos`, `container-kube-proxy-macos`,
+and kubelet in dependency order. Token-bearing kubeconfig contents are never
+expanded in logs. Operators can pass `--dry-run` to inspect the full plan
+without writing files, contacting the API server, or starting services, and
+`--skip-start` to render files without loading launchd jobs.
 
 Operators can inspect a node with:
 

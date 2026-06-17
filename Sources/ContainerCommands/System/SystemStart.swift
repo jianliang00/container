@@ -109,20 +109,7 @@ extension Application {
                 )
             }
 
-            // Now ping our friendly daemon. Fail if we don't get a response.
-            do {
-                print("Verifying apiserver is running...")
-                _ = try await ClientHealthCheck.ping(timeout: .seconds(timeout))
-            } catch {
-                let diagnostics = self.collectAPIServerDiagnostics()
-                throw ContainerizationError(
-                    .internalError,
-                    message: """
-                        failed to get a response from apiserver: \(error)
-                        \(diagnostics)
-                        """
-                )
-            }
+            try await verifyAPIServer(plistURL: plistURL, timeout: .seconds(timeout))
 
             if await !initImageExists() {
                 try? await installInitialFilesystem()
@@ -191,6 +178,34 @@ extension Application {
                 return true
             } catch {
                 return false
+            }
+        }
+
+        private func verifyAPIServer(plistURL: URL, timeout: Duration) async throws {
+            print("Verifying apiserver is running...")
+            do {
+                _ = try await ClientHealthCheck.ping(timeout: timeout)
+                return
+            } catch {
+                let firstError = error
+                print("Restarting unresponsive API server with launchd...")
+                do {
+                    let domain = try ServiceManager.getDomainString()
+                    try ServiceManager.deregister(fullServiceLabel: "\(domain)/\(Self.apiServerServiceLabel)")
+                    try ServiceManager.register(plistPath: plistURL.path)
+                    print("Verifying apiserver is running...")
+                    _ = try await ClientHealthCheck.ping(timeout: timeout)
+                } catch {
+                    let diagnostics = self.collectAPIServerDiagnostics()
+                    throw ContainerizationError(
+                        .internalError,
+                        message: """
+                            failed to get a response from apiserver: \(firstError)
+                            failed to restart apiserver: \(error)
+                            \(diagnostics)
+                            """
+                    )
+                }
             }
         }
 

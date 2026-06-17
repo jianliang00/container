@@ -13,7 +13,7 @@ on:
       kubelet_artifact_url:
         description: "URL of the kubelet-darwin-arm64 tar.gz artifact"
         required: true
-        default: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-3/kubelet-darwin-arm64-k8s-v1.27.2-3.tar.gz"
+        default: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-4/kubelet-darwin-arm64-k8s-v1.27.2-4.tar.gz"
         type: string
       node_name:
         description: "Default node name rendered into packaged templates"
@@ -44,7 +44,7 @@ jobs:
       packages: read
     env:
       KUBERNETES_BASELINE: v1.27.2
-      DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-3/kubelet-darwin-arm64-k8s-v1.27.2-3.tar.gz"
+      DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-4/kubelet-darwin-arm64-k8s-v1.27.2-4.tar.gz"
       DEFAULT_NODE_NAME: macos-node-1
     steps:
       - name: Checkout repository
@@ -208,6 +208,14 @@ jobs:
           for payload_path in "${required_payload_paths[@]}"; do
             test -e "${work_dir}/pkg/Payload/${payload_path}"
           done
+
+          kubelet_version="$("${work_dir}/pkg/Payload/usr/local/bin/kubelet" --version)"
+          echo "${kubelet_version}"
+          expected_kubelet_version="Kubernetes ${KUBERNETES_BASELINE}"
+          if [[ "${kubelet_version}" != "${expected_kubelet_version}" ]]; then
+            echo "unexpected kubelet version: ${kubelet_version}; expected ${expected_kubelet_version}" >&2
+            exit 1
+          fi
 
           signed_payload_binaries=(
             "usr/local/bin/container-cri-shim-macos"

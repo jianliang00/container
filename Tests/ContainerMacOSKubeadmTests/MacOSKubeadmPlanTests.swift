@@ -97,6 +97,58 @@ struct MacOSKubeadmPlanTests {
         #expect(waitIndex < kubeletIndex)
     }
 
+    @Test func serviceStartPlanUsesRootUserBootstrapForContainerRuntime() throws {
+        let options = try makeOptions(startServices: true)
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "start container core services",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/launchctl",
+                    "asuser",
+                    "0",
+                    "/usr/local/bin/container",
+                    "system",
+                    "start",
+                ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "start CRI shim launchd job",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/launchctl",
+                    "bootstrap",
+                    "user/0",
+                    "/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist",
+                ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "kickstart CRI shim launchd job",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/launchctl",
+                    "kickstart",
+                    "-k",
+                    "user/0/com.apple.container.cri-shim-macos",
+                ]
+            })
+    }
+
     @Test func joinPlanRequiresDiscoveryHash() throws {
         var options = try makeOptions(startServices: false)
         options.discoveryTokenCACertHashes = []

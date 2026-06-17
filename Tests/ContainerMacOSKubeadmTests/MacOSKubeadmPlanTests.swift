@@ -128,7 +128,7 @@ struct MacOSKubeadmPlanTests {
                 return arguments == [
                     "/bin/launchctl",
                     "bootstrap",
-                    "user/0",
+                    "system",
                     "/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist",
                 ]
             })
@@ -144,8 +144,21 @@ struct MacOSKubeadmPlanTests {
                     "/bin/launchctl",
                     "kickstart",
                     "-k",
-                    "user/0/com.apple.container.cri-shim-macos",
+                    "system/com.apple.container.cri-shim-macos",
                 ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "write CRI shim launchd plist",
+                    case .writeFile(_, let contents, 0o644, false) = step.action
+                else {
+                    return false
+                }
+                return contents.contains("<string>/bin/launchctl</string>")
+                    && contents.contains("<string>asuser</string>")
+                    && contents.contains("<string>0</string>")
+                    && contents.contains("<string>/usr/local/bin/container-cri-shim-macos</string>")
             })
     }
 

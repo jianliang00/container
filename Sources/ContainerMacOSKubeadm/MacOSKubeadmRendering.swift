@@ -189,6 +189,9 @@ public enum MacOSKubeadmRenderer {
         launchdPlist(
             label: "com.apple.container.cri-shim-macos",
             programArguments: [
+                "/bin/launchctl",
+                "asuser",
+                "0",
                 "/usr/local/bin/container-cri-shim-macos",
                 "--config",
                 "/etc/kubernetes/container-cri-shim-macos-config.json",

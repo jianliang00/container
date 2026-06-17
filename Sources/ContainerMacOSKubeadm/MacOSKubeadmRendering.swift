@@ -55,17 +55,14 @@ public enum MacOSKubeadmRenderer {
         port: 10250
         readOnlyPort: 0
         staticPodPath: "/etc/kubernetes/manifests"
-        podLogsDir: "/var/log/pods"
         containerRuntimeEndpoint: "unix:///var/run/container-cri-macos.sock"
         imageServiceEndpoint: "unix:///var/run/container-cri-macos.sock"
         syncFrequency: "5s"
         fileCheckFrequency: "5s"
         runtimeRequestTimeout: "2m"
         failSwapOn: false
-        failCgroupV1: false
         cgroupsPerQOS: false
-        enforceNodeAllocatable:
-          - "none"
+        enforceNodeAllocatable: []
         eventRecordQPS: 5
         enableServer: true
         localStorageCapacityIsolation: false

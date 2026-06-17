@@ -472,16 +472,14 @@ cat >"${KUBELET_CONFIG}" <<EOF
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 staticPodPath: "${STATIC_POD_DIR}"
-podLogsDir: "${POD_LOG_DIR}"
 containerRuntimeEndpoint: "unix://${RUNTIME_ENDPOINT}"
 imageServiceEndpoint: "unix://${RUNTIME_ENDPOINT}"
 syncFrequency: 5s
 fileCheckFrequency: 2s
 runtimeRequestTimeout: 2m
 failSwapOn: false
-failCgroupV1: false
 cgroupsPerQOS: false
-enforceNodeAllocatable: [none]
+enforceNodeAllocatable: []
 eventRecordQPS: 0
 enableServer: true
 port: 10250

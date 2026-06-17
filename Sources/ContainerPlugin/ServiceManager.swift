@@ -81,20 +81,38 @@ public struct ServiceManager {
     private static func runLaunchctlCommandChecked(args: [String]) throws {
         let result = try runLaunchctlCommand(args: args, captureOutput: true)
         guard result.status == 0 else {
-            let command = (["launchctl"] + args).joined(separator: " ")
-            let output = result.combinedOutput
-            let details = output.isEmpty ? "" : ", output: \(output)"
-            throw ContainerizationError(
-                .internalError,
-                message: "command `\(command)` failed with status \(result.status)\(details)"
-            )
+            try throwLaunchctlCommandFailure(args: args, result: result)
         }
+    }
+
+    private static func throwLaunchctlCommandFailure(args: [String], result: LaunchctlCommandResult) throws -> Never {
+        let command = (["launchctl"] + args).joined(separator: " ")
+        let output = result.combinedOutput
+        let details = output.isEmpty ? "" : ", output: \(output)"
+        throw ContainerizationError(
+            .internalError,
+            message: "command `\(command)` failed with status \(result.status)\(details)"
+        )
     }
 
     /// Register a service by providing the path to a plist.
     public static func register(plistPath: String) throws {
         let domain = try Self.getDomainString()
-        try runLaunchctlCommandChecked(args: ["bootstrap", domain, plistPath])
+        let serviceLabel = try Self.serviceLabel(plistPath: plistPath)
+        if let serviceLabel, try Self.isRegistered(fullServiceLabel: fullServiceLabel(serviceLabel, domain: domain)) {
+            return
+        }
+
+        let args = ["bootstrap", domain, plistPath]
+        let result = try runLaunchctlCommand(args: args, captureOutput: true)
+        if result.status == 0 {
+            return
+        }
+        if let serviceLabel, try Self.isRegistered(fullServiceLabel: fullServiceLabel(serviceLabel, domain: domain)) {
+            return
+        }
+
+        try throwLaunchctlCommandFailure(args: args, result: result)
     }
 
     /// Deregister a service by a launchd label.
@@ -163,8 +181,9 @@ public struct ServiceManager {
 
     /// Check if a service has been registered or not.
     public static func isRegistered(fullServiceLabel label: String) throws -> Bool {
-        let exitStatus = try runLaunchctlCommand(args: ["list", label])
-        return exitStatus == 0
+        let label = try fullServiceLabel(label)
+        let result = try runLaunchctlCommand(args: ["print", label], captureOutput: true)
+        return result.status == 0
     }
 
     private static func getLaunchdSessionType() throws -> String {
@@ -204,12 +223,29 @@ public struct ServiceManager {
         }
     }
 
+    private static func fullServiceLabel(_ label: String, domain: String? = nil) throws -> String {
+        if label.contains("/") {
+            return label
+        }
+        let domain = try domain ?? Self.getDomainString()
+        return "\(domain)/\(label)"
+    }
+
+    private static func serviceLabel(plistPath: String) throws -> String? {
+        let data = try Data(contentsOf: URL(fileURLWithPath: plistPath))
+        let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        guard let dictionary = plist as? [String: Any] else {
+            return nil
+        }
+        return dictionary["Label"] as? String
+    }
+
     private static func waitForServiceToDisappear(fullServiceLabel label: String) throws {
         let launchdLabel = String(label.split(separator: "/").last ?? Substring(label))
         let deadline = Date().addingTimeInterval(Self.bootoutTimeoutSeconds)
 
         while Date() < deadline {
-            if try !Self.isRegistered(fullServiceLabel: launchdLabel) {
+            if try !Self.isRegistered(fullServiceLabel: label) {
                 return
             }
             Thread.sleep(forTimeInterval: Self.bootoutPollIntervalSeconds)

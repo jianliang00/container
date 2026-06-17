@@ -59,6 +59,9 @@ struct MacOSKubeadmPlanTests {
                 return path == "/tmp/macos-node/etc/kubernetes/kubelet-config.yaml"
                     && contents.contains("clusterDNS:")
                     && contents.contains(#""10.96.0.53""#)
+                    && contents.contains("enforceNodeAllocatable: []")
+                    && !contents.contains("podLogsDir:")
+                    && !contents.contains("failCgroupV1:")
             })
     }
 

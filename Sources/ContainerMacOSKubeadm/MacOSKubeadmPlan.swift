@@ -253,6 +253,10 @@ public enum MacOSKubeadmPlanner {
                 action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kube-proxy-macos"], bestEffort: true)
             ),
             MacOSKubeadmStep(
+                message: "stop CRI shim root launchd job if present",
+                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "user/0/com.apple.container.cri-shim-macos"], bestEffort: true)
+            ),
+            MacOSKubeadmStep(
                 message: "stop CRI shim launchd job if present",
                 action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.cri-shim-macos"], bestEffort: true)
             ),
@@ -366,7 +370,14 @@ public enum MacOSKubeadmPlanner {
         [
             MacOSKubeadmStep(
                 message: "start container core services",
-                action: .runCommand(arguments: ["/usr/local/bin/container", "system", "start"], bestEffort: false)
+                action: .runCommand(
+                    arguments: ["/bin/launchctl", "asuser", "0", "/usr/local/bin/container", "system", "start"],
+                    bestEffort: false
+                )
+            ),
+            MacOSKubeadmStep(
+                message: "stop previous CRI shim root launchd job if present",
+                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "user/0/com.apple.container.cri-shim-macos"], bestEffort: true)
             ),
             MacOSKubeadmStep(
                 message: "stop previous CRI shim launchd job if present",
@@ -378,7 +389,7 @@ public enum MacOSKubeadmPlanner {
                     arguments: [
                         "/bin/launchctl",
                         "bootstrap",
-                        "system",
+                        "user/0",
                         "/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist",
                     ],
                     bestEffort: false
@@ -386,11 +397,11 @@ public enum MacOSKubeadmPlanner {
             ),
             MacOSKubeadmStep(
                 message: "enable CRI shim launchd job",
-                action: .runCommand(arguments: ["/bin/launchctl", "enable", "system/com.apple.container.cri-shim-macos"], bestEffort: false)
+                action: .runCommand(arguments: ["/bin/launchctl", "enable", "user/0/com.apple.container.cri-shim-macos"], bestEffort: false)
             ),
             MacOSKubeadmStep(
                 message: "kickstart CRI shim launchd job",
-                action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.cri-shim-macos"], bestEffort: false)
+                action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "user/0/com.apple.container.cri-shim-macos"], bestEffort: false)
             ),
             MacOSKubeadmStep(
                 message: "wait for CRI socket",

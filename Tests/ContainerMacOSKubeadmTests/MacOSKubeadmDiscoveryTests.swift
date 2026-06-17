@@ -64,20 +64,38 @@ private struct RecordedKubernetesRequest: Sendable {
     var authorization: String?
 }
 
-private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendable {
-    private static let lock = NSLock()
-    private static var requests: [RecordedKubernetesRequest] = []
+private final class KubernetesRequestRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [RecordedKubernetesRequest] = []
 
-    static func reset() {
+    func reset() {
         lock.withLock {
             requests = []
         }
     }
 
-    static func recordedRequests() -> [RecordedKubernetesRequest] {
+    func append(_ request: RecordedKubernetesRequest) {
+        lock.withLock {
+            requests.append(request)
+        }
+    }
+
+    func recordedRequests() -> [RecordedKubernetesRequest] {
         lock.withLock {
             requests
         }
+    }
+}
+
+private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let recorder = KubernetesRequestRecorder()
+
+    static func reset() {
+        recorder.reset()
+    }
+
+    static func recordedRequests() -> [RecordedKubernetesRequest] {
+        recorder.recordedRequests()
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -91,14 +109,12 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
     override func startLoading() {
         let url = request.url ?? URL(string: "https://cluster.example")!
         let path = url.path
-        Self.lock.withLock {
-            Self.requests.append(
-                RecordedKubernetesRequest(
-                    path: path,
-                    method: request.httpMethod ?? "GET",
-                    authorization: request.value(forHTTPHeaderField: "Authorization")
-                ))
-        }
+        Self.recorder.append(
+            RecordedKubernetesRequest(
+                path: path,
+                method: request.httpMethod ?? "GET",
+                authorization: request.value(forHTTPHeaderField: "Authorization")
+            ))
 
         let statusCode = Self.statusCode(for: path)
         let data = Self.responseData(for: path)

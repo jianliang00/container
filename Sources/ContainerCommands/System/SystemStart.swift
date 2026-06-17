@@ -26,6 +26,8 @@ extension Application {
     public struct SystemStart: AsyncLoggableCommand {
         private static let apiServerServiceLabel = "com.apple.container.apiserver"
         private static let launchctlPrintLineLimit = 30
+        private static let apiServerHealthPollInterval: Duration = .milliseconds(250)
+        private static let apiServerSinglePingTimeoutSeconds = 1.0
 
         public static let configuration = CommandConfiguration(
             commandName: "start",
@@ -109,7 +111,7 @@ extension Application {
                 )
             }
 
-            try await verifyAPIServer(plistURL: plistURL, timeout: .seconds(timeout))
+            try await verifyAPIServer(plistURL: plistURL, timeoutSeconds: timeout)
 
             if await !initImageExists() {
                 try? await installInitialFilesystem()
@@ -181,10 +183,10 @@ extension Application {
             }
         }
 
-        private func verifyAPIServer(plistURL: URL, timeout: Duration) async throws {
+        private func verifyAPIServer(plistURL: URL, timeoutSeconds: Double) async throws {
             print("Verifying apiserver is running...")
             do {
-                _ = try await ClientHealthCheck.ping(timeout: timeout)
+                try await waitForAPIServer(timeoutSeconds: timeoutSeconds)
                 return
             } catch {
                 let firstError = error
@@ -194,7 +196,7 @@ extension Application {
                     try ServiceManager.deregister(fullServiceLabel: "\(domain)/\(Self.apiServerServiceLabel)")
                     try ServiceManager.register(plistPath: plistURL.path)
                     print("Verifying apiserver is running...")
-                    _ = try await ClientHealthCheck.ping(timeout: timeout)
+                    try await waitForAPIServer(timeoutSeconds: timeoutSeconds)
                 } catch {
                     let diagnostics = self.collectAPIServerDiagnostics()
                     throw ContainerizationError(
@@ -207,6 +209,37 @@ extension Application {
                     )
                 }
             }
+        }
+
+        private func waitForAPIServer(timeoutSeconds: Double) async throws {
+            let deadline = Date().addingTimeInterval(timeoutSeconds)
+            var lastError: Error?
+
+            repeat {
+                let remaining = deadline.timeIntervalSinceNow
+                let pingTimeoutSeconds = max(
+                    0.1,
+                    min(Self.apiServerSinglePingTimeoutSeconds, max(0, remaining))
+                )
+
+                do {
+                    _ = try await ClientHealthCheck.ping(timeout: .seconds(pingTimeoutSeconds))
+                    return
+                } catch {
+                    lastError = error
+                }
+
+                guard Date() < deadline else {
+                    break
+                }
+
+                try await Task.sleep(for: Self.apiServerHealthPollInterval)
+            } while true
+
+            if let lastError {
+                throw lastError
+            }
+            throw ContainerizationError(.timeout, message: "timed out waiting for apiserver")
         }
 
         private func collectAPIServerDiagnostics() -> String {

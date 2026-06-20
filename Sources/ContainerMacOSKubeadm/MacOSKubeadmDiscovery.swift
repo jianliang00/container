@@ -62,6 +62,7 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         apiServer: URL,
         token: String,
         expectedCACertHashes: [String],
+        requestKubeProxyToken: Bool = true,
         log: MacOSKubeadmLog
     ) throws -> MacOSKubeadmDiscoveredCluster {
         let normalizedHashes = try expectedCACertHashes.map(Self.normalizeDiscoveryHash)
@@ -105,12 +106,18 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
             session: trustedSession,
             log: log
         )
-        let kubeProxyToken = try requestKubeProxyToken(
-            apiServer: parsedClusterInfo.apiServer,
-            token: token,
-            session: trustedSession
-        )
-        log.info("received kube-proxy ServiceAccount token")
+        let kubeProxyToken: String
+        if requestKubeProxyToken {
+            kubeProxyToken = try self.requestKubeProxyToken(
+                apiServer: parsedClusterInfo.apiServer,
+                token: token,
+                session: trustedSession
+            )
+            log.info("received kube-proxy ServiceAccount token")
+        } else {
+            kubeProxyToken = ""
+            log.info("skipped kube-proxy ServiceAccount token request")
+        }
 
         return MacOSKubeadmDiscoveredCluster(
             apiServer: parsedClusterInfo.apiServer,

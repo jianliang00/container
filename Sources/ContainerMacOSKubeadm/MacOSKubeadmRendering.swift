@@ -134,7 +134,7 @@ public enum MacOSKubeadmRenderer {
         """
         {
             "cniVersion": "1.1.0",
-            "name": "macvmnet",
+            "name": "default",
             "plugins": [
                 {
                     "type": "macvmnet",

@@ -38,8 +38,14 @@ The join command follows the Linux kubeadm shape:
 sudo container-macos-kubeadm join 10.0.0.10:6443 \
   --token abcdef.0123456789abcdef \
   --discovery-token-ca-cert-hash sha256:<hash> \
-  --node-name macos-node-1
+  --node-name macos-node-1 \
+  --network-mode full
 ```
+
+`--network-mode full` is the default and uses the vmnet-backed CNI path. It
+requires macOS 26 or newer. On older macOS hosts, use `--network-mode compat`;
+that mode uses Virtualization.framework NAT, skips kube-proxy and Pod CNI
+setup, and writes a `macos-compat` RuntimeClass manifest.
 
 Use `container-macos-kubeadm status` to inspect installed files, generated
 configuration, the CRI socket, and launchd state. Use

@@ -42,6 +42,12 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
     }
 }
 
+extension ResolvedRuntimeHandler {
+    public var usesPodNetworking: Bool {
+        networkBackend.trimmed == "vmnetShared"
+    }
+}
+
 public enum RuntimeHandlerResolutionError: Error, Equatable, CustomStringConvertible, Sendable {
     case invalidConfig([String])
     case unknownRuntimeHandler(String)

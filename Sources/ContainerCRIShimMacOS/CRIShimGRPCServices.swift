@@ -164,18 +164,22 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             do {
                 try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
                 try metadataStore.upsertSandbox(metadata)
-                let network = try await cniManager.add(
-                    sandboxID: sandboxID,
-                    networkName: handler.network,
-                    config: config
-                )
-                metadata.networkLeaseID = network.sandboxURI
-                metadata.networkAttachments = [network.networkName]
+                if handler.usesPodNetworking {
+                    let network = try await cniManager.add(
+                        sandboxID: sandboxID,
+                        networkName: handler.network,
+                        config: config
+                    )
+                    metadata.networkLeaseID = network.sandboxURI
+                    metadata.networkAttachments = [network.networkName]
+                }
                 metadata.state = .ready
                 metadata.updatedAt = Date()
                 try metadataStore.upsertSandbox(metadata)
             } catch {
-                try? await cniManager.delete(sandboxID: sandboxID, networkName: handler.network, config: config)
+                if handler.usesPodNetworking {
+                    try? await cniManager.delete(sandboxID: sandboxID, networkName: handler.network, config: config)
+                }
                 try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
                 try? metadataStore.deleteSandbox(id: sandboxID)
                 throw error

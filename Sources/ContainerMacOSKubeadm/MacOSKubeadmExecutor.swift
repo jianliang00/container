@@ -47,7 +47,8 @@ public struct MacOSKubeadmJoinRunner {
         } else {
             log.info("join completed")
             log.info("next: approve kubelet bootstrap CSR if your control plane does not auto-approve it")
-            log.info("next: apply /usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml from an admin workstation")
+            let runtimeClassManifest = options.networkMode == .full ? "runtimeclass-macos.yaml" : "runtimeclass-macos-compat.yaml"
+            log.info("next: apply /usr/local/share/container-macos-node/manifests/\(runtimeClassManifest) from an admin workstation")
         }
     }
 
@@ -68,17 +69,30 @@ public struct MacOSKubeadmJoinRunner {
         throw MacOSKubeadmError.preflightFailed("macOS node packages currently require arm64")
         #endif
 
+        if options.networkMode == .full {
+            let version = ProcessInfo.processInfo.operatingSystemVersion
+            if version.majorVersion < 26 {
+                throw MacOSKubeadmError.preflightFailed(
+                    "network mode full requires macOS 26 or newer; use --network-mode compat on older macOS versions"
+                )
+            }
+        }
+
         if options.token.range(of: #"^[a-z0-9]{6}\.[a-z0-9]{16}$"#, options: .regularExpression) == nil {
             log.warning("bootstrap token does not match Kubernetes bootstrap-token format abcdef.0123456789abcdef")
         }
 
-        let requiredExecutables = [
+        var requiredExecutables = [
             "/usr/local/bin/container",
             "/usr/local/bin/container-cri-shim-macos",
-            "/usr/local/bin/container-kube-proxy-macos",
             "/usr/local/bin/kubelet",
-            "/opt/cni/bin/container-cni-macvmnet",
         ]
+        if options.networkMode.usesPodNetworking {
+            requiredExecutables.append(contentsOf: [
+                "/usr/local/bin/container-kube-proxy-macos",
+                "/opt/cni/bin/container-cni-macvmnet",
+            ])
+        }
         for executable in requiredExecutables {
             if !options.dryRun {
                 try validateExecutable(options.rooted(executable), name: executable)
@@ -90,10 +104,12 @@ public struct MacOSKubeadmJoinRunner {
 
     private func resolve(options: MacOSKubeadmJoinOptions, log: MacOSKubeadmLog) throws -> MacOSKubeadmJoinOptions {
         if options.dryRun {
-            log.info("dry-run enabled; bootstrap discovery and kube-proxy token request will be skipped")
+            log.info("dry-run enabled; bootstrap discovery and ServiceAccount token requests will be skipped")
             var resolved = options
             resolved.certificateAuthorityPEM = MacOSKubeadmDiscoveryClient.dryRunCertificateAuthorityPEM
-            resolved.kubeProxyToken = "dry-run-kube-proxy-token"
+            if options.networkMode.usesPodNetworking {
+                resolved.kubeProxyToken = "dry-run-kube-proxy-token"
+            }
             return resolved
         }
 
@@ -102,6 +118,7 @@ public struct MacOSKubeadmJoinRunner {
             apiServer: options.apiServer,
             token: options.token,
             expectedCACertHashes: options.discoveryTokenCACertHashes,
+            requestKubeProxyToken: options.networkMode.usesPodNetworking,
             log: log
         )
 
@@ -110,7 +127,9 @@ public struct MacOSKubeadmJoinRunner {
         resolved.certificateAuthorityPEM = discovered.certificateAuthorityPEM
         resolved.clusterDNS = discovered.clusterDNS
         resolved.clusterDomain = discovered.clusterDomain
-        resolved.kubeProxyToken = discovered.kubeProxyToken
+        if options.networkMode.usesPodNetworking {
+            resolved.kubeProxyToken = discovered.kubeProxyToken
+        }
         return resolved
     }
 

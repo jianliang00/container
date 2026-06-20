@@ -78,12 +78,14 @@ func makeCRIShimSandboxConfiguration(
     )
     configuration.runtimeHandler = "container-runtime-macos"
     configuration.labels = request.config.labels
-    configuration.networks = [
-        AttachmentConfiguration(
-            network: handler.network,
-            options: AttachmentOptions(hostname: sandboxID)
-        )
-    ]
+    if handler.usesPodNetworking {
+        configuration.networks = [
+            AttachmentConfiguration(
+                network: handler.network,
+                options: AttachmentOptions(hostname: sandboxID)
+            )
+        ]
+    }
     if let cpus = handler.resources.cpus {
         configuration.resources.cpus = cpus
     }

@@ -146,10 +146,38 @@ struct CRIShimCoreMappingTests {
         #expect(configuration.labels["app"] == "demo")
         #expect(configuration.resources.cpus == 6)
         #expect(configuration.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
+        #expect(configuration.macosGuest?.networkBackend == .vmnetShared)
+        #expect(configuration.networks.map(\.network) == ["default"])
         let decodedMetadata = try #require(decodeCRIShimCoreSandboxMetadataLabel(configuration.labels))
         #expect(decodedMetadata.id == "sandbox-1")
         #expect(decodedMetadata.runtimeHandler == "macos")
         #expect(removeCRIShimCoreLabels(configuration.labels) == ["app": "demo"])
+    }
+
+    @Test
+    func virtualizationNATSandboxConfigurationDoesNotAttachContainerNetwork() throws {
+        var request = Runtime_V1_RunPodSandboxRequest()
+        let configuration = try makeCRIShimSandboxConfiguration(
+            id: "sandbox-1",
+            request: request,
+            handler: ResolvedRuntimeHandler(
+                name: "macos-compat",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes)
+            ),
+            sandboxImage: CRIShimImageRecord(
+                reference: "example.com/macos/sandbox:latest",
+                digest: "sha256:sandbox",
+                size: 1
+            )
+        )
+
+        #expect(configuration.macosGuest?.networkBackend == .virtualizationNAT)
+        #expect(configuration.networks.isEmpty)
     }
 
     @Test

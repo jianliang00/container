@@ -61,6 +61,7 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""10.96.0.53""#)
                     && contents.contains("enforceNodeAllocatable: []")
                     && contents.contains(#"memory.available: "0%""#)
+                    && contents.contains(#""name": "default""#)
                     && !contents.contains("podLogsDir:")
                     && !contents.contains("failCgroupV1:")
             })

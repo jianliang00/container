@@ -111,6 +111,19 @@ public struct ContainerKitCRIShimReadinessChecker: CRIShimReadinessChecking {
         config: CRIShimConfig,
         info: inout [String: String]
     ) async -> CRIShimRuntimeConditionSnapshot {
+        if !config.requiresCNI && config.defaults?.networkBackend?.trimmed == "virtualizationNAT" {
+            info["network"] = jsonString([
+                "backend": "virtualizationNAT",
+                "state": "ready",
+            ])
+            return CRIShimRuntimeConditionSnapshot(
+                type: CRIShimRuntimeConditionType.networkReady,
+                status: true,
+                reason: "NATReady",
+                message: "virtualizationNAT does not require a container network"
+            )
+        }
+
         guard let networkName = config.defaults?.network?.trimmed, !networkName.isEmpty else {
             return CRIShimRuntimeConditionSnapshot(
                 type: CRIShimRuntimeConditionType.networkReady,

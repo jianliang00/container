@@ -16,6 +16,41 @@
 
 import Foundation
 
+public enum MacOSKubeadmNetworkMode: String, CaseIterable, Sendable, Equatable {
+    case full
+    case compat
+
+    public var usesPodNetworking: Bool {
+        self == .full
+    }
+
+    public var runtimeHandler: String {
+        switch self {
+        case .full:
+            return "macos"
+        case .compat:
+            return "macos-compat"
+        }
+    }
+
+    public var runtimeClassName: String {
+        runtimeHandler
+    }
+
+    public var networkBackend: String {
+        switch self {
+        case .full:
+            return "vmnetShared"
+        case .compat:
+            return "virtualizationNAT"
+        }
+    }
+
+    public var nodeNetworkLabelValue: String {
+        rawValue
+    }
+}
+
 public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var apiServer: URL
     public var nodeName: String
@@ -27,6 +62,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var clusterDNS: String
     public var clusterDomain: String
     public var sandboxImage: String
+    public var networkMode: MacOSKubeadmNetworkMode
     public var installRoot: String
     public var startServices: Bool
     public var dryRun: Bool
@@ -43,6 +79,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         clusterDNS: String = "10.96.0.10",
         clusterDomain: String = "cluster.local",
         sandboxImage: String = "localhost/macos-sandbox:latest",
+        networkMode: MacOSKubeadmNetworkMode = .full,
         installRoot: String = "/",
         startServices: Bool = true,
         dryRun: Bool = false,
@@ -58,6 +95,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.clusterDNS = clusterDNS
         self.clusterDomain = clusterDomain
         self.sandboxImage = sandboxImage
+        self.networkMode = networkMode
         self.installRoot = installRoot
         self.startServices = startServices
         self.dryRun = dryRun

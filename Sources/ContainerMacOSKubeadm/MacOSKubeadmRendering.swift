@@ -86,48 +86,90 @@ public enum MacOSKubeadmRenderer {
         """
     }
 
-    public static func criShimConfiguration(sandboxImage: String) -> String {
-        """
-        {
-            "runtimeEndpoint": "/var/run/container-cri-macos.sock",
-            "stateDirectory": "/var/lib/container/cri-shim-macos",
-            "streaming": {
-                "address": "127.0.0.1",
-                "port": 0
-            },
-            "cni": {
-                "binDir": "/opt/cni/bin",
-                "confDir": "/etc/cni/net.d",
-                "plugin": "macvmnet"
-            },
-            "defaults": {
-                "sandboxImage": "\(sandboxImage)",
-                "workloadPlatform": {
-                    "os": "darwin",
-                    "architecture": "arm64"
-                },
-                "network": "default",
-                "networkBackend": "vmnetShared",
-                "guiEnabled": false
-            },
-            "runtimeHandlers": {
-                "macos": {
-                    "sandboxImage": "\(sandboxImage)",
-                    "network": "default",
-                    "networkBackend": "vmnetShared",
-                    "guiEnabled": false
+    public static func criShimConfiguration(
+        sandboxImage: String,
+        networkMode: MacOSKubeadmNetworkMode = .full
+    ) -> String {
+        switch networkMode {
+        case .full:
+            return """
+                {
+                    "runtimeEndpoint": "/var/run/container-cri-macos.sock",
+                    "stateDirectory": "/var/lib/container/cri-shim-macos",
+                    "streaming": {
+                        "address": "127.0.0.1",
+                        "port": 0
+                    },
+                    "cni": {
+                        "binDir": "/opt/cni/bin",
+                        "confDir": "/etc/cni/net.d",
+                        "plugin": "macvmnet"
+                    },
+                    "defaults": {
+                        "sandboxImage": "\(sandboxImage)",
+                        "workloadPlatform": {
+                            "os": "darwin",
+                            "architecture": "arm64"
+                        },
+                        "network": "default",
+                        "networkBackend": "vmnetShared",
+                        "guiEnabled": false
+                    },
+                    "runtimeHandlers": {
+                        "macos": {
+                            "sandboxImage": "\(sandboxImage)",
+                            "network": "default",
+                            "networkBackend": "vmnetShared",
+                            "guiEnabled": false
+                        }
+                    },
+                    "networkPolicy": {
+                        "enabled": false
+                    },
+                    "kubeProxy": {
+                        "enabled": true,
+                        "configPath": "/etc/kubernetes/kube-proxy.conf"
+                    }
                 }
-            },
-            "networkPolicy": {
-                "enabled": false
-            },
-            "kubeProxy": {
-                "enabled": true,
-                "configPath": "/etc/kubernetes/kube-proxy.conf"
-            }
-        }
 
-        """
+                """
+        case .compat:
+            return """
+                {
+                    "runtimeEndpoint": "/var/run/container-cri-macos.sock",
+                    "stateDirectory": "/var/lib/container/cri-shim-macos",
+                    "streaming": {
+                        "address": "127.0.0.1",
+                        "port": 0
+                    },
+                    "defaults": {
+                        "sandboxImage": "\(sandboxImage)",
+                        "workloadPlatform": {
+                            "os": "darwin",
+                            "architecture": "arm64"
+                        },
+                        "network": "default",
+                        "networkBackend": "virtualizationNAT",
+                        "guiEnabled": false
+                    },
+                    "runtimeHandlers": {
+                        "macos-compat": {
+                            "sandboxImage": "\(sandboxImage)",
+                            "network": "default",
+                            "networkBackend": "virtualizationNAT",
+                            "guiEnabled": false
+                        }
+                    },
+                    "networkPolicy": {
+                        "enabled": false
+                    },
+                    "kubeProxy": {
+                        "enabled": false
+                    }
+                }
+
+                """
+        }
     }
 
     public static func cniConfiguration() -> String {
@@ -165,24 +207,33 @@ public enum MacOSKubeadmRenderer {
         """
     }
 
-    public static func runtimeClassManifest() -> String {
-        """
-        apiVersion: node.k8s.io/v1
-        kind: RuntimeClass
-        metadata:
-          name: macos
-        handler: macos
-        scheduling:
-          nodeSelector:
-            kubernetes.io/os: darwin
-            node.kubernetes.io/macos: "true"
-          tolerations:
-            - key: node.kubernetes.io/macos
-              operator: Equal
-              value: "true"
-              effect: NoSchedule
-
-        """
+    public static func runtimeClassManifest(networkMode: MacOSKubeadmNetworkMode = .full) -> String {
+        var lines = [
+            "apiVersion: node.k8s.io/v1",
+            "kind: RuntimeClass",
+            "metadata:",
+            "  name: \(networkMode.runtimeClassName)",
+            "handler: \(networkMode.runtimeHandler)",
+            "scheduling:",
+            "  nodeSelector:",
+            "    kubernetes.io/os: darwin",
+            "    node.kubernetes.io/macos: \"true\"",
+            "    node.kubernetes.io/macos-network: \"\(networkMode.nodeNetworkLabelValue)\"",
+            "  tolerations:",
+            "    - key: node.kubernetes.io/macos",
+            "      operator: Equal",
+            "      value: \"true\"",
+            "      effect: NoSchedule",
+        ]
+        if networkMode == .compat {
+            lines.append(contentsOf: [
+                "    - key: node.kubernetes.io/macos-network",
+                "      operator: Equal",
+                "      value: \"compat\"",
+                "      effect: NoSchedule",
+            ])
+        }
+        return lines.joined(separator: "\n") + "\n"
     }
 
     public static func criShimPlist() -> String {
@@ -212,8 +263,28 @@ public enum MacOSKubeadmRenderer {
         )
     }
 
-    public static func kubeletPlist(nodeName: String, sandboxImage: String) -> String {
-        launchdPlist(
+    public static func kubeletPlist(
+        nodeName: String,
+        sandboxImage: String,
+        networkMode: MacOSKubeadmNetworkMode = .full
+    ) -> String {
+        let nodeLabels = [
+            "kubernetes.io/os=darwin",
+            "node.kubernetes.io/macos=true",
+            "node.kubernetes.io/macos-network=\(networkMode.nodeNetworkLabelValue)",
+        ].joined(separator: ",")
+        let nodeTaints: String
+        switch networkMode {
+        case .full:
+            nodeTaints = "node.kubernetes.io/macos=true:NoSchedule"
+        case .compat:
+            nodeTaints = [
+                "node.kubernetes.io/macos=true:NoSchedule",
+                "node.kubernetes.io/macos-network=compat:NoSchedule",
+            ].joined(separator: ",")
+        }
+
+        return launchdPlist(
             label: "com.apple.container.kubelet",
             programArguments: [
                 "/usr/local/bin/kubelet",
@@ -226,9 +297,9 @@ public enum MacOSKubeadmRenderer {
                 "--hostname-override",
                 nodeName,
                 "--node-labels",
-                "kubernetes.io/os=darwin,node.kubernetes.io/macos=true",
+                nodeLabels,
                 "--register-with-taints",
-                "node.kubernetes.io/macos=true:NoSchedule",
+                nodeTaints,
                 "--root-dir",
                 "/var/lib/kubelet",
                 "--pod-infra-container-image",

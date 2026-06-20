@@ -688,6 +688,115 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func virtualizationNATRunPodSandboxSkipsCNI() async throws {
+        let socketPath = "/tmp/cri-shim-nat-\(UUID().uuidString.prefix(8)).sock"
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            stateDirectory: stateDirectory.path,
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            defaults: RuntimeProfile(
+                sandboxImage: "localhost/macos-sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: false),
+            kubeProxy: KubeProxyConfig(enabled: false)
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let imageManager = RecordingImageManager(images: [
+            CRIShimImageRecord(
+                reference: "localhost/macos-sandbox:latest",
+                digest: "sha256:sandbox",
+                size: 16_384,
+                annotations: ["org.apple.container.macos.image.role": "sandbox"]
+            )
+        ])
+        let cniManager = RecordingCNIManager()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = try CRIShimGRPCServer(
+            socketPath: socketPath,
+            config: config,
+            versionInfo: CRIShimRuntimeVersionInfo(),
+            eventLoopGroup: group,
+            readinessChecker: StaticReadinessChecker(
+                snapshot: CRIShimReadinessSnapshot(
+                    runtime: CRIShimRuntimeConditionSnapshot(
+                        type: CRIShimRuntimeConditionType.runtimeReady,
+                        status: true,
+                        reason: "RuntimeHealthOK",
+                        message: "test runtime ready"
+                    ),
+                    network: CRIShimRuntimeConditionSnapshot(
+                        type: CRIShimRuntimeConditionType.networkReady,
+                        status: true,
+                        reason: "NATReady",
+                        message: "test network ready"
+                    )
+                )
+            ),
+            runtimeManager: runtimeManager,
+            imageManager: imageManager,
+            cniManager: cniManager
+        )
+        let serverTask = Task {
+            try await server.run()
+        }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
+
+        try await waitForSocket(at: socketPath)
+
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+
+        var runSandboxRequest = Runtime_V1_RunPodSandboxRequest()
+        runSandboxRequest.runtimeHandler = "macos-compat"
+        runSandboxRequest.config.metadata.uid = "nat-pod-uid"
+        runSandboxRequest.config.metadata.namespace = "default"
+        runSandboxRequest.config.metadata.name = "nat-pod"
+        runSandboxRequest.config.metadata.attempt = 1
+        let runSandbox = try await client.runPodSandbox(runSandboxRequest)
+
+        #expect(!runSandbox.podSandboxID.isEmpty)
+        #expect(runtimeManager.createSandboxCalls.count == 1)
+        let createSandboxCall = try #require(runtimeManager.createSandboxCalls.first)
+        #expect(createSandboxCall.macosGuest?.networkBackend == .virtualizationNAT)
+        #expect(createSandboxCall.networks.isEmpty)
+        #expect(cniManager.addCalls.isEmpty)
+        #expect(cniManager.deleteCalls.isEmpty)
+
+        var statusRequest = Runtime_V1_PodSandboxStatusRequest()
+        statusRequest.podSandboxID = runSandbox.podSandboxID
+        statusRequest.verbose = true
+        let status = try await client.podSandboxStatus(statusRequest)
+        let metadataInfo = try #require(status.info["metadata"])
+        let metadata = try JSONDecoder.criShimMetadataDecoder.decode(
+            CRIShimSandboxMetadata.self,
+            from: Data(metadataInfo.utf8)
+        )
+        #expect(metadata.networkLeaseID == nil)
+        #expect(metadata.networkAttachments.isEmpty)
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        await shutdown(group)
+    }
+
+    @Test
     func execStreamingTimeoutKillsIdleProcess() async throws {
         let socketPath = "/tmp/cri-shim-timeout-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()

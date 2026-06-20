@@ -53,6 +53,9 @@ extension MacOSKubeadm {
         @Option(help: "macOS sandbox image used by CRI shim and kubelet.")
         var sandboxImage: String = "localhost/macos-sandbox:latest"
 
+        @Option(help: "Node network mode: full or compat.")
+        var networkMode: String = MacOSKubeadmNetworkMode.full.rawValue
+
         @Option(help: "Alternate filesystem root for tests and image assembly. Normal deployments use '/'.")
         var installRoot: String = "/"
 
@@ -67,6 +70,7 @@ extension MacOSKubeadm {
 
         func run() throws {
             let apiServer = try parseAPIServerEndpoint(apiServerEndpoint)
+            let resolvedNetworkMode = try parseNetworkMode(networkMode)
 
             let options = MacOSKubeadmJoinOptions(
                 apiServer: apiServer,
@@ -74,6 +78,7 @@ extension MacOSKubeadm {
                 token: token,
                 discoveryTokenCACertHashes: discoveryTokenCACertHash,
                 sandboxImage: sandboxImage,
+                networkMode: resolvedNetworkMode,
                 installRoot: installRoot,
                 startServices: !skipStart,
                 dryRun: dryRun,
@@ -95,6 +100,15 @@ extension MacOSKubeadm {
                 throw ValidationError("api-server-endpoint must be a valid host:port or URL")
             }
             return url
+        }
+
+        private func parseNetworkMode(_ value: String) throws -> MacOSKubeadmNetworkMode {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let mode = MacOSKubeadmNetworkMode(rawValue: normalized) else {
+                let allowed = MacOSKubeadmNetworkMode.allCases.map(\.rawValue).joined(separator: ", ")
+                throw ValidationError("--network-mode must be one of: \(allowed)")
+            }
+            return mode
         }
     }
 

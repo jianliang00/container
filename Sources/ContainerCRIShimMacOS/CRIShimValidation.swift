@@ -70,7 +70,7 @@ extension CRIShimConfig {
             if let plugin = cni.plugin?.trimmed, plugin.contains("/") {
                 issues.append("cni.plugin must be a plugin name, not a path")
             }
-        } else {
+        } else if requiresCNI {
             issues.append("cni is required")
         }
 
@@ -120,6 +120,24 @@ extension CRIShimConfig {
         validateKubernetesIntegrationNetworkBackend(issues: &issues)
 
         return issues
+    }
+}
+
+extension CRIShimConfig {
+    public var requiresCNI: Bool {
+        guard let defaults else {
+            return false
+        }
+
+        let defaultBackend = defaults.networkBackend?.trimmed
+        if defaultBackend == "vmnetShared" {
+            return true
+        }
+
+        return runtimeHandlers.values.contains { handler in
+            let backend = handler.networkBackend?.trimmed ?? defaultBackend
+            return backend == "vmnetShared"
+        }
     }
 }
 

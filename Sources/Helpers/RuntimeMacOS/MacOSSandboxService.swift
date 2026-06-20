@@ -2290,7 +2290,9 @@ extension MacOSSandboxService {
 
         if fm.fileExists(atPath: configPath().path) {
             let data = try Data(contentsOf: configPath())
-            return try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+            let config = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+            try await ensureTemplateArtifacts(for: config, progressUpdate: progressUpdate)
+            return config
         }
 
         let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: root)
@@ -2304,11 +2306,30 @@ extension MacOSSandboxService {
             try JSONEncoder().encode(options).write(to: optionsPath())
         }
 
-        let layers = try await resolveTemplateLayers(containerConfig: config, progressUpdate: progressUpdate)
-        _ = try FilesystemClone.cloneOrCopyItem(at: layers.hardwareModel, to: hardwareModelPath())
-        _ = try FilesystemClone.cloneOrCopyItem(at: layers.auxiliaryStorage, to: auxiliaryStoragePath())
-        _ = try FilesystemClone.cloneOrCopyItem(at: layers.diskImage, to: diskImagePath())
+        try await ensureTemplateArtifacts(for: config, progressUpdate: progressUpdate)
         return config
+    }
+
+    private func ensureTemplateArtifacts(for config: ContainerConfiguration, progressUpdate: ProgressUpdateHandler? = nil) async throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: hardwareModelPath().path),
+            fm.fileExists(atPath: auxiliaryStoragePath().path),
+            fm.fileExists(atPath: diskImagePath().path)
+        {
+            return
+        }
+
+        let layers = try await resolveTemplateLayers(containerConfig: config, progressUpdate: progressUpdate)
+        try copyTemplateArtifactIfNeeded(from: layers.hardwareModel, to: hardwareModelPath())
+        try copyTemplateArtifactIfNeeded(from: layers.auxiliaryStorage, to: auxiliaryStoragePath())
+        try copyTemplateArtifactIfNeeded(from: layers.diskImage, to: diskImagePath())
+    }
+
+    private func copyTemplateArtifactIfNeeded(from source: URL, to destination: URL) throws {
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            return
+        }
+        _ = try FilesystemClone.cloneOrCopyItem(at: source, to: destination)
     }
 
     private struct LayerPaths {
@@ -3627,6 +3648,10 @@ extension MacOSSandboxService {
 
     func testingPersistWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
         try persistWorkloadConfiguration(configuration)
+    }
+
+    func testingPrepareBundle() async throws -> ContainerConfiguration {
+        try await prepareSandboxIfNeeded()
     }
 
     func testingPrepareSandbox(_ configuration: ContainerConfiguration, state: String = "booted") throws {

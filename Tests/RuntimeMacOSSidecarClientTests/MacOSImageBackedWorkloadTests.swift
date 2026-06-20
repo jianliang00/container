@@ -94,6 +94,33 @@ struct MacOSImageBackedWorkloadTests {
     }
 
     @Test
+    func prepareBundleRestoresMissingTemplateArtifactsWhenConfigurationAlreadyExists() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-sandbox-template-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeSandboxImage(in: tempDirectory.appendingPathComponent("sandbox-image", isDirectory: true))
+        let sandboxRoot = tempDirectory.appendingPathComponent("sandbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: sandboxRoot, withIntermediateDirectories: true)
+
+        let layout = MacOSSandboxLayout(root: sandboxRoot)
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        try JSONEncoder().encode(containerConfiguration).write(to: layout.containerConfigurationURL)
+
+        let service = MacOSSandboxService(
+            root: sandboxRoot,
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        let prepared = try await service.testingPrepareBundle()
+
+        #expect(prepared.id == containerConfiguration.id)
+        #expect(try Data(contentsOf: layout.hardwareModelURL) == image.hardwareModelData)
+        #expect(try Data(contentsOf: layout.auxiliaryStorageURL) == image.auxiliaryStorageData)
+        #expect(try Data(contentsOf: layout.diskImageURL) == image.diskImageData)
+    }
+
+    @Test
     func startImageBackedWorkloadInjectsPayloadMetadataAndMapsPayloadPathsWithoutChroot() async throws {
         let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-image-tests")
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
@@ -744,6 +771,14 @@ extension MacOSImageBackedWorkloadTests {
         let store: MockContentStore
     }
 
+    private struct CreatedSandboxImage {
+        let indexDigest: String
+        let store: MockContentStore
+        let hardwareModelData: Data
+        let auxiliaryStorageData: Data
+        let diskImageData: Data
+    }
+
     private struct MockContentStore: ContentStore {
         let entries: [String: URL]
 
@@ -791,6 +826,82 @@ extension MacOSImageBackedWorkloadTests {
     }
 
     private struct Unimplemented: Error {}
+
+    private static func makeSandboxImage(in directory: URL) throws -> CreatedSandboxImage {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let hardwareModelData = Data("hardware-model".utf8)
+        let auxiliaryStorageData = Data("auxiliary-storage".utf8)
+        let diskImageData = Data("disk-image".utf8)
+
+        let hardwareModelURL = directory.appendingPathComponent("HardwareModel.bin")
+        let auxiliaryStorageURL = directory.appendingPathComponent("AuxiliaryStorage")
+        let diskImageURL = directory.appendingPathComponent("Disk.img")
+        try hardwareModelData.write(to: hardwareModelURL)
+        try auxiliaryStorageData.write(to: auxiliaryStorageURL)
+        try diskImageData.write(to: diskImageURL)
+
+        let hardwareModelDigest = "sha256:hardware-\(UUID().uuidString)"
+        let auxiliaryStorageDigest = "sha256:auxiliary-\(UUID().uuidString)"
+        let diskImageDigest = "sha256:disk-\(UUID().uuidString)"
+        let manifestDigest = "sha256:manifest-\(UUID().uuidString)"
+        let indexDigest = "sha256:index-\(UUID().uuidString)"
+
+        let manifest = Manifest(
+            config: Descriptor(
+                mediaType: MediaTypes.imageConfig,
+                digest: "sha256:config-\(UUID().uuidString)",
+                size: 2
+            ),
+            layers: [
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.hardwareModel,
+                    digest: hardwareModelDigest,
+                    size: Int64(hardwareModelData.count)
+                ),
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage,
+                    digest: auxiliaryStorageDigest,
+                    size: Int64(auxiliaryStorageData.count)
+                ),
+                Descriptor(
+                    mediaType: MacOSImageOCIMediaTypes.diskImage,
+                    digest: diskImageDigest,
+                    size: Int64(diskImageData.count)
+                ),
+            ],
+            annotations: MacOSImageContract.annotations(for: .sandbox)
+        )
+        let manifestURL = try writeJSON(manifest, named: "sandbox-manifest.json", in: directory)
+        let index = Index(
+            manifests: [
+                Descriptor(
+                    mediaType: MediaTypes.imageManifest,
+                    digest: manifestDigest,
+                    size: Int64(try Data(contentsOf: manifestURL).count),
+                    annotations: MacOSImageContract.annotations(for: .sandbox),
+                    platform: .init(arch: "arm64", os: "darwin")
+                )
+            ]
+        )
+        let indexURL = try writeJSON(index, named: "sandbox-index.json", in: directory)
+
+        return CreatedSandboxImage(
+            indexDigest: indexDigest,
+            store: MockContentStore(
+                entries: [
+                    indexDigest: indexURL,
+                    manifestDigest: manifestURL,
+                    hardwareModelDigest: hardwareModelURL,
+                    auxiliaryStorageDigest: auxiliaryStorageURL,
+                    diskImageDigest: diskImageURL,
+                ]
+            ),
+            hardwareModelData: hardwareModelData,
+            auxiliaryStorageData: auxiliaryStorageData,
+            diskImageData: diskImageData
+        )
+    }
 
     private static func makeWorkloadImage(in directory: URL) throws -> CreatedWorkloadImage {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -86,20 +86,24 @@ public enum MacOSKubeadmPlanner {
         try validate(options)
 
         let caPath = "/etc/kubernetes/pki/ca.crt"
-        let directories = [
+        var directories = [
             "/etc/kubernetes",
             "/etc/kubernetes/manifests",
             "/etc/kubernetes/pki",
-            "/etc/cni/net.d",
-            "/opt/cni/bin",
             "/Library/LaunchDaemons",
             "/usr/local/share/container-macos-node/manifests",
             "/var/lib/kubelet",
             "/var/lib/container/cri-shim-macos",
-            "/var/lib/container/cni/macvmnet",
             "/var/log/pods",
             "/var/log/containers",
         ]
+        if options.networkMode.usesPodNetworking {
+            directories.append(contentsOf: [
+                "/etc/cni/net.d",
+                "/opt/cni/bin",
+                "/var/lib/container/cni/macvmnet",
+            ])
+        }
 
         var steps: [MacOSKubeadmStep] = directories.map { path in
             MacOSKubeadmStep(
@@ -138,22 +142,6 @@ public enum MacOSKubeadmPlanner {
                 )
             ),
             MacOSKubeadmStep(
-                message: "write kube-proxy kubeconfig",
-                action: .writeFile(
-                    path: options.rooted("/etc/kubernetes/kube-proxy.kubeconfig"),
-                    contents: MacOSKubeadmRenderer.kubeconfig(
-                        clusterName: options.clusterName,
-                        contextName: "kube-proxy",
-                        userName: "kube-proxy",
-                        server: options.apiServer,
-                        certificateAuthorityPath: caPath,
-                        token: options.kubeProxyToken ?? ""
-                    ),
-                    mode: 0o600,
-                    sensitive: true
-                )
-            ),
-            MacOSKubeadmStep(
                 message: "write kubelet configuration",
                 action: .writeFile(
                     path: options.rooted("/etc/kubernetes/kubelet-config.yaml"),
@@ -169,34 +157,71 @@ public enum MacOSKubeadmPlanner {
                 message: "write CRI shim configuration",
                 action: .writeFile(
                     path: options.rooted("/etc/kubernetes/container-cri-shim-macos-config.json"),
-                    contents: MacOSKubeadmRenderer.criShimConfiguration(sandboxImage: options.sandboxImage),
+                    contents: MacOSKubeadmRenderer.criShimConfiguration(
+                        sandboxImage: options.sandboxImage,
+                        networkMode: options.networkMode
+                    ),
                     mode: 0o644,
                     sensitive: false
                 )
             ),
-            MacOSKubeadmStep(
-                message: "write CNI configuration",
-                action: .writeFile(
-                    path: options.rooted("/etc/cni/net.d/10-macvmnet.conflist"),
-                    contents: MacOSKubeadmRenderer.cniConfiguration(),
-                    mode: 0o644,
-                    sensitive: false
-                )
-            ),
-            MacOSKubeadmStep(
-                message: "write kube-proxy configuration",
-                action: .writeFile(
-                    path: options.rooted("/etc/kubernetes/kube-proxy.conf"),
-                    contents: MacOSKubeadmRenderer.kubeProxyConfiguration(nodeName: options.nodeName),
-                    mode: 0o644,
-                    sensitive: false
-                )
-            ),
+        ])
+
+        if options.networkMode.usesPodNetworking {
+            steps.append(contentsOf: [
+                MacOSKubeadmStep(
+                    message: "write kube-proxy kubeconfig",
+                    action: .writeFile(
+                        path: options.rooted("/etc/kubernetes/kube-proxy.kubeconfig"),
+                        contents: MacOSKubeadmRenderer.kubeconfig(
+                            clusterName: options.clusterName,
+                            contextName: "kube-proxy",
+                            userName: "kube-proxy",
+                            server: options.apiServer,
+                            certificateAuthorityPath: caPath,
+                            token: options.kubeProxyToken ?? ""
+                        ),
+                        mode: 0o600,
+                        sensitive: true
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "write CNI configuration",
+                    action: .writeFile(
+                        path: options.rooted("/etc/cni/net.d/10-macvmnet.conflist"),
+                        contents: MacOSKubeadmRenderer.cniConfiguration(),
+                        mode: 0o644,
+                        sensitive: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "write kube-proxy configuration",
+                    action: .writeFile(
+                        path: options.rooted("/etc/kubernetes/kube-proxy.conf"),
+                        contents: MacOSKubeadmRenderer.kubeProxyConfiguration(nodeName: options.nodeName),
+                        mode: 0o644,
+                        sensitive: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "write kube-proxy launchd plist",
+                    action: .writeFile(
+                        path: options.rooted("/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist"),
+                        contents: MacOSKubeadmRenderer.kubeProxyPlist(),
+                        mode: 0o644,
+                        sensitive: false
+                    )
+                ),
+            ])
+        }
+
+        let runtimeClassFile = options.networkMode == .full ? "runtimeclass-macos.yaml" : "runtimeclass-macos-compat.yaml"
+        steps.append(contentsOf: [
             MacOSKubeadmStep(
                 message: "write RuntimeClass manifest",
                 action: .writeFile(
-                    path: options.rooted("/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml"),
-                    contents: MacOSKubeadmRenderer.runtimeClassManifest(),
+                    path: options.rooted("/usr/local/share/container-macos-node/manifests/\(runtimeClassFile)"),
+                    contents: MacOSKubeadmRenderer.runtimeClassManifest(networkMode: options.networkMode),
                     mode: 0o644,
                     sensitive: false
                 )
@@ -211,21 +236,13 @@ public enum MacOSKubeadmPlanner {
                 )
             ),
             MacOSKubeadmStep(
-                message: "write kube-proxy launchd plist",
-                action: .writeFile(
-                    path: options.rooted("/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist"),
-                    contents: MacOSKubeadmRenderer.kubeProxyPlist(),
-                    mode: 0o644,
-                    sensitive: false
-                )
-            ),
-            MacOSKubeadmStep(
                 message: "write kubelet launchd plist",
                 action: .writeFile(
                     path: options.rooted("/Library/LaunchDaemons/com.apple.container.kubelet.plist"),
                     contents: MacOSKubeadmRenderer.kubeletPlist(
                         nodeName: options.nodeName,
-                        sandboxImage: options.sandboxImage
+                        sandboxImage: options.sandboxImage,
+                        networkMode: options.networkMode
                     ),
                     mode: 0o644,
                     sensitive: false
@@ -234,7 +251,7 @@ public enum MacOSKubeadmPlanner {
         ])
 
         if options.startServices {
-            steps.append(contentsOf: serviceStartSteps())
+            steps.append(contentsOf: serviceStartSteps(networkMode: options.networkMode))
         }
 
         return MacOSKubeadmPlan(steps: steps)
@@ -275,6 +292,7 @@ public enum MacOSKubeadmPlanner {
             ("/etc/kubernetes/pki/ca.crt", false, false),
             ("/etc/cni/net.d/10-macvmnet.conflist", false, false),
             ("/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml", false, false),
+            ("/usr/local/share/container-macos-node/manifests/runtimeclass-macos-compat.yaml", false, false),
         ]
 
         for entry in generatedPaths {
@@ -336,7 +354,7 @@ public enum MacOSKubeadmPlanner {
         guard !(options.certificateAuthorityPEM ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("discovered Kubernetes CA certificate is required")
         }
-        guard !(options.kubeProxyToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !options.networkMode.usesPodNetworking || !(options.kubeProxyToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("discovered kube-proxy token is required")
         }
         guard !options.clusterDNS.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -362,8 +380,8 @@ public enum MacOSKubeadmPlanner {
         }
     }
 
-    private static func serviceStartSteps() -> [MacOSKubeadmStep] {
-        [
+    private static func serviceStartSteps(networkMode: MacOSKubeadmNetworkMode) -> [MacOSKubeadmStep] {
+        var steps = [
             MacOSKubeadmStep(
                 message: "start container core services",
                 action: .runCommand(
@@ -399,30 +417,36 @@ public enum MacOSKubeadmPlanner {
                 message: "wait for CRI socket",
                 action: .waitForPath(path: "/var/run/container-cri-macos.sock", timeoutSeconds: 30)
             ),
-            MacOSKubeadmStep(
-                message: "stop previous kube-proxy launchd job if present",
-                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kube-proxy-macos"], bestEffort: true)
-            ),
-            MacOSKubeadmStep(
-                message: "start kube-proxy launchd job",
-                action: .runCommand(
-                    arguments: [
-                        "/bin/launchctl",
-                        "bootstrap",
-                        "system",
-                        "/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
-                    ],
-                    bestEffort: false
-                )
-            ),
-            MacOSKubeadmStep(
-                message: "enable kube-proxy launchd job",
-                action: .runCommand(arguments: ["/bin/launchctl", "enable", "system/com.apple.container.kube-proxy-macos"], bestEffort: false)
-            ),
-            MacOSKubeadmStep(
-                message: "kickstart kube-proxy launchd job",
-                action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.kube-proxy-macos"], bestEffort: false)
-            ),
+        ]
+        if networkMode.usesPodNetworking {
+            steps.append(contentsOf: [
+                MacOSKubeadmStep(
+                    message: "stop previous kube-proxy launchd job if present",
+                    action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kube-proxy-macos"], bestEffort: true)
+                ),
+                MacOSKubeadmStep(
+                    message: "start kube-proxy launchd job",
+                    action: .runCommand(
+                        arguments: [
+                            "/bin/launchctl",
+                            "bootstrap",
+                            "system",
+                            "/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
+                        ],
+                        bestEffort: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "enable kube-proxy launchd job",
+                    action: .runCommand(arguments: ["/bin/launchctl", "enable", "system/com.apple.container.kube-proxy-macos"], bestEffort: false)
+                ),
+                MacOSKubeadmStep(
+                    message: "kickstart kube-proxy launchd job",
+                    action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.kube-proxy-macos"], bestEffort: false)
+                ),
+            ])
+        }
+        steps.append(contentsOf: [
             MacOSKubeadmStep(
                 message: "stop previous kubelet launchd job if present",
                 action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kubelet"], bestEffort: true)
@@ -447,6 +471,7 @@ public enum MacOSKubeadmPlanner {
                 message: "kickstart kubelet launchd job",
                 action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.kubelet"], bestEffort: false)
             ),
-        ]
+        ])
+        return steps
     }
 }

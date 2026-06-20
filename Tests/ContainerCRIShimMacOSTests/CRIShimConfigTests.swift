@@ -194,6 +194,53 @@ struct CRIShimConfigTests {
                 "runtimeHandlers.macos.networkBackend must be vmnetShared when networkPolicy or kubeProxy is enabled"
             ))
     }
+
+    @Test
+    func natOnlyConfigDoesNotRequireCNI() throws {
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            defaults: RuntimeProfile(
+                sandboxImage: "localhost/macos-sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: false),
+            kubeProxy: KubeProxyConfig(enabled: false)
+        )
+
+        #expect(config.requiresCNI == false)
+        #expect(!config.validationIssues.contains("cni is required"))
+        try config.validate()
+    }
+
+    @Test
+    func vmnetSharedConfigRequiresCNI() {
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            defaults: RuntimeProfile(
+                sandboxImage: "localhost/macos-sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "vmnetShared",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos": RuntimeProfile(networkBackend: "vmnetShared")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: false),
+            kubeProxy: KubeProxyConfig(enabled: false)
+        )
+
+        #expect(config.requiresCNI)
+        #expect(config.validationIssues.contains("cni is required"))
+    }
 }
 
 private func makeTemporaryDirectory() -> URL {

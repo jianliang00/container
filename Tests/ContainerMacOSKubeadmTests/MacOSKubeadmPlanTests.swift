@@ -74,6 +74,74 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""name": "default""#)
                     && contents.contains(#""network": "default""#)
             })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml"
+                    && contents.contains("name: macos")
+                    && contents.contains("node.kubernetes.io/macos-network: \"full\"")
+            })
+    }
+
+    @Test func compatJoinPlanOmitsPodNetworkingArtifacts() throws {
+        var options = try makeOptions(startServices: true)
+        options.networkMode = .compat
+        options.kubeProxyToken = nil
+
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let descriptions = plan.steps.map(\.message)
+        let writePaths = plan.steps.compactMap { step -> String? in
+            guard case .writeFile(let path, _, _, _) = step.action else {
+                return nil
+            }
+            return path
+        }
+
+        #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/kube-proxy.kubeconfig"))
+        #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/kube-proxy.conf"))
+        #expect(!writePaths.contains("/tmp/macos-node/etc/cni/net.d/10-macvmnet.conflist"))
+        #expect(!writePaths.contains("/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist"))
+        #expect(!descriptions.contains("start kube-proxy launchd job"))
+        #expect(!descriptions.contains("kickstart kube-proxy launchd job"))
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/etc/kubernetes/container-cri-shim-macos-config.json"
+                    && contents.contains(#""networkBackend": "virtualizationNAT""#)
+                    && contents.contains(#""macos-compat""#)
+                    && contents.contains(#""kubeProxy": {"#)
+                    && contents.contains(#""enabled": false"#)
+                    && !contents.contains(#""cni":"#)
+                    && !contents.contains(#""plugin": "macvmnet""#)
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/usr/local/share/container-macos-node/manifests/runtimeclass-macos-compat.yaml"
+                    && contents.contains("name: macos-compat")
+                    && contents.contains("handler: macos-compat")
+                    && contents.contains("node.kubernetes.io/macos-network: \"compat\"")
+                    && contents.contains("key: node.kubernetes.io/macos-network")
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kubelet.plist"
+                    && contents.contains("node.kubernetes.io/macos-network=compat")
+                    && contents.contains("node.kubernetes.io/macos-network=compat:NoSchedule")
+            })
     }
 
     @Test func kubeconfigsAreMarkedSensitive() throws {

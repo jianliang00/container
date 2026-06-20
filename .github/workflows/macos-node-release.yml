@@ -13,7 +13,7 @@ on:
       kubelet_artifact_url:
         description: "URL of the kubelet-darwin-arm64 tar.gz artifact"
         required: true
-        default: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-4/kubelet-darwin-arm64-k8s-v1.27.2-4.tar.gz"
+        default: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-5/kubelet-darwin-arm64-k8s-v1.27.2-5.tar.gz"
         type: string
       node_name:
         description: "Default node name rendered into packaged templates"
@@ -44,7 +44,7 @@ jobs:
       packages: read
     env:
       KUBERNETES_BASELINE: v1.27.2
-      DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-4/kubelet-darwin-arm64-k8s-v1.27.2-4.tar.gz"
+      DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-5/kubelet-darwin-arm64-k8s-v1.27.2-5.tar.gz"
       DEFAULT_NODE_NAME: macos-node-1
     steps:
       - name: Checkout repository
@@ -201,6 +201,8 @@ jobs:
             "etc/kubernetes/kubelet-config.yaml"
             "Library/LaunchDaemons/com.apple.container.kubelet.plist"
             "opt/cni/bin/container-cni-macvmnet"
+            "usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml"
+            "usr/local/share/container-macos-node/manifests/runtimeclass-macos-compat.yaml"
             "usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml"
             "usr/local/share/container-macos-node/release-manifest.json"
           )

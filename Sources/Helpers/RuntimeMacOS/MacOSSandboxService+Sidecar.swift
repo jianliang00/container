@@ -43,7 +43,7 @@ extension MacOSSandboxService {
         "com.apple.container.runtime.container-runtime-macos-sidecar.\(config.id)"
     }
 
-    func sidecarLaunchdDomain(uid: uid_t) -> String {
+    nonisolated func sidecarLaunchdDomain(uid: uid_t) -> String {
         if uid == 0 {
             return "user/0"
         }
@@ -54,7 +54,7 @@ extension MacOSSandboxService {
         sidecarLaunchdDomain(uid: getuid())
     }
 
-    func sidecarLaunchAgentSessionOptions(uid: uid_t) -> [String: Any] {
+    nonisolated func sidecarLaunchAgentSessionOptions(uid: uid_t) -> [String: Any] {
         if uid == 0 {
             return [
                 "LimitLoadToSessionType": ["Aqua", "Background", "System"]

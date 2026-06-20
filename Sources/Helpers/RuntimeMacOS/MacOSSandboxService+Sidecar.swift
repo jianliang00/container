@@ -54,6 +54,18 @@ extension MacOSSandboxService {
         sidecarLaunchdDomain(uid: getuid())
     }
 
+    func sidecarLaunchAgentSessionOptions(uid: uid_t) -> [String: Any] {
+        if uid == 0 {
+            return [
+                "LimitLoadToSessionType": ["Aqua", "Background", "System"]
+            ]
+        }
+        return [
+            "LimitLoadToSessionType": "Aqua",
+            "ProcessType": "Interactive",
+        ]
+    }
+
     func sidecarFullLaunchLabel(config: ContainerConfiguration) -> String {
         "\(sidecarGUIDomain())/\(sidecarLaunchLabel(config: config))"
     }
@@ -297,16 +309,18 @@ extension MacOSSandboxService {
             "--control-socket", socketURL.path,
         ]
 
-        let plist: [String: Any] = [
+        let sessionOptions = sidecarLaunchAgentSessionOptions(uid: getuid())
+        var plist: [String: Any] = [
             "Label": launchLabel,
             "RunAtLoad": true,
             "KeepAlive": false,
-            "LimitLoadToSessionType": "Aqua",
-            "ProcessType": "Interactive",
             "ProgramArguments": args,
             "StandardOutPath": stdoutURL.path,
             "StandardErrorPath": stderrURL.path,
         ]
+        for (key, value) in sessionOptions {
+            plist[key] = value
+        }
 
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
         try data.write(to: plistURL)

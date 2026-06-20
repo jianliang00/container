@@ -63,6 +63,9 @@ public enum MacOSKubeadmRenderer {
         failSwapOn: false
         cgroupsPerQOS: false
         enforceNodeAllocatable: []
+        evictionHard:
+          memory.available: "0%"
+        evictionPressureTransitionPeriod: "10s"
         eventRecordQPS: 5
         enableServer: true
         localStorageCapacityIsolation: false

@@ -229,6 +229,9 @@ func validateCRIShimImage(
 
     do {
         guard let role = try MacOSImageContract.role(descriptorAnnotations: image.annotations) else {
+            if expectedRole == .sandbox {
+                return
+            }
             throw MacOSImageContractError.missingRoleAnnotation
         }
         guard role == expectedRole else {

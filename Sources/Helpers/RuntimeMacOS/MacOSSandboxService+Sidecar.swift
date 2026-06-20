@@ -43,8 +43,15 @@ extension MacOSSandboxService {
         "com.apple.container.runtime.container-runtime-macos-sidecar.\(config.id)"
     }
 
+    func sidecarLaunchdDomain(uid: uid_t) -> String {
+        if uid == 0 {
+            return "user/0"
+        }
+        return "gui/\(uid)"
+    }
+
     func sidecarGUIDomain() -> String {
-        "gui/\(getuid())"
+        sidecarLaunchdDomain(uid: getuid())
     }
 
     func sidecarFullLaunchLabel(config: ContainerConfiguration) -> String {

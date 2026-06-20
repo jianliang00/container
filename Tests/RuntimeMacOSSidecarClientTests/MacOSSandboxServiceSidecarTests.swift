@@ -33,5 +33,22 @@ struct MacOSSandboxServiceSidecarTests {
         #expect(service.sidecarLaunchdDomain(uid: 0) == "user/0")
         #expect(service.sidecarLaunchdDomain(uid: 501) == "gui/501")
     }
+
+    @Test
+    func sidecarLaunchAgentSessionOptionsSupportRootBootstrap() {
+        let service = MacOSSandboxService(
+            root: FileManager.default.temporaryDirectory.appendingPathComponent("sidecar-session-options-test"),
+            connection: nil,
+            log: Logger(label: "MacOSSandboxServiceSidecarTests")
+        )
+
+        let rootOptions = service.sidecarLaunchAgentSessionOptions(uid: 0)
+        #expect(rootOptions["LimitLoadToSessionType"] as? [String] == ["Aqua", "Background", "System"])
+        #expect(rootOptions["ProcessType"] == nil)
+
+        let userOptions = service.sidecarLaunchAgentSessionOptions(uid: 501)
+        #expect(userOptions["LimitLoadToSessionType"] as? String == "Aqua")
+        #expect(userOptions["ProcessType"] as? String == "Interactive")
+    }
 }
 #endif

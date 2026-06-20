@@ -72,7 +72,7 @@ struct CRIShimImageServiceTests {
     }
 
     @Test
-    func validatesExplicitMacOSImageRoles() throws {
+    func validatesMacOSImageRolesAndLegacySandboxImages() throws {
         let sandboxImage = CRIShimImageRecord(
             reference: "localhost/macos-sandbox:latest",
             digest: "sha256:sandbox",
@@ -115,10 +115,16 @@ struct CRIShimImageServiceTests {
             digest: "sha256:unannotated",
             size: 1024
         )
+        try validateCRIShimImage(
+            unannotated,
+            expectedRole: .sandbox,
+            requestedReference: unannotated.reference
+        )
+
         #expect {
             try validateCRIShimImage(
                 unannotated,
-                expectedRole: .sandbox,
+                expectedRole: .workload,
                 requestedReference: unannotated.reference
             )
         } throws: { error in

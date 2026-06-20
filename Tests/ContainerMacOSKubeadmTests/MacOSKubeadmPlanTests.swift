@@ -61,9 +61,18 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""10.96.0.53""#)
                     && contents.contains("enforceNodeAllocatable: []")
                     && contents.contains(#"memory.available: "0%""#)
-                    && contents.contains(#""name": "default""#)
                     && !contents.contains("podLogsDir:")
                     && !contents.contains("failCgroupV1:")
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/etc/cni/net.d/10-macvmnet.conflist"
+                    && contents.contains(#""name": "default""#)
+                    && contents.contains(#""network": "default""#)
             })
     }
 

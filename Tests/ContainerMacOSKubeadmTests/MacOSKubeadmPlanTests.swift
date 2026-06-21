@@ -278,6 +278,33 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains("<string>501</string>")
                     && contents.contains("<string>/usr/local/bin/container-cri-shim-macos</string>")
             })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "ensure directory /var/lib/kubelet/pods",
+                    case .createDirectory(let path, 0o750) = step.action
+                else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/kubelet/pods"
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "grant container service user access to kubelet pod directories",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments.count == 6
+                    && arguments[0] == "/bin/sh"
+                    && arguments[1] == "-c"
+                    && arguments[2].contains("/usr/bin/id -nu")
+                    && arguments[2].contains("/bin/chmod +a")
+                    && arguments[3] == "container-macos-kubeadm-acl"
+                    && arguments[4] == "501"
+                    && arguments[5] == "/tmp/macos-node/var/lib/kubelet/pods"
+            })
     }
 
     @Test func joinPlanRequiresDiscoveryHash() throws {

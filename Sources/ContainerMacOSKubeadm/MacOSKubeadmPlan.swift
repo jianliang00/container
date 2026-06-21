@@ -111,6 +111,9 @@ public enum MacOSKubeadmPlanner {
                 action: .createDirectory(path: options.rooted(path), mode: 0o755)
             )
         }
+        if options.containerServiceUserID != 0 {
+            steps.append(contentsOf: kubeletPodsAccessSteps(options: options))
+        }
 
         steps.append(
             MacOSKubeadmStep(
@@ -492,6 +495,39 @@ public enum MacOSKubeadmPlanner {
             ),
         ])
         return steps
+    }
+
+    private static func kubeletPodsAccessSteps(options: MacOSKubeadmJoinOptions) -> [MacOSKubeadmStep] {
+        let podsPath = options.rooted("/var/lib/kubelet/pods")
+        let script = """
+            set -eu
+            user=$(/usr/bin/id -nu "$1")
+            path=$2
+            acl="$user allow read,readattr,readextattr,readsecurity,list,search,file_inherit,directory_inherit"
+            /bin/mkdir -p "$path"
+            /usr/bin/find "$path" -type d -exec /bin/chmod -a "$acl" {} + 2>/dev/null || true
+            /usr/bin/find "$path" -type d -exec /bin/chmod +a "$acl" {} +
+            """
+        return [
+            MacOSKubeadmStep(
+                message: "ensure directory /var/lib/kubelet/pods",
+                action: .createDirectory(path: podsPath, mode: 0o750)
+            ),
+            MacOSKubeadmStep(
+                message: "grant container service user access to kubelet pod directories",
+                action: .runCommand(
+                    arguments: [
+                        "/bin/sh",
+                        "-c",
+                        script,
+                        "container-macos-kubeadm-acl",
+                        "\(options.containerServiceUserID)",
+                        podsPath,
+                    ],
+                    bestEffort: false
+                )
+            ),
+        ]
     }
 
     private static func containerSystemCommand(userID: Int, subcommand: String) -> [String] {

@@ -236,13 +236,13 @@ public enum MacOSKubeadmRenderer {
         return lines.joined(separator: "\n") + "\n"
     }
 
-    public static func criShimPlist() -> String {
+    public static func criShimPlist(containerServiceUserID: Int = 0) -> String {
         launchdPlist(
             label: "com.apple.container.cri-shim-macos",
             programArguments: [
                 "/bin/launchctl",
                 "asuser",
-                "0",
+                "\(containerServiceUserID)",
                 "/usr/local/bin/container-cri-shim-macos",
                 "--config",
                 "/etc/kubernetes/container-cri-shim-macos-config.json",

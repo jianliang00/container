@@ -797,6 +797,120 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func stopPodSandboxTreatsMissingWorkloadOptionsAsAlreadyStopped() async throws {
+        let socketPath = "/tmp/cri-shim-stop-missing-options-\(UUID().uuidString.prefix(8)).sock"
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            stateDirectory: stateDirectory.path,
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            defaults: RuntimeProfile(
+                sandboxImage: "localhost/macos-sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: false),
+            kubeProxy: KubeProxyConfig(enabled: false)
+        )
+        let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1",
+                podUID: "pod-uid",
+                namespace: "default",
+                name: "stop-missing-options",
+                attempt: 1,
+                runtimeHandler: "macos-compat",
+                sandboxImage: "localhost/macos-sandbox:latest",
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ))
+        try metadataStore.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-1",
+                sandboxID: "sandbox-1",
+                name: "workload",
+                attempt: 1,
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos-compat",
+                command: ["/bin/true"],
+                args: [],
+                logPath: stateDirectory.appendingPathComponent("workload/0.log").path,
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_010),
+                startedAt: Date(timeIntervalSince1970: 1_700_000_020)
+            ))
+
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.stopWorkloadError = ContainerizationError(
+            .internalError,
+            message: "failed to stop workload in sandbox",
+            cause: OpaqueCRIShimError(
+                description:
+                    #"unknown: "Error Domain=NSCocoaErrorDomain Code=260 "options.json missing" UserInfo={NSFilePath=/Users/bytedance/Library/Application Support/com.apple.container/containers/container-1/options.json, NSUnderlyingError=0x1 {Error Domain=NSPOSIXErrorDomain Code=2 "No such file or directory"}}"#
+            )
+        )
+        let imageManager = RecordingImageManager(images: [])
+        let cniManager = RecordingCNIManager()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    metadataStore: metadataStore,
+                    runtimeManager: runtimeManager,
+                    imageManager: imageManager,
+                    cniManager: cniManager
+                ),
+                CRIShimImageServiceProvider(imageManager: imageManager),
+            ],
+            eventLoopGroup: group,
+            startupTasks: []
+        )
+        let serverTask = Task {
+            try await server.run()
+        }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
+
+        try await waitForSocket(at: socketPath)
+
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+
+        var stopRequest = Runtime_V1_StopPodSandboxRequest()
+        stopRequest.podSandboxID = "sandbox-1"
+        _ = try await client.stopPodSandbox(stopRequest)
+
+        #expect(runtimeManager.stopWorkloadCalls.count == 1)
+        #expect(runtimeManager.stopSandboxCalls.count == 1)
+        #expect(cniManager.deleteCalls.isEmpty)
+        let container = try #require(try metadataStore.container(id: "container-1"))
+        #expect(container.state == .exited)
+        let sandbox = try #require(try metadataStore.sandbox(id: "sandbox-1"))
+        #expect(sandbox.state == .stopped)
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        await shutdown(group)
+    }
+
+    @Test
     func runPodSandboxPullsSandboxImageWhenMissing() async throws {
         let socketPath = "/tmp/cri-shim-sandbox-pull-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()

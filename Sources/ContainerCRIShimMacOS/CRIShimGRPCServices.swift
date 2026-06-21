@@ -817,8 +817,17 @@ private func isNotFound(_ error: any Error) -> Bool {
     if nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(POSIXErrorCode.ENOENT.rawValue) {
         return true
     }
+    if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? any Error, isNotFound(underlyingError) {
+        return true
+    }
     let description = String(describing: error)
     if description.contains("notFound:") {
+        return true
+    }
+    if description.contains("NSCocoaErrorDomain Code=\(NSFileNoSuchFileError)")
+        || description.contains("NSPOSIXErrorDomain Code=\(Int(POSIXErrorCode.ENOENT.rawValue))")
+        || description.contains("No such file or directory")
+    {
         return true
     }
     return false

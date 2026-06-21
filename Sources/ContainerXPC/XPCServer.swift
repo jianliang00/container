@@ -159,12 +159,14 @@ public struct XPCServer: Sendable {
             return
         }
 
-        // Ensure that the client has our EUID
+        // Ensure that the client has our EUID. Root is allowed so system daemons
+        // can talk to per-user container services when macOS requires a GUI user
+        // bootstrap domain to start macOS guests.
         var token = audit_token_t()
         xpc_dictionary_get_audit_token(object, &token)
         let serverEuid = geteuid()
         let clientEuid = audit_token_to_euid(token)
-        guard clientEuid == serverEuid else {
+        guard Self.isAuthorizedClient(serverEuid: serverEuid, clientEuid: clientEuid) else {
             log.error(
                 "unauthorized request - uid mismatch",
                 metadata: [
@@ -226,6 +228,10 @@ public struct XPCServer: Sendable {
         let reply = message.reply()
         reply.set(error: err)
         xpc_connection_send_message(connection, reply.underlying)
+    }
+
+    public static func isAuthorizedClient(serverEuid: uid_t, clientEuid: uid_t) -> Bool {
+        clientEuid == serverEuid || clientEuid == 0
     }
 }
 

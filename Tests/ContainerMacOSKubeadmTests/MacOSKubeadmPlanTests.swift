@@ -244,6 +244,42 @@ struct MacOSKubeadmPlanTests {
             })
     }
 
+    @Test func serviceStartPlanCanUseNonRootContainerServiceUser() throws {
+        var options = try makeOptions(startServices: true)
+        options.containerServiceUserID = 501
+
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "start container core services",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/bin/sudo",
+                    "-u",
+                    "#501",
+                    "/usr/local/bin/container",
+                    "system",
+                    "start",
+                ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "write CRI shim launchd plist",
+                    case .writeFile(_, let contents, 0o644, false) = step.action
+                else {
+                    return false
+                }
+                return contents.contains("<string>asuser</string>")
+                    && contents.contains("<string>501</string>")
+                    && contents.contains("<string>/usr/local/bin/container-cri-shim-macos</string>")
+            })
+    }
+
     @Test func joinPlanRequiresDiscoveryHash() throws {
         var options = try makeOptions(startServices: false)
         options.discoveryTokenCACertHashes = []

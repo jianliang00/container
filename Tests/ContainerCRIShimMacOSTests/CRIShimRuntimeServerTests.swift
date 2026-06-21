@@ -401,7 +401,7 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.stopSandboxCalls.count == 1)
         let stopSandboxCall = try #require(runtimeManager.stopSandboxCalls.first)
         #expect(stopSandboxCall.id == runSandbox.podSandboxID)
-        #expect(stopSandboxCall.options.timeoutInSeconds == 5)
+        #expect(stopSandboxCall.options.timeoutInSeconds == 30)
         #expect(cniManager.deleteCalls.count == 1)
         let cniDeleteCall = try #require(cniManager.deleteCalls.first)
         #expect(cniDeleteCall.sandboxID == runSandbox.podSandboxID)

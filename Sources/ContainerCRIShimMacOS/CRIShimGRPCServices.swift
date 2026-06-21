@@ -38,6 +38,8 @@ public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
     }
 }
 
+private let criShimPodSandboxStopOptions = ContainerStopOptions(timeoutInSeconds: 30, signal: SIGTERM)
+
 public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsyncProvider, @unchecked Sendable {
     public var versionInfo: CRIShimRuntimeVersionInfo
     public var config: CRIShimConfig
@@ -701,7 +703,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     try await runtimeManager.stopWorkload(
                         sandboxID: metadata.id,
                         workloadID: container.id,
-                        options: .default
+                        options: criShimPodSandboxStopOptions
                     )
                 } catch {
                     if !isNotFound(error) {
@@ -721,7 +723,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
 
         if metadata.state != .stopped {
             do {
-                try await runtimeManager.stopSandbox(id: metadata.id, options: .default)
+                try await runtimeManager.stopSandbox(id: metadata.id, options: criShimPodSandboxStopOptions)
             } catch {
                 if !isNotFound(error) {
                     record(error)

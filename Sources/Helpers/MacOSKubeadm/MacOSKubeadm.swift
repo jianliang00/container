@@ -56,6 +56,9 @@ extension MacOSKubeadm {
         @Option(help: "Node network mode: full or compat.")
         var networkMode: String = MacOSKubeadmNetworkMode.full.rawValue
 
+        @Option(help: "UID whose bootstrap domain runs container core services. Defaults to SUDO_UID for compat joins, otherwise 0.")
+        var containerServiceUser: Int?
+
         @Option(help: "Alternate filesystem root for tests and image assembly. Normal deployments use '/'.")
         var installRoot: String = "/"
 
@@ -71,6 +74,7 @@ extension MacOSKubeadm {
         func run() throws {
             let apiServer = try parseAPIServerEndpoint(apiServerEndpoint)
             let resolvedNetworkMode = try parseNetworkMode(networkMode)
+            let resolvedContainerServiceUser = try resolveContainerServiceUser(networkMode: resolvedNetworkMode)
 
             let options = MacOSKubeadmJoinOptions(
                 apiServer: apiServer,
@@ -79,6 +83,7 @@ extension MacOSKubeadm {
                 discoveryTokenCACertHashes: discoveryTokenCACertHash,
                 sandboxImage: sandboxImage,
                 networkMode: resolvedNetworkMode,
+                containerServiceUserID: resolvedContainerServiceUser,
                 installRoot: installRoot,
                 startServices: !skipStart,
                 dryRun: dryRun,
@@ -109,6 +114,25 @@ extension MacOSKubeadm {
                 throw ValidationError("--network-mode must be one of: \(allowed)")
             }
             return mode
+        }
+
+        private func resolveContainerServiceUser(networkMode: MacOSKubeadmNetworkMode) throws -> Int {
+            if let containerServiceUser {
+                guard containerServiceUser >= 0 else {
+                    throw ValidationError("--container-service-user must be a non-negative uid")
+                }
+                return containerServiceUser
+            }
+            guard networkMode == .compat else {
+                return 0
+            }
+            guard let sudoUID = ProcessInfo.processInfo.environment["SUDO_UID"],
+                let uid = Int(sudoUID),
+                uid > 0
+            else {
+                return 0
+            }
+            return uid
         }
     }
 

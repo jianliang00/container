@@ -63,6 +63,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var clusterDomain: String
     public var sandboxImage: String
     public var networkMode: MacOSKubeadmNetworkMode
+    public var containerServiceUserID: Int
     public var installRoot: String
     public var startServices: Bool
     public var dryRun: Bool
@@ -80,6 +81,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         clusterDomain: String = "cluster.local",
         sandboxImage: String = "localhost/macos-sandbox:latest",
         networkMode: MacOSKubeadmNetworkMode = .full,
+        containerServiceUserID: Int = 0,
         installRoot: String = "/",
         startServices: Bool = true,
         dryRun: Bool = false,
@@ -96,6 +98,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.clusterDomain = clusterDomain
         self.sandboxImage = sandboxImage
         self.networkMode = networkMode
+        self.containerServiceUserID = containerServiceUserID
         self.installRoot = installRoot
         self.startServices = startServices
         self.dryRun = dryRun

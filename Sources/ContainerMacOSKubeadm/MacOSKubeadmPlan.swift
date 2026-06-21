@@ -230,7 +230,9 @@ public enum MacOSKubeadmPlanner {
                 message: "write CRI shim launchd plist",
                 action: .writeFile(
                     path: options.rooted("/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist"),
-                    contents: MacOSKubeadmRenderer.criShimPlist(),
+                    contents: MacOSKubeadmRenderer.criShimPlist(
+                        containerServiceUserID: options.containerServiceUserID
+                    ),
                     mode: 0o644,
                     sensitive: false
                 )
@@ -251,7 +253,11 @@ public enum MacOSKubeadmPlanner {
         ])
 
         if options.startServices {
-            steps.append(contentsOf: serviceStartSteps(networkMode: options.networkMode))
+            steps.append(
+                contentsOf: serviceStartSteps(
+                    networkMode: options.networkMode,
+                    containerServiceUserID: options.containerServiceUserID
+                ))
         }
 
         return MacOSKubeadmPlan(steps: steps)
@@ -357,6 +363,9 @@ public enum MacOSKubeadmPlanner {
         guard !options.networkMode.usesPodNetworking || !(options.kubeProxyToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("discovered kube-proxy token is required")
         }
+        guard options.containerServiceUserID >= 0 else {
+            throw MacOSKubeadmError.invalidInput("--container-service-user must be a non-negative uid")
+        }
         guard !options.clusterDNS.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("--cluster-dns is required")
         }
@@ -380,12 +389,22 @@ public enum MacOSKubeadmPlanner {
         }
     }
 
-    private static func serviceStartSteps(networkMode: MacOSKubeadmNetworkMode) -> [MacOSKubeadmStep] {
+    private static func serviceStartSteps(
+        networkMode: MacOSKubeadmNetworkMode,
+        containerServiceUserID: Int
+    ) -> [MacOSKubeadmStep] {
         var steps = [
+            MacOSKubeadmStep(
+                message: "stop container core services if present",
+                action: .runCommand(
+                    arguments: containerSystemCommand(userID: containerServiceUserID, subcommand: "stop"),
+                    bestEffort: true
+                )
+            ),
             MacOSKubeadmStep(
                 message: "start container core services",
                 action: .runCommand(
-                    arguments: ["/bin/launchctl", "asuser", "0", "/usr/local/bin/container", "system", "start"],
+                    arguments: containerSystemCommand(userID: containerServiceUserID, subcommand: "start"),
                     bestEffort: false
                 )
             ),
@@ -473,5 +492,12 @@ public enum MacOSKubeadmPlanner {
             ),
         ])
         return steps
+    }
+
+    private static func containerSystemCommand(userID: Int, subcommand: String) -> [String] {
+        if userID == 0 {
+            return ["/bin/launchctl", "asuser", "0", "/usr/local/bin/container", "system", subcommand]
+        }
+        return ["/usr/bin/sudo", "-u", "#\(userID)", "/usr/local/bin/container", "system", subcommand]
     }
 }

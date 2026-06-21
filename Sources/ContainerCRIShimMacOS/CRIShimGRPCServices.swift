@@ -808,6 +808,13 @@ private func isNotFound(_ error: any Error) -> Bool {
     if let error = error as? ContainerizationError, let cause = error.cause {
         return isNotFound(cause)
     }
+    let nsError = error as NSError
+    if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError {
+        return true
+    }
+    if nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(POSIXErrorCode.ENOENT.rawValue) {
+        return true
+    }
     let description = String(describing: error)
     if description.contains("notFound:") {
         return true

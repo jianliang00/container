@@ -142,7 +142,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
 
             let handler = try config.resolveRuntimeHandler(request.runtimeHandler)
             let sandboxID = UUID().uuidString.lowercased()
-            let sandboxImage = try await findImage(reference: handler.sandboxImage)
+            let sandboxImage = try await resolveSandboxImage(reference: handler.sandboxImage)
             try validateCRIShimImage(
                 sandboxImage,
                 expectedRole: .sandbox,
@@ -762,12 +762,23 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         try metadataStore.upsertSandbox(metadata)
     }
 
-    private func findImage(reference: String) async throws -> CRIShimImageRecord {
-        let images = try await imageManager.listImages()
-        guard let image = images.first(where: { $0.matches(reference: reference) }) else {
-            throw CRIShimError.notFound("image not found: \(reference)")
+    private func resolveSandboxImage(reference: String) async throws -> CRIShimImageRecord {
+        if let image = try await findOptionalImage(reference: reference) {
+            return image
         }
-        return image
+        return try await imageManager.pullImage(reference: reference, authentication: nil)
+    }
+
+    private func findImage(reference: String) async throws -> CRIShimImageRecord {
+        if let image = try await findOptionalImage(reference: reference) {
+            return image
+        }
+        throw CRIShimError.notFound("image not found: \(reference)")
+    }
+
+    private func findOptionalImage(reference: String) async throws -> CRIShimImageRecord? {
+        let images = try await imageManager.listImages()
+        return images.first(where: { $0.matches(reference: reference) })
     }
 }
 

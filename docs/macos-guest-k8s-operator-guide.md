@@ -7,24 +7,40 @@ Kubernetes worker nodes. The control plane remains Linux.
 
 macOS workloads must opt in. Ordinary Pods must not land on macOS nodes.
 
-Required node labels:
+`container-macos-kubeadm join` registers the node labels and taints that match
+the selected network mode. Operators should not label or taint the node as a
+separate deployment step.
 
-```sh
-kubectl label node <mac-node> \
-  kubernetes.io/os=darwin \
-  apple.com/macos-container=true \
-  --overwrite
+Full-mode nodes are registered with these labels:
+
+```text
+kubernetes.io/os=darwin
+node.kubernetes.io/macos=true
+node.kubernetes.io/macos-network=full
 ```
 
-Required node taint:
+Full-mode nodes are registered with this taint:
 
-```sh
-kubectl taint node <mac-node> \
-  apple.com/macos-container=true:NoSchedule \
-  --overwrite
+```text
+node.kubernetes.io/macos=true:NoSchedule
 ```
 
-Required RuntimeClass:
+Compat-mode nodes are registered with these labels:
+
+```text
+kubernetes.io/os=darwin
+node.kubernetes.io/macos=true
+node.kubernetes.io/macos-network=compat
+```
+
+Compat-mode nodes are registered with these taints:
+
+```text
+node.kubernetes.io/macos=true:NoSchedule
+node.kubernetes.io/macos-network=compat:NoSchedule
+```
+
+Full-mode nodes use the `macos` RuntimeClass:
 
 ```yaml
 apiVersion: node.k8s.io/v1
@@ -35,19 +51,46 @@ handler: macos
 scheduling:
   nodeSelector:
     kubernetes.io/os: darwin
-    apple.com/macos-container: "true"
+    node.kubernetes.io/macos: "true"
+    node.kubernetes.io/macos-network: "full"
   tolerations:
-    - key: apple.com/macos-container
+    - key: node.kubernetes.io/macos
       operator: Equal
       value: "true"
       effect: NoSchedule
 ```
 
+Older macOS hosts joined with `--network-mode compat` use the `macos-compat`
+RuntimeClass:
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: macos-compat
+handler: macos-compat
+scheduling:
+  nodeSelector:
+    kubernetes.io/os: darwin
+    node.kubernetes.io/macos: "true"
+    node.kubernetes.io/macos-network: "compat"
+  tolerations:
+    - key: node.kubernetes.io/macos
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+    - key: node.kubernetes.io/macos-network
+      operator: Equal
+      value: "compat"
+      effect: NoSchedule
+```
+
 Admission policy should enforce these rules:
 
-- Pods selecting `kubernetes.io/os=darwin` must set `runtimeClassName: macos`.
-- Pods using `runtimeClassName: macos` must not set `.spec.os.name`.
-- Pods using `runtimeClassName: macos` must use a macOS workload image.
+- Pods selecting `kubernetes.io/os=darwin` must set `runtimeClassName: macos`
+  or `runtimeClassName: macos-compat`.
+- Pods using a macOS RuntimeClass must not set `.spec.os.name`.
+- Pods using a macOS RuntimeClass must use a macOS workload image.
 - Pods without the macOS RuntimeClass must not tolerate the macOS node taint.
 
 The admission implementation can be the cluster's existing policy engine. The
@@ -70,8 +113,11 @@ Do not set `linux` or `windows` for macOS workloads. The supported selection
 signals are:
 
 - `runtimeClassName: macos`
+- `runtimeClassName: macos-compat`
 - `kubernetes.io/os=darwin`
-- `apple.com/macos-container=true`
+- `node.kubernetes.io/macos=true`
+- `node.kubernetes.io/macos-network=full`
+- `node.kubernetes.io/macos-network=compat`
 - the macOS node taint and matching toleration supplied by RuntimeClass
   scheduling
 
@@ -96,6 +142,28 @@ spec:
 The Pod intentionally omits `.spec.os.name`; RuntimeClass scheduling carries the
 node selector and taint toleration.
 
+Compat-mode Pods use `runtimeClassName: macos-compat` and the same Pod OS
+contract:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: macos-compat-smoke
+  labels:
+    app: macos-compat-smoke
+spec:
+  runtimeClassName: macos-compat
+  containers:
+    - name: smoke
+      image: ghcr.io/example/macos-workload:15.2
+      command: ["/bin/sh", "-lc"]
+      args: ["sw_vers && sleep 3600"]
+```
+
+Compat-mode Pods have NAT egress only. They do not have a real Pod IP, ClusterIP
+Service semantics, NetworkPolicy, or inbound Service reachability.
+
 ## Static Pod
 
 Static Pods are placed directly on a macOS node by the local kubelet. They are
@@ -119,7 +187,8 @@ spec:
 ```
 
 When the kubelet is connected to the API server and the RuntimeClass object is
-available, static Pod manifests may set `runtimeClassName: macos`. Standalone
+available, static Pod manifests may set `runtimeClassName: macos` on full-mode
+nodes or `runtimeClassName: macos-compat` on compat-mode nodes. Standalone
 static Pod smoke tests should omit it and rely on the macOS-only CRI shim
 configuration.
 
@@ -139,8 +208,8 @@ The first production rollout supports a conservative macOS worker-node surface:
 | Port-forward | `kubectl port-forward` through the loopback streaming server |
 | Probes | exec, HTTP, and TCP kubelet probes |
 | Mounts | Supported CRI mount subset backed by boot-time `virtiofs` shares |
-| Service | Single-node IPv4 ClusterIP TCP/UDP through `container-kube-proxy-macos`; production release is blocked until this passes real API server validation |
-| NetworkPolicy | Not part of the first production rollout; keep disabled unless a separate validation effort promotes it |
+| Service | Full mode supports the kube-proxy-backed Service surface validated for the release. Compat mode does not provide ClusterIP or inbound Service semantics |
+| NetworkPolicy | Full mode may enable a separately validated implementation. Compat mode does not provide NetworkPolicy |
 
 Unsupported in the first production rollout:
 

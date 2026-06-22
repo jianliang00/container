@@ -42,10 +42,58 @@ sudo container-macos-kubeadm join 10.0.0.10:6443 \
   --network-mode full
 ```
 
-`--network-mode full` is the default and uses the vmnet-backed CNI path. It
-requires macOS 26 or newer. On older macOS hosts, use `--network-mode compat`;
-that mode uses Virtualization.framework NAT, skips kube-proxy and Pod CNI
-setup, and writes a `macos-compat` RuntimeClass manifest.
+Choose the network mode for the node before joining it:
+
+- `--network-mode full` is the default. It requires macOS 26 or newer and uses
+  the vmnet-backed CNI path with kube-proxy. Full-mode Pods use the `macos`
+  RuntimeClass and get the normal macOS node labels:
+  `node.kubernetes.io/macos=true` and
+  `node.kubernetes.io/macos-network=full`. Full-mode nodes also carry the taint
+  `node.kubernetes.io/macos=true:NoSchedule`.
+- `--network-mode compat` is for older macOS hosts. It uses
+  Virtualization.framework NAT, skips Pod CNI setup, does not start
+  kube-proxy, and writes a `macos-compat` RuntimeClass manifest. Compat-mode
+  Pods use NAT egress only: they do not get a real Pod IP, ClusterIP Service
+  semantics, NetworkPolicy, or inbound Service reachability. Compat nodes get
+  `node.kubernetes.io/macos=true`,
+  `node.kubernetes.io/macos-network=compat`, and the taints
+  `node.kubernetes.io/macos=true:NoSchedule` and
+  `node.kubernetes.io/macos-network=compat:NoSchedule`.
+
+After joining a node, apply the matching RuntimeClass manifest from an admin
+workstation. From the source tree:
+
+```sh
+kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos.yaml
+kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos-compat.yaml
+```
+
+Installed packages also stage the same manifests under
+`/usr/local/share/container-macos-node/manifests/` on each macOS node. Copy the
+matching manifest to an admin workstation before applying it if the source tree
+is not available there.
+
+Apply only the manifest that matches the node mode when a cluster exposes a
+single macOS scheduling surface. Apply both manifests when the cluster
+intentionally supports both macOS 26+ full-mode nodes and older compat-mode
+nodes.
+
+Example compat workload:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: macos-compat-smoke
+spec:
+  runtimeClassName: macos-compat
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: ghcr.io/example/macos-workload:15.2
+      command: ["/bin/sh", "-lc"]
+      args: ["sw_vers && sleep 3600"]
+```
 
 Use `container-macos-kubeadm status` to inspect installed files, generated
 configuration, the CRI socket, and launchd state. Use

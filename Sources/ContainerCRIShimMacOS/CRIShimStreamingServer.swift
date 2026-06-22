@@ -83,7 +83,21 @@ private struct CRIShimPreparedWebSocketUpgrade: Sendable {
 
 private struct CRIShimPreparedSPDYUpgrade: Sendable {
     var protocolVersion: String
-    var handler: CRIShimPortForwardSPDYHandler
+    var handler: CRIShimSPDYHandler
+
+    func addHandler(to pipeline: ChannelPipeline) throws {
+        switch handler {
+        case .exec(let handler):
+            try pipeline.syncOperations.addHandler(handler)
+        case .portForward(let handler):
+            try pipeline.syncOperations.addHandler(handler)
+        }
+    }
+}
+
+private enum CRIShimSPDYHandler: Sendable {
+    case exec(CRIShimExecSPDYHandler)
+    case portForward(CRIShimPortForwardSPDYHandler)
 }
 
 private struct CRIShimStreamingPath {
@@ -307,41 +321,58 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
         requestHead: HTTPRequestHead
     ) async throws -> CRIShimPreparedSPDYUpgrade {
         let path = try parseStreamingPath(requestHead.uri)
-        guard path.route == .portForward else {
-            throw CRIShimStreamingHTTPError(status: .badRequest, message: "SPDY upgrade is only supported for port-forward")
-        }
         guard let preview = await sessionStore.peek(token: path.token) else {
             throw CRIShimStreamingHTTPError(status: .notFound, message: "stream token not found")
         }
-        guard case .portForward(let invocation) = preview else {
-            throw CRIShimStreamingHTTPError(status: .badRequest, message: "SPDY upgrade is only supported for port-forward")
-        }
-
         let offeredProtocols = spdyStreamProtocols(from: requestHead.headers)
-        guard offeredProtocols.contains(criShimPortForwardProtocol) else {
-            throw CRIShimStreamingHTTPError(
-                status: .badRequest,
-                message: "\(criShimSPDYStreamProtocolHeader) must include \(criShimPortForwardProtocol)"
+
+        switch (path.route, preview) {
+        case (.exec, .exec(let invocation)):
+            guard let protocolVersion = CRIShimExecStreamProtocol.negotiate(offered: offeredProtocols) else {
+                throw CRIShimStreamingHTTPError(
+                    status: .badRequest,
+                    message: "\(criShimSPDYStreamProtocolHeader) must include a supported exec protocol"
+                )
+            }
+            guard let session = await sessionStore.consume(token: path.token), case .exec = session else {
+                throw CRIShimStreamingHTTPError(status: .notFound, message: "stream token not found")
+            }
+            let handler = CRIShimExecSPDYHandler(
+                server: self,
+                runtimeManager: runtimeManager,
+                invocation: invocation,
+                protocolVersion: protocolVersion,
+                idleTimeout: activeSessionIdleTimeout
             )
-        }
+            return CRIShimPreparedSPDYUpgrade(
+                protocolVersion: protocolVersion.rawValue,
+                handler: .exec(handler)
+            )
 
-        guard let session = await sessionStore.consume(token: path.token) else {
+        case (.portForward, .portForward(let invocation)):
+            guard offeredProtocols.contains(criShimPortForwardProtocol) else {
+                throw CRIShimStreamingHTTPError(
+                    status: .badRequest,
+                    message: "\(criShimSPDYStreamProtocolHeader) must include \(criShimPortForwardProtocol)"
+                )
+            }
+            guard let session = await sessionStore.consume(token: path.token), case .portForward = session else {
+                throw CRIShimStreamingHTTPError(status: .notFound, message: "stream token not found")
+            }
+            let handler = CRIShimPortForwardSPDYHandler(
+                server: self,
+                runtimeManager: runtimeManager,
+                invocation: invocation,
+                idleTimeout: activeSessionIdleTimeout
+            )
+            return CRIShimPreparedSPDYUpgrade(
+                protocolVersion: criShimPortForwardProtocol,
+                handler: .portForward(handler)
+            )
+
+        default:
             throw CRIShimStreamingHTTPError(status: .notFound, message: "stream token not found")
         }
-        guard case .portForward = session else {
-            throw CRIShimStreamingHTTPError(status: .notFound, message: "stream token not found")
-        }
-
-        let handler = CRIShimPortForwardSPDYHandler(
-            server: self,
-            runtimeManager: runtimeManager,
-            invocation: invocation,
-            idleTimeout: activeSessionIdleTimeout
-        )
-        return CRIShimPreparedSPDYUpgrade(
-            protocolVersion: criShimPortForwardProtocol,
-            handler: handler
-        )
     }
 
     fileprivate func plainHTTPRequestError(
@@ -563,8 +594,628 @@ private final class CRIShimSPDYServerUpgrader: HTTPServerProtocolUpgrader, @unch
             removeRequestHandler = context.eventLoop.makeSucceededFuture(())
         }
         return removeRequestHandler.flatMapThrowing {
-            try pipeline.syncOperations.addHandler(preparedUpgrade.handler)
+            try preparedUpgrade.addHandler(to: pipeline)
         }
+    }
+}
+
+private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    fileprivate enum StreamKind: String, Hashable {
+        case error
+        case stdin
+        case stdout
+        case stderr
+        case resize
+    }
+
+    private let server: CRIShimStreamingServer
+    private let runtimeManager: any CRIShimRuntimeManaging
+    private let invocation: CRIShimExecStreamingInvocation
+    private let protocolVersion: CRIShimExecStreamProtocol
+    private let idleTimeout: TimeAmount?
+    private let lock = NSLock()
+    private var channel: Channel?
+    private var inboundBuffer: ByteBuffer?
+    private var streamsByID: [UInt32: StreamKind] = [:]
+    private var streamIDsByKind: [StreamKind: UInt32] = [:]
+    private var stdinPipe: Pipe?
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
+    private var process: (any CRIShimStreamingProcess)?
+    private var pendingStdin = Data()
+    private var pendingResizes: [CRIShimTerminalSize] = []
+    private var stdinClosed = false
+    private var processStarting = false
+    private var tasks: [Task<Void, Never>] = []
+    private var cleanupPerformed = false
+    private var idleTimeoutTask: Scheduled<Void>?
+    private var inflater = try! CRIShimSPDYHeaderInflater()
+    private var deflater = try! CRIShimSPDYHeaderDeflater()
+
+    init(
+        server: CRIShimStreamingServer,
+        runtimeManager: any CRIShimRuntimeManaging,
+        invocation: CRIShimExecStreamingInvocation,
+        protocolVersion: CRIShimExecStreamProtocol,
+        idleTimeout: TimeAmount?
+    ) {
+        self.server = server
+        self.runtimeManager = runtimeManager
+        self.invocation = invocation
+        self.protocolVersion = protocolVersion
+        self.idleTimeout = idleTimeout
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        channel = context.channel
+        inboundBuffer = context.channel.allocator.buffer(capacity: 0)
+        recordActivity()
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var incoming = unwrapInboundIn(data)
+        inboundBuffer?.writeBuffer(&incoming)
+        recordActivity()
+        do {
+            try parseAvailableFrames()
+        } catch {
+            Task {
+                await failSession(String(describing: error))
+            }
+        }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        server.unregisterActiveChannel(context.channel)
+        Task {
+            await cleanup(killProcess: true)
+        }
+        context.fireChannelInactive()
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        Task {
+            await cleanup(killProcess: true)
+        }
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        server.unregisterActiveChannel(context.channel)
+        Task {
+            await cleanup(killProcess: true)
+        }
+        context.close(promise: nil)
+    }
+
+    private var expectedStreamKinds: Set<StreamKind> {
+        var kinds: Set<StreamKind> = [.error]
+        if invocation.stdin {
+            kinds.insert(.stdin)
+        }
+        if invocation.stdout {
+            kinds.insert(.stdout)
+        }
+        if invocation.stderr && !invocation.tty {
+            kinds.insert(.stderr)
+        }
+        if invocation.tty && protocolVersion.supportsResize {
+            kinds.insert(.resize)
+        }
+        return kinds
+    }
+
+    private func parseAvailableFrames() throws {
+        guard var buffer = inboundBuffer else {
+            return
+        }
+
+        while true {
+            guard buffer.readableBytes >= 8 else {
+                break
+            }
+            let frameStart = buffer.readerIndex
+            guard
+                let firstWord = buffer.getInteger(at: frameStart, endianness: .big, as: UInt32.self),
+                let flagsAndLength = buffer.getInteger(at: frameStart + 4, endianness: .big, as: UInt32.self)
+            else {
+                break
+            }
+            let length = Int(flagsAndLength & 0x00FF_FFFF)
+            guard buffer.readableBytes >= 8 + length else {
+                break
+            }
+
+            buffer.moveReaderIndex(forwardBy: 8)
+            guard var payload = buffer.readSlice(length: length) else {
+                break
+            }
+            let flags = UInt8((flagsAndLength & 0xFF00_0000) >> 24)
+            if (firstWord & 0x8000_0000) != 0 {
+                let version = UInt16((firstWord >> 16) & 0x7FFF)
+                let frameType = UInt16(firstWord & 0xFFFF)
+                try handleControlFrame(version: version, type: frameType, flags: flags, payload: &payload)
+            } else {
+                let streamID = firstWord & 0x7FFF_FFFF
+                handleDataFrame(streamID: streamID, flags: flags, payload: payload)
+            }
+        }
+
+        buffer.discardReadBytes()
+        inboundBuffer = buffer
+    }
+
+    private func handleControlFrame(
+        version: UInt16,
+        type: UInt16,
+        flags: UInt8,
+        payload: inout ByteBuffer
+    ) throws {
+        guard version == 3 else {
+            throw CRIShimError.invalidArgument("unsupported SPDY version \(version)")
+        }
+
+        switch type {
+        case 1:
+            try handleSynStream(flags: flags, payload: &payload)
+        case 3:
+            handleRstStream(payload: &payload)
+        case 4:
+            break
+        case 6:
+            try handlePing(payload: &payload)
+        case 7:
+            Task {
+                await cleanup(killProcess: true)
+            }
+        case 9:
+            break
+        default:
+            break
+        }
+    }
+
+    private func handleSynStream(
+        flags: UInt8,
+        payload: inout ByteBuffer
+    ) throws {
+        guard
+            let rawStreamID = payload.readInteger(endianness: .big, as: UInt32.self),
+            payload.readInteger(endianness: .big, as: UInt32.self) != nil,
+            payload.readInteger(endianness: .big, as: UInt8.self) != nil,
+            payload.readInteger(endianness: .big, as: UInt8.self) != nil
+        else {
+            throw CRIShimError.invalidArgument("SPDY SYN_STREAM payload is truncated")
+        }
+
+        let streamID = rawStreamID & 0x7FFF_FFFF
+        let headerData = Data(payload.readableBytesView)
+        let headers = try parseSPDYHeaders(try inflater.decompress(headerData))
+        guard
+            let streamType = headers["streamtype"]?.first,
+            let kind = execStreamKind(streamType),
+            acceptsStream(kind)
+        else {
+            try writeResetFrame(streamID: streamID, status: 1)
+            return
+        }
+
+        let registered = lock.withLock { () -> Bool in
+            guard streamsByID[streamID] == nil, streamIDsByKind[kind] == nil else {
+                return false
+            }
+            streamsByID[streamID] = kind
+            streamIDsByKind[kind] = streamID
+            return true
+        }
+        guard registered else {
+            try writeResetFrame(streamID: streamID, status: 1)
+            return
+        }
+
+        try writeSynReplyFrame(streamID: streamID)
+
+        if (flags & 0x01) != 0 {
+            handleStreamFinished(streamID)
+        }
+        startExecIfReady()
+    }
+
+    private func acceptsStream(_ kind: StreamKind) -> Bool {
+        switch kind {
+        case .error:
+            true
+        case .stdin:
+            invocation.stdin
+        case .stdout:
+            invocation.stdout
+        case .stderr:
+            invocation.stderr && !invocation.tty
+        case .resize:
+            invocation.tty && protocolVersion.supportsResize
+        }
+    }
+
+    private func handleRstStream(payload: inout ByteBuffer) {
+        guard let streamID = payload.readInteger(endianness: .big, as: UInt32.self) else {
+            return
+        }
+        handleStreamFinished(streamID & 0x7FFF_FFFF)
+    }
+
+    private func handlePing(payload: inout ByteBuffer) throws {
+        guard let pingID = payload.readInteger(endianness: .big, as: UInt32.self) else {
+            return
+        }
+        try writePingFrame(id: pingID)
+    }
+
+    private func handleDataFrame(
+        streamID: UInt32,
+        flags: UInt8,
+        payload: ByteBuffer
+    ) {
+        let data = Data(payload.readableBytesView)
+        let kind = lock.withLock { streamsByID[streamID] }
+        switch kind {
+        case .stdin:
+            handleStdinData(data)
+        case .resize:
+            handleResizeData(data)
+        case .error, .stdout, .stderr, .none:
+            break
+        }
+
+        if (flags & 0x01) != 0 {
+            handleStreamFinished(streamID)
+        }
+    }
+
+    private func handleStdinData(_ data: Data) {
+        guard !data.isEmpty else {
+            return
+        }
+        let handle = lock.withLock { () -> FileHandle? in
+            if let handle = stdinPipe?.fileHandleForWriting {
+                return handle
+            }
+            pendingStdin.append(data)
+            return nil
+        }
+        guard let handle else {
+            return
+        }
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            Task {
+                await failSession(String(describing: error))
+            }
+        }
+    }
+
+    private func handleResizeData(_ data: Data) {
+        guard !data.isEmpty else {
+            return
+        }
+        do {
+            let size = try decodeTerminalSize(data)
+            let process = lock.withLock { self.process }
+            guard let process else {
+                lock.withLock {
+                    pendingResizes.append(size)
+                }
+                return
+            }
+            let task = Task {
+                do {
+                    try await process.resize(size)
+                } catch {
+                    await failSession(String(describing: error))
+                }
+            }
+            appendTask(task)
+        } catch {
+            Task {
+                await failSession(String(describing: error))
+            }
+        }
+    }
+
+    private func handleStreamFinished(_ streamID: UInt32) {
+        let (kind, handle) = lock.withLock { () -> (StreamKind?, FileHandle?) in
+            guard let kind = streamsByID[streamID] else {
+                return (nil, nil)
+            }
+            if kind == .stdin {
+                stdinClosed = true
+                return (kind, stdinPipe?.fileHandleForWriting)
+            }
+            return (kind, nil)
+        }
+        guard kind == .stdin else {
+            return
+        }
+        try? handle?.close()
+    }
+
+    private func startExecIfReady() {
+        let shouldStart = lock.withLock { () -> Bool in
+            guard !cleanupPerformed, !processStarting else {
+                return false
+            }
+            guard expectedStreamKinds.isSubset(of: Set(streamIDsByKind.keys)) else {
+                return false
+            }
+            processStarting = true
+            stdinPipe = invocation.stdin ? Pipe() : nil
+            stdoutPipe = invocation.stdout ? Pipe() : nil
+            stderrPipe = invocation.stderr && !invocation.tty ? Pipe() : nil
+            return true
+        }
+        guard shouldStart else {
+            return
+        }
+
+        let task = Task {
+            await runExecSession()
+        }
+        appendTask(task)
+    }
+
+    private func runExecSession() async {
+        do {
+            let stdio = lock.withLock {
+                [
+                    stdinPipe?.fileHandleForReading,
+                    stdoutPipe?.fileHandleForWriting,
+                    stderrPipe?.fileHandleForWriting,
+                ]
+            }
+            let process = try await runtimeManager.streamExec(
+                containerID: invocation.containerID,
+                configuration: invocation.configuration,
+                stdio: stdio
+            )
+
+            let startupState = lock.withLock {
+                self.process = process
+                return (
+                    stdinWriter: stdinPipe?.fileHandleForWriting,
+                    stdoutReader: stdoutPipe?.fileHandleForReading,
+                    stderrReader: stderrPipe?.fileHandleForReading,
+                    pendingStdin: pendingStdin,
+                    pendingResizes: pendingResizes,
+                    stdinClosed: stdinClosed
+                )
+            }
+
+            if let stdinWriter = startupState.stdinWriter {
+                if !startupState.pendingStdin.isEmpty {
+                    try stdinWriter.write(contentsOf: startupState.pendingStdin)
+                }
+                if startupState.stdinClosed {
+                    try? stdinWriter.close()
+                }
+            }
+
+            var outputTasks: [Task<Void, Never>] = []
+            if let stdoutReader = startupState.stdoutReader {
+                outputTasks.append(
+                    Task {
+                        await pumpExecOutput(kind: .stdout, handle: stdoutReader)
+                    })
+            }
+            if let stderrReader = startupState.stderrReader {
+                outputTasks.append(
+                    Task {
+                        await pumpExecOutput(kind: .stderr, handle: stderrReader)
+                    })
+            }
+            for task in outputTasks {
+                appendTask(task)
+            }
+
+            try await process.start()
+            for size in startupState.pendingResizes {
+                try await process.resize(size)
+            }
+
+            let exitCode = try await process.wait()
+            try? stdoutPipe?.fileHandleForWriting.close()
+            try? stderrPipe?.fileHandleForWriting.close()
+            for task in outputTasks {
+                _ = await task.result
+            }
+            await sendExecExitStatus(exitCode: exitCode)
+            await closeChannel(killProcess: false)
+        } catch {
+            await failSession(String(describing: error))
+        }
+    }
+
+    private func pumpExecOutput(
+        kind: StreamKind,
+        handle: FileHandle
+    ) async {
+        guard let streamID = lock.withLock({ streamIDsByKind[kind] }) else {
+            return
+        }
+        for await data in fileHandleStream(handle) {
+            do {
+                try await writeDataFrame(streamID: streamID, data: data)
+                recordActivity()
+            } catch {
+                await failSession(String(describing: error))
+                return
+            }
+        }
+        try? await writeDataFrame(streamID: streamID, data: Data(), flags: 0x01)
+    }
+
+    private func sendExecExitStatus(exitCode: Int32) async {
+        let payload: Data
+        if protocolVersion.supportsStructuredExitStatus {
+            payload = makeStructuredExecStatus(exitCode: exitCode)
+        } else if exitCode == 0 {
+            payload = Data()
+        } else {
+            payload = Data("command terminated with exit code \(exitCode)".utf8)
+        }
+        guard let errorStreamID = lock.withLock({ streamIDsByKind[.error] }) else {
+            return
+        }
+        try? await writeDataFrame(streamID: errorStreamID, data: payload, flags: 0x01)
+    }
+
+    private func failSession(_ message: String) async {
+        fputs("container-cri-shim-macos SPDY exec failed: \(message)\n", stderr)
+        if let errorStreamID = lock.withLock({ streamIDsByKind[.error] }) {
+            let payload =
+                if protocolVersion.supportsStructuredExitStatus {
+                    makeStructuredExecFailureStatus(message: message)
+                } else {
+                    Data(message.utf8)
+                }
+            try? await writeDataFrame(streamID: errorStreamID, data: payload, flags: 0x01)
+        }
+        await closeChannel(killProcess: true)
+    }
+
+    private func closeChannel(killProcess: Bool) async {
+        await cleanup(killProcess: killProcess)
+        if let channel {
+            try? await channel.close().get()
+        }
+    }
+
+    private func cleanup(killProcess: Bool) async {
+        let cleanupState = lock.withLock {
+            () -> (
+                process: (any CRIShimStreamingProcess)?,
+                tasks: [Task<Void, Never>],
+                stdinPipe: Pipe?,
+                stdoutPipe: Pipe?,
+                stderrPipe: Pipe?
+            ) in
+            if cleanupPerformed {
+                return (nil, [], nil, nil, nil)
+            }
+            cleanupPerformed = true
+            idleTimeoutTask?.cancel()
+            idleTimeoutTask = nil
+            let cleanupState = (
+                process: process,
+                tasks: tasks,
+                stdinPipe: stdinPipe,
+                stdoutPipe: stdoutPipe,
+                stderrPipe: stderrPipe
+            )
+            tasks.removeAll()
+            streamsByID.removeAll()
+            streamIDsByKind.removeAll()
+            process = nil
+            stdinPipe = nil
+            stdoutPipe = nil
+            stderrPipe = nil
+            return cleanupState
+        }
+
+        for task in cleanupState.tasks {
+            task.cancel()
+        }
+        try? cleanupState.stdinPipe?.fileHandleForReading.close()
+        try? cleanupState.stdinPipe?.fileHandleForWriting.close()
+        try? cleanupState.stdoutPipe?.fileHandleForReading.close()
+        try? cleanupState.stdoutPipe?.fileHandleForWriting.close()
+        try? cleanupState.stderrPipe?.fileHandleForReading.close()
+        try? cleanupState.stderrPipe?.fileHandleForWriting.close()
+        if killProcess {
+            try? await cleanupState.process?.kill(SIGTERM)
+        }
+    }
+
+    private func appendTask(_ task: Task<Void, Never>) {
+        lock.withLock {
+            tasks.append(task)
+        }
+    }
+
+    private func recordActivity() {
+        guard let idleTimeout, let channel else {
+            return
+        }
+
+        let scheduled = channel.eventLoop.scheduleTask(in: idleTimeout) { [weak self] in
+            guard let self else {
+                return
+            }
+            Task {
+                await self.failSession("streaming session timed out due to inactivity")
+            }
+        }
+
+        let staleTask = lock.withLock { () -> Scheduled<Void>? in
+            guard !cleanupPerformed else {
+                scheduled.cancel()
+                return nil
+            }
+            let previous = idleTimeoutTask
+            idleTimeoutTask = scheduled
+            return previous
+        }
+        staleTask?.cancel()
+    }
+
+    private func writeSynReplyFrame(streamID: UInt32) throws {
+        let compressedHeaders = try deflater.compress(makeSPDYHeaderBlock([:]))
+        var payload = Data()
+        payload.append(contentsOf: spdyUInt32(streamID & 0x7FFF_FFFF))
+        payload.append(compressedHeaders)
+        try writeControlFrame(type: 2, flags: 0, payload: payload)
+    }
+
+    private func writeResetFrame(streamID: UInt32, status: UInt32) throws {
+        var payload = Data()
+        payload.append(contentsOf: spdyUInt32(streamID & 0x7FFF_FFFF))
+        payload.append(contentsOf: spdyUInt32(status))
+        try writeControlFrame(type: 3, flags: 0, payload: payload)
+    }
+
+    private func writePingFrame(id: UInt32) throws {
+        try writeControlFrame(type: 6, flags: 0, payload: Data(spdyUInt32(id)))
+    }
+
+    private func writeControlFrame(
+        type: UInt16,
+        flags: UInt8,
+        payload: Data
+    ) throws {
+        guard let channel else {
+            return
+        }
+        var buffer = channel.allocator.buffer(capacity: 8 + payload.count)
+        buffer.writeInteger(UInt32(0x8000_0000) | (UInt32(3) << 16) | UInt32(type), endianness: .big)
+        writeSPDYLength(flags: flags, length: payload.count, to: &buffer)
+        buffer.writeBytes(payload)
+        channel.writeAndFlush(buffer, promise: nil)
+    }
+
+    private func writeDataFrame(
+        streamID: UInt32,
+        data: Data,
+        flags: UInt8 = 0
+    ) async throws {
+        guard let channel else {
+            return
+        }
+        var buffer = channel.allocator.buffer(capacity: 8 + data.count)
+        buffer.writeInteger(streamID & 0x7FFF_FFFF, endianness: .big)
+        writeSPDYLength(flags: flags, length: data.count, to: &buffer)
+        buffer.writeBytes(data)
+        try await channel.writeAndFlush(buffer).get()
     }
 }
 
@@ -1701,6 +2352,23 @@ private func streamKind(_ value: String) -> CRIShimPortForwardSPDYHandler.Stream
         .data
     case "error":
         .error
+    default:
+        nil
+    }
+}
+
+private func execStreamKind(_ value: String) -> CRIShimExecSPDYHandler.StreamKind? {
+    switch value {
+    case "error":
+        .error
+    case "stdin":
+        .stdin
+    case "stdout":
+        .stdout
+    case "stderr":
+        .stderr
+    case "resize":
+        .resize
     default:
         nil
     }

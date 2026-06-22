@@ -668,15 +668,14 @@ Because this is an experimental macOS node path, workloads must opt in.
 Operator-facing manifests and examples are maintained in
 [`macos-guest-k8s-operator-guide.md`](./macos-guest-k8s-operator-guide.md).
 
-Recommended node setup:
-
-- label: `apple.com/macos-container=true`
-- label: `kubernetes.io/os=darwin`
-- taint: `apple.com/macos-container=true:NoSchedule`
-- `RuntimeClass` handler: `macos`
-- Pod `nodeSelector` or RuntimeClass scheduling rules selecting the macOS node,
-  including `kubernetes.io/os=darwin`
-- matching toleration for the macOS node taint
+`container-macos-kubeadm join` registers the node labels and taints for the
+selected network mode. Full-mode nodes use the `macos` RuntimeClass and
+`node.kubernetes.io/macos-network=full`; compat-mode nodes use the
+`macos-compat` RuntimeClass and `node.kubernetes.io/macos-network=compat`.
+RuntimeClass scheduling rules select the macOS node with
+`kubernetes.io/os=darwin`, `node.kubernetes.io/macos=true`, and the matching
+network-mode label, then provide the required tolerations for the macOS node
+taints.
 
 Pod manifests should omit `.spec.os.name` unless the deployed Kubernetes API
 server and kubelet explicitly admit `darwin` as a Pod OS value. The supported

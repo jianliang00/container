@@ -162,7 +162,8 @@ public enum MacOSKubeadmPlanner {
                     path: options.rooted("/etc/kubernetes/container-cri-shim-macos-config.json"),
                     contents: MacOSKubeadmRenderer.criShimConfiguration(
                         sandboxImage: options.sandboxImage,
-                        networkMode: options.networkMode
+                        networkMode: options.networkMode,
+                        runtimeClasses: options.runtimeClasses
                     ),
                     mode: 0o644,
                     sensitive: false
@@ -218,17 +219,19 @@ public enum MacOSKubeadmPlanner {
             ])
         }
 
-        let runtimeClassFile = options.networkMode == .full ? "runtimeclass-macos.yaml" : "runtimeclass-macos-compat.yaml"
-        steps.append(contentsOf: [
-            MacOSKubeadmStep(
-                message: "write RuntimeClass manifest",
-                action: .writeFile(
-                    path: options.rooted("/usr/local/share/container-macos-node/manifests/\(runtimeClassFile)"),
-                    contents: MacOSKubeadmRenderer.runtimeClassManifest(networkMode: options.networkMode),
-                    mode: 0o644,
-                    sensitive: false
+        steps.append(
+            contentsOf: options.effectiveRuntimeClasses.map { profile in
+                MacOSKubeadmStep(
+                    message: "write RuntimeClass manifest \(profile.name)",
+                    action: .writeFile(
+                        path: options.rooted("/usr/local/share/container-macos-node/manifests/\(profile.manifestFileName)"),
+                        contents: MacOSKubeadmRenderer.runtimeClassManifest(profile: profile),
+                        mode: 0o644,
+                        sensitive: false
+                    )
                 )
-            ),
+            })
+        steps.append(contentsOf: [
             MacOSKubeadmStep(
                 message: "write CRI shim launchd plist",
                 action: .writeFile(
@@ -377,6 +380,30 @@ public enum MacOSKubeadmPlanner {
         }
         if options.startServices && !options.rootPrefix.isEmpty && !options.dryRun {
             throw MacOSKubeadmError.invalidInput("--install-root cannot be combined with service start; pass --skip-start")
+        }
+        let runtimeClassNames = options.effectiveRuntimeClasses.map(\.name)
+        if Set(runtimeClassNames).count != runtimeClassNames.count {
+            throw MacOSKubeadmError.invalidInput("--runtime-class names must be unique")
+        }
+        let runtimeHandlers = options.effectiveRuntimeClasses.map(\.handler)
+        if Set(runtimeHandlers).count != runtimeHandlers.count {
+            throw MacOSKubeadmError.invalidInput("--runtime-class handlers must be unique")
+        }
+        for profile in options.effectiveRuntimeClasses {
+            try validateRuntimeClassProfile(profile)
+        }
+    }
+
+    private static func validateRuntimeClassProfile(_ profile: MacOSKubeadmRuntimeClassProfile) throws {
+        let dnsLabelPattern = #"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"#
+        guard profile.name.range(of: dnsLabelPattern, options: .regularExpression) != nil else {
+            throw MacOSKubeadmError.invalidInput("--runtime-class name must be a DNS label")
+        }
+        guard profile.handler.range(of: dnsLabelPattern, options: .regularExpression) != nil else {
+            throw MacOSKubeadmError.invalidInput("--runtime-class handler must be a DNS label")
+        }
+        guard !profile.sandboxImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MacOSKubeadmError.invalidInput("--runtime-class sandbox image is required")
         }
     }
 

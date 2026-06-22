@@ -51,6 +51,29 @@ public enum MacOSKubeadmNetworkMode: String, CaseIterable, Sendable, Equatable {
     }
 }
 
+public struct MacOSKubeadmRuntimeClassProfile: Sendable, Equatable {
+    public var name: String
+    public var handler: String
+    public var sandboxImage: String
+    public var networkMode: MacOSKubeadmNetworkMode
+
+    public init(
+        name: String,
+        handler: String? = nil,
+        sandboxImage: String,
+        networkMode: MacOSKubeadmNetworkMode
+    ) {
+        self.name = name
+        self.handler = handler ?? name
+        self.sandboxImage = sandboxImage
+        self.networkMode = networkMode
+    }
+
+    public var manifestFileName: String {
+        "runtimeclass-\(name).yaml"
+    }
+}
+
 public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var apiServer: URL
     public var nodeName: String
@@ -62,6 +85,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var clusterDNS: String
     public var clusterDomain: String
     public var sandboxImage: String
+    public var runtimeClasses: [MacOSKubeadmRuntimeClassProfile]
     public var networkMode: MacOSKubeadmNetworkMode
     public var containerServiceUserID: Int
     public var installRoot: String
@@ -80,6 +104,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         clusterDNS: String = "10.96.0.10",
         clusterDomain: String = "cluster.local",
         sandboxImage: String = "localhost/macos-sandbox:latest",
+        runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = [],
         networkMode: MacOSKubeadmNetworkMode = .full,
         containerServiceUserID: Int = 0,
         installRoot: String = "/",
@@ -97,6 +122,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.clusterDNS = clusterDNS
         self.clusterDomain = clusterDomain
         self.sandboxImage = sandboxImage
+        self.runtimeClasses = runtimeClasses
         self.networkMode = networkMode
         self.containerServiceUserID = containerServiceUserID
         self.installRoot = installRoot
@@ -107,6 +133,19 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
 }
 
 extension MacOSKubeadmJoinOptions {
+    public var defaultRuntimeClass: MacOSKubeadmRuntimeClassProfile {
+        MacOSKubeadmRuntimeClassProfile(
+            name: networkMode.runtimeClassName,
+            handler: networkMode.runtimeHandler,
+            sandboxImage: sandboxImage,
+            networkMode: networkMode
+        )
+    }
+
+    public var effectiveRuntimeClasses: [MacOSKubeadmRuntimeClassProfile] {
+        [defaultRuntimeClass] + runtimeClasses
+    }
+
     public var rootPrefix: String {
         let trimmed = installRoot.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         if trimmed.isEmpty {

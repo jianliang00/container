@@ -183,23 +183,30 @@ pass `--dry-run` to inspect the full plan without writing files, contacting the
 API server, or starting services, and `--skip-start` to render files without
 loading launchd jobs.
 
-Apply the RuntimeClass manifest that matches the joined node mode from an admin
-workstation. From the source tree:
+Apply the RuntimeClass manifests that should be exposed to workloads from an
+admin workstation. The built-in default manifests are available from the source
+tree:
 
 ```sh
 kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos.yaml
 kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos-compat.yaml
 ```
 
-Installed packages also stage the same manifests under
+Installed packages also stage generated manifests under
 `/usr/local/share/container-macos-node/manifests/` on each macOS node. Copy the
-matching manifest to an admin workstation before applying it if the source tree
-is not available there.
+matching `runtimeclass-*.yaml` files to an admin workstation before applying
+them when the source tree is not available there or when `--runtime-class`
+generated additional RuntimeClasses.
 
 Use only `runtimeclass-macos.yaml` for a cluster that exposes full-mode macOS
 nodes only. Use only `runtimeclass-macos-compat.yaml` for a cluster that
 exposes older compat-mode macOS nodes only. Apply both manifests only when the
 cluster deliberately supports both scheduling targets.
+
+Expose additional macOS sandbox images with repeated
+`container-macos-kubeadm join --runtime-class <name>=<sandbox-image>` options.
+Each additional RuntimeClass uses the joined node's selected network mode, and
+Pods select it with `spec.runtimeClassName`.
 
 Full-mode nodes advertise:
 

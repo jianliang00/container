@@ -1193,14 +1193,20 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
         flags: UInt8,
         payload: Data
     ) throws {
-        guard let channel else {
+        guard let channel, channel.isActive else {
             return
         }
         var buffer = channel.allocator.buffer(capacity: 8 + payload.count)
         buffer.writeInteger(UInt32(0x8000_0000) | (UInt32(3) << 16) | UInt32(type), endianness: .big)
         writeSPDYLength(flags: flags, length: payload.count, to: &buffer)
         buffer.writeBytes(payload)
-        channel.writeAndFlush(buffer, promise: nil)
+        let promise = channel.eventLoop.makePromise(of: Void.self)
+        promise.futureResult.whenFailure { [weak self] _ in
+            Task {
+                await self?.handleWriteFailure()
+            }
+        }
+        channel.writeAndFlush(buffer, promise: promise)
     }
 
     private func writeDataFrame(
@@ -1208,14 +1214,27 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
         data: Data,
         flags: UInt8 = 0
     ) async throws {
-        guard let channel else {
+        guard let channel, channel.isActive else {
             return
         }
         var buffer = channel.allocator.buffer(capacity: 8 + data.count)
         buffer.writeInteger(streamID & 0x7FFF_FFFF, endianness: .big)
         writeSPDYLength(flags: flags, length: data.count, to: &buffer)
         buffer.writeBytes(data)
-        try await channel.writeAndFlush(buffer).get()
+        do {
+            try await channel.writeAndFlush(buffer).get()
+        } catch {
+            await handleWriteFailure()
+            throw error
+        }
+    }
+
+    private func handleWriteFailure() async {
+        await cleanup(killProcess: true)
+        guard let channel else {
+            return
+        }
+        try? await channel.close().get()
     }
 }
 
@@ -1660,14 +1679,20 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         flags: UInt8,
         payload: Data
     ) throws {
-        guard let channel else {
+        guard let channel, channel.isActive else {
             return
         }
         var buffer = channel.allocator.buffer(capacity: 8 + payload.count)
         buffer.writeInteger(UInt32(0x8000_0000) | (UInt32(3) << 16) | UInt32(type), endianness: .big)
         writeSPDYLength(flags: flags, length: payload.count, to: &buffer)
         buffer.writeBytes(payload)
-        channel.writeAndFlush(buffer, promise: nil)
+        let promise = channel.eventLoop.makePromise(of: Void.self)
+        promise.futureResult.whenFailure { [weak self] _ in
+            Task {
+                await self?.handleWriteFailure()
+            }
+        }
+        channel.writeAndFlush(buffer, promise: promise)
     }
 
     private func writeDataFrame(
@@ -1675,14 +1700,27 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         data: Data,
         flags: UInt8 = 0
     ) async throws {
-        guard let channel else {
+        guard let channel, channel.isActive else {
             return
         }
         var buffer = channel.allocator.buffer(capacity: 8 + data.count)
         buffer.writeInteger(streamID & 0x7FFF_FFFF, endianness: .big)
         writeSPDYLength(flags: flags, length: data.count, to: &buffer)
         buffer.writeBytes(data)
-        try await channel.writeAndFlush(buffer).get()
+        do {
+            try await channel.writeAndFlush(buffer).get()
+        } catch {
+            await handleWriteFailure()
+            throw error
+        }
+    }
+
+    private func handleWriteFailure() async {
+        await cleanup(killProcess: true)
+        guard let channel else {
+            return
+        }
+        try? await channel.close().get()
     }
 }
 

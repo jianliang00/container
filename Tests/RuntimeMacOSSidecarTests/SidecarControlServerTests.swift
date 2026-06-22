@@ -178,6 +178,42 @@ struct SidecarControlServerTests {
             #expect(String(describing: error).contains("No such file or directory"))
         }
     }
+
+    @Test
+    func bareExecutableLaunchUsesGuestPathLookup() throws {
+        let server = makeServer()
+
+        let launch = server._testGuestExecutableLaunch(
+            executable: "sh",
+            arguments: ["-lc", "echo ok"]
+        )
+
+        #expect(launch.executable == "/usr/bin/env")
+        #expect(launch.arguments == ["sh", "-lc", "echo ok"])
+    }
+
+    @Test
+    func pathExecutableLaunchIsPreserved() throws {
+        let server = makeServer()
+
+        let launch = server._testGuestExecutableLaunch(
+            executable: "/bin/sh",
+            arguments: ["-lc", "echo ok"]
+        )
+
+        #expect(launch.executable == "/bin/sh")
+        #expect(launch.arguments == ["-lc", "echo ok"])
+    }
+
+    @Test
+    func emptyExecutableLaunchIsPreserved() throws {
+        let server = makeServer()
+
+        let launch = server._testGuestExecutableLaunch(executable: "", arguments: ["arg"])
+
+        #expect(launch.executable == "")
+        #expect(launch.arguments == ["arg"])
+    }
 }
 
 private func makeServer() -> SidecarControlServer {

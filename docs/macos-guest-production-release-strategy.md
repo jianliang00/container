@@ -136,26 +136,99 @@ it to `system:node-proxier`, and allows kubeadm bootstrap tokens in
 ConfigMap and request a bounded kube-proxy ServiceAccount token during join.
 
 The supported deployment path is to install the package and then run the
-packaged bootstrap helper with kubeadm-compatible join arguments:
+packaged bootstrap helper with kubeadm-compatible join arguments. Select one
+network mode for each node before joining it:
+
+- `full` is the default mode. It requires macOS 26 or newer, configures the
+  vmnet-backed CNI path, starts kube-proxy, and registers the node for the
+  `macos` RuntimeClass.
+- `compat` is for older macOS hosts. It configures the CRI shim to use
+  Virtualization.framework NAT, skips Pod CNI configuration, skips kube-proxy,
+  and registers the node for the `macos-compat` RuntimeClass. Compat-mode Pods
+  have NAT egress, but they do not have a real Pod IP, ClusterIP Service
+  semantics, NetworkPolicy, or inbound Service reachability.
+
+Full-mode join:
 
 ```sh
 sudo container-macos-kubeadm join 10.0.0.10:6443 \
   --token abcdef.0123456789abcdef \
   --discovery-token-ca-cert-hash sha256:<hash> \
-  --node-name macos-node-1
+  --node-name macos-node-1 \
+  --network-mode full
+```
+
+Compat-mode join:
+
+```sh
+sudo container-macos-kubeadm join 10.0.0.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --node-name macos-node-1 \
+  --network-mode compat
 ```
 
 `container-macos-kubeadm join` reads the public `kube-public/cluster-info`
 ConfigMap, validates the discovered CA with `--discovery-token-ca-cert-hash`,
 then uses the bootstrap token to read the kubelet config ConfigMap when
-available and request a kube-proxy ServiceAccount token. It writes the CA
-certificate, kubelet bootstrap kubeconfig, kube-proxy kubeconfig, kubelet
-configuration, CRI/CNI/kube-proxy configuration, and launchd plists, then starts
+available. In full mode it also requests a kube-proxy ServiceAccount token. It
+writes the CA certificate, kubelet bootstrap kubeconfig, kubelet configuration,
+CRI configuration, launchd plists, and the matching RuntimeClass manifest. Full
+mode additionally writes CNI and kube-proxy configuration, then starts
 `container system`, `container-cri-shim-macos`, `container-kube-proxy-macos`,
-and kubelet in dependency order. Token-bearing kubeconfig contents are never
-expanded in logs. Operators can pass `--dry-run` to inspect the full plan
-without writing files, contacting the API server, or starting services, and
-`--skip-start` to render files without loading launchd jobs.
+and kubelet in dependency order. Compat mode starts `container system`, the CRI
+shim, and kubelet, and intentionally does not configure CNI or kube-proxy.
+Token-bearing kubeconfig contents are never expanded in logs. Operators can
+pass `--dry-run` to inspect the full plan without writing files, contacting the
+API server, or starting services, and `--skip-start` to render files without
+loading launchd jobs.
+
+Apply the RuntimeClass manifest that matches the joined node mode from an admin
+workstation. From the source tree:
+
+```sh
+kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos.yaml
+kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos-compat.yaml
+```
+
+Installed packages also stage the same manifests under
+`/usr/local/share/container-macos-node/manifests/` on each macOS node. Copy the
+matching manifest to an admin workstation before applying it if the source tree
+is not available there.
+
+Use only `runtimeclass-macos.yaml` for a cluster that exposes full-mode macOS
+nodes only. Use only `runtimeclass-macos-compat.yaml` for a cluster that
+exposes older compat-mode macOS nodes only. Apply both manifests only when the
+cluster deliberately supports both scheduling targets.
+
+Full-mode nodes advertise:
+
+```text
+kubernetes.io/os=darwin
+node.kubernetes.io/macos=true
+node.kubernetes.io/macos-network=full
+```
+
+Full-mode nodes also carry:
+
+```text
+node.kubernetes.io/macos=true:NoSchedule
+```
+
+Compat-mode nodes advertise:
+
+```text
+kubernetes.io/os=darwin
+node.kubernetes.io/macos=true
+node.kubernetes.io/macos-network=compat
+```
+
+Compat-mode nodes also carry:
+
+```text
+node.kubernetes.io/macos=true:NoSchedule
+node.kubernetes.io/macos-network=compat:NoSchedule
+```
 
 Operators can inspect a node with:
 
@@ -173,12 +246,14 @@ Operators can reset node-local Kubernetes configuration with:
 sudo container-macos-kubeadm reset --force
 ```
 
-`reset` stops kubelet, kube-proxy, and the CRI shim, flushes the kube-proxy PF
-anchor, and removes kubeadm-generated kubelet, CRI, CNI, kube-proxy, CA, and
-launchd configuration. It preserves the installed binaries and package payload.
-Use `--dry-run` to inspect the exact plan without changing the host. Use
-`--purge-state` only when intentionally removing kubelet, CRI/CNI state, and
-node logs:
+`reset` stops kubelet, kube-proxy when present, and the CRI shim, flushes the
+kube-proxy PF anchor when present, and removes kubeadm-generated kubelet, CRI,
+CNI, kube-proxy, CA, and launchd configuration. Compat-mode nodes do not create
+CNI or kube-proxy runtime configuration, so reset only removes the files and
+services that exist on the host. It preserves the installed binaries and
+package payload. Use `--dry-run` to inspect the exact plan without changing the
+host. Use `--purge-state` only when intentionally removing kubelet, CRI/CNI
+state, and node logs:
 
 ```sh
 sudo container-macos-kubeadm reset --force --purge-state
@@ -243,7 +318,9 @@ path:
 Use the kubelet log for node registration, pod lifecycle, probe, CRI, and log
 streaming failures. Use the CRI shim log for runtime, image, sandbox, container,
 exec, attach, and port-forward requests. Use the kube-proxy log for Service and
-EndpointSlice watch state, generated PF rules, and PF apply failures.
+EndpointSlice watch state, generated PF rules, and PF apply failures. Compat
+mode does not start kube-proxy, so the kube-proxy launchd job and log are
+expected to be absent on compat-mode nodes.
 
 The Darwin kubelet fork also uses the standard kubelet CRI log layout:
 
@@ -279,9 +356,9 @@ Rollback is node-local and must not require control-plane changes:
    kube-proxy, and NetworkPolicy controller.
 3. Restore the previous signed package or previous binary set.
 4. Restore previous kubelet, CRI, CNI, kube-proxy, and NetworkPolicy config.
-5. Validate PF config before reloading it.
+5. Validate PF config before reloading it on full-mode nodes.
 6. Start launchd services.
-7. Confirm CRI readiness, CNI readiness, kube-proxy PF anchor state, and Node
-   readiness before uncordoning.
+7. Confirm CRI readiness and Node readiness before uncordoning. On full-mode
+   nodes, also confirm CNI readiness and kube-proxy PF anchor state.
 
 Rollback artifacts must remain available for every production rollout.

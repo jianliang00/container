@@ -47,8 +47,9 @@ public struct MacOSKubeadmJoinRunner {
         } else {
             log.info("join completed")
             log.info("next: approve kubelet bootstrap CSR if your control plane does not auto-approve it")
-            let runtimeClassManifest = options.networkMode == .full ? "runtimeclass-macos.yaml" : "runtimeclass-macos-compat.yaml"
-            log.info("next: apply /usr/local/share/container-macos-node/manifests/\(runtimeClassManifest) from an admin workstation")
+            for profile in resolvedOptions.effectiveRuntimeClasses {
+                log.info("next: apply /usr/local/share/container-macos-node/manifests/\(profile.manifestFileName) from an admin workstation")
+            }
         }
     }
 

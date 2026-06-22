@@ -121,6 +121,52 @@ signals are:
 - the macOS node taint and matching toleration supplied by RuntimeClass
   scheduling
 
+## Sandbox Image Selection
+
+The default RuntimeClass for a joined node uses the sandbox image configured
+with `container-macos-kubeadm join --sandbox-image`.
+
+Operators can expose additional administrator-defined sandbox images by
+repeating `--runtime-class <name>=<sandbox-image>` during join:
+
+```sh
+sudo container-macos-kubeadm join 10.0.0.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --node-name macos-node-1 \
+  --network-mode compat \
+  --runtime-class macos-15-2=ghcr.io/jianliang00/macos-base:15.2 \
+  --runtime-class macos-15-4=ghcr.io/jianliang00/macos-base:15.4
+```
+
+Each additional RuntimeClass uses the node's selected network mode. Pods select
+the desired sandbox image through `spec.runtimeClassName`:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: macos-15-2-smoke
+spec:
+  runtimeClassName: macos-15-2
+  containers:
+    - name: smoke
+      image: ghcr.io/example/macos-workload:15.2
+      command: ["/bin/sh", "-lc"]
+      args: ["sw_vers && sleep 3600"]
+```
+
+The CRI shim also accepts a Pod annotation override for the sandbox image:
+
+```yaml
+metadata:
+  annotations:
+    container-macos.io/sandbox-image: ghcr.io/jianliang00/macos-base:15.2
+```
+
+Clusters that expose this annotation to ordinary workload authors should
+enforce their own admission policy for accepted sandbox images and callers.
+
 ## API-Backed Pod
 
 ```yaml

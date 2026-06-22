@@ -53,6 +53,9 @@ extension MacOSKubeadm {
         @Option(help: "macOS sandbox image used by CRI shim and kubelet.")
         var sandboxImage: String = "localhost/macos-sandbox:latest"
 
+        @Option(help: "Additional RuntimeClass in name=sandbox-image format. May be repeated; each entry uses the selected --network-mode.")
+        var runtimeClass: [String] = []
+
         @Option(help: "Node network mode: full or compat.")
         var networkMode: String = MacOSKubeadmNetworkMode.full.rawValue
 
@@ -75,6 +78,9 @@ extension MacOSKubeadm {
             let apiServer = try parseAPIServerEndpoint(apiServerEndpoint)
             let resolvedNetworkMode = try parseNetworkMode(networkMode)
             let resolvedContainerServiceUser = try resolveContainerServiceUser(networkMode: resolvedNetworkMode)
+            let resolvedRuntimeClasses = try runtimeClass.map {
+                try parseRuntimeClass($0, networkMode: resolvedNetworkMode)
+            }
 
             let options = MacOSKubeadmJoinOptions(
                 apiServer: apiServer,
@@ -82,6 +88,7 @@ extension MacOSKubeadm {
                 token: token,
                 discoveryTokenCACertHashes: discoveryTokenCACertHash,
                 sandboxImage: sandboxImage,
+                runtimeClasses: resolvedRuntimeClasses,
                 networkMode: resolvedNetworkMode,
                 containerServiceUserID: resolvedContainerServiceUser,
                 installRoot: installRoot,
@@ -114,6 +121,29 @@ extension MacOSKubeadm {
                 throw ValidationError("--network-mode must be one of: \(allowed)")
             }
             return mode
+        }
+
+        private func parseRuntimeClass(
+            _ value: String,
+            networkMode: MacOSKubeadmNetworkMode
+        ) throws -> MacOSKubeadmRuntimeClassProfile {
+            let parts = value.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else {
+                throw ValidationError("--runtime-class must use name=sandbox-image")
+            }
+            let name = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let image = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                throw ValidationError("--runtime-class name is required")
+            }
+            guard !image.isEmpty else {
+                throw ValidationError("--runtime-class sandbox image is required")
+            }
+            return MacOSKubeadmRuntimeClassProfile(
+                name: name,
+                sandboxImage: image,
+                networkMode: networkMode
+            )
         }
 
         private func resolveContainerServiceUser(networkMode: MacOSKubeadmNetworkMode) throws -> Int {

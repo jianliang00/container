@@ -88,8 +88,21 @@ public enum MacOSKubeadmRenderer {
 
     public static func criShimConfiguration(
         sandboxImage: String,
-        networkMode: MacOSKubeadmNetworkMode = .full
+        networkMode: MacOSKubeadmNetworkMode = .full,
+        runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = []
     ) -> String {
+        let sandboxImageJSON = jsonString(sandboxImage)
+        let profiles =
+            [
+                MacOSKubeadmRuntimeClassProfile(
+                    name: networkMode.runtimeClassName,
+                    handler: networkMode.runtimeHandler,
+                    sandboxImage: sandboxImage,
+                    networkMode: networkMode
+                )
+            ] + runtimeClasses
+        let runtimeHandlers = profiles.map(runtimeHandlerJSON).joined(separator: ",\n")
+
         switch networkMode {
         case .full:
             return """
@@ -106,7 +119,7 @@ public enum MacOSKubeadmRenderer {
                         "plugin": "macvmnet"
                     },
                     "defaults": {
-                        "sandboxImage": "\(sandboxImage)",
+                        "sandboxImage": \(sandboxImageJSON),
                         "workloadPlatform": {
                             "os": "darwin",
                             "architecture": "arm64"
@@ -116,12 +129,7 @@ public enum MacOSKubeadmRenderer {
                         "guiEnabled": false
                     },
                     "runtimeHandlers": {
-                        "macos": {
-                            "sandboxImage": "\(sandboxImage)",
-                            "network": "default",
-                            "networkBackend": "vmnetShared",
-                            "guiEnabled": false
-                        }
+                \(runtimeHandlers)
                     },
                     "networkPolicy": {
                         "enabled": false
@@ -143,7 +151,7 @@ public enum MacOSKubeadmRenderer {
                         "port": 0
                     },
                     "defaults": {
-                        "sandboxImage": "\(sandboxImage)",
+                        "sandboxImage": \(sandboxImageJSON),
                         "workloadPlatform": {
                             "os": "darwin",
                             "architecture": "arm64"
@@ -153,12 +161,7 @@ public enum MacOSKubeadmRenderer {
                         "guiEnabled": false
                     },
                     "runtimeHandlers": {
-                        "macos-compat": {
-                            "sandboxImage": "\(sandboxImage)",
-                            "network": "default",
-                            "networkBackend": "virtualizationNAT",
-                            "guiEnabled": false
-                        }
+                \(runtimeHandlers)
                     },
                     "networkPolicy": {
                         "enabled": false
@@ -170,6 +173,22 @@ public enum MacOSKubeadmRenderer {
 
                 """
         }
+    }
+
+    private static func runtimeHandlerJSON(_ profile: MacOSKubeadmRuntimeClassProfile) -> String {
+        """
+                        \(jsonString(profile.handler)): {
+                            "sandboxImage": \(jsonString(profile.sandboxImage)),
+                            "network": "default",
+                            "networkBackend": \(jsonString(profile.networkMode.networkBackend)),
+                            "guiEnabled": false
+                        }
+        """
+    }
+
+    private static func jsonString(_ value: String) -> String {
+        let data = (try? JSONEncoder().encode(value)) ?? Data(#""""#.utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 
     public static func cniConfiguration() -> String {
@@ -208,24 +227,34 @@ public enum MacOSKubeadmRenderer {
     }
 
     public static func runtimeClassManifest(networkMode: MacOSKubeadmNetworkMode = .full) -> String {
+        runtimeClassManifest(
+            profile: MacOSKubeadmRuntimeClassProfile(
+                name: networkMode.runtimeClassName,
+                handler: networkMode.runtimeHandler,
+                sandboxImage: "",
+                networkMode: networkMode
+            ))
+    }
+
+    public static func runtimeClassManifest(profile: MacOSKubeadmRuntimeClassProfile) -> String {
         var lines = [
             "apiVersion: node.k8s.io/v1",
             "kind: RuntimeClass",
             "metadata:",
-            "  name: \(networkMode.runtimeClassName)",
-            "handler: \(networkMode.runtimeHandler)",
+            "  name: \(profile.name)",
+            "handler: \(profile.handler)",
             "scheduling:",
             "  nodeSelector:",
             "    kubernetes.io/os: darwin",
             "    node.kubernetes.io/macos: \"true\"",
-            "    node.kubernetes.io/macos-network: \"\(networkMode.nodeNetworkLabelValue)\"",
+            "    node.kubernetes.io/macos-network: \"\(profile.networkMode.nodeNetworkLabelValue)\"",
             "  tolerations:",
             "    - key: node.kubernetes.io/macos",
             "      operator: Equal",
             "      value: \"true\"",
             "      effect: NoSchedule",
         ]
-        if networkMode == .compat {
+        if profile.networkMode == .compat {
             lines.append(contentsOf: [
                 "    - key: node.kubernetes.io/macos-network",
                 "      operator: Equal",

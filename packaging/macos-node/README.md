@@ -60,18 +60,38 @@ Choose the network mode for the node before joining it:
   `node.kubernetes.io/macos=true:NoSchedule` and
   `node.kubernetes.io/macos-network=compat:NoSchedule`.
 
-After joining a node, apply the matching RuntimeClass manifest from an admin
-workstation. From the source tree:
+To expose more than one macOS sandbox image on the same node, repeat
+`--runtime-class <name>=<sandbox-image>` during join. Each additional
+RuntimeClass uses the selected node network mode.
+
+```sh
+sudo container-macos-kubeadm join 10.0.0.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --node-name macos-node-1 \
+  --network-mode compat \
+  --runtime-class macos-15-2=ghcr.io/jianliang00/macos-base:15.2 \
+  --runtime-class macos-15-4=ghcr.io/jianliang00/macos-base:15.4
+```
+
+The generated CRI shim configuration registers one runtime handler per
+RuntimeClass. Pods select the desired sandbox image with
+`spec.runtimeClassName`, for example `macos-15-2`.
+
+After joining a node, apply the RuntimeClass manifests that should be exposed
+to the cluster from an admin workstation. The built-in default manifests are
+available from the source tree:
 
 ```sh
 kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos.yaml
 kubectl apply -f packaging/macos-node/manifests/runtimeclass-macos-compat.yaml
 ```
 
-Installed packages also stage the same manifests under
+Installed packages also stage generated manifests under
 `/usr/local/share/container-macos-node/manifests/` on each macOS node. Copy the
-matching manifest to an admin workstation before applying it if the source tree
-is not available there.
+matching `runtimeclass-*.yaml` files to an admin workstation before applying
+them when the source tree is not available there or when `--runtime-class`
+generated additional RuntimeClasses.
 
 Apply only the manifest that matches the node mode when a cluster exposes a
 single macOS scheduling surface. Apply both manifests when the cluster

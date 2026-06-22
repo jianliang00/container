@@ -40,6 +40,10 @@ public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
 
 private let criShimPodSandboxStopOptions = ContainerStopOptions(timeoutInSeconds: 30, signal: SIGTERM)
 
+public enum CRIShimPodAnnotation {
+    public static let sandboxImage = "container-macos.io/sandbox-image"
+}
+
 public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsyncProvider, @unchecked Sendable {
     public var versionInfo: CRIShimRuntimeVersionInfo
     public var config: CRIShimConfig
@@ -142,7 +146,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         try await handlerLogger.handle(operation: CRIRuntimeOperation.runPodSandbox.rawValue) {
             try CRIShimUnsupportedFieldValidator.validate(request)
 
-            let handler = try config.resolveRuntimeHandler(request.runtimeHandler)
+            var handler = try config.resolveRuntimeHandler(request.runtimeHandler)
+            handler.sandboxImage = try sandboxImageReference(request: request, handler: handler)
             let sandboxID = UUID().uuidString.lowercased()
             let sandboxImage = try await resolveSandboxImage(reference: handler.sandboxImage)
             try validateCRIShimImage(
@@ -769,6 +774,20 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             return image
         }
         return try await imageManager.pullImage(reference: reference, authentication: nil)
+    }
+
+    private func sandboxImageReference(
+        request: Runtime_V1_RunPodSandboxRequest,
+        handler: ResolvedRuntimeHandler
+    ) throws -> String {
+        guard let override = request.config.annotations[CRIShimPodAnnotation.sandboxImage] else {
+            return handler.sandboxImage
+        }
+        let reference = override.trimmed
+        guard !reference.isEmpty else {
+            throw CRIShimError.invalidArgument("\(CRIShimPodAnnotation.sandboxImage) annotation must not be empty")
+        }
+        return reference
     }
 
     private func findImage(reference: String) async throws -> CRIShimImageRecord {

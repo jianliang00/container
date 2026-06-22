@@ -144,6 +144,75 @@ struct MacOSKubeadmPlanTests {
             })
     }
 
+    @Test func joinPlanRendersAdditionalRuntimeClasses() throws {
+        var options = try makeOptions(startServices: false)
+        options.networkMode = .compat
+        options.kubeProxyToken = nil
+        options.runtimeClasses = [
+            MacOSKubeadmRuntimeClassProfile(
+                name: "macos-15-2",
+                sandboxImage: "ghcr.io/jianliang00/macos-base:15.2",
+                networkMode: .compat
+            ),
+            MacOSKubeadmRuntimeClassProfile(
+                name: "macos-15-4",
+                sandboxImage: "ghcr.io/jianliang00/macos-base:15.4",
+                networkMode: .compat
+            ),
+        ]
+
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let writes = plan.steps.compactMap { step -> (path: String, contents: String)? in
+            guard case .writeFile(let path, let contents, _, _) = step.action else {
+                return nil
+            }
+            return (path, contents)
+        }
+
+        let config = try #require(
+            writes.first { $0.path == "/tmp/macos-node/etc/kubernetes/container-cri-shim-macos-config.json" }?.contents
+        )
+        #expect(config.contains(#""macos-compat": {"#))
+        #expect(config.contains(#""macos-15-2": {"#))
+        #expect(config.contains(#""sandboxImage": "ghcr.io/jianliang00/macos-base:15.2""#))
+        #expect(config.contains(#""macos-15-4": {"#))
+        #expect(config.contains(#""sandboxImage": "ghcr.io/jianliang00/macos-base:15.4""#))
+        #expect(config.contains(#""networkBackend": "virtualizationNAT""#))
+
+        let runtimeClass15_2 = try #require(
+            writes.first {
+                $0.path == "/tmp/macos-node/usr/local/share/container-macos-node/manifests/runtimeclass-macos-15-2.yaml"
+            }?.contents
+        )
+        #expect(runtimeClass15_2.contains("name: macos-15-2"))
+        #expect(runtimeClass15_2.contains("handler: macos-15-2"))
+        #expect(runtimeClass15_2.contains("node.kubernetes.io/macos-network: \"compat\""))
+
+        let runtimeClass15_4 = try #require(
+            writes.first {
+                $0.path == "/tmp/macos-node/usr/local/share/container-macos-node/manifests/runtimeclass-macos-15-4.yaml"
+            }?.contents
+        )
+        #expect(runtimeClass15_4.contains("name: macos-15-4"))
+        #expect(runtimeClass15_4.contains("handler: macos-15-4"))
+        #expect(runtimeClass15_4.contains("node.kubernetes.io/macos-network: \"compat\""))
+    }
+
+    @Test func joinPlanRejectsDuplicateRuntimeClassNames() throws {
+        var options = try makeOptions(startServices: false)
+        options.runtimeClasses = [
+            MacOSKubeadmRuntimeClassProfile(
+                name: "macos",
+                sandboxImage: "ghcr.io/jianliang00/macos-base:26.3",
+                networkMode: .full
+            )
+        ]
+
+        #expect(throws: MacOSKubeadmError.invalidInput("--runtime-class names must be unique")) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
     @Test func kubeconfigsAreMarkedSensitive() throws {
         let options = try makeOptions(startServices: false)
         let plan = try MacOSKubeadmPlanner.joinPlan(options: options)

@@ -868,6 +868,9 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         connection: AgentConnection
     ) throws -> SpawnedProcessSession {
         let preparedExec = PreparedCStringArray([executable] + arguments)
+        let preparedExecutableSearch = PreparedCStringArray(
+            executableSearchCandidates(executable: executable, environment: environment)
+        )
         let preparedEnv = PreparedCStringArray(environment)
         let preparedWorkingDirectory = workingDirectory.map(PreparedCString.init)
 
@@ -908,7 +911,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
                 closeIfValid(masterFD)
                 runChild(
                     execStatusFD: execStatus.writeEnd,
-                    executable: preparedExec.pointer.pointee,
+                    executableSearch: preparedExecutableSearch.pointer,
                     arguments: preparedExec.pointer,
                     environment: preparedEnv.pointer,
                     workingDirectory: preparedWorkingDirectory?.pointer,
@@ -924,7 +927,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
                 closeIfValid(stderrPipe?.readEnd)
                 runChild(
                     execStatusFD: execStatus.writeEnd,
-                    executable: preparedExec.pointer.pointee,
+                    executableSearch: preparedExecutableSearch.pointer,
                     arguments: preparedExec.pointer,
                     environment: preparedEnv.pointer,
                     workingDirectory: preparedWorkingDirectory?.pointer,
@@ -1201,6 +1204,52 @@ private func readExecStatus(_ fd: Int32) throws -> Int32? {
     return code
 }
 
+private let defaultExecutableSearchPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+private func executableSearchCandidates(executable: String, environment: [String]) -> [String] {
+    guard !executable.contains("/") else {
+        return [executable]
+    }
+
+    let searchPath =
+        environment.first { $0.hasPrefix("PATH=") }.map { String($0.dropFirst(5)) }
+        ?? defaultExecutableSearchPath
+    if searchPath.isEmpty {
+        return ["./\(executable)"]
+    }
+
+    return searchPath.split(separator: ":", omittingEmptySubsequences: false).map { component in
+        let directory = component.isEmpty ? "." : String(component)
+        if directory.hasSuffix("/") {
+            return "\(directory)\(executable)"
+        }
+        return "\(directory)/\(executable)"
+    }
+}
+
+private func execWithPathSearch(
+    _ executableSearch: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+    arguments: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+    environment: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> Int32 {
+    var index = 0
+    var permissionErrno: Int32?
+    while let candidate = executableSearch.advanced(by: index).pointee {
+        execve(candidate, arguments, environment)
+        let code = Int32(errno)
+        switch code {
+        case Int32(ENOENT), Int32(ENOTDIR):
+            break
+        case Int32(EACCES):
+            permissionErrno = code
+        default:
+            return code
+        }
+        index += 1
+    }
+    return permissionErrno ?? Int32(ENOENT)
+}
+
 private func wifexited(_ status: Int32) -> Bool {
     (status & 0x7f) == 0
 }
@@ -1220,7 +1269,7 @@ private func wtermsig(_ status: Int32) -> Int32 {
 
 private func runChild(
     execStatusFD: Int32,
-    executable: UnsafeMutablePointer<CChar>?,
+    executableSearch: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
     arguments: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
     environment: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
     workingDirectory: UnsafeMutablePointer<CChar>?,
@@ -1288,11 +1337,7 @@ private func runChild(
     if let workingDirectory, chdir(workingDirectory) != 0 {
         fail(Int32(errno))
     }
-    guard let executable else {
-        fail(Int32(EINVAL))
-    }
-    execve(executable, arguments, environment)
-    fail(Int32(errno))
+    fail(execWithPathSearch(executableSearch, arguments: arguments, environment: environment))
 }
 
 private func sendSignalToProcessTree(pid: pid_t, signal: Int32) throws {

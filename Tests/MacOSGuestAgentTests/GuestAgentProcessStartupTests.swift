@@ -113,6 +113,48 @@ struct GuestAgentProcessStartupTests {
     }
 
     @Test
+    func executableNameSearchesPathEnvironment() throws {
+        signal(SIGPIPE, SIG_IGN)
+
+        let harness = try AgentConnectionHarness()
+        defer { harness.closePeer() }
+
+        let ready = try readAgentFrame(from: harness.peerFD)
+        #expect(ready.type == .ready)
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec,
+                id: "path-search",
+                executable: "sh",
+                arguments: ["-c", "printf path-search-ok"],
+                environment: ["PATH=/bin:/usr/bin"],
+                workingDirectory: "/",
+                terminal: false,
+                uid: UInt32(geteuid()),
+                gid: UInt32(getegid())
+            ),
+            fd: harness.peerFD
+        )
+
+        var frames: [GuestAgentFrame] = []
+        for _ in 0..<8 {
+            let frame = try readAgentFrame(from: harness.peerFD)
+            frames.append(frame)
+            if frames.contains(where: { $0.type == .ack }) && frames.contains(where: { $0.type == .exit }) {
+                break
+            }
+        }
+
+        #expect(frames.contains(where: { $0.type == .ack && $0.id == "path-search" }))
+        #expect(frames.contains(where: { $0.type == .stdout && $0.data == Data("path-search-ok".utf8) }))
+        #expect(frames.contains(where: { $0.type == .exit && $0.exitCode == 0 }))
+        #expect(!frames.contains(where: { $0.type == .error }))
+
+        try harness.waitForCompletion()
+    }
+
+    @Test
     func fastProcessSendsAckBeforeExit() throws {
         signal(SIGPIPE, SIG_IGN)
 

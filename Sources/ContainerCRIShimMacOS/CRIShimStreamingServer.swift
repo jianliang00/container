@@ -1716,7 +1716,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 
     private func handleWriteFailure() async {
-        await cleanup(killProcess: true)
+        await cleanup()
         guard let channel else {
             return
         }

@@ -1591,6 +1591,10 @@ final class SidecarControlServer: @unchecked Sendable {
         try waitForProcessStartAck(fd: fd, expectedProcessID: expectedProcessID, timeoutSeconds: timeoutSeconds)
     }
 
+    func _testGuestExecutableLaunch(executable: String, arguments: [String]) -> (executable: String, arguments: [String]) {
+        guestExecutableLaunch(executable: executable, arguments: arguments)
+    }
+
     private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: ProcessStreamSession) throws {
         session.writeLock.lock()
         defer { session.writeLock.unlock() }
@@ -1810,11 +1814,12 @@ final class SidecarControlServer: @unchecked Sendable {
             try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
             let env = exec.environment ?? ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"]
             let cwd = exec.workingDirectory ?? "/"
+            let launch = guestExecutableLaunch(executable: exec.executable, arguments: exec.arguments)
             try MacOSSidecarSocketIO.writeJSONFrame(
                 SidecarGuestAgentFrame.exec(
                     id: processID,
-                    executable: exec.executable,
-                    arguments: exec.arguments,
+                    executable: launch.executable,
+                    arguments: launch.arguments,
                     environment: env,
                     rootDirectory: exec.rootDirectory,
                     workingDirectory: cwd,
@@ -1835,6 +1840,13 @@ final class SidecarControlServer: @unchecked Sendable {
             Darwin.close(fd)
             throw error
         }
+    }
+
+    private func guestExecutableLaunch(executable: String, arguments: [String]) -> (executable: String, arguments: [String]) {
+        guard !executable.isEmpty, !executable.contains("/") else {
+            return (executable, arguments)
+        }
+        return ("/usr/bin/env", [executable] + arguments)
     }
 
     private func startProcessReadLoop(_ session: ProcessStreamSession, initialFrames: [SidecarGuestAgentFrame] = []) {

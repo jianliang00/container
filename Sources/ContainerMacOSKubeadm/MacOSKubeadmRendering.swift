@@ -51,7 +51,7 @@ public enum MacOSKubeadmRenderer {
         """
         apiVersion: kubelet.config.k8s.io/v1beta1
         kind: KubeletConfiguration
-        address: "127.0.0.1"
+        address: "0.0.0.0"
         port: 10250
         readOnlyPort: 0
         staticPodPath: "/etc/kubernetes/manifests"

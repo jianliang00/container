@@ -200,19 +200,32 @@ endef
 # the three phases. Expand the filter lists as suites are migrated from CLITests.
 PARALLEL_WIDTH ?= 2
 WARMUP_FILTER = ImageWarmup
-CONCURRENT_FILTER = DemoConcurrentTests
+
+CONCURRENT_TEST_SUITES ?= \
+	TestCLIStop \
+	TestCLIRmRaceCondition \
+	TestCLIExportCommand
+CONCURRENT_FILTER = $(subst $(space),|,$(strip $(CONCURRENT_TEST_SUITES)))
+
 GLOBAL_FILTER = DemoGlobalTests
 
 INTEGRATION_SWIFT_EXTRA ?=
 INTEGRATION_POST_TEST ?=
 
+PRESERVE_KERNELS ?= false
+
 define RUN_INTEGRATION
 	@echo Ensuring apiserver stopped before the CLI integration tests...
 	@bin/container system stop && sleep 3 && scripts/ensure-container-stopped.sh
 	@if [ -n "$(APP_ROOT)" ]; then \
-		echo "Clearing application data under $(APP_ROOT) (preserving kernels)..." ; \
 		mkdir -p $(APP_ROOT) ; \
-		find "$(APP_ROOT)" -mindepth 1 -maxdepth 1 ! -name kernels -exec rm -rf {} + ; \
+		if [ "$(PRESERVE_KERNELS)" = "true" ]; then \
+			echo "Clearing application data under $(APP_ROOT) (preserving kernels)..." ; \
+			find "$(APP_ROOT)" -mindepth 1 -maxdepth 1 ! -name kernels -exec rm -rf {} + ; \
+		else \
+			echo "Clearing application data under $(APP_ROOT)..." ; \
+			find "$(APP_ROOT)" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ; \
+		fi ; \
 	fi
 	@echo Running the integration tests...
 	@bin/container --debug system start --timeout 60 --enable-kernel-install $(SYSTEM_START_OPTS) && \
@@ -263,7 +276,6 @@ INTEGRATION_TEST_SUITES ?= \
 	TestCLIRunBase \
 	TestCLIRunInitImage \
 	TestCLIBuildBase \
-	TestCLIExportCommand \
 	TestCLIVolumes \
 	TestCLIKernelSet \
 	TestCLIAnonymousVolumes \

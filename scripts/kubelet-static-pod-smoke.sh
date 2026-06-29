@@ -419,7 +419,7 @@ eventRecordQPS: 0
 enableServer: false
 readOnlyPort: 0
 healthzPort: 0
-localStorageCapacityIsolation: false
+localStorageCapacityIsolation: true
 makeIPTablesUtilChains: false
 authentication:
   anonymous:

@@ -202,9 +202,10 @@ PARALLEL_WIDTH ?= 2
 WARMUP_FILTER = ImageWarmup
 
 CONCURRENT_TEST_SUITES ?= \
-	TestCLIStop/ \
+	TestCLIExportCommand/ \
+	TestCLIMachineCommand/ \
 	TestCLIRmRaceCondition/ \
-	TestCLIExportCommand/
+	TestCLIStop/
 CONCURRENT_FILTER = $(subst $(space),|,$(strip $(CONCURRENT_TEST_SUITES)))
 
 GLOBAL_TEST_SUITES ?= \
@@ -212,7 +213,8 @@ GLOBAL_TEST_SUITES ?= \
 	TestCLIBuilderSerial/ \
 	TestCLIBuilderEnvOnlySerial/ \
 	TestCLIBuilderLocalOutputSerial/ \
-	TestCLIBuilderTarExportSerial/
+	TestCLIBuilderTarExportSerial/ \
+	TestCLIMachineRuntimeSerial/
 GLOBAL_FILTER = $(subst $(space),|,$(strip $(GLOBAL_TEST_SUITES)))
 
 INTEGRATION_SWIFT_EXTRA ?=
@@ -292,8 +294,6 @@ INTEGRATION_TEST_SUITES ?= \
 	TestCLIAnonymousVolumes \
 	TestCLINotFound \
 	TestCLISystemDF \
-	TestCLIMachineCommand \
-	TestCLIMachineRuntime \
 	TestCLINoParallelCases \
 	TestCLICopyCommand
 

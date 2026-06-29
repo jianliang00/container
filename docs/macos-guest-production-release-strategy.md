@@ -206,7 +206,46 @@ cluster deliberately supports both scheduling targets.
 Expose additional macOS sandbox images with repeated
 `container-macos-kubeadm join --runtime-class <name>=<sandbox-image>` options.
 Each additional RuntimeClass uses the joined node's selected network mode, and
-Pods select it with `spec.runtimeClassName`.
+Pods select it with `spec.runtimeClassName`. The join command writes generated
+RuntimeClass manifests under
+`/usr/local/share/container-macos-node/manifests/`; copy the matching
+`runtimeclass-<name>.yaml` files to an admin workstation and apply them before
+scheduling Pods that reference the new RuntimeClasses.
+
+Example compat-mode node exposing two macOS base images:
+
+```sh
+sudo container-macos-kubeadm join 10.0.0.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --node-name macos-node-1 \
+  --network-mode compat \
+  --runtime-class macos-15-2=ghcr.io/jianliang00/macos-base:15.2 \
+  --runtime-class macos-15-4=ghcr.io/jianliang00/macos-base:15.4
+```
+
+Example Pod selecting one of those RuntimeClasses:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: macos-15-2-check
+spec:
+  runtimeClassName: macos-15-2
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: ghcr.io/jianliang00/macos-base-workload:15.2
+      command: ["/bin/sh", "-lc"]
+      args: ["sw_vers && echo macos-15-2-ok && sleep 3600"]
+```
+
+For compat-mode release validation, run macOS Pods sequentially on each host
+unless that host has been validated for multiple active macOS VMs. Set
+`automountServiceAccountToken: false` for validation Pods that do not need
+Kubernetes API credentials.
 
 Full-mode nodes advertise:
 

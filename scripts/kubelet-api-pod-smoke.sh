@@ -487,7 +487,7 @@ readOnlyPort: 0
 healthzPort: 0
 tlsCertFile: "${CERT_DIR}/kubelet-server.crt"
 tlsPrivateKeyFile: "${CERT_DIR}/kubelet-server.key"
-localStorageCapacityIsolation: false
+localStorageCapacityIsolation: true
 makeIPTablesUtilChains: false
 authentication:
   anonymous:

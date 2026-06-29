@@ -75,8 +75,10 @@ sudo container-macos-kubeadm join 10.0.0.10:6443 \
 ```
 
 The generated CRI shim configuration registers one runtime handler per
-RuntimeClass. Pods select the desired sandbox image with
-`spec.runtimeClassName`, for example `macos-15-2`.
+RuntimeClass. Each additional profile also renders a
+`runtimeclass-<name>.yaml` manifest under the package manifest directory. Pods
+select the desired sandbox image with `spec.runtimeClassName`, for example
+`macos-15-2`.
 
 After joining a node, apply the RuntimeClass manifests that should be exposed
 to the cluster from an admin workstation. The built-in default manifests are
@@ -93,27 +95,66 @@ matching `runtimeclass-*.yaml` files to an admin workstation before applying
 them when the source tree is not available there or when `--runtime-class`
 generated additional RuntimeClasses.
 
+For a node joined with `--runtime-class macos-15-2=...`, apply the generated
+manifest after copying it from the node:
+
+```sh
+kubectl apply -f runtimeclass-macos-15-2.yaml
+```
+
 Apply only the manifest that matches the node mode when a cluster exposes a
 single macOS scheduling surface. Apply both manifests when the cluster
 intentionally supports both macOS 26+ full-mode nodes and older compat-mode
 nodes.
 
-Example compat workload:
+Example compat validation workload:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: macos-compat-smoke
+  name: macos-compat-check
 spec:
   runtimeClassName: macos-compat
+  automountServiceAccountToken: false
   restartPolicy: Never
   containers:
-    - name: smoke
-      image: ghcr.io/example/macos-workload:15.2
+    - name: main
+      image: ghcr.io/jianliang00/macos-base-workload:15.2
       command: ["/bin/sh", "-lc"]
-      args: ["sw_vers && sleep 3600"]
+      args: ["sw_vers && echo macos-compat-ok && sleep 3600"]
 ```
+
+Example workload selecting an administrator-defined RuntimeClass:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: macos-15-2-check
+spec:
+  runtimeClassName: macos-15-2
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: ghcr.io/jianliang00/macos-base-workload:15.2
+      command: ["/bin/sh", "-lc"]
+      args: ["sw_vers && echo macos-15-2-ok && sleep 3600"]
+```
+
+The CRI shim also accepts a Pod annotation override for the sandbox image:
+
+```yaml
+metadata:
+  annotations:
+    container-macos.io/sandbox-image: ghcr.io/jianliang00/macos-base:15.2
+```
+
+Clusters that expose this annotation should enforce an admission policy for
+accepted sandbox images and callers. For basic compat-mode validation, run one
+macOS Pod at a time on a host. Set `automountServiceAccountToken: false` for
+validation Pods that do not need Kubernetes API credentials.
 
 Use `container-macos-kubeadm status` to inspect installed files, generated
 configuration, the CRI socket, and launchd state. Use

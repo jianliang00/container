@@ -30,6 +30,11 @@ on:
         required: true
         default: false
         type: boolean
+      skip_notarization:
+        description: "Skip Apple notarization and stapling"
+        required: true
+        default: false
+        type: boolean
   push:
     tags:
       - "container-macos-node-*"
@@ -61,6 +66,7 @@ jobs:
           node_name="${DEFAULT_NODE_NAME}"
           draft="false"
           prerelease="false"
+          skip_notarization="false"
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             release_tag="${{ inputs.release_tag }}"
@@ -68,6 +74,7 @@ jobs:
             node_name="${{ inputs.node_name }}"
             draft="${{ inputs.draft }}"
             prerelease="${{ inputs.prerelease }}"
+            skip_notarization="${{ inputs.skip_notarization }}"
           fi
 
           package_version="${release_tag#container-macos-node-}"
@@ -90,6 +97,7 @@ jobs:
             echo "MACOS_NODE_NAME=${node_name}"
             echo "RELEASE_DRAFT=${draft}"
             echo "RELEASE_PRERELEASE=${prerelease}"
+            echo "SKIP_NOTARIZATION=${skip_notarization}"
           } >> "$GITHUB_ENV"
 
       - name: Validate signing and notarization secrets
@@ -233,6 +241,7 @@ jobs:
           done
 
       - name: Notarize and staple installer package
+        if: env.SKIP_NOTARIZATION != 'true'
         env:
           APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
           APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
@@ -292,6 +301,10 @@ jobs:
         run: |
           set -euo pipefail
           shasum -a 256 "${PACKAGE_PATH}" > "${PACKAGE_PATH}.sha256"
+          notarization_status="stapled"
+          if [[ "${SKIP_NOTARIZATION}" == "true" ]]; then
+            notarization_status="skipped"
+          fi
           cat > release-notes.md <<EOF
           macOS Kubernetes worker-node installer.
 
@@ -301,7 +314,7 @@ jobs:
           - Node template name: ${MACOS_NODE_NAME}
           - Package: ${PACKAGE_NAME}
           - Signing: Developer ID Application and Developer ID Installer
-          - Notarization: stapled
+          - Notarization: ${notarization_status}
           EOF
 
       - name: Upload workflow artifacts

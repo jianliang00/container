@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerXPC
+import Darwin
 import Testing
 
 struct XPCServerAuthorizationTests {

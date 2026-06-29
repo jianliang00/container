@@ -68,7 +68,7 @@ public enum MacOSKubeadmRenderer {
         evictionPressureTransitionPeriod: "10s"
         eventRecordQPS: 5
         enableServer: true
-        localStorageCapacityIsolation: false
+        localStorageCapacityIsolation: true
         makeIPTablesUtilChains: false
         clusterDNS:
           - "\(clusterDNS)"

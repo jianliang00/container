@@ -198,6 +198,7 @@ endef
 # PARALLEL_WIDTH controls --experimental-maximum-parallelization-width for the
 # concurrent pass. WARMUP_FILTER, CONCURRENT_FILTER, and GLOBAL_FILTER select
 # the three phases. Expand the filter lists as suites are migrated from CLITests.
+#PARALLEL_WIDTH ?= $(shell sysctl -n hw.physicalcpu)
 PARALLEL_WIDTH ?= 2
 WARMUP_FILTER = ImageWarmup/
 

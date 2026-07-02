@@ -353,3 +353,25 @@ final class ContainerFixture: Sendable {
         }
     }
 }
+
+// MARK: - Retry
+
+extension ContainerFixture {
+    /// Retries `body` up to `attempts` times, sleeping `delay` between each attempt.
+    ///
+    /// - Returns when `body` returns `true`.
+    /// - Retries when `body` returns `false`.
+    /// - Propagates immediately (aborting the loop) when `body` throws.
+    ///
+    /// Throws `CommandError.executionFailed` if all attempts return `false`.
+    func retry(attempts: Int, delay: Duration = .seconds(1), _ body: () async throws -> Bool) async throws {
+        for attempt in 1...attempts {
+            if try await body() { return }
+            print("retry: attempt \(attempt)/\(attempts) not yet ready")
+            if attempt < attempts {
+                try await Task.sleep(for: delay)
+            }
+        }
+        throw CommandError.executionFailed("retry: condition not met after \(attempts) attempts")
+    }
+}

@@ -648,25 +648,18 @@ struct TestCLIRunCommand {
                 try? f.doRemove(c)
             }
 
-            let client = HTTPClient(eventLoopGroupProvider: .singleton)
+            let client = f.makeHTTPClient()
             defer { _ = client.shutdown() }
-            var success = false
-            for attempt in 1...10 {
+            try await f.retry(attempts: 10, delay: .seconds(3)) {
                 do {
                     var req = HTTPClientRequest(url: "http://127.0.0.1:\(proxyPort)")
                     req.method = .GET
                     let resp = try await client.execute(req, timeout: .seconds(3))
-                    if resp.status == .ok {
-                        f.log.info("testForwardTCP: attempt \(attempt) succeeded")
-                        success = true
-                        break
-                    }
+                    return resp.status.code >= 200 && resp.status.code < 300
                 } catch {
-                    f.log.info("testForwardTCP: attempt \(attempt) failed: \(error)")
-                    try await Task.sleep(for: .seconds(3))
+                    return false
                 }
             }
-            #expect(success, "TCP forward to port \(proxyPort) did not succeed after retries")
         }
     }
 
@@ -686,25 +679,18 @@ struct TestCLIRunCommand {
                 try? f.doRemove(c)
             }
 
-            let client = HTTPClient(eventLoopGroupProvider: .singleton)
-            defer { _ = client.shutdown() }
-            var success = false
-            for attempt in 1...10 {
+            let client2 = f.makeHTTPClient()
+            defer { _ = client2.shutdown() }
+            try await f.retry(attempts: 10, delay: .seconds(3)) {
                 do {
                     var req = HTTPClientRequest(url: "http://127.0.0.1:\(proxyPortStart)")
                     req.method = .GET
-                    let resp = try await client.execute(req, timeout: .seconds(3))
-                    if resp.status == .ok {
-                        f.log.info("testForwardTCPPortRange: attempt \(attempt) succeeded")
-                        success = true
-                        break
-                    }
+                    let resp = try await client2.execute(req, timeout: .seconds(3))
+                    return resp.status.code >= 200 && resp.status.code < 300
                 } catch {
-                    f.log.info("testForwardTCPPortRange: attempt \(attempt) failed: \(error)")
-                    try await Task.sleep(for: .seconds(3))
+                    return false
                 }
             }
-            #expect(success, "TCP port range forward did not succeed after retries")
         }
     }
 
@@ -724,25 +710,18 @@ struct TestCLIRunCommand {
                 try? f.doRemove(c)
             }
 
-            let client = HTTPClient(eventLoopGroupProvider: .singleton)
-            defer { _ = client.shutdown() }
-            var success = false
-            for attempt in 1...10 {
+            let client3 = f.makeHTTPClient()
+            defer { _ = client3.shutdown() }
+            try await f.retry(attempts: 10, delay: .seconds(3)) {
                 do {
                     var req = HTTPClientRequest(url: "http://[::1]:\(proxyPort)")
                     req.method = .GET
-                    let resp = try await client.execute(req, timeout: .seconds(3))
-                    if resp.status == .ok {
-                        f.log.info("testForwardTCPv6: attempt \(attempt) succeeded")
-                        success = true
-                        break
-                    }
+                    let resp = try await client3.execute(req, timeout: .seconds(3))
+                    return resp.status.code >= 200 && resp.status.code < 300
                 } catch {
-                    f.log.info("testForwardTCPv6: attempt \(attempt) failed: \(error)")
-                    try await Task.sleep(for: .seconds(3))
+                    return false
                 }
             }
-            #expect(success, "TCPv6 forward to port \(proxyPort) did not succeed after retries")
         }
     }
 }

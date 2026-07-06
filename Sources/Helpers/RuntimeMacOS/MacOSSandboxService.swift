@@ -256,6 +256,8 @@ public actor MacOSSandboxService {
 
     private var sandboxState: State = .created
     var configuration: ContainerConfiguration?
+    private var sandboxImageConfig: ContainerizationOCI.Image?
+    private var sandboxImageConfigResolved = false
     var sessions: [String: Session] = [:]
     private var workloads: [String: WorkloadRecord] = [:]
     private var workloadSessions: [String: String] = [:]
@@ -1488,7 +1490,9 @@ extension MacOSSandboxService {
         }
 
         let resolvedImage = try await resolveWorkloadImage(for: normalized)
+        let sandboxImageConfig = try await sandboxImageConfigForWorkloadDefaults()
         let processConfiguration = try resolveEffectiveProcessConfiguration(
+            sandboxImageConfig: sandboxImageConfig,
             imageConfig: resolvedImage.imageConfig.config,
             requestedConfiguration: normalized.processConfiguration
         )
@@ -1552,6 +1556,19 @@ extension MacOSSandboxService {
             try? await cleanupGuestWorkloadInstance(workloadID: workloadID, containerConfig: containerConfig)
             throw error
         }
+    }
+
+    private func sandboxImageConfigForWorkloadDefaults() async throws -> ImageConfig? {
+        if sandboxImageConfigResolved {
+            return sandboxImageConfig?.config
+        }
+        guard let configuration else {
+            throw ContainerizationError(.invalidState, message: "sandbox not prepared")
+        }
+        let resolvedImage = try await resolveSandboxImage(containerConfig: configuration)
+        sandboxImageConfig = resolvedImage.imageConfig
+        sandboxImageConfigResolved = true
+        return resolvedImage.imageConfig.config
     }
 
     private func resolveWorkloadImage(for configuration: WorkloadConfiguration) async throws -> ResolvedWorkloadImage {
@@ -1631,6 +1648,7 @@ extension MacOSSandboxService {
     // internal "no explicit override" marker until the public workload image create
     // surface grows dedicated override fields.
     private func resolveEffectiveProcessConfiguration(
+        sandboxImageConfig: ImageConfig?,
         imageConfig: ImageConfig?,
         requestedConfiguration: ProcessConfiguration
     ) throws -> ProcessConfiguration {
@@ -1679,10 +1697,14 @@ extension MacOSSandboxService {
             }
         }()
 
+        let imageEnvironment = mergeEnvironmentEntries(
+            base: imageEnvironmentEntries(sandboxImageConfig),
+            overrides: imageEnvironmentEntries(imageConfig)
+        )
         return ProcessConfiguration(
             executable: command[0],
             arguments: Array(command.dropFirst()),
-            environment: mergeEnvironmentEntries(base: imageConfig?.env ?? [], overrides: requestedConfiguration.environment),
+            environment: mergeEnvironmentEntries(base: imageEnvironment, overrides: requestedConfiguration.environment),
             workingDirectory: resolvedWorkingDirectory,
             terminal: requestedConfiguration.terminal,
             user: resolvedUser,
@@ -1691,12 +1713,26 @@ extension MacOSSandboxService {
         )
     }
 
+    private func imageEnvironmentEntries(_ imageConfig: ImageConfig?) -> [String] {
+        guard let imageConfig else {
+            return []
+        }
+        var environment = imageConfig.env ?? []
+        if !environment.contains(where: { environmentEntryKey($0) == "USER" }),
+            let user = imageConfig.user?.split(separator: ":", maxSplits: 1).first.map(String.init),
+            !user.isEmpty
+        {
+            environment.append("USER=\(user)")
+        }
+        return environment
+    }
+
     private func mergeEnvironmentEntries(base: [String], overrides: [String]) -> [String] {
         var orderedKeys: [String] = []
         var rawValues: [String: String] = [:]
 
         func insert(_ entry: String) {
-            let key = entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? entry
+            let key = environmentEntryKey(entry)
             if rawValues[key] == nil {
                 orderedKeys.append(key)
             }
@@ -1711,6 +1747,10 @@ extension MacOSSandboxService {
         }
 
         return orderedKeys.compactMap { rawValues[$0] }
+    }
+
+    private func environmentEntryKey(_ entry: String) -> String {
+        entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? entry
     }
 
     private func resolveLaunchProcessConfiguration(
@@ -2338,7 +2378,13 @@ extension MacOSSandboxService {
         let diskImage: URL
     }
 
-    private func resolveTemplateLayers(containerConfig: ContainerConfiguration, progressUpdate: ProgressUpdateHandler? = nil) async throws -> LayerPaths {
+    private struct ResolvedSandboxImage {
+        let manifestDescriptor: Descriptor
+        let manifest: Manifest
+        let imageConfig: ContainerizationOCI.Image
+    }
+
+    private func resolveSandboxImage(containerConfig: ContainerConfiguration) async throws -> ResolvedSandboxImage {
         guard let indexContent: Content = try await contentStore.get(digest: containerConfig.image.digest) else {
             throw ContainerizationError(.notFound, message: "missing index blob \(containerConfig.image.digest)")
         }
@@ -2361,7 +2407,22 @@ extension MacOSSandboxService {
                 message: "image \(containerConfig.image.reference) cannot boot a macOS sandbox: \(error.localizedDescription)"
             )
         }
-        let layers = try MacOSImageLayers(manifest: manifest)
+        guard let configContent: Content = try await contentStore.get(digest: manifest.config.digest) else {
+            throw ContainerizationError(.notFound, message: "missing sandbox image config blob \(manifest.config.digest)")
+        }
+        let imageConfig: ContainerizationOCI.Image = try configContent.decode()
+        return ResolvedSandboxImage(
+            manifestDescriptor: manifestDescriptor,
+            manifest: manifest,
+            imageConfig: imageConfig
+        )
+    }
+
+    private func resolveTemplateLayers(containerConfig: ContainerConfiguration, progressUpdate: ProgressUpdateHandler? = nil) async throws -> LayerPaths {
+        let resolvedImage = try await resolveSandboxImage(containerConfig: containerConfig)
+        sandboxImageConfig = resolvedImage.imageConfig
+        sandboxImageConfigResolved = true
+        let layers = try MacOSImageLayers(manifest: resolvedImage.manifest)
 
         guard let hardwareContent: Content = try await contentStore.get(digest: layers.hardwareModel.digest) else {
             throw ContainerizationError(.notFound, message: "missing hardware model blob \(layers.hardwareModel.digest)")
@@ -2381,7 +2442,7 @@ extension MacOSSandboxService {
         case .v1(_, _, let diskLayoutDesc, let diskChunks):
             diskImagePath = try await resolveV1DiskImage(
                 store: contentStore,
-                manifestDigest: manifestDescriptor.digest,
+                manifestDigest: resolvedImage.manifestDescriptor.digest,
                 diskLayoutDescriptor: diskLayoutDesc,
                 diskChunks: diskChunks,
                 progressUpdate: progressUpdate
@@ -3654,8 +3715,14 @@ extension MacOSSandboxService {
         try await prepareSandboxIfNeeded()
     }
 
-    func testingPrepareSandbox(_ configuration: ContainerConfiguration, state: String = "booted") throws {
+    func testingPrepareSandbox(
+        _ configuration: ContainerConfiguration,
+        state: String = "booted",
+        sandboxImageConfig: ContainerizationOCI.Image? = nil
+    ) throws {
         self.configuration = configuration
+        self.sandboxImageConfig = sandboxImageConfig
+        self.sandboxImageConfigResolved = true
         switch state {
         case "created":
             self.sandboxState = .created

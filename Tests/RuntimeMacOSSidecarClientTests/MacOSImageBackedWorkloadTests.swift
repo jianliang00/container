@@ -205,6 +205,74 @@ struct MacOSImageBackedWorkloadTests {
     }
 
     @Test
+    func imageBackedWorkloadMergesSandboxWorkloadAndRequestEnvironment() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-environment-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory)
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        let sandboxImageConfig = Self.makeSandboxImageConfig(
+            env: [
+                "HOME=/var/root",
+                "PATH=/sandbox/bin:/usr/bin",
+                "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer",
+                "GREETING=sandbox",
+                "SANDBOX_ONLY=1",
+            ]
+        )
+        try await service.testingPrepareSandbox(
+            containerConfiguration,
+            sandboxImageConfig: sandboxImageConfig
+        )
+
+        let workloadID = "image-backed-environment"
+        let workloadConfiguration = WorkloadConfiguration(
+            id: workloadID,
+            processConfiguration: ProcessConfiguration(
+                executable: "",
+                arguments: [],
+                environment: [
+                    "GREETING=request",
+                    "HOME=/request-home",
+                    "REQUEST_ONLY=1",
+                ],
+                workingDirectory: "/",
+                terminal: false,
+                user: .id(uid: 0, gid: 0)
+            ),
+            workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
+            workloadImageDigest: image.indexDigest
+        )
+
+        try await service.testingCreateWorkload(workloadConfiguration)
+
+        let stored = try #require(await service.testingWorkloadConfiguration(workloadID))
+        let environment = stored.processConfiguration.environment
+        #expect(
+            environment == [
+                "HOME=/request-home",
+                "PATH=/usr/bin:/bin",
+                "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer",
+                "GREETING=request",
+                "SANDBOX_ONLY=1",
+                "USER=nobody",
+                "REQUEST_ONLY=1",
+            ]
+        )
+        let environmentKeys = environment.map { entry in
+            entry.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? entry
+        }
+        #expect(environmentKeys.count == Set(environmentKeys).count)
+        #expect(!environment.contains { $0.hasPrefix("KUBERNETES_SERVICE_HOST=") })
+    }
+
+    @Test
     func stopSandboxCleansGuestWorkloadDirectoriesButKeepsHostRootfsCache() async throws {
         let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-stop-tests")
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
@@ -844,14 +912,17 @@ extension MacOSImageBackedWorkloadTests {
         let hardwareModelDigest = "sha256:hardware-\(UUID().uuidString)"
         let auxiliaryStorageDigest = "sha256:auxiliary-\(UUID().uuidString)"
         let diskImageDigest = "sha256:disk-\(UUID().uuidString)"
+        let configDigest = "sha256:config-\(UUID().uuidString)"
         let manifestDigest = "sha256:manifest-\(UUID().uuidString)"
         let indexDigest = "sha256:index-\(UUID().uuidString)"
 
+        let imageConfig = makeSandboxImageConfig()
+        let configURL = try writeJSON(imageConfig, named: "sandbox-config.json", in: directory)
         let manifest = Manifest(
             config: Descriptor(
                 mediaType: MediaTypes.imageConfig,
-                digest: "sha256:config-\(UUID().uuidString)",
-                size: 2
+                digest: configDigest,
+                size: Int64(try Data(contentsOf: configURL).count)
             ),
             layers: [
                 Descriptor(
@@ -892,6 +963,7 @@ extension MacOSImageBackedWorkloadTests {
                 entries: [
                     indexDigest: indexURL,
                     manifestDigest: manifestURL,
+                    configDigest: configURL,
                     hardwareModelDigest: hardwareModelURL,
                     auxiliaryStorageDigest: auxiliaryStorageURL,
                     diskImageDigest: diskImageURL,
@@ -900,6 +972,29 @@ extension MacOSImageBackedWorkloadTests {
             hardwareModelData: hardwareModelData,
             auxiliaryStorageData: auxiliaryStorageData,
             diskImageData: diskImageData
+        )
+    }
+
+    private static func makeSandboxImageConfig(
+        env: [String] = [
+            "HOME=/var/root",
+            "USER=root",
+            "PATH=/usr/bin:/bin",
+        ]
+    ) -> ContainerizationOCI.Image {
+        ContainerizationOCI.Image(
+            architecture: "arm64",
+            os: "darwin",
+            config: .init(
+                user: "root",
+                env: env,
+                entrypoint: nil,
+                cmd: nil,
+                workingDir: "/var/root",
+                labels: nil,
+                stopSignal: nil
+            ),
+            rootfs: .init(type: "layers", diffIDs: [])
         )
     }
 

@@ -156,7 +156,7 @@ struct CRIShimCoreMappingTests {
 
     @Test
     func virtualizationNATSandboxConfigurationDoesNotAttachContainerNetwork() throws {
-        var request = Runtime_V1_RunPodSandboxRequest()
+        let request = Runtime_V1_RunPodSandboxRequest()
         let configuration = try makeCRIShimSandboxConfiguration(
             id: "sandbox-1",
             request: request,

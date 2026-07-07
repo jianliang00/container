@@ -173,12 +173,16 @@ struct MacOSKubeadmPlanTests {
         let config = try #require(
             writes.first { $0.path == "/tmp/macos-node/etc/kubernetes/container-cri-shim-macos-config.json" }?.contents
         )
-        #expect(config.contains(#""macos-compat": {"#))
-        #expect(config.contains(#""macos-15-2": {"#))
-        #expect(config.contains(#""sandboxImage": "ghcr.io/jianliang00/macos-base:15.2""#))
-        #expect(config.contains(#""macos-15-4": {"#))
-        #expect(config.contains(#""sandboxImage": "ghcr.io/jianliang00/macos-base:15.4""#))
-        #expect(config.contains(#""networkBackend": "virtualizationNAT""#))
+        let configObject = try #require(JSONSerialization.jsonObject(with: Data(config.utf8)) as? [String: Any])
+        let runtimeHandlers = try #require(configObject["runtimeHandlers"] as? [String: Any])
+        let macosCompat = try #require(runtimeHandlers["macos-compat"] as? [String: Any])
+        let macos15_2 = try #require(runtimeHandlers["macos-15-2"] as? [String: Any])
+        let macos15_4 = try #require(runtimeHandlers["macos-15-4"] as? [String: Any])
+        #expect(macosCompat["networkBackend"] as? String == "virtualizationNAT")
+        #expect(macos15_2["sandboxImage"] as? String == "ghcr.io/jianliang00/macos-base:15.2")
+        #expect(macos15_2["networkBackend"] as? String == "virtualizationNAT")
+        #expect(macos15_4["sandboxImage"] as? String == "ghcr.io/jianliang00/macos-base:15.4")
+        #expect(macos15_4["networkBackend"] as? String == "virtualizationNAT")
 
         let runtimeClass15_2 = try #require(
             writes.first {

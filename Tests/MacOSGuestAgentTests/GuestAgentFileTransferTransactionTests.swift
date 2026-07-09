@@ -383,8 +383,18 @@ struct GuestAgentFileTransferTransactionTests {
     }
 
     @Test
+    func rootAgentUsesUserBootstrapForNonRootExecIdentity() throws {
+        let nonRootIdentity = GuestAgentExecIdentity(uid: 501, gid: 20, supplementalGroups: [])
+        let rootIdentity = GuestAgentExecIdentity(uid: 0, gid: 0, supplementalGroups: [])
+
+        #expect(nonRootIdentity.requiresUserBootstrapSession(agentEUID: 0))
+        #expect(!nonRootIdentity.requiresUserBootstrapSession(agentEUID: nonRootIdentity.uid))
+        #expect(!rootIdentity.requiresUserBootstrapSession(agentEUID: 0))
+    }
+
+    @Test
     func execIdentityRejectsUnknownNamedUser() throws {
-        let unknownUser = "codex-user-\(UUID().uuidString)"
+        let unknownUser = "missing-user-\(UUID().uuidString)"
 
         #expect(throws: (any Error).self) {
             _ = try GuestAgentExecIdentity.resolve(

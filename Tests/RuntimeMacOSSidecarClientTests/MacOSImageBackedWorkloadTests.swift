@@ -17,7 +17,9 @@
 #if os(macOS)
 import ContainerResource
 import Containerization
+import ContainerizationArchive
 import ContainerizationOCI
+import Darwin
 import Foundation
 import Logging
 import Testing
@@ -180,6 +182,14 @@ struct MacOSImageBackedWorkloadTests {
         #expect(injectedPaths.contains("\(guestRoot)/etc"))
         #expect(injectedPaths.contains("\(guestRoot)/etc/config.txt"))
         #expect(!injectedPaths.contains("\(guestRoot)/tmp/stale.txt"))
+
+        let workspaceBegin = try #require(requests.first(where: { $0.fsBegin?.path == "\(guestRoot)/workspace" })?.fsBegin)
+        #expect(workspaceBegin.uid == 501)
+        #expect(workspaceBegin.gid == 20)
+
+        let helloBegin = try #require(requests.first(where: { $0.fsBegin?.path == "\(guestRoot)/bin/hello" })?.fsBegin)
+        #expect(helloBegin.uid == 501)
+        #expect(helloBegin.gid == 20)
 
         let metadataPayload = try #require(
             requests.first(where: { $0.fsBegin?.path == "/var/lib/container/workloads/\(workloadID)/meta.json" })?.fsBegin?.inlineData
@@ -1019,7 +1029,14 @@ extension MacOSImageBackedWorkloadTests {
 
         let layer1Tar = directory.appendingPathComponent("layer1.tar")
         let layer2Tar = directory.appendingPathComponent("layer2.tar")
-        try createTarArchive(from: layer1Root, to: layer1Tar)
+        try createTarArchive(
+            from: layer1Root,
+            to: layer1Tar,
+            ownerOverrides: [
+                "bin/hello": (uid: 501, gid: 20),
+                "workspace": (uid: 501, gid: 20),
+            ]
+        )
         try createTarArchive(from: layer2Root, to: layer2Tar)
 
         let layer1Digest = "sha256:layer1-\(UUID().uuidString)"
@@ -1094,18 +1111,65 @@ extension MacOSImageBackedWorkloadTests {
         return url
     }
 
-    private static func createTarArchive(from sourceRoot: URL, to outputURL: URL) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = ["-cf", outputURL.path, "-C", sourceRoot.path, "."]
-        let stderr = Pipe()
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "failed to create tar archive"
-            throw NSError(domain: "MacOSImageBackedWorkloadTests", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message])
+    private static func createTarArchive(
+        from sourceRoot: URL,
+        to outputURL: URL,
+        ownerOverrides: [String: (uid: UInt32, gid: UInt32)] = [:]
+    ) throws {
+        let writer = try ArchiveWriter(format: .pax, filter: .none, file: outputURL)
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: sourceRoot,
+                includingPropertiesForKeys: [.fileResourceTypeKey],
+                options: .producesRelativePathURLs
+            )
+        else {
+            throw POSIXError(.ENOTDIR)
         }
+
+        for case let relativeURL as URL in enumerator {
+            let relativePath = relativeURL.relativePath
+            let sourceURL = sourceRoot.appendingPathComponent(relativePath)
+            let values = try sourceURL.resourceValues(forKeys: [.fileResourceTypeKey])
+            guard let fileType = values.fileResourceType else {
+                continue
+            }
+            guard [.directory, .regular, .symbolicLink].contains(fileType) else {
+                continue
+            }
+
+            var statInfo = stat()
+            guard lstat(sourceURL.path, &statInfo) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+
+            let entry = WriteEntry()
+            entry.path = relativePath
+            entry.fileType = fileType
+            entry.permissions = statInfo.st_mode & 0o7777
+            entry.modificationDate = Date(timeIntervalSince1970: TimeInterval(statInfo.st_mtimespec.tv_sec))
+            if let owner = ownerOverrides[relativePath] {
+                entry.owner = uid_t(owner.uid)
+                entry.group = gid_t(owner.gid)
+            } else {
+                entry.owner = statInfo.st_uid
+                entry.group = statInfo.st_gid
+            }
+
+            switch fileType {
+            case .regular:
+                let data = try Data(contentsOf: sourceURL)
+                entry.size = Int64(data.count)
+                try writer.writeEntry(entry: entry, data: data)
+            case .symbolicLink:
+                entry.symlinkTarget = try FileManager.default.destinationOfSymbolicLink(atPath: sourceURL.path)
+                try writer.writeEntry(entry: entry, data: nil as UnsafeRawBufferPointer?)
+            default:
+                entry.size = 0
+                try writer.writeEntry(entry: entry, data: nil as UnsafeRawBufferPointer?)
+            }
+        }
+        try writer.finishEncoding()
     }
 
     private static func baseContainerConfiguration(indexDigest: String) throws -> ContainerConfiguration {

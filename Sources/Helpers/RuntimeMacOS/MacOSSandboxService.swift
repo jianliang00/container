@@ -1453,6 +1453,11 @@ extension MacOSSandboxService {
         let imageConfig: ContainerizationOCI.Image
     }
 
+    private struct ResolvedWorkloadRootfs {
+        let root: URL
+        let metadata: WorkloadRootfsMetadata
+    }
+
     private enum WorkloadLayerEntryKind {
         case directory
         case file
@@ -1463,6 +1468,33 @@ extension MacOSSandboxService {
         let url: URL
         let relativePath: String
         let kind: WorkloadLayerEntryKind
+    }
+
+    private struct WorkloadRootfsMetadata: Codable {
+        var entries: [String: WorkloadRootfsEntryMetadata] = [:]
+
+        mutating func removeEntryAndDescendants(at relativePath: String) {
+            entries = entries.filter { key, _ in
+                key != relativePath && !key.hasPrefix("\(relativePath)/")
+            }
+        }
+
+        mutating func removeChildren(under relativePath: String) {
+            if relativePath.isEmpty {
+                entries.removeAll()
+                return
+            }
+            entries = entries.filter { key, _ in
+                !key.hasPrefix("\(relativePath)/")
+            }
+        }
+    }
+
+    private struct WorkloadRootfsEntryMetadata: Codable {
+        let mode: UInt32?
+        let uid: UInt32?
+        let gid: UInt32?
+        let mtime: Int64?
     }
 
     private func resetImageBackedWorkloadsForColdBootIfNeeded() throws {
@@ -1545,7 +1577,7 @@ extension MacOSSandboxService {
 
         do {
             try await prepareGuestWorkloadInstanceDirectory(workloadID: workloadID, containerConfig: containerConfig)
-            try await injectDirectoryTree(from: hostRootfs, to: guestPayloadPath)
+            try await injectDirectoryTree(from: hostRootfs.root, metadata: hostRootfs.metadata, to: guestPayloadPath)
             try await writeGuestFile(from: metadataFile, to: guestMetadataPath)
 
             var updated = record.configuration
@@ -1770,7 +1802,7 @@ extension MacOSSandboxService {
         return mapImageBackedWorkloadProcessConfiguration(
             sessionConfiguration,
             guestPayloadPath: guestPayloadPath,
-            hostRootfs: hostRootfs
+            hostRootfs: hostRootfs.root
         )
     }
 
@@ -1882,19 +1914,25 @@ extension MacOSSandboxService {
         return joinGuestPath(guestPayloadPath, String(relativePath))
     }
 
-    private func unpackWorkloadRootfs(_ resolvedImage: ResolvedWorkloadImage) async throws -> URL {
+    private func unpackWorkloadRootfs(_ resolvedImage: ResolvedWorkloadImage) async throws -> ResolvedWorkloadRootfs {
         let fileManager = FileManager.default
         let cacheRoot = MacOSGuestCache.workloadRootfsCacheDirectory(fileManager: fileManager)
         let cachedDirectory = cacheRoot.appendingPathComponent(MacOSGuestCache.safeDigest(resolvedImage.imageDigest), isDirectory: true)
         let cachedRootfs = cachedDirectory.appendingPathComponent("rootfs", isDirectory: true)
+        let cachedMetadata = workloadRootfsMetadataURL(forRootfs: cachedRootfs)
         if fileManager.fileExists(atPath: cachedRootfs.path) {
-            return cachedRootfs
+            if fileManager.fileExists(atPath: cachedMetadata.path) {
+                return ResolvedWorkloadRootfs(root: cachedRootfs, metadata: try readWorkloadRootfsMetadata(from: cachedMetadata))
+            }
+            try fileManager.removeItem(at: cachedDirectory)
         }
 
         try fileManager.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
         let stagingDirectory = cacheRoot.appendingPathComponent(".workload-\(UUID().uuidString)", isDirectory: true)
         let stagingRootfs = stagingDirectory.appendingPathComponent("rootfs", isDirectory: true)
+        let stagingMetadata = workloadRootfsMetadataURL(forRootfs: stagingRootfs)
         try fileManager.createDirectory(at: stagingRootfs, withIntermediateDirectories: true)
+        var rootfsMetadata = WorkloadRootfsMetadata()
 
         do {
             for (index, layer) in resolvedImage.manifest.layers.enumerated() {
@@ -1902,6 +1940,7 @@ extension MacOSSandboxService {
                     throw ContainerizationError(.notFound, message: "missing workload layer blob \(layer.digest)")
                 }
                 let extractedLayerDirectory = stagingDirectory.appendingPathComponent("layer-\(index)", isDirectory: true)
+                let layerMetadata = try readWorkloadLayerMetadata(from: layerContent.path)
                 let rejectedMembers = try ArchiveReader(file: layerContent.path).extractContents(to: extractedLayerDirectory)
                 guard rejectedMembers.isEmpty else {
                     throw ContainerizationError(
@@ -1909,16 +1948,25 @@ extension MacOSSandboxService {
                         message: "workload layer \(layer.digest) contains rejected archive members: \(rejectedMembers.joined(separator: ", "))"
                     )
                 }
-                try applyExtractedWorkloadLayer(at: extractedLayerDirectory, to: stagingRootfs)
+                try applyExtractedWorkloadLayer(
+                    at: extractedLayerDirectory,
+                    to: stagingRootfs,
+                    layerMetadata: layerMetadata,
+                    rootfsMetadata: &rootfsMetadata
+                )
                 try? fileManager.removeItem(at: extractedLayerDirectory)
             }
+            try writeWorkloadRootfsMetadata(rootfsMetadata, to: stagingMetadata)
 
             do {
                 try fileManager.moveItem(at: stagingDirectory, to: cachedDirectory)
             } catch {
                 if fileManager.fileExists(atPath: cachedRootfs.path) {
                     try? fileManager.removeItem(at: stagingDirectory)
-                    return cachedRootfs
+                    return ResolvedWorkloadRootfs(
+                        root: cachedRootfs,
+                        metadata: try readWorkloadRootfsMetadata(from: cachedMetadata)
+                    )
                 }
                 throw error
             }
@@ -1927,11 +1975,71 @@ extension MacOSSandboxService {
             throw error
         }
 
-        return cachedRootfs
+        return ResolvedWorkloadRootfs(root: cachedRootfs, metadata: rootfsMetadata)
     }
 
-    private func applyExtractedWorkloadLayer(at sourceRoot: URL, to destinationRoot: URL) throws {
-        try applyWhiteouts(from: sourceRoot, to: destinationRoot)
+    private func workloadRootfsMetadataURL(forRootfs rootfs: URL) -> URL {
+        rootfs.deletingLastPathComponent().appendingPathComponent("metadata.json")
+    }
+
+    private func readWorkloadRootfsMetadata(from url: URL) throws -> WorkloadRootfsMetadata {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(WorkloadRootfsMetadata.self, from: data)
+    }
+
+    private func writeWorkloadRootfsMetadata(_ metadata: WorkloadRootfsMetadata, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(metadata).write(to: url, options: .atomic)
+    }
+
+    private func readWorkloadLayerMetadata(from layer: URL) throws -> WorkloadRootfsMetadata {
+        let reader = try ArchiveReader(file: layer)
+        var metadata = WorkloadRootfsMetadata()
+        for (entry, _) in reader.makeStreamingIterator() {
+            guard let relativePath = normalizedWorkloadLayerRelativePath(entry.path) else {
+                continue
+            }
+            metadata.entries[relativePath] = WorkloadRootfsEntryMetadata(
+                mode: UInt32(entry.permissions),
+                uid: entry.owner.map { UInt32($0) },
+                gid: entry.group.map { UInt32($0) },
+                mtime: entry.modificationDate.map { Int64($0.timeIntervalSince1970) }
+            )
+        }
+        return metadata
+    }
+
+    private func normalizedWorkloadLayerRelativePath(_ rawPath: String?) -> String? {
+        guard var path = rawPath, !path.isEmpty else {
+            return nil
+        }
+        while path.hasPrefix("./") {
+            path.removeFirst(2)
+        }
+        while path.hasPrefix("/") {
+            path.removeFirst()
+        }
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+        guard !path.isEmpty && path != "." else {
+            return nil
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            return nil
+        }
+        return path
+    }
+
+    private func applyExtractedWorkloadLayer(
+        at sourceRoot: URL,
+        to destinationRoot: URL,
+        layerMetadata: WorkloadRootfsMetadata,
+        rootfsMetadata: inout WorkloadRootfsMetadata
+    ) throws {
+        try applyWhiteouts(from: sourceRoot, to: destinationRoot, rootfsMetadata: &rootfsMetadata)
         for entry in try walkWorkloadLayerTree(root: sourceRoot) {
             guard !isWhiteoutEntry(entry.url) else {
                 continue
@@ -1945,10 +2053,17 @@ extension MacOSSandboxService {
             case .symlink:
                 try recreateSymbolicLink(from: entry.url, to: destinationURL)
             }
+            if let metadata = layerMetadata.entries[entry.relativePath] {
+                rootfsMetadata.entries[entry.relativePath] = metadata
+            }
         }
     }
 
-    private func applyWhiteouts(from sourceRoot: URL, to destinationRoot: URL) throws {
+    private func applyWhiteouts(
+        from sourceRoot: URL,
+        to destinationRoot: URL,
+        rootfsMetadata: inout WorkloadRootfsMetadata
+    ) throws {
         let fileManager = FileManager.default
         for entry in try walkWorkloadLayerTree(root: sourceRoot) {
             let basename = entry.url.lastPathComponent
@@ -1963,6 +2078,7 @@ extension MacOSSandboxService {
                         try fileManager.removeItem(at: child)
                     }
                 }
+                rootfsMetadata.removeChildren(under: relativeDirectory == "." ? "" : relativeDirectory)
                 try fileManager.removeItem(at: entry.url)
                 continue
             }
@@ -1977,6 +2093,7 @@ extension MacOSSandboxService {
             if fileManager.fileExists(atPath: targetURL.path) {
                 try fileManager.removeItem(at: targetURL)
             }
+            rootfsMetadata.removeEntryAndDescendants(at: targetRelativePath)
             try fileManager.removeItem(at: entry.url)
         }
     }
@@ -2162,35 +2279,48 @@ extension MacOSSandboxService {
         closeSessionResources(session)
     }
 
-    private func injectDirectoryTree(from sourceRoot: URL, to guestRoot: String) async throws {
+    private func injectDirectoryTree(
+        from sourceRoot: URL,
+        metadata: WorkloadRootfsMetadata,
+        to guestRoot: String
+    ) async throws {
         for entry in try walkWorkloadLayerTree(root: sourceRoot) {
             let destinationPath = joinGuestPath(guestRoot, entry.relativePath)
+            let entryMetadata = metadata.entries[entry.relativePath]
             switch entry.kind {
             case .directory:
-                try await createGuestDirectory(from: entry.url, to: destinationPath)
+                try await createGuestDirectory(from: entry.url, metadata: entryMetadata, to: destinationPath)
             case .file:
-                try await writeGuestFile(from: entry.url, to: destinationPath)
+                try await writeGuestFile(from: entry.url, metadata: entryMetadata, to: destinationPath)
             case .symlink:
-                try await createGuestSymbolicLink(from: entry.url, to: destinationPath)
+                try await createGuestSymbolicLink(from: entry.url, metadata: entryMetadata, to: destinationPath)
             }
         }
     }
 
-    private func createGuestDirectory(from source: URL, to destinationPath: String) async throws {
+    private func createGuestDirectory(
+        from source: URL,
+        metadata: WorkloadRootfsEntryMetadata?,
+        to destinationPath: String
+    ) async throws {
         try await MacOSSidecarFileTransfer.createDirectory(
             at: destinationPath,
-            options: .init(mode: hostFileMode(at: source), mtime: hostModificationTime(at: source)),
+            options: fileTransferOptions(for: source, metadata: metadata),
             begin: { payload in
                 try await self.sendFSBegin(payload)
             }
         )
     }
 
-    private func writeGuestFile(from source: URL, to destinationPath: String) async throws {
+    private func writeGuestFile(
+        from source: URL,
+        metadata: WorkloadRootfsEntryMetadata? = nil,
+        to destinationPath: String
+    ) async throws {
         try await MacOSSidecarFileTransfer.writeFile(
             from: source,
             to: destinationPath,
-            options: .init(mode: hostFileMode(at: source), mtime: hostModificationTime(at: source), overwrite: true),
+            options: fileTransferOptions(for: source, metadata: metadata, overwrite: true),
             begin: { payload in
                 try await self.sendFSBegin(payload)
             },
@@ -2203,15 +2333,34 @@ extension MacOSSandboxService {
         )
     }
 
-    private func createGuestSymbolicLink(from source: URL, to destinationPath: String) async throws {
+    private func createGuestSymbolicLink(
+        from source: URL,
+        metadata: WorkloadRootfsEntryMetadata?,
+        to destinationPath: String
+    ) async throws {
         let target = try FileManager.default.destinationOfSymbolicLink(atPath: source.path)
         try await MacOSSidecarFileTransfer.createSymbolicLink(
             at: destinationPath,
             target: target,
-            options: .init(mtime: hostModificationTime(at: source), overwrite: true),
+            options: fileTransferOptions(for: source, metadata: metadata, includeMode: false, overwrite: true),
             begin: { payload in
                 try await self.sendFSBegin(payload)
             }
+        )
+    }
+
+    private func fileTransferOptions(
+        for source: URL,
+        metadata: WorkloadRootfsEntryMetadata?,
+        includeMode: Bool = true,
+        overwrite: Bool = true
+    ) -> MacOSSidecarFileTransfer.WriteOptions {
+        MacOSSidecarFileTransfer.WriteOptions(
+            mode: includeMode ? metadata?.mode ?? hostFileMode(at: source) : nil,
+            uid: metadata?.uid,
+            gid: metadata?.gid,
+            mtime: metadata?.mtime ?? hostModificationTime(at: source),
+            overwrite: overwrite
         )
     }
 

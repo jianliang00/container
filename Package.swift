@@ -582,6 +582,7 @@ let package = Package(
                 "ContainerAPIClient",
                 "ContainerCommands",
                 .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerResource",
                 "ContainerSandboxServiceClient",

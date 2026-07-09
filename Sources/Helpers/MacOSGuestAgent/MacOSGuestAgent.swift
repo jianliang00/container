@@ -23,7 +23,8 @@ import RuntimeMacOSSidecarShared
 struct MacOSGuestAgent: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "container-macos-guest-agent",
-        abstract: "Guest-side vsock agent for container-runtime-macos"
+        abstract: "Guest-side vsock agent for container-runtime-macos",
+        subcommands: [ExecHelper.self]
     )
 
     @Option(name: .long, help: "vsock listen port")
@@ -35,6 +36,24 @@ struct MacOSGuestAgent: ParsableCommand {
         logAgentStartupContext()
         let listener = try VsockListener(port: port)
         try listener.serveForever()
+    }
+
+    struct ExecHelper: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "exec-helper",
+            abstract: "Internal process launcher",
+            shouldDisplay: false
+        )
+
+        @Option(name: .long, help: "File descriptor containing the exec payload")
+        var payloadFD: Int32
+
+        @Option(name: .long, help: "File descriptor used to report exec startup errors")
+        var statusFD: Int32
+
+        mutating func run() throws {
+            runExecHelper(payloadFD: payloadFD, statusFD: statusFD)
+        }
     }
 }
 
@@ -735,6 +754,10 @@ struct GuestAgentExecIdentity {
         uid != currentIdentity.uid || gid != currentIdentity.gid || !supplementalGroups.isEmpty
     }
 
+    func requiresUserBootstrapSession(agentEUID: uid_t = geteuid()) -> Bool {
+        agentEUID == 0 && uid != 0
+    }
+
     static func resolve(from frame: GuestAgentFrame) throws -> Self? {
         let supplementalGroups = frame.supplementalGroups ?? []
         if let user = frame.user, !user.isEmpty {
@@ -829,6 +852,47 @@ struct GuestAgentExecIdentity {
     }
 }
 
+struct GuestAgentExecBootstrapPayload: Codable {
+    let executable: String
+    let arguments: [String]
+    let environment: [String]
+    let workingDirectory: String?
+    let uid: UInt32
+    let gid: UInt32
+    let supplementalGroups: [UInt32]
+
+    init(
+        executable: String,
+        arguments: [String],
+        environment: [String],
+        workingDirectory: String?,
+        identity: GuestAgentExecIdentity
+    ) {
+        self.executable = executable
+        self.arguments = arguments
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.uid = UInt32(identity.uid)
+        self.gid = UInt32(identity.gid)
+        self.supplementalGroups = identity.supplementalGroups.map { UInt32($0) }
+    }
+
+    var identity: GuestAgentExecIdentity {
+        .init(
+            uid: uid_t(uid),
+            gid: gid_t(gid),
+            supplementalGroups: supplementalGroups.map { gid_t($0) }
+        )
+    }
+}
+
+private struct UserBootstrapLaunch {
+    let executable: String
+    let arguments: [String]
+    let environment: [String]
+    let payloadFD: Int32
+}
+
 private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable {
     private let pid: pid_t
     private let terminal: Bool
@@ -867,15 +931,30 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         identity: GuestAgentExecIdentity,
         connection: AgentConnection
     ) throws -> SpawnedProcessSession {
-        let preparedExec = PreparedCStringArray([executable] + arguments)
-        let preparedExecutableSearch = PreparedCStringArray(
-            executableSearchCandidates(executable: executable, environment: environment)
-        )
-        let preparedEnv = PreparedCStringArray(environment)
-        let preparedWorkingDirectory = workingDirectory.map(PreparedCString.init)
-
         let execStatus = try makePipe()
-        try setCloseOnExec(execStatus.writeEnd)
+        let bootstrapLaunch = try makeUserBootstrapLaunchIfNeeded(
+            executable: executable,
+            arguments: arguments,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            identity: identity,
+            statusFD: execStatus.writeEnd
+        )
+        if bootstrapLaunch == nil {
+            try setCloseOnExec(execStatus.writeEnd)
+        }
+
+        let childExecutable = bootstrapLaunch?.executable ?? executable
+        let childArguments = bootstrapLaunch?.arguments ?? arguments
+        let childEnvironment = bootstrapLaunch?.environment ?? environment
+        let childIdentity = bootstrapLaunch == nil ? identity : GuestAgentExecIdentity.currentProcess()
+        let childWorkingDirectory = bootstrapLaunch == nil ? workingDirectory : nil
+        let preparedExec = PreparedCStringArray([childExecutable] + childArguments)
+        let preparedExecutableSearch = PreparedCStringArray(
+            executableSearchCandidates(executable: childExecutable, environment: childEnvironment)
+        )
+        let preparedEnv = PreparedCStringArray(childEnvironment)
+        let preparedWorkingDirectory = childWorkingDirectory.map(PreparedCString.init)
 
         var stdinPipe: RawPipe?
         var stdoutPipe: RawPipe?
@@ -897,6 +976,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         guard pid >= 0 else {
             closeIfValid(execStatus.readEnd)
             closeIfValid(execStatus.writeEnd)
+            closeIfValid(bootstrapLaunch?.payloadFD)
             closeIfValid(masterFD)
             closeIfValid(slaveFD)
             closePipe(stdinPipe)
@@ -915,7 +995,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
                     arguments: preparedExec.pointer,
                     environment: preparedEnv.pointer,
                     workingDirectory: preparedWorkingDirectory?.pointer,
-                    identity: identity,
+                    identity: childIdentity,
                     stdinFD: slaveFD,
                     stdoutFD: slaveFD,
                     stderrFD: slaveFD,
@@ -931,7 +1011,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
                     arguments: preparedExec.pointer,
                     environment: preparedEnv.pointer,
                     workingDirectory: preparedWorkingDirectory?.pointer,
-                    identity: identity,
+                    identity: childIdentity,
                     stdinFD: stdinPipe?.readEnd ?? -1,
                     stdoutFD: stdoutPipe?.writeEnd ?? -1,
                     stderrFD: stderrPipe?.writeEnd ?? -1,
@@ -941,12 +1021,16 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         }
 
         closeIfValid(execStatus.writeEnd)
+        closeIfValid(bootstrapLaunch?.payloadFD)
         closeIfValid(slaveFD)
         closeIfValid(stdinPipe?.readEnd)
         closeIfValid(stdoutPipe?.writeEnd)
         closeIfValid(stderrPipe?.writeEnd)
 
-        if let errorCode = try readExecStatus(execStatus.readEnd) {
+        if let errorCode = try readExecStatus(
+            execStatus.readEnd,
+            requireHelperReady: bootstrapLaunch != nil
+        ) {
             closeIfValid(masterFD)
             closeIfValid(stdinPipe?.writeEnd)
             closeIfValid(stdoutPipe?.readEnd)
@@ -1179,6 +1263,16 @@ private func closeIfValid(_ fd: Int32?) {
     _ = Darwin.close(fd)
 }
 
+private func clearCloseOnExec(_ fd: Int32) throws {
+    let flags = fcntl(fd, F_GETFD)
+    guard flags != -1 else {
+        throw POSIXError.fromErrno()
+    }
+    guard fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+}
+
 private func setCloseOnExec(_ fd: Int32) throws {
     let flags = fcntl(fd, F_GETFD)
     guard flags != -1 else {
@@ -1189,8 +1283,22 @@ private func setCloseOnExec(_ fd: Int32) throws {
     }
 }
 
-private func readExecStatus(_ fd: Int32) throws -> Int32? {
+private let execHelperReadyStatus: Int32 = -1
+
+private func readExecStatus(_ fd: Int32, requireHelperReady: Bool = false) throws -> Int32? {
     defer { closeIfValid(fd) }
+    if requireHelperReady {
+        guard let firstStatus = try readExecStatusCode(fd) else {
+            throw POSIXError(.EIO)
+        }
+        if firstStatus != execHelperReadyStatus {
+            return firstStatus
+        }
+    }
+    return try readExecStatusCode(fd)
+}
+
+private func readExecStatusCode(_ fd: Int32) throws -> Int32? {
     var code: Int32 = 0
     let bytes = withUnsafeMutablePointer(to: &code) {
         Darwin.read(fd, $0, MemoryLayout<Int32>.size)
@@ -1202,6 +1310,14 @@ private func readExecStatus(_ fd: Int32) throws -> Int32? {
         throw POSIXError(.EIO)
     }
     return code
+}
+
+private func writeExecStatus(_ code: Int32, to fd: Int32) -> Bool {
+    var status = code
+    let bytes = withUnsafePointer(to: &status) {
+        Darwin.write(fd, $0, MemoryLayout<Int32>.size)
+    }
+    return bytes == MemoryLayout<Int32>.size
 }
 
 private let defaultExecutableSearchPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -1248,6 +1364,200 @@ private func execWithPathSearch(
         index += 1
     }
     return permissionErrno ?? Int32(ENOENT)
+}
+
+private func makeUserBootstrapLaunchIfNeeded(
+    executable: String,
+    arguments: [String],
+    environment: [String],
+    workingDirectory: String?,
+    identity: GuestAgentExecIdentity,
+    statusFD: Int32
+) throws -> UserBootstrapLaunch? {
+    guard identity.requiresUserBootstrapSession() else {
+        return nil
+    }
+
+    let agentPath = try currentGuestAgentExecutablePath()
+    let payload = GuestAgentExecBootstrapPayload(
+        executable: executable,
+        arguments: arguments,
+        environment: environment,
+        workingDirectory: workingDirectory,
+        identity: identity
+    )
+    let payloadFD = try makeTemporaryPayloadFile(payload)
+    do {
+        try clearCloseOnExec(payloadFD)
+        try clearCloseOnExec(statusFD)
+    } catch {
+        closeIfValid(payloadFD)
+        throw error
+    }
+
+    return UserBootstrapLaunch(
+        executable: "/bin/launchctl",
+        arguments: [
+            "asuser",
+            "\(identity.uid)",
+            agentPath,
+            "exec-helper",
+            "--payload-fd",
+            "\(payloadFD)",
+            "--status-fd",
+            "\(statusFD)",
+        ],
+        environment: ["PATH=\(defaultExecutableSearchPath)"],
+        payloadFD: payloadFD
+    )
+}
+
+private func currentGuestAgentExecutablePath() throws -> String {
+    let candidates: [String?] = [
+        Bundle.main.executableURL?.path,
+        CommandLine.arguments.first,
+        "/usr/local/bin/container-macos-guest-agent",
+    ]
+    for candidate in candidates.compactMap({ $0 }) {
+        guard candidate.contains("/") else {
+            continue
+        }
+        if FileManager.default.isExecutableFile(atPath: candidate) {
+            return candidate
+        }
+    }
+    throw POSIXError(.ENOENT)
+}
+
+private func makeTemporaryPayloadFile(_ payload: GuestAgentExecBootstrapPayload) throws -> Int32 {
+    let data = try JSONEncoder().encode(payload)
+    var template = Array("/tmp/container-macos-guest-agent-exec.XXXXXX".utf8CString)
+    let fd = template.withUnsafeMutableBufferPointer { buffer -> Int32 in
+        guard let baseAddress = buffer.baseAddress else {
+            return -1
+        }
+        return mkstemp(baseAddress)
+    }
+    guard fd >= 0 else {
+        throw POSIXError.fromErrno()
+    }
+    let path = template.withUnsafeBufferPointer { buffer -> String in
+        String(cString: buffer.baseAddress!)
+    }
+    _ = unlink(path)
+    do {
+        try writeAll(data, to: fd)
+        guard lseek(fd, 0, SEEK_SET) == 0 else {
+            throw POSIXError.fromErrno()
+        }
+        return fd
+    } catch {
+        closeIfValid(fd)
+        throw error
+    }
+}
+
+private func readAll(from fd: Int32) throws -> Data {
+    var result = Data()
+    var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+    while true {
+        let bytesRead = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+            guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+            return Darwin.read(fd, baseAddress, rawBuffer.count)
+        }
+        if bytesRead > 0 {
+            result.append(contentsOf: buffer.prefix(bytesRead))
+            continue
+        }
+        if bytesRead == 0 {
+            return result
+        }
+        let code = errno
+        if code == EINTR {
+            continue
+        }
+        throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+    }
+}
+
+private func writeAll(_ data: Data, to fd: Int32) throws {
+    try data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.baseAddress else { return }
+        var totalWritten = 0
+        while totalWritten < rawBuffer.count {
+            let written = Darwin.write(
+                fd,
+                baseAddress.advanced(by: totalWritten),
+                rawBuffer.count - totalWritten
+            )
+            if written > 0 {
+                totalWritten += written
+                continue
+            }
+            if written == 0 {
+                throw POSIXError(.EPIPE)
+            }
+            let code = errno
+            if code == EINTR {
+                continue
+            }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+    }
+}
+
+private func runExecHelper(payloadFD: Int32, statusFD: Int32) -> Never {
+    func fail(_ code: Int32) -> Never {
+        _ = writeExecStatus(code, to: statusFD)
+        _exit(127)
+    }
+
+    var openPayloadFD: Int32? = payloadFD
+    do {
+        let payloadData = try readAll(from: payloadFD)
+        closeIfValid(openPayloadFD)
+        openPayloadFD = nil
+        let payload = try JSONDecoder().decode(GuestAgentExecBootstrapPayload.self, from: payloadData)
+        let preparedExec = PreparedCStringArray([payload.executable] + payload.arguments)
+        let preparedExecutableSearch = PreparedCStringArray(
+            executableSearchCandidates(executable: payload.executable, environment: payload.environment)
+        )
+        let preparedEnv = PreparedCStringArray(payload.environment)
+
+        guard writeExecStatus(execHelperReadyStatus, to: statusFD) else {
+            _exit(127)
+        }
+        applyProcessIdentity(payload.identity, fail: fail)
+        if let workingDirectory = payload.workingDirectory, chdir(workingDirectory) != 0 {
+            fail(Int32(errno))
+        }
+        do {
+            try setCloseOnExec(statusFD)
+        } catch {
+            fail(posixErrorCode(error))
+        }
+        fail(
+            execWithPathSearch(
+                preparedExecutableSearch.pointer,
+                arguments: preparedExec.pointer,
+                environment: preparedEnv.pointer
+            )
+        )
+    } catch {
+        closeIfValid(openPayloadFD)
+        fail(posixErrorCode(error))
+    }
+}
+
+private func posixErrorCode(_ error: Error) -> Int32 {
+    if let error = error as? POSIXError {
+        return error.code.rawValue
+    }
+    let nsError = error as NSError
+    if nsError.domain == NSPOSIXErrorDomain {
+        return Int32(nsError.code)
+    }
+    return Int32(EINVAL)
 }
 
 private func wifexited(_ status: Int32) -> Bool {
@@ -1315,6 +1625,15 @@ private func runChild(
         _ = Darwin.close(stderrFD)
     }
 
+    applyProcessIdentity(identity, fail: fail)
+
+    if let workingDirectory, chdir(workingDirectory) != 0 {
+        fail(Int32(errno))
+    }
+    fail(execWithPathSearch(executableSearch, arguments: arguments, environment: environment))
+}
+
+private func applyProcessIdentity(_ identity: GuestAgentExecIdentity, fail: (Int32) -> Never) {
     let currentUID = geteuid()
     let currentGID = getegid()
 
@@ -1333,11 +1652,6 @@ private func runChild(
     if identity.uid != currentUID, setuid(identity.uid) != 0 {
         fail(Int32(errno))
     }
-
-    if let workingDirectory, chdir(workingDirectory) != 0 {
-        fail(Int32(errno))
-    }
-    fail(execWithPathSearch(executableSearch, arguments: arguments, environment: environment))
 }
 
 private func sendSignalToProcessTree(pid: pid_t, signal: Int32) throws {

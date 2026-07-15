@@ -1,0 +1,21 @@
+Tests/SocketForwarderTests/SocketForwarderPolicyTests.swift
+  s_48d2bd70f10c44::t_70c75615062124 52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d83d1fad7028ab124f8ea0714cb93c037e94779f",
+  "prompts": {},
+  "sessions": {
+    "s_48d2bd70f10c44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f658c-886c-7411-9358-2c7f17d3ed21",
+        "model": "unknown"
+      },
+      "human_author": "jianliang00 <wangjianliang0@126.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

@@ -49,7 +49,7 @@ extension SocketForwarderStressTests {
                     .connectTimeout(.seconds(2))
                     .connect(to: actualProxyAddress)
                     .get()
-                try await clientChannel.close().get()
+                try await clientChannel.closeFuture.get()
             }
 
             let evaluations = recorder.evaluations()

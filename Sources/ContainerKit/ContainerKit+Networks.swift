@@ -15,7 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import Foundation
 
 extension ContainerKit {

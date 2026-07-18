@@ -41,13 +41,20 @@ $(PROTOC):
 .PHONY: protoc-gen-swift
 protoc-gen-swift:
 	@$(SWIFT) build --product protoc-gen-swift
+
+.PHONY: protoc-gen-grpc-swift
+protoc-gen-grpc-swift:
+	@$(SWIFT) build --product protoc-gen-grpc-swift
+
+.PHONY: protoc-gen-grpc-swift-2
+protoc-gen-grpc-swift-2:
 	@$(SWIFT) build --product protoc-gen-grpc-swift-2
 
 .PHONY: protos
 protos: builder-protos cri-protos
 
 .PHONY: builder-protos
-builder-protos: $(PROTOC) protoc-gen-swift
+builder-protos: $(PROTOC) protoc-gen-swift protoc-gen-grpc-swift-2
 	@echo Generating protocol buffers source code...
 	@mkdir -p $(LOCAL_DIR)
 	@if [ ! -d "$(LOCAL_DIR)/container-builder-shim" ]; then \
@@ -65,7 +72,7 @@ builder-protos: $(PROTOC) protoc-gen-swift
 	@"$(MAKE)" update-licenses
 
 .PHONY: cri-protos
-cri-protos: $(PROTOC) protoc-gen-swift
+cri-protos: $(PROTOC) protoc-gen-swift protoc-gen-grpc-swift
 	@echo Generating Kubernetes CRI protocol buffers source code...
 	@mkdir -p $(LOCAL_DIR)
 	@if [ ! -d "$(CRI_API_LOCAL_DIR)" ]; then \

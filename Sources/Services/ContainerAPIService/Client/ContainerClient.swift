@@ -15,7 +15,6 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
-import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
 import ContainerizationError
@@ -51,7 +50,8 @@ public struct ContainerClient: Sendable {
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions = .default,
         kernel: Kernel? = nil,
-        initImage: String? = nil
+        initImage: String? = nil,
+        runtimeData: Data? = nil
     ) async throws {
         do {
             let request = XPCMessage(route: .containerCreate)
@@ -89,13 +89,15 @@ public struct ContainerClient: Sendable {
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions = .default,
         kernel: Kernel? = nil,
-        initImage: String? = nil
+        initImage: String? = nil,
+        runtimeData: Data? = nil
     ) async throws {
         try await create(
             configuration: configuration,
             options: options,
             kernel: kernel,
-            initImage: initImage
+            initImage: initImage,
+            runtimeData: runtimeData
         )
     }
 
@@ -141,7 +143,8 @@ public struct ContainerClient: Sendable {
         id: String,
         stdio: [FileHandle?],
         presentGUI: Bool = true,
-        progressUpdate: ProgressUpdateHandler? = nil
+        progressUpdate: ProgressUpdateHandler? = nil,
+        dynamicEnv: [String: String] = [:]
     ) async throws -> ClientProcess {
         let request = XPCMessage(route: .containerBootstrap)
 

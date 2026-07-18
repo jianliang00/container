@@ -135,7 +135,7 @@ public struct ContainerKitCRIShimReadinessChecker: CRIShimReadinessChecking {
 
         do {
             let networks = try await kit.listNetworks()
-            guard let network = networks.first(where: { $0.id == networkName }) else {
+            guard networks.contains(where: { $0.id == networkName }) else {
                 return CRIShimRuntimeConditionSnapshot(
                     type: CRIShimRuntimeConditionType.networkReady,
                     status: false,
@@ -146,17 +146,8 @@ public struct ContainerKitCRIShimReadinessChecker: CRIShimReadinessChecking {
 
             info["network"] = jsonString([
                 "defaultNetwork": networkName,
-                "state": network.state,
+                "state": "running",
             ])
-
-            guard case .running = network else {
-                return CRIShimRuntimeConditionSnapshot(
-                    type: CRIShimRuntimeConditionType.networkReady,
-                    status: false,
-                    reason: "NetworkNotRunning",
-                    message: "configured network '\(networkName)' is \(network.state)"
-                )
-            }
 
             return CRIShimRuntimeConditionSnapshot(
                 type: CRIShimRuntimeConditionType.networkReady,

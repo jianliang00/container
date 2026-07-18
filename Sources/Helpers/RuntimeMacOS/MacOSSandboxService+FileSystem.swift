@@ -14,7 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import ContainerXPC
 import ContainerizationError
 import Foundation
@@ -68,7 +68,7 @@ extension MacOSSandboxService {
         let payload = try message.fsReadBeginRequest()
         let result = try sendFSReadBegin(payload)
         let reply = message.reply()
-        reply.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(result))
+        reply.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(result))
         return reply
     }
 
@@ -78,14 +78,14 @@ extension MacOSSandboxService {
         let data = try sendFSReadChunk(payload)
         let reply = message.reply()
         if let data {
-            reply.set(key: SandboxKeys.fsPayload.rawValue, value: data)
+            reply.set(key: RuntimeKeys.fsPayload.rawValue, value: data)
         }
         return reply
     }
 
     @Sendable
     public func fsReadEnd(_ message: XPCMessage) async throws -> XPCMessage {
-        guard let data = message.dataNoCopy(key: SandboxKeys.fsPayload.rawValue) else {
+        guard let data = message.dataNoCopy(key: RuntimeKeys.fsPayload.rawValue) else {
             throw ContainerizationError(.invalidArgument, message: "missing filesystem payload")
         }
         let decoded = try JSONDecoder().decode([String: String].self, from: data)
@@ -101,7 +101,7 @@ extension MacOSSandboxService {
         let payload = try message.fsListDirRequest()
         let entries = try sendFSListDir(payload)
         let reply = message.reply()
-        reply.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(entries))
+        reply.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(entries))
         return reply
     }
 
@@ -167,7 +167,7 @@ extension XPCMessage {
     }
 
     private func decodePayload<T: Decodable>(_ type: T.Type) throws -> T {
-        guard let data = dataNoCopy(key: SandboxKeys.fsPayload.rawValue) else {
+        guard let data = dataNoCopy(key: RuntimeKeys.fsPayload.rawValue) else {
             throw ContainerizationError(.invalidArgument, message: "missing filesystem payload")
         }
         return try JSONDecoder().decode(T.self, from: data)

@@ -16,8 +16,9 @@
 
 import ContainerAPIClient
 import ContainerBuild
+import ContainerPersistence
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import Containerization
 import ContainerizationError
 import ContainerizationOCI
@@ -290,6 +291,8 @@ struct MacOSBuildEngine {
     }
 
     static func run(_ input: Input) async throws -> Output {
+        let containerSystemConfig = try await Application.loadContainerSystemConfig()
+
         guard input.exports.count == 1, let export = input.exports.first else {
             throw ContainerizationError(.unsupported, message: "darwin builds currently support a single --output entry")
         }
@@ -335,7 +338,8 @@ struct MacOSBuildEngine {
                 pull: input.pull,
                 quiet: input.quiet,
                 disableTTYProgress: input.disableTTYProgress,
-                context: "workload build sandbox"
+                context: "workload build sandbox",
+                containerSystemConfig: containerSystemConfig
             )
             workloadSandboxImage = preparedSandbox.image
             workloadSandboxConfig = preparedSandbox.config
@@ -370,7 +374,8 @@ struct MacOSBuildEngine {
                         pull: input.pull,
                         quiet: input.quiet,
                         disableTTYProgress: input.disableTTYProgress,
-                        context: "stage \(stageLabel)"
+                        context: "stage \(stageLabel)",
+                        containerSystemConfig: containerSystemConfig
                     )
                     preparedBaseImages[stage.baseImage] = prepared
                     return prepared
@@ -427,6 +432,7 @@ struct MacOSBuildEngine {
                 stageIndex: stage.index,
                 cpus: input.cpus,
                 memory: input.memory,
+                containerSystemConfig: containerSystemConfig,
                 hostPayloadRoot: hostPayloadRoot,
                 startupMessage: input.quiet ? nil : "Waiting for macOS build guest for stage \(stageLabel)..."
             )
@@ -605,14 +611,29 @@ struct MacOSBuildEngine {
         return exported
     }
 
-    private static func loadBaseImage(reference: String, pull: Bool, progressUpdate: ProgressUpdateHandler?) async throws -> ClientImage {
+    private static func loadBaseImage(
+        reference: String,
+        pull: Bool,
+        containerSystemConfig: ContainerSystemConfig,
+        progressUpdate: ProgressUpdateHandler?
+    ) async throws -> ClientImage {
         if reference == "scratch" {
             throw ContainerizationError(.unsupported, message: "darwin builds do not support FROM scratch")
         }
         if pull {
-            return try await ClientImage.pull(reference: reference, platform: buildPlatform, progressUpdate: progressUpdate)
+            return try await ClientImage.pull(
+                reference: reference,
+                platform: buildPlatform,
+                containerSystemConfig: containerSystemConfig,
+                progressUpdate: progressUpdate
+            )
         }
-        return try await ClientImage.fetch(reference: reference, platform: buildPlatform, progressUpdate: progressUpdate)
+        return try await ClientImage.fetch(
+            reference: reference,
+            platform: buildPlatform,
+            containerSystemConfig: containerSystemConfig,
+            progressUpdate: progressUpdate
+        )
     }
 
     private static func prepareBaseImage(
@@ -620,7 +641,8 @@ struct MacOSBuildEngine {
         pull: Bool,
         quiet: Bool,
         disableTTYProgress: Bool,
-        context: String?
+        context: String?,
+        containerSystemConfig: ContainerSystemConfig
     ) async throws -> (image: ClientImage, config: ContainerizationOCI.Image) {
         if !quiet {
             writeStderrLine(baseImageResolveMessage(reference: reference, pull: pull, context: context))
@@ -642,6 +664,7 @@ struct MacOSBuildEngine {
         let image = try await loadBaseImage(
             reference: reference,
             pull: pull,
+            containerSystemConfig: containerSystemConfig,
             progressUpdate: fetchProgress?.handler
         )
 
@@ -2067,12 +2090,12 @@ extension MacOSBuildEngine {
             let createDirectoryIfMissing: Bool
         }
 
-        let sandboxClient: SandboxClient
+        let sandboxClient: RuntimeClient
         let contextProvider: BuildContextProvider
         let pathInspector: (String) async throws -> GuestPathKind
 
         init(
-            sandboxClient: SandboxClient,
+            sandboxClient: RuntimeClient,
             contextProvider: BuildContextProvider,
             pathInspector: @escaping (String) async throws -> GuestPathKind
         ) {
@@ -2516,9 +2539,9 @@ extension MacOSBuildEngine {
     final class StageRuntime {
         private final class SandboxProcess: ClientProcess, @unchecked Sendable {
             let id: String
-            private let sandboxClient: SandboxClient
+            private let sandboxClient: RuntimeClient
 
-            init(id: String, sandboxClient: SandboxClient) {
+            init(id: String, sandboxClient: RuntimeClient) {
                 self.id = id
                 self.sandboxClient = sandboxClient
             }
@@ -2542,9 +2565,9 @@ extension MacOSBuildEngine {
 
         let containerClient: ContainerClient
         let containerID: String
-        let sandboxClient: SandboxClient
+        let sandboxClient: RuntimeClient
 
-        private init(containerClient: ContainerClient, containerID: String, sandboxClient: SandboxClient) {
+        private init(containerClient: ContainerClient, containerID: String, sandboxClient: RuntimeClient) {
             self.containerClient = containerClient
             self.containerID = containerID
             self.sandboxClient = sandboxClient
@@ -2557,6 +2580,7 @@ extension MacOSBuildEngine {
             stageIndex: Int,
             cpus: Int64,
             memory: String,
+            containerSystemConfig: ContainerSystemConfig,
             hostPayloadRoot: URL? = nil,
             startupMessage: String? = nil
         ) async throws -> StageRuntime {
@@ -2577,6 +2601,7 @@ extension MacOSBuildEngine {
                 initProcess: initProcess,
                 cpus: cpus,
                 memory: memory,
+                containerSystemConfig: containerSystemConfig,
                 hostPayloadRoot: hostPayloadRoot
             )
             configuration.resources.memoryInBytes = max(configuration.resources.memoryInBytes, 8192.mib())
@@ -2592,7 +2617,7 @@ extension MacOSBuildEngine {
                     process: process,
                     startupMessage: startupMessage
                 )
-                let sandboxClient = try await SandboxClient.create(id: containerID, runtime: MacOSBuildEngine.runtimeName)
+                let sandboxClient = try await RuntimeClient.create(id: containerID, runtime: MacOSBuildEngine.runtimeName)
                 try await waitForContainerStatus(client: containerClient, id: containerID, status: .running, timeoutSeconds: 180)
                 try await waitForSandboxStatus(client: sandboxClient, status: .running, timeoutSeconds: 180)
                 _ = appRoot
@@ -2609,6 +2634,7 @@ extension MacOSBuildEngine {
             initProcess: ProcessConfiguration,
             cpus: Int64,
             memory: String,
+            containerSystemConfig: ContainerSystemConfig = .init(),
             hostPayloadRoot: URL? = nil
         ) throws -> ContainerConfiguration {
             var configuration = ContainerConfiguration(id: containerID, image: baseImage, process: initProcess)
@@ -2620,7 +2646,12 @@ extension MacOSBuildEngine {
                 agentPort: MacOSBuildEngine.defaultAgentPort,
                 networkBackend: .virtualizationNAT
             )
-            configuration.resources = try Parser.resources(cpus: cpus, memory: memory)
+            configuration.resources = try Parser.resources(
+                cpus: cpus,
+                memory: memory,
+                defaultCPUs: containerSystemConfig.build.cpus,
+                defaultMemory: containerSystemConfig.build.memory
+            )
             if let hostPayloadRoot {
                 configuration.mounts.append(
                     .virtiofs(
@@ -2930,7 +2961,7 @@ extension MacOSBuildEngine {
         }
 
         private static func waitForSandboxStatus(
-            client: SandboxClient,
+            client: RuntimeClient,
             status: RuntimeStatus,
             timeoutSeconds: TimeInterval
         ) async throws {

@@ -16,7 +16,7 @@
 
 import ContainerAPIClient
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 
 public typealias ContainerConfiguration = ContainerResource.ContainerConfiguration
 public typealias ContainerCreateOptions = ContainerResource.ContainerCreateOptions
@@ -29,10 +29,11 @@ public typealias DiskUsageStats = ContainerAPIClient.DiskUsageStats
 public typealias ExecSyncResult = ContainerResource.ExecSyncResult
 public typealias Image = ContainerAPIClient.ClientImage
 public typealias NetworkConfiguration = ContainerResource.NetworkConfiguration
-public typealias NetworkState = ContainerResource.NetworkState
+public typealias NetworkState = ContainerResource.NetworkResource
 public typealias ProcessConfiguration = ContainerResource.ProcessConfiguration
 public typealias SandboxConfiguration = ContainerResource.SandboxConfiguration
 public typealias SandboxLogPaths = ContainerResource.SandboxLogPaths
+public typealias SandboxNetworkState = ContainerResource.SandboxNetworkState
 public typealias SandboxNetworkAuditMode = ContainerResource.SandboxNetworkAuditMode
 public typealias SandboxNetworkPolicy = ContainerResource.SandboxNetworkPolicy
 public typealias SandboxNetworkPolicyAction = ContainerResource.SandboxNetworkPolicyAction
@@ -40,9 +41,9 @@ public typealias SandboxNetworkPolicyEndpoint = ContainerResource.SandboxNetwork
 public typealias SandboxNetworkPolicyRule = ContainerResource.SandboxNetworkPolicyRule
 public typealias SandboxNetworkPolicyState = ContainerResource.SandboxNetworkPolicyState
 public typealias SandboxNetworkPortRange = ContainerResource.SandboxNetworkPortRange
-public typealias SandboxSnapshot = ContainerSandboxServiceClient.SandboxSnapshot
+public typealias SandboxSnapshot = ContainerRuntimeClient.SandboxSnapshot
 public typealias SystemHealth = ContainerAPIClient.SystemHealth
-public typealias Volume = ContainerResource.Volume
+public typealias Volume = ContainerResource.VolumeConfiguration
 public typealias WorkloadAttachOptions = ContainerResource.WorkloadAttachOptions
 public typealias WorkloadConfiguration = ContainerResource.WorkloadConfiguration
 public typealias WorkloadSnapshot = ContainerResource.WorkloadSnapshot

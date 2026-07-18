@@ -19,7 +19,7 @@ import Foundation
 import Testing
 
 @testable import ContainerResource
-@testable import ContainerSandboxServiceClient
+@testable import ContainerRuntimeClient
 
 struct SandboxSnapshotTests {
     @Test

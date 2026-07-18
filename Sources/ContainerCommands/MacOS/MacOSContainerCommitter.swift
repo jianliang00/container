@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerPersistence
 import ContainerResource
 import ContainerizationError
 import ContainerizationOCI
@@ -51,7 +52,11 @@ enum MacOSContainerCommitter {
         progress: ProgressHandler? = nil,
         detail: ProgressHandler? = nil
     ) async throws {
-        let normalizedTargetReference = try normalizeTargetReference(targetReference)
+        let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
+        let normalizedTargetReference = try normalizeTargetReference(
+            targetReference,
+            containerSystemConfig: containerSystemConfig
+        )
         let client = ContainerClient()
 
         progress?("Validating container")
@@ -63,7 +68,10 @@ enum MacOSContainerCommitter {
         let bundleRoot = try await resolveBundleRoot(for: container.id)
         let bundleImageDirectory = try validateImageDirectory(at: bundleRoot)
 
-        let sourceImage = try await resolveSourceImage(reference: container.configuration.image.reference)
+        let sourceImage = try await resolveSourceImage(
+            reference: container.configuration.image.reference,
+            containerSystemConfig: containerSystemConfig
+        )
         let baseImageConfig = try await resolveSourceImageConfig(
             image: sourceImage,
             reference: container.configuration.image.reference
@@ -250,9 +258,15 @@ enum MacOSContainerCommitter {
         )
     }
 
-    private static func normalizeTargetReference(_ reference: String) throws -> String {
+    private static func normalizeTargetReference(
+        _ reference: String,
+        containerSystemConfig: ContainerSystemConfig
+    ) throws -> String {
         do {
-            return try ClientImage.normalizeReference(reference)
+            return try ClientImage.normalizeReference(
+                reference,
+                containerSystemConfig: containerSystemConfig
+            )
         } catch {
             throw ContainerizationError(
                 .invalidArgument,
@@ -295,9 +309,15 @@ enum MacOSContainerCommitter {
         }
     }
 
-    private static func resolveSourceImage(reference: String) async throws -> ClientImage {
+    private static func resolveSourceImage(
+        reference: String,
+        containerSystemConfig: ContainerSystemConfig
+    ) async throws -> ClientImage {
         do {
-            return try await ClientImage.get(reference: reference)
+            return try await ClientImage.get(
+                reference: reference,
+                containerSystemConfig: containerSystemConfig
+            )
         } catch {
             throw ContainerizationError(
                 .internalError,

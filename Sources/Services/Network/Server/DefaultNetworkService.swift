@@ -25,7 +25,9 @@ public actor DefaultNetworkService: NetworkService {
     private let log: Logger
     private var allocator: AttachmentAllocator
     private var macAddresses: [UInt32: MACAddress]
-    private var allocationsBySession: [XPCServerSession: [(hostname: String, index: UInt32)]]
+    private var allocationsBySession: [XPCServerSession: [String: UInt32]]
+    private var ownersByHostname: [String: Set<XPCServerSession>]
+    private var releaseWaitersByHostname: [String: [CheckedContinuation<Void, Never>]]
 
     /// Set up a network service for the specified network.
     public init(
@@ -43,6 +45,8 @@ public actor DefaultNetworkService: NetworkService {
         self.allocator = try AttachmentAllocator(lower: subnet.lower.value + 2, size: size)
         self.macAddresses = [:]
         self.allocationsBySession = [:]
+        self.ownersByHostname = [:]
+        self.releaseWaitersByHostname = [:]
     }
 
     @Sendable
@@ -66,8 +70,11 @@ public actor DefaultNetworkService: NetworkService {
             throw ContainerizationError(.invalidState, message: "network \(network.id) must be running")
         }
 
-        let macAddress = macAddress ?? MACAddress((UInt64.random(in: 0...UInt64.max) & 0x0cff_ffff_ffff) | 0xf200_0000_0000)
-        let index = try await allocator.allocate(hostname: hostname)
+        let index = try await allocateIndex(hostname: hostname)
+        let macAddress =
+            macAddresses[index]
+            ?? macAddress
+            ?? MACAddress((UInt64.random(in: 0...UInt64.max) & 0x0cff_ffff_ffff) | 0xf200_0000_0000)
         let ipv6Address = try status.ipv6Subnet
             .map { try CIDRv6(macAddress.ipv6Address(network: $0.lower), prefix: $0.prefix) }
         let ip = IPv4Address(index)
@@ -97,10 +104,16 @@ public actor DefaultNetworkService: NetworkService {
         macAddresses[index] = macAddress
 
         let isNewSession = allocationsBySession[session] == nil
-        allocationsBySession[session, default: []].append((hostname: hostname, index: index))
+        if allocationsBySession[session]?[hostname] == nil {
+            allocationsBySession[session, default: [:]][hostname] = index
+            ownersByHostname[hostname, default: []].insert(session)
+        }
         if isNewSession {
-            await session.onDisconnect { [weak self] in
-                await self?.releaseSession(session)
+            await session.onDisconnect { [weak self, weak session] in
+                guard let self, let session else {
+                    return
+                }
+                await self.releaseSession(session)
             }
         }
 
@@ -111,11 +124,67 @@ public actor DefaultNetworkService: NetworkService {
         guard let allocations = allocationsBySession.removeValue(forKey: session) else {
             return
         }
-        for allocation in allocations {
-            _ = try? await allocator.deallocate(hostname: allocation.hostname)
-            macAddresses.removeValue(forKey: allocation.index)
+        for (hostname, index) in allocations {
+            guard var owners = ownersByHostname[hostname] else {
+                continue
+            }
+            owners.remove(session)
+            guard owners.isEmpty else {
+                ownersByHostname[hostname] = owners
+                continue
+            }
+
+            ownersByHostname.removeValue(forKey: hostname)
+            releaseWaitersByHostname[hostname] = []
+            do {
+                _ = try await allocator.deallocate(hostname: hostname)
+            } catch {
+                log.error(
+                    "failed to release attachment",
+                    metadata: [
+                        "hostname": "\(hostname)",
+                        "error": "\(error)",
+                    ])
+            }
+            macAddresses.removeValue(forKey: index)
+            finishRelease(hostname: hostname)
         }
         log.info("released session", metadata: ["allocations": "\(allocations.count)"])
+    }
+
+    private func allocateIndex(hostname: String) async throws -> UInt32 {
+        while true {
+            await waitForRelease(hostname: hostname)
+            do {
+                let index = try await allocator.allocate(hostname: hostname)
+                if releaseWaitersByHostname[hostname] == nil {
+                    return index
+                }
+            } catch {
+                guard releaseWaitersByHostname[hostname] != nil else {
+                    throw error
+                }
+            }
+        }
+    }
+
+    private func waitForRelease(hostname: String) async {
+        while releaseWaitersByHostname[hostname] != nil {
+            await withCheckedContinuation { continuation in
+                guard releaseWaitersByHostname[hostname] != nil else {
+                    continuation.resume()
+                    return
+                }
+                releaseWaitersByHostname[hostname, default: []].append(continuation)
+            }
+        }
+    }
+
+    private func finishRelease(hostname: String) {
+        let waiters = releaseWaitersByHostname.removeValue(forKey: hostname) ?? []
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     @Sendable

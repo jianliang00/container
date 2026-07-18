@@ -15,17 +15,17 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
-import ContainerNetworkServiceClient
+import ContainerNetworkClient
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import ContainerizationError
 import Foundation
 
 public protocol MacvmnetNetworkHealthClient: Sendable {
-    func state() async throws -> NetworkState
+    func status() async throws -> NetworkStatus
 }
 
-extension NetworkClient: MacvmnetNetworkHealthClient {}
+extension ContainerNetworkClient.NetworkClient: MacvmnetNetworkHealthClient {}
 
 public protocol MacvmnetSandboxNetworkClient: Sendable {
     func prepareSandboxNetwork() async throws -> SandboxNetworkState
@@ -33,7 +33,7 @@ public protocol MacvmnetSandboxNetworkClient: Sendable {
     func releaseSandboxNetwork() async throws
 }
 
-extension SandboxClient: MacvmnetSandboxNetworkClient {}
+extension RuntimeClient: MacvmnetSandboxNetworkClient {}
 
 public struct MacvmnetAPISandboxNetworkClient: MacvmnetSandboxNetworkClient {
     public var sandboxID: String
@@ -73,7 +73,9 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     private let makeAttachmentLedger: AttachmentLedgerFactory
 
     public init(
-        makeNetworkClient: @escaping NetworkHealthClientFactory = { NetworkClient(id: $0) },
+        makeNetworkClient: @escaping NetworkHealthClientFactory = {
+            ContainerNetworkClient.NetworkClient(id: $0, plugin: "container-network-vmnet")
+        },
         makeSandboxClient: @escaping SandboxNetworkClientFactory = { sandboxID, runtimeName in
             _ = runtimeName
             return MacvmnetAPISandboxNetworkClient(sandboxID: sandboxID)
@@ -88,7 +90,7 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     }
 
     public func health(networkName: String) async throws {
-        _ = try await makeNetworkClient(networkName).state()
+        _ = try await makeNetworkClient(networkName).status()
     }
 
     public func prepare(_ plan: MacvmnetOperationPlan) async throws -> CNIResult {

@@ -253,9 +253,6 @@ public struct ProcessIO: Sendable {
         let signals = AsyncSignalHandler.create(notify: Self.signalSet)
 
         return try await withThrowingTaskGroup(of: Int32?.self, returning: Int32.self) { group in
-            try await process.start()
-            try closeAfterStart()
-
             let waitAdded = group.addTaskUnlessCancelled {
                 let code = try await waitForExit()
                 try await wait()

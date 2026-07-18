@@ -17,7 +17,7 @@
 import ContainerAPIClient
 import ContainerImagesServiceClient
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import ContainerXPC
 import Containerization
 import ContainerizationArchive
@@ -324,7 +324,7 @@ extension MacOSSandboxService {
         }
         let endpoint = xpc_endpoint_create(connection)
         let reply = message.reply()
-        reply.set(key: SandboxKeys.sandboxServiceEndpoint.rawValue, value: endpoint)
+        reply.set(key: RuntimeKeys.runtimeServiceEndpoint.rawValue, value: endpoint)
         return reply
     }
 
@@ -337,10 +337,10 @@ extension MacOSSandboxService {
     @Sendable
     public func startSandbox(_ message: XPCMessage) async throws -> XPCMessage {
         let progressUpdateService = ProgressUpdateService(message: message)
-        let hasPresentGUI = message.contains(key: SandboxKeys.presentGUI.rawValue)
+        let hasPresentGUI = message.contains(key: RuntimeKeys.presentGUI.rawValue)
         let presentGUI =
             hasPresentGUI
-            ? message.bool(key: SandboxKeys.presentGUI.rawValue)
+            ? message.bool(key: RuntimeKeys.presentGUI.rawValue)
             : true
         log.info(
             "macOS runtime startSandbox request",
@@ -371,10 +371,10 @@ extension MacOSSandboxService {
         }
         let progressUpdateService = ProgressUpdateService(message: message)
         let config = try await prepareSandboxIfNeeded(progressUpdate: progressUpdateService?.handler)
-        let hasPresentGUI = message.contains(key: SandboxKeys.presentGUI.rawValue)
+        let hasPresentGUI = message.contains(key: RuntimeKeys.presentGUI.rawValue)
         let presentGUI =
             hasPresentGUI
-            ? message.bool(key: SandboxKeys.presentGUI.rawValue)
+            ? message.bool(key: RuntimeKeys.presentGUI.rawValue)
             : true
         log.info(
             "macOS runtime bootstrap request",
@@ -492,15 +492,35 @@ extension MacOSSandboxService {
             cleanupExitedExternalProcessIfNeeded(processID: processID)
         }
         let reply = message.reply()
-        reply.set(key: SandboxKeys.exitCode.rawValue, value: Int64(status.exitCode))
-        reply.set(key: SandboxKeys.exitedAt.rawValue, value: status.exitedAt)
+        reply.set(key: RuntimeKeys.exitCode.rawValue, value: Int64(status.exitCode))
+        reply.set(key: RuntimeKeys.exitedAt.rawValue, value: status.exitedAt)
         return reply
     }
 
     @Sendable
     public func kill(_ message: XPCMessage) async throws -> XPCMessage {
+        try handleKill(message)
+        return message.reply()
+    }
+
+    private func handleKill(_ message: XPCMessage) throws {
         let processID = try message.id()
-        let signal = Int32(message.int64(key: SandboxKeys.signal.rawValue))
+        guard message.contains(key: RuntimeKeys.signal.rawValue) else {
+            throw ContainerizationError(.invalidArgument, message: "missing signal in xpc message")
+        }
+        let signal: Int32
+        if let signalName = message.string(key: RuntimeKeys.signal.rawValue) {
+            signal = try Signal(signalName, from: Signal.platform).rawValue
+        } else {
+            let rawSignal = message.int64(key: RuntimeKeys.signal.rawValue)
+            guard let convertedSignal = Int32(exactly: rawSignal) else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "signal value \(rawSignal) is outside the supported range"
+                )
+            }
+            signal = convertedSignal
+        }
         let attachmentID = message.optionalAttachmentIdentifier()
         if workloads[processID] != nil {
             try sendSignalToWorkload(
@@ -520,14 +540,13 @@ extension MacOSSandboxService {
             }
             try sendSignalToProcess(processID: processID, signal: signal)
         }
-        return message.reply()
     }
 
     @Sendable
     public func resize(_ message: XPCMessage) async throws -> XPCMessage {
         let processID = try message.id()
-        let width = UInt16(message.uint64(key: SandboxKeys.width.rawValue))
-        let height = UInt16(message.uint64(key: SandboxKeys.height.rawValue))
+        let width = UInt16(message.uint64(key: RuntimeKeys.width.rawValue))
+        let height = UInt16(message.uint64(key: RuntimeKeys.height.rawValue))
         let attachmentID = message.optionalAttachmentIdentifier()
         if workloads[processID] != nil {
             try sendResizeToWorkload(
@@ -559,8 +578,10 @@ extension MacOSSandboxService {
     }
 
     private func stopSandbox(stopOptions: ContainerStopOptions) async throws {
+        let stopSignalName = stopOptions.signal ?? "SIGTERM"
+        let stopSignal = try Signal(stopSignalName, from: Signal.platform).rawValue
         sandboxState = .stopping
-        writeContainerLog(Data(("stop requested signal=\(stopOptions.signal) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
+        writeContainerLog(Data(("stop requested signal=\(stopSignalName) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
 
         if let configuration {
             await stopAttachedWorkloadsIfNeeded(containerConfig: configuration, stopOptions: stopOptions)
@@ -572,8 +593,8 @@ extension MacOSSandboxService {
             current.started
         {
             if current.exitStatus == nil {
-                writeContainerLog(Data(("stop: init workload \(workloadID) still running; sending signal \(stopOptions.signal)\n").utf8))
-                try? sendSignalToSession(processID: sessionID, signal: Int32(stopOptions.signal))
+                writeContainerLog(Data(("stop: init workload \(workloadID) still running; sending signal \(stopSignalName)\n").utf8))
+                try? sendSignalToSession(processID: sessionID, signal: stopSignal)
                 _ = try? await waitForSession(sessionID, timeout: stopOptions.timeoutInSeconds)
                 writeContainerLog(Data(("stop: wait for init workload \(workloadID) finished\n").utf8))
             } else {
@@ -882,10 +903,10 @@ extension MacOSSandboxService {
     @Sendable
     public func dial(_ message: XPCMessage) async throws -> XPCMessage {
         #if arch(arm64)
-        let port = UInt32(message.uint64(key: SandboxKeys.port.rawValue))
+        let port = UInt32(message.uint64(key: RuntimeKeys.port.rawValue))
         let fh = try sidecarDial(port: port)
         let reply = message.reply()
-        reply.set(key: SandboxKeys.fd.rawValue, value: fh)
+        reply.set(key: RuntimeKeys.fd.rawValue, value: fh)
         return reply
         #else
         throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
@@ -907,7 +928,7 @@ extension MacOSSandboxService {
         )
         let data = try JSONEncoder().encode(stats)
         let reply = message.reply()
-        reply.set(key: SandboxKeys.statistics.rawValue, value: data)
+        reply.set(key: RuntimeKeys.statistics.rawValue, value: data)
         return reply
     }
 }
@@ -1146,14 +1167,16 @@ extension MacOSSandboxService {
             return
         }
 
+        let stopSignalName = stopOptions.signal ?? "SIGTERM"
         writeContainerLog(
             Data(
-                ("stopWorkload requested id=\(workloadID) signal=\(stopOptions.signal) timeout=\(stopOptions.timeoutInSeconds)\n").utf8
+                ("stopWorkload requested id=\(workloadID) signal=\(stopSignalName) timeout=\(stopOptions.timeoutInSeconds)\n").utf8
             )
         )
 
+        let stopSignal = try Signal(stopSignalName, from: Signal.platform).rawValue
         do {
-            try sendSignalToWorkload(workloadID: workloadID, signal: stopOptions.signal)
+            try sendSignalToWorkload(workloadID: workloadID, signal: stopSignal)
             _ = try await waitForWorkload(workloadID, timeout: stopOptions.timeoutInSeconds)
         } catch let error as ContainerizationError where error.code == .timeout {
             writeContainerLog(Data(("stopWorkload timeout for \(workloadID); escalating to SIGKILL\n").utf8))
@@ -3631,37 +3654,37 @@ private func shQuoteForWorkloadScript(_ value: String) -> String {
 extension XPCMessage {
     fileprivate func setState(_ state: SandboxSnapshot) throws {
         let data = try JSONEncoder().encode(state)
-        self.set(key: SandboxKeys.snapshot.rawValue, value: data)
+        self.set(key: RuntimeKeys.snapshot.rawValue, value: data)
     }
 
     func setSandboxNetworkState(_ state: SandboxNetworkState) throws {
         let data = try JSONEncoder().encode(state)
-        self.set(key: SandboxKeys.networkState.rawValue, value: data)
+        self.set(key: RuntimeKeys.networkState.rawValue, value: data)
     }
 
     fileprivate func stdio() -> [FileHandle?] {
         var handles = [FileHandle?](repeating: nil, count: 3)
-        if let stdin = self.fileHandle(key: SandboxKeys.stdin.rawValue) {
+        if let stdin = self.fileHandle(key: RuntimeKeys.stdin.rawValue) {
             handles[0] = stdin
         }
-        if let stdout = self.fileHandle(key: SandboxKeys.stdout.rawValue) {
+        if let stdout = self.fileHandle(key: RuntimeKeys.stdout.rawValue) {
             handles[1] = stdout
         }
-        if let stderr = self.fileHandle(key: SandboxKeys.stderr.rawValue) {
+        if let stderr = self.fileHandle(key: RuntimeKeys.stderr.rawValue) {
             handles[2] = stderr
         }
         return handles
     }
 
     fileprivate func processConfig() throws -> ProcessConfiguration {
-        guard let data = self.dataNoCopy(key: SandboxKeys.processConfig.rawValue) else {
+        guard let data = self.dataNoCopy(key: RuntimeKeys.processConfig.rawValue) else {
             throw ContainerizationError(.invalidArgument, message: "missing process configuration")
         }
         return try JSONDecoder().decode(ProcessConfiguration.self, from: data)
     }
 
     fileprivate func workloadConfiguration(id fallbackID: String) throws -> WorkloadConfiguration {
-        if let data = self.dataNoCopy(key: SandboxKeys.workloadConfig.rawValue) {
+        if let data = self.dataNoCopy(key: RuntimeKeys.workloadConfig.rawValue) {
             let configuration = try JSONDecoder().decode(WorkloadConfiguration.self, from: data)
             guard configuration.id == fallbackID else {
                 throw ContainerizationError(
@@ -3675,25 +3698,25 @@ extension XPCMessage {
     }
 
     fileprivate func stopOptions() throws -> ContainerStopOptions {
-        guard let data = self.dataNoCopy(key: SandboxKeys.stopOptions.rawValue) else {
+        guard let data = self.dataNoCopy(key: RuntimeKeys.stopOptions.rawValue) else {
             return .default
         }
         return try JSONDecoder().decode(ContainerStopOptions.self, from: data)
     }
 
     fileprivate func attachmentIdentifier() throws -> String {
-        guard let attachmentID = self.string(key: SandboxKeys.attachmentIdentifier.rawValue) else {
+        guard let attachmentID = self.string(key: RuntimeKeys.attachmentIdentifier.rawValue) else {
             throw ContainerizationError(.invalidArgument, message: "missing attachment identifier")
         }
         return attachmentID
     }
 
     fileprivate func optionalAttachmentIdentifier() -> String? {
-        self.string(key: SandboxKeys.attachmentIdentifier.rawValue)
+        self.string(key: RuntimeKeys.attachmentIdentifier.rawValue)
     }
 
     fileprivate func attachOptions() throws -> WorkloadAttachOptions {
-        guard let data = self.dataNoCopy(key: SandboxKeys.attachOptions.rawValue) else {
+        guard let data = self.dataNoCopy(key: RuntimeKeys.attachOptions.rawValue) else {
             return .init()
         }
         return try JSONDecoder().decode(WorkloadAttachOptions.self, from: data)
@@ -4014,6 +4037,10 @@ extension MacOSSandboxService {
             throw ContainerizationError(.notFound, message: "process \(id) not found")
         }
         try sendSignalToProcess(processID: id, signal: signal)
+    }
+
+    func testingHandleKill(_ message: XPCMessage) throws {
+        try handleKill(message)
     }
 
     func testingResizeExternalProcess(_ id: String, width: UInt16, height: UInt16) throws {

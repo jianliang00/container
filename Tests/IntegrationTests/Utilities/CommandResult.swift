@@ -16,12 +16,10 @@
 
 import Foundation
 
-@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
-
-class TestCLIRegistry: CLITest {
-    @Test func testListDefaultFormat() throws {
-        let (_, output, error, status) = try run(arguments: ["registry", "list"])
-        #expect(status == 0, "registry list should succeed, stderr: \(error)")
+struct CommandResult: Sendable {
+    let outputData: Data
+    let errorData: Data
+    let status: Int32
 
     var output: String {
         String(data: outputData, encoding: .utf8) ?? ""

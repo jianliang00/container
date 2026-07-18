@@ -73,10 +73,12 @@ extension ContainerKitServicesDependencies {
                 (try? await ClientKernel.getDefaultKernel(for: .current)) != nil
             },
             installRecommendedKernel: {
+                let kernel = try await kit.systemConfiguration().kernel
                 try await ClientKernel.installKernelFromTar(
-                    tarFile: DefaultsStore.get(key: .defaultKernelURL),
-                    kernelFilePath: DefaultsStore.get(key: .defaultKernelBinaryPath),
+                    tarFile: kernel.url.absoluteString,
+                    kernelFilePath: kernel.binaryPath,
                     platform: .current,
+                    expectedDigest: kernel.digest,
                     force: true
                 )
             },

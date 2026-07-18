@@ -16,7 +16,6 @@
 
 import ContainerAPIClient
 import ContainerResource
-import ContainerSandboxServiceClient
 import ContainerXPC
 import Containerization
 import ContainerizationError
@@ -59,6 +58,8 @@ public struct ContainersHarness: Sendable {
         let stdio = message.stdio()
         let hasPresentGUI = message.contains(key: .presentGUI)
         let presentGUI = hasPresentGUI ? message.bool(key: .presentGUI) : true
+        let data = message.dataNoCopy(key: .dynamicEnv)
+        let dynamicEnv = try data.map { try JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
         log.info(
             "container API bootstrap request",
             metadata: [
@@ -69,6 +70,7 @@ public struct ContainersHarness: Sendable {
         try await service.bootstrap(
             id: id,
             stdio: stdio,
+            dynamicEnv: dynamicEnv,
             presentGUI: presentGUI,
             progressUpdateEndpoint: message.endpoint(key: .progressUpdateEndpoint)
         )
@@ -221,12 +223,19 @@ public struct ContainersHarness: Sendable {
                 message: "process ID cannot be empty"
             )
         }
-        try await service.kill(
-            id: id,
-            processID: processID,
-            signal: try message.signal(),
-            attachmentID: message.optionalAttachmentIdentifier()
-        )
+        guard message.contains(key: .signal) else {
+            throw ContainerizationError(.invalidArgument, message: "missing signal in xpc message")
+        }
+        if let signal = message.string(key: .signal) {
+            try await service.kill(id: id, processID: processID, signal: signal)
+        } else {
+            try await service.kill(
+                id: id,
+                processID: processID,
+                signal: message.int64(key: .signal),
+                attachmentID: message.optionalAttachmentIdentifier()
+            )
+        }
         return message.reply()
     }
 
@@ -468,6 +477,60 @@ public struct ContainersHarness: Sendable {
         let reply = message.reply()
         reply.set(key: .sandboxLogPaths, value: data)
         return reply
+    }
+
+    @Sendable
+    public func copyIn(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "id cannot be empty"
+            )
+        }
+        guard let sourcePath = message.string(key: .sourcePath) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "source path cannot be empty"
+            )
+        }
+        guard let destinationPath = message.string(key: .destinationPath) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "destination path cannot be empty"
+            )
+        }
+        let mode = UInt32(message.uint64(key: .fileMode))
+        let createParents = message.bool(key: .createParents)
+
+        try await service.copyIn(id: id, source: sourcePath, destination: destinationPath, mode: mode, createParents: createParents)
+        return message.reply()
+    }
+
+    @Sendable
+    public func copyOut(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "id cannot be empty"
+            )
+        }
+        guard let sourcePath = message.string(key: .sourcePath) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "source path cannot be empty"
+            )
+        }
+        guard let destinationPath = message.string(key: .destinationPath) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "destination path cannot be empty"
+            )
+        }
+
+        let createParents = message.bool(key: .createParents)
+
+        try await service.copyOut(id: id, source: sourcePath, destination: destinationPath, createParents: createParents)
+        return message.reply()
     }
 
     @Sendable

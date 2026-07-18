@@ -416,6 +416,10 @@ extension ClientImageMacOSPrewarmTests {
         func cancelIngestSession(_ id: String) async throws {
             throw Unimplemented()
         }
+
+        func totalAllocatedSize() async throws -> UInt64 {
+            throw Unimplemented()
+        }
     }
 
     private struct Unimplemented: Error {}

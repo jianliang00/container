@@ -15,7 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ArgumentParser
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import ContainerXPC
 import Foundation
 import Logging
@@ -64,10 +64,10 @@ extension RuntimeMacOSHelper {
                 let endpointServer = XPCServer(
                     identifier: machServiceLabel,
                     routes: [
-                        SandboxRoutes.createEndpoint.rawValue: { message in
+                        RuntimeRoutes.createEndpoint.rawValue: XPCServer.route { message in
                             let endpoint = xpc_endpoint_create(anonymousConnection)
                             let reply = message.reply()
-                            reply.set(key: SandboxKeys.sandboxServiceEndpoint.rawValue, value: endpoint)
+                            reply.set(key: RuntimeKeys.runtimeServiceEndpoint.rawValue, value: endpoint)
                             return reply
                         }
                     ],
@@ -77,40 +77,40 @@ extension RuntimeMacOSHelper {
                 let mainServer = XPCServer(
                     connection: anonymousConnection,
                     routes: [
-                        SandboxRoutes.createSandbox.rawValue: service.createSandbox,
-                        SandboxRoutes.startSandbox.rawValue: service.startSandbox,
-                        SandboxRoutes.showGUI.rawValue: service.showGUI,
-                        SandboxRoutes.bootstrap.rawValue: service.bootstrap,
-                        SandboxRoutes.createWorkload.rawValue: service.createWorkload,
-                        SandboxRoutes.startWorkload.rawValue: service.startWorkload,
-                        SandboxRoutes.attachWorkload.rawValue: service.attachWorkload,
-                        SandboxRoutes.detachWorkloadAttachment.rawValue: service.detachWorkloadAttachment,
-                        SandboxRoutes.stopWorkload.rawValue: service.stopWorkload,
-                        SandboxRoutes.removeWorkload.rawValue: service.removeWorkload,
-                        SandboxRoutes.createProcess.rawValue: service.createProcess,
-                        SandboxRoutes.state.rawValue: service.state,
-                        SandboxRoutes.inspectWorkload.rawValue: service.inspectWorkload,
-                        SandboxRoutes.stop.rawValue: service.stop,
-                        SandboxRoutes.kill.rawValue: service.kill,
-                        SandboxRoutes.resize.rawValue: service.resize,
-                        SandboxRoutes.wait.rawValue: service.wait,
-                        SandboxRoutes.start.rawValue: service.startProcess,
-                        SandboxRoutes.dial.rawValue: service.dial,
-                        SandboxRoutes.fsBegin.rawValue: service.fsBegin,
-                        SandboxRoutes.fsChunk.rawValue: service.fsChunk,
-                        SandboxRoutes.fsEnd.rawValue: service.fsEnd,
-                        SandboxRoutes.fsReadBegin.rawValue: service.fsReadBegin,
-                        SandboxRoutes.fsReadChunk.rawValue: service.fsReadChunk,
-                        SandboxRoutes.fsReadEnd.rawValue: service.fsReadEnd,
-                        SandboxRoutes.fsListDir.rawValue: service.fsListDir,
-                        SandboxRoutes.prepareNetwork.rawValue: service.prepareSandboxNetwork,
-                        SandboxRoutes.inspectNetwork.rawValue: service.inspectSandboxNetwork,
-                        SandboxRoutes.releaseNetwork.rawValue: service.releaseSandboxNetwork,
-                        SandboxRoutes.applyNetworkPolicy.rawValue: service.applySandboxPolicy,
-                        SandboxRoutes.removeNetworkPolicy.rawValue: service.removeSandboxPolicy,
-                        SandboxRoutes.inspectNetworkPolicy.rawValue: service.inspectSandboxPolicy,
-                        SandboxRoutes.shutdown.rawValue: service.shutdown,
-                        SandboxRoutes.statistics.rawValue: service.statistics,
+                        RuntimeRoutes.createSandbox.rawValue: XPCServer.route(service.createSandbox),
+                        RuntimeRoutes.startSandbox.rawValue: XPCServer.route(service.startSandbox),
+                        RuntimeRoutes.showGUI.rawValue: XPCServer.route(service.showGUI),
+                        RuntimeRoutes.bootstrap.rawValue: XPCServer.route(service.bootstrap),
+                        RuntimeRoutes.createWorkload.rawValue: XPCServer.route(service.createWorkload),
+                        RuntimeRoutes.startWorkload.rawValue: XPCServer.route(service.startWorkload),
+                        RuntimeRoutes.attachWorkload.rawValue: XPCServer.route(service.attachWorkload),
+                        RuntimeRoutes.detachWorkloadAttachment.rawValue: XPCServer.route(service.detachWorkloadAttachment),
+                        RuntimeRoutes.stopWorkload.rawValue: XPCServer.route(service.stopWorkload),
+                        RuntimeRoutes.removeWorkload.rawValue: XPCServer.route(service.removeWorkload),
+                        RuntimeRoutes.createProcess.rawValue: XPCServer.route(service.createProcess),
+                        RuntimeRoutes.state.rawValue: XPCServer.route(service.state),
+                        RuntimeRoutes.inspectWorkload.rawValue: XPCServer.route(service.inspectWorkload),
+                        RuntimeRoutes.stop.rawValue: XPCServer.route(service.stop),
+                        RuntimeRoutes.kill.rawValue: XPCServer.route(service.kill),
+                        RuntimeRoutes.resize.rawValue: XPCServer.route(service.resize),
+                        RuntimeRoutes.wait.rawValue: XPCServer.route(service.wait),
+                        RuntimeRoutes.start.rawValue: XPCServer.route(service.startProcess),
+                        RuntimeRoutes.dial.rawValue: XPCServer.route(service.dial),
+                        RuntimeRoutes.fsBegin.rawValue: XPCServer.route(service.fsBegin),
+                        RuntimeRoutes.fsChunk.rawValue: XPCServer.route(service.fsChunk),
+                        RuntimeRoutes.fsEnd.rawValue: XPCServer.route(service.fsEnd),
+                        RuntimeRoutes.fsReadBegin.rawValue: XPCServer.route(service.fsReadBegin),
+                        RuntimeRoutes.fsReadChunk.rawValue: XPCServer.route(service.fsReadChunk),
+                        RuntimeRoutes.fsReadEnd.rawValue: XPCServer.route(service.fsReadEnd),
+                        RuntimeRoutes.fsListDir.rawValue: XPCServer.route(service.fsListDir),
+                        RuntimeRoutes.prepareNetwork.rawValue: XPCServer.route(service.prepareSandboxNetwork),
+                        RuntimeRoutes.inspectNetwork.rawValue: XPCServer.route(service.inspectSandboxNetwork),
+                        RuntimeRoutes.releaseNetwork.rawValue: XPCServer.route(service.releaseSandboxNetwork),
+                        RuntimeRoutes.applyNetworkPolicy.rawValue: XPCServer.route(service.applySandboxPolicy),
+                        RuntimeRoutes.removeNetworkPolicy.rawValue: XPCServer.route(service.removeSandboxPolicy),
+                        RuntimeRoutes.inspectNetworkPolicy.rawValue: XPCServer.route(service.inspectSandboxPolicy),
+                        RuntimeRoutes.shutdown.rawValue: XPCServer.route(service.shutdown),
+                        RuntimeRoutes.statistics.rawValue: XPCServer.route(service.statistics),
                     ],
                     log: log
                 )

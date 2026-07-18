@@ -14,7 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import ContainerNetworkServiceClient
+import ContainerNetworkClient
 import ContainerResource
 import ContainerXPC
 import ContainerizationError
@@ -27,6 +27,7 @@ struct PreparedMacOSNetwork {
     let devices: [VZNetworkDeviceConfiguration]
     let lease: MacOSGuestNetworkLease?
     let ownedNetworks: [ManagedVMNetNetwork]
+    let sessions: [XPCClientSession]
 }
 
 final class ManagedVMNetNetwork: @unchecked Sendable {
@@ -77,7 +78,8 @@ struct VirtualizationNATNetworkBackend: MacOSNetworkBackend {
         return PreparedMacOSNetwork(
             devices: [device],
             lease: nil,
-            ownedNetworks: []
+            ownedNetworks: [],
+            sessions: []
         )
     }
 }
@@ -153,7 +155,16 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
         var liveAttachments: [Attachment] = []
         var ownedNetworks: [ManagedVMNetNetwork] = []
         var preparedDevices: [VZNetworkDeviceConfiguration] = []
+        var sessions: [XPCClientSession] = []
         var networkRefs: [String: ManagedVMNetNetwork] = [:]
+        var retainsNetworkSessions = false
+        defer {
+            if !retainsNetworkSessions {
+                for session in sessions {
+                    session.close()
+                }
+            }
+        }
 
         do {
             for request in requests {
@@ -195,10 +206,13 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                     return nil
                 }
 
-                let client = NetworkClient(id: request.network)
+                let client = NetworkClient(id: request.network, plugin: "container-network-vmnet")
+                let session = client.connect()
+                sessions.append(session)
                 let (attachment, additionalData) = try await client.allocate(
                     hostname: leasedInterface.attachment.hostname,
-                    macAddress: leasedInterface.attachment.macAddress
+                    macAddress: leasedInterface.attachment.macAddress,
+                    on: session
                 )
 
                 let managedNetwork = try resolveManagedNetwork(
@@ -222,13 +236,15 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                 "recovered macOS guest network state from persisted lease",
                 metadata: ["interfaces": "\(liveAttachments.count)"]
             )
+            retainsNetworkSessions = true
             return PreparedMacOSNetwork(
                 devices: preparedDevices,
                 lease: makeLease(
                     containerConfig: containerConfig,
                     attachments: liveAttachments
                 ),
-                ownedNetworks: ownedNetworks
+                ownedNetworks: ownedNetworks,
+                sessions: sessions
             )
         } catch {
             log.warning(

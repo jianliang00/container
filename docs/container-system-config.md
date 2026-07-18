@@ -5,9 +5,9 @@
 >
 > Example: [release 0.4.1 tag](https://github.com/apple/container/tree/0.4.1)
 
-For a guided walk-through on setting default values, see [Container system config tutorial](./tutorials/container-system-config-tutorial.md). 
+For a guided walk-through on setting default values, see [Container system config tutorial](./tutorials/container-system-config-tutorial.md).
 
-Source of truth: [`Sources/ContainerPersistence/ContainerSystemConfig.swift`](../Sources/ContainerPersistence/ContainerSystemConfig.swift). 
+Source of truth: [`Sources/ContainerPersistence/ContainerSystemConfig.swift`](../Sources/ContainerPersistence/ContainerSystemConfig.swift).
 
 ## Top-level schema
 

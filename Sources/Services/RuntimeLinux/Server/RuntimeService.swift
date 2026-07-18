@@ -69,10 +69,15 @@ public actor RuntimeService {
         }
 
         public func doExit(exitStatus: ExitStatus) {
+            guard self.exitStatus == nil else {
+                return
+            }
+
             for cc in continuations {
                 cc.resume(returning: exitStatus)
             }
 
+            continuations.removeAll()
             self.exitStatus = exitStatus
         }
     }
@@ -465,7 +470,9 @@ public actor RuntimeService {
     ///     that contains the state information.
     @Sendable
     public func state(_ message: XPCMessage) async throws -> XPCMessage {
-        self.log.info("`state` xpc handler")
+        self.log.debug("enter", metadata: ["func": "\(#function)"])
+        defer { self.log.debug("exit", metadata: ["func": "\(#function)"]) }
+
         let sandboxConfiguration = container.map { SandboxConfiguration(containerConfiguration: $0.config) }
         var status: RuntimeStatus = .unknown
         var networks: [Attachment] = []
@@ -1488,7 +1495,7 @@ extension FileHandle: @retroactive ReaderStream, @retroactive Writer {
 
 // MARK: State handler and bundle creation helpers
 
-extension SandboxService {
+extension RuntimeService {
     private func removeStoppedWorkloadProcessInfo(id: String) throws -> ProcessInfo {
         if let container, id == container.container.id {
             throw ContainerizationError(.invalidArgument, message: "cannot remove the init workload \(id)")
@@ -1504,18 +1511,17 @@ extension SandboxService {
         }
 
         let fallbackStatus = ExitStatus(exitCode: 255, exitedAt: Date())
-        for continuation in self.waiters[id] ?? [] {
-            continuation.resume(returning: fallbackStatus)
-        }
-        self.removeWaiters(for: id)
+        self.releaseWaiters(for: id, status: fallbackStatus)
+        self.waiters.removeValue(forKey: id)
         self.processes.removeValue(forKey: id)
         return processInfo
     }
 
-    private func addWaiter(id: String, cont: CheckedContinuation<ExitStatus, Never>) {
-        var current = self.waiters[id] ?? []
-        current.append(cont)
-        self.waiters[id] = current
+    private func initializeWaiters(for id: String) throws {
+        guard waiters[id] == nil else {
+            throw ContainerizationError(.invalidState, message: "waiter for \(id) already initialized")
+        }
+        waiters[id] = ExitWaiter()
     }
 
     private func waitForExit(id: String, cont: CheckedContinuation<ExitStatus, Never>) {
@@ -1581,19 +1587,22 @@ extension SandboxService {
         }
 
         let status = workloadRuntimeStatus(from: processInfo.state)
-        let exitCode = workloadExitCode(from: processInfo.state)
+        let exitStatus = waiters[id]?.exitStatus
         return WorkloadSnapshot(
             configuration: .init(id: id, processConfiguration: processInfo.config),
             status: status,
-            exitCode: exitCode
+            exitCode: exitStatus?.exitCode,
+            exitedAt: exitStatus?.exitedAt
         )
     }
 
     private func workloadSnapshot(containerInfo: ContainerInfo) -> WorkloadSnapshot {
-        WorkloadSnapshot(
+        let exitStatus = waiters[containerInfo.container.id]?.exitStatus
+        return WorkloadSnapshot(
             configuration: .init(id: containerInfo.container.id, processConfiguration: containerInfo.config.initProcess),
             status: workloadRuntimeStatus(from: state),
-            exitCode: workloadExitCode(from: state),
+            exitCode: exitStatus?.exitCode,
+            exitedAt: exitStatus?.exitedAt,
             stdoutLogPath: containerInfo.bundle.containerLog.path,
             stderrLogPath: containerInfo.bundle.containerLog.path
         )
@@ -1605,16 +1614,9 @@ extension SandboxService {
             .running
         case .stopping:
             .stopping
-        case .created, .booted, .stopped(_), .shuttingDown:
+        case .created, .booted, .stopped, .shuttingDown:
             .stopped
         }
-    }
-
-    private func workloadExitCode(from state: State) -> Int32? {
-        guard case .stopped(let code) = state else {
-            return nil
-        }
-        return code
     }
 
     private struct ProcessInfo {

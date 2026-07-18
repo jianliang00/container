@@ -14,9 +14,9 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import ContainerNetworkServiceClient
+import ContainerNetworkClient
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import ContainerXPC
 import ContainerizationError
 import ContainerizationExtras
@@ -27,24 +27,74 @@ public struct SandboxNetworkControl: Sendable {
     let lookup: @Sendable (_ network: String, _ hostname: String) async throws -> Attachment?
     let deallocate: @Sendable (_ network: String, _ hostname: String) async throws -> Void
 
-    public static let live = SandboxNetworkControl(
-        allocate: { network, hostname, macAddress in
-            let client = NetworkClient(id: network)
+    public static var live: SandboxNetworkControl {
+        let sessions = SandboxNetworkSessionStore()
+        return SandboxNetworkControl(
+            allocate: { network, hostname, macAddress in
+                try await sessions.allocate(network: network, hostname: hostname, macAddress: macAddress)
+            },
+            lookup: { network, hostname in
+                try await sessions.lookup(network: network, hostname: hostname)
+            },
+            deallocate: { network, hostname in
+                await sessions.release(network: network, hostname: hostname)
+            }
+        )
+    }
+}
+
+private actor SandboxNetworkSessionStore {
+    private struct Key: Hashable, Sendable {
+        let network: String
+        let hostname: String
+    }
+
+    private struct Lease: Sendable {
+        let session: XPCClientSession
+        let attachment: Attachment
+    }
+
+    private static let plugin = "container-network-vmnet"
+    private var leases: [Key: Lease] = [:]
+
+    deinit {
+        for lease in leases.values {
+            lease.session.close()
+        }
+    }
+
+    func allocate(network: String, hostname: String, macAddress: MACAddress?) async throws -> Attachment {
+        let key = Key(network: network, hostname: hostname)
+        if let lease = leases[key] {
+            return lease.attachment
+        }
+
+        let client = NetworkClient(id: network, plugin: Self.plugin)
+        let session = client.connect()
+        do {
             let (attachment, _) = try await client.allocate(
                 hostname: hostname,
-                macAddress: macAddress
+                macAddress: macAddress,
+                on: session
             )
+            leases[key] = Lease(session: session, attachment: attachment)
             return attachment
-        },
-        lookup: { network, hostname in
-            let client = NetworkClient(id: network)
-            return try await client.lookup(hostname: hostname)
-        },
-        deallocate: { network, hostname in
-            let client = NetworkClient(id: network)
-            try await client.deallocate(hostname: hostname)
+        } catch {
+            session.close()
+            throw error
         }
-    )
+    }
+
+    func lookup(network: String, hostname: String) async throws -> Attachment? {
+        if let lease = leases[Key(network: network, hostname: hostname)] {
+            return lease.attachment
+        }
+        return try await NetworkClient(id: network, plugin: Self.plugin).lookup(hostname: hostname)
+    }
+
+    func release(network: String, hostname: String) {
+        leases.removeValue(forKey: Key(network: network, hostname: hostname))?.session.close()
+    }
 }
 
 extension MacOSSandboxService {
@@ -115,20 +165,54 @@ extension MacOSSandboxService {
             return SandboxNetworkState(attachments: [])
         }
 
-        if let lease = try MacOSGuestNetworkLeaseStore.load(from: root) {
-            writeContainerLog(Data(("reused persisted guest network lease interfaces=\(lease.interfaces.count)\n").utf8))
-            return SandboxNetworkState(attachments: lease.attachments)
-        }
-
+        let persistedLease = try MacOSGuestNetworkLeaseStore.load(from: root)
         var attachments: [Attachment] = []
+        var acquiredAttachments: [Attachment] = []
         do {
             for request in containerConfig.macOSGuestNetworkRequests() {
+                let persistedAttachment = persistedLease?.interfaces.first {
+                    $0.backend == .vmnetShared
+                        && $0.attachment.network == request.network
+                        && $0.attachment.hostname == request.hostname
+                }?.attachment
+                let liveAttachment: Attachment?
+                do {
+                    liveAttachment = try await networkControl.lookup(
+                        request.network,
+                        request.hostname
+                    )
+                } catch {
+                    liveAttachment = nil
+                    writeContainerLog(
+                        Data(
+                            ("failed to validate persisted guest network allocation network=\(request.network) hostname=\(request.hostname): \(error)\n").utf8
+                        )
+                    )
+                }
+
+                let persistedLeaseIsLive =
+                    persistedAttachment.map { persisted in
+                        guard let liveAttachment else {
+                            return false
+                        }
+                        return liveAttachment.withDNS(nil) == persisted.withDNS(nil)
+                            && request.macAddress.map { liveAttachment.macAddress == $0 } != false
+                    } ?? false
+                if persistedAttachment != nil, !persistedLeaseIsLive {
+                    writeContainerLog(
+                        Data(
+                            ("refreshing stale guest network lease network=\(request.network) hostname=\(request.hostname)\n").utf8
+                        )
+                    )
+                }
+
                 let attachment = try await networkControl.allocate(
                     request.network,
                     request.hostname,
-                    request.macAddress
+                    request.macAddress ?? persistedAttachment?.macAddress
                 )
                 attachments.append(attachment)
+                acquiredAttachments.append(attachment)
             }
 
             let projectedAttachments = containerConfig.macOSGuestReportedNetworkAttachments(attachments)
@@ -138,10 +222,11 @@ extension MacOSSandboxService {
                 }
             )
             try MacOSGuestNetworkLeaseStore.save(lease, in: root)
-            writeContainerLog(Data(("prepared persisted guest network lease interfaces=\(projectedAttachments.count)\n").utf8))
+            let action = persistedLease == nil ? "prepared" : "refreshed"
+            writeContainerLog(Data(("\(action) persisted guest network lease interfaces=\(projectedAttachments.count)\n").utf8))
             return SandboxNetworkState(attachments: projectedAttachments)
         } catch {
-            for attachment in attachments {
+            for attachment in acquiredAttachments {
                 try? await networkControl.deallocate(
                     attachment.network,
                     attachment.hostname
@@ -347,7 +432,7 @@ extension MacOSSandboxService {
 
 extension XPCMessage {
     fileprivate func sandboxNetworkPolicy() throws -> SandboxNetworkPolicy {
-        guard let data = self.dataNoCopy(key: SandboxKeys.networkPolicy.rawValue) else {
+        guard let data = self.dataNoCopy(key: RuntimeKeys.networkPolicy.rawValue) else {
             throw ContainerizationError(.invalidArgument, message: "missing sandbox network policy payload")
         }
         return try JSONDecoder().decode(SandboxNetworkPolicy.self, from: data)
@@ -358,6 +443,6 @@ extension XPCMessage {
             return
         }
         let data = try JSONEncoder().encode(state)
-        self.set(key: SandboxKeys.networkPolicyState.rawValue, value: data)
+        self.set(key: RuntimeKeys.networkPolicyState.rawValue, value: data)
     }
 }

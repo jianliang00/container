@@ -292,13 +292,24 @@ extension APIServer {
 
             routes[XPCRoute.containerList] = XPCServer.route(harness.list)
             routes[XPCRoute.containerCreate] = XPCServer.route(harness.create)
+            routes[XPCRoute.containerState] = XPCServer.route(harness.inspectSandbox)
             routes[XPCRoute.containerDelete] = XPCServer.route(harness.delete)
             routes[XPCRoute.containerLogs] = XPCServer.route(harness.logs)
+            routes[XPCRoute.containerSandboxLogPaths] = XPCServer.route(harness.sandboxLogPaths)
             routes[XPCRoute.containerBootstrap] = XPCServer.route(harness.bootstrap)
+            routes[XPCRoute.containerStartSandbox] = XPCServer.route(harness.startSandbox)
+            routes[XPCRoute.containerShowSandboxGUI] = XPCServer.route(harness.showSandboxGUI)
             routes[XPCRoute.containerDial] = XPCServer.route(harness.dial)
             routes[XPCRoute.containerStop] = XPCServer.route(harness.stop)
+            routes[XPCRoute.containerCreateWorkload] = XPCServer.route(harness.createWorkload)
             routes[XPCRoute.containerStartProcess] = XPCServer.route(harness.startProcess)
+            routes[XPCRoute.containerStartWorkload] = XPCServer.route(harness.startWorkload)
+            routes[XPCRoute.containerAttachWorkload] = XPCServer.route(harness.attachWorkload)
+            routes[XPCRoute.containerDetachWorkloadAttachment] = XPCServer.route(harness.detachWorkloadAttachment)
             routes[XPCRoute.containerCreateProcess] = XPCServer.route(harness.createProcess)
+            routes[XPCRoute.containerStopWorkload] = XPCServer.route(harness.stopWorkload)
+            routes[XPCRoute.containerRemoveWorkload] = XPCServer.route(harness.removeWorkload)
+            routes[XPCRoute.containerInspectWorkload] = XPCServer.route(harness.inspectWorkload)
             routes[XPCRoute.containerResize] = XPCServer.route(harness.resize)
             routes[XPCRoute.containerWait] = XPCServer.route(harness.wait)
             routes[XPCRoute.containerKill] = XPCServer.route(harness.kill)
@@ -353,6 +364,12 @@ extension APIServer {
             }
             routes[XPCRoute.networkList] = XPCServer.route(harness.list)
             routes[XPCRoute.networkDelete] = XPCServer.route(harness.delete)
+            routes[XPCRoute.networkPrepareSandbox] = XPCServer.route(harness.prepareSandboxNetwork)
+            routes[XPCRoute.networkInspectSandbox] = XPCServer.route(harness.inspectSandboxNetwork)
+            routes[XPCRoute.networkReleaseSandbox] = XPCServer.route(harness.releaseSandboxNetwork)
+            routes[XPCRoute.networkApplySandboxPolicy] = XPCServer.route(harness.applySandboxPolicy)
+            routes[XPCRoute.networkRemoveSandboxPolicy] = XPCServer.route(harness.removeSandboxPolicy)
+            routes[XPCRoute.networkInspectSandboxPolicy] = XPCServer.route(harness.inspectSandboxPolicy)
 
             return service
         }
@@ -385,7 +402,9 @@ extension APIServer {
         ) throws {
             log.info("initializing disk usage service")
 
+            let appRootURL = URL(fileURLWithPath: appRoot.string)
             let service = DiskUsageService(
+                appRoot: appRootURL,
                 containersService: containersService,
                 volumesService: volumesService,
                 log: log

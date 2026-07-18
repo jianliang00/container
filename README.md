@@ -31,6 +31,35 @@ Start the system service with:
 container system start
 ```
 
+### Upgrade or downgrade
+
+For both upgrading and downgrading, you can manually download and install the signed installer package by following the steps from [initial install](#initial-install) or use the `update-container.sh` script (installed to `/usr/local/bin`).
+
+If you're upgrading or downgrading, you must stop your existing `container`:
+
+```bash
+container system stop
+```
+
+To upgrade to the latest release, simply run the command below:
+
+```bash
+/usr/local/bin/update-container.sh
+```
+
+To downgrade, you must uninstall your existing `container` (the `-k` flag keeps your user data, while `-d` removes it):
+
+```bash
+/usr/local/bin/uninstall-container.sh -k
+/usr/local/bin/update-container.sh -v 0.3.0
+```
+
+Start the system service with:
+
+```bash
+container system start
+```
+
 ### macOS guest and GUI support
 
 In addition to Linux containers, `container` can run supported `darwin/arm64` macOS guest images with the macOS runtime:

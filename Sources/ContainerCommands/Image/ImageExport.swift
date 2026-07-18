@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerPersistence
 import ContainerizationOCI
 import Foundation
 
@@ -53,13 +54,17 @@ extension Application {
         var reference: String
 
         public func run() async throws {
+            let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
             let exportPlatform: Platform
             if let platform {
                 exportPlatform = try Platform(from: platform)
             } else {
                 exportPlatform = Platform(arch: "arm64", os: "darwin")
             }
-            let image = try await ClientImage.get(reference: reference)
+            let image = try await ClientImage.get(
+                reference: reference,
+                containerSystemConfig: containerSystemConfig
+            )
             try await image.exportMacOSImageDirectory(
                 to: output,
                 platform: exportPlatform,

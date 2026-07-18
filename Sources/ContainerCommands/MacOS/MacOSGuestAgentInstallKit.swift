@@ -62,7 +62,8 @@ extension Application {
         public var logOptions: Flags.Logging
 
         public func run() async throws {
-            let sources = try Self.resolveSources(cliExecutableURL: CommandLine.executablePathUrl.standardizedFileURL)
+            let executableURL = URL(filePath: CommandLine.executablePath.string).standardizedFileURL
+            let sources = try Self.resolveSources(cliExecutableURL: executableURL)
             try Self.writeInstallKit(
                 sources: sources,
                 outputDirectory: output,

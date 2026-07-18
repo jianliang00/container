@@ -81,8 +81,6 @@ extension Application {
         @Option(name: .shortAndLong, help: ArgumentHelp("Path to Dockerfile", valueName: "path"))
         var file: String?
 
-        var dockerfile: String = "-"
-
         @Option(name: .shortAndLong, help: ArgumentHelp("Set a label", valueName: "key=val"))
         var label: [String] = []
 
@@ -176,6 +174,32 @@ extension Application {
                 }
                 let buildFilePath = try resolveBuildFilePath()
                 let buildFileData = try loadBuildFileData(from: buildFilePath)
+                let ignoreFileData: Data? =
+                    buildFilePath == "-"
+                    ? nil
+                    : try? Data(contentsOf: URL(filePath: buildFilePath + ".dockerignore"))
+
+                // BUG: See https://github.com/apple/container/issues/735.
+                // Reject dockerfiles larger than 16 KiB before attempting to build.
+                let maxDockerfileSize = 16 * 1024
+                guard buildFileData.count < maxDockerfileSize else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: """
+                            Dockerfile size (\(buildFileData.count) bytes) exceeds the maximum allowed size of \(maxDockerfileSize) bytes. \
+                            See https://github.com/apple/container/issues/735.
+                            """
+                    )
+                }
+
+                let secretsData: [String: Data] = try self.secrets.mapValues { secret in
+                    switch secret {
+                    case .data(let data):
+                        return data
+                    case .file(let path):
+                        return try Data(contentsOf: URL(fileURLWithPath: path))
+                    }
+                }
 
                 let systemHealth = try await ClientHealthCheck.ping(timeout: .seconds(10))
                 let exportPath = systemHealth.appRoot
@@ -225,7 +249,10 @@ extension Application {
                     }
                     progress.start()
 
-                    let builder = try await dialBuilder(progress: progress)
+                    let builder = try await dialBuilder(
+                        progress: progress,
+                        containerSystemConfig: containerSystemConfig
+                    )
                     try await withThrowingTaskGroup(of: Void.self) { [terminal] group in
                         defer {
                             group.cancelAll()
@@ -243,13 +270,15 @@ extension Application {
                                 handler.cancel()
                             }
                         }
-                        group.addTask { [terminal, buildArg, contextDir, label, noCache, target, quiet, cacheIn, cacheOut, pull] in
+                        group.addTask { [terminal, buildArg, secretsData, contextDir, ignoreFileData, label, noCache, target, quiet, cacheIn, cacheOut, pull] in
                             let config = Builder.BuildConfig(
                                 buildID: buildID,
                                 contentStore: RemoteContentStoreClient(),
                                 buildArgs: buildArg,
+                                secrets: secretsData,
                                 contextDir: contextDir,
                                 dockerfile: buildFileData,
+                                dockerignore: ignoreFileData,
                                 labels: label,
                                 noCache: noCache,
                                 platforms: [Platform](platforms),
@@ -260,7 +289,8 @@ extension Application {
                                 exports: exports,
                                 cacheIn: cacheIn,
                                 cacheOut: cacheOut,
-                                pull: pull
+                                pull: pull,
+                                containerSystemConfig: containerSystemConfig
                             )
                             progress.finish()
                             try await builder.build(config)
@@ -301,8 +331,8 @@ extension Application {
                                 dockerfile: buildFileData,
                                 buildArgs: buildArg,
                                 labelArgs: label,
-                                cpus: cpus,
-                                memory: memory,
+                                cpus: cpus ?? 2,
+                                memory: memory ?? "2048MB",
                                 noCache: noCache,
                                 pull: pull,
                                 quiet: quiet,
@@ -406,6 +436,10 @@ extension Application {
                 return results
             }
 
+            if let envPlatform = try DefaultPlatform.fromEnvironment(log: log) {
+                return [envPlatform]
+            }
+
             for o in (self.os.flatMap { $0 }) {
                 for a in (self.arch.flatMap { $0 }) {
                     guard let platform = try? Platform(from: "\(o)/\(a)") else {
@@ -477,24 +511,31 @@ extension Application {
             return try Data(contentsOf: URL(filePath: buildFilePath))
         }
 
-        private func dialBuilder(progress: ProgressBar) async throws -> Builder {
+        private func dialBuilder(
+            progress: ProgressBar,
+            containerSystemConfig: ContainerSystemConfig
+        ) async throws -> Builder {
             let timeout: Duration = .seconds(300)
             let dnsNameservers = self.dns.nameservers
+            let dnsDomain = self.dns.domain
+            let dnsSearchDomains = self.dns.searchDomains
+            let dnsOptions = self.dns.options
             progress.set(description: "Dialing builder")
 
-            let builder: Builder? = try await withThrowingTaskGroup(of: Builder.self) { [vsockPort, cpus, memory, dnsNameservers] group in
+            let builder: Builder? = try await withThrowingTaskGroup(of: Builder.self) {
+                [vsockPort, cpus, memory, dnsNameservers, dnsDomain, dnsSearchDomains, dnsOptions] group in
                 defer {
                     group.cancelAll()
                 }
 
-                group.addTask { [vsockPort, cpus, memory, log, dnsNameservers] in
+                group.addTask { [vsockPort, cpus, memory, log, dnsNameservers, dnsDomain, dnsSearchDomains, dnsOptions] in
                     let client = ContainerClient()
                     while true {
                         do {
                             let fh = try await client.dial(id: "buildkit", port: vsockPort)
 
                             let threadGroup: MultiThreadedEventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
-                            let builder = try Builder(socket: fh, group: threadGroup)
+                            let builder = try await Builder(socket: fh, group: threadGroup, logger: log)
                             _ = try await builder.info()
                             return builder
                         } catch {
@@ -506,7 +547,11 @@ extension Application {
                                 memory: memory,
                                 log: log,
                                 dnsNameservers: dnsNameservers,
-                                progressUpdate: progress.handler
+                                dnsDomain: dnsDomain,
+                                dnsSearchDomains: dnsSearchDomains,
+                                dnsOptions: dnsOptions,
+                                progressUpdate: progress.handler,
+                                containerSystemConfig: containerSystemConfig
                             )
 
                             try await Task.sleep(for: .seconds(5))
@@ -528,7 +573,7 @@ extension Application {
             return builder
         }
 
-        public func validate() throws {
+        public mutating func validate() throws {
             // NOTE: We'll "validate" the Dockerfile later.
             guard FileManager.default.fileExists(atPath: contextDir) else {
                 throw ValidationError("context dir does not exist \(contextDir)")
@@ -539,52 +584,23 @@ extension Application {
                 }
             }
 
-            switch file {
-            case "-":
-                dockerfile = "-"
-                break
-            case .some(let filepath):
-                let fileURL = URL(fileURLWithPath: filepath, relativeTo: .currentDirectory())
-                guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                    throw ValidationError("dockerfile does not exist \(filepath)")
-                }
-
-                dockerfile = fileURL.path
-                break
-            case .none:
-                guard let defaultDockerfile = try BuildFile.resolvePath(contextDir: contextDir) else {
-                    throw ValidationError("dockerfile not found in context dir")
-                }
-
-                guard FileManager.default.fileExists(atPath: defaultDockerfile) else {
-                    throw ValidationError("dockerfile does not exist \(defaultDockerfile)")
-                }
-
-                dockerfile = defaultDockerfile
-                break
-            }
-
-            // Parse --secret args
             for secret in self.secret {
                 let parts = secret.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
                 guard parts[0].hasPrefix("id=") else {
                     throw ValidationError("secret must start with id=<key> \(secret)")
                 }
                 let key = String(parts[0].dropFirst(3))
-                guard !key.contains("=") else {
-                    throw ValidationError("secret id cannot contain '=' \(key)")
+                guard !key.isEmpty, !key.contains("=") else {
+                    throw ValidationError("invalid secret id \(key)")
                 }
                 if parts.count == 1 || parts[1].hasPrefix("env=") {
                     let env = parts.count == 1 ? key : String(parts[1].dropFirst(4))
-                    // Using getenv/strlen over processInfo.environment to support
-                    // non-UTF-8 env var data.
                     guard let ptr = getenv(env) else {
                         throw ValidationError("secret env var doesn't exist \(env)")
                     }
                     self.secrets[key] = .data(Data(bytes: ptr, count: strlen(ptr)))
                 } else if parts[1].hasPrefix("src=") {
-                    let path = String(parts[1].dropFirst(4))
-                    self.secrets[key] = .file(path)
+                    self.secrets[key] = .file(String(parts[1].dropFirst(4)))
                 } else {
                     throw ValidationError("secret bad value \(parts[1])")
                 }

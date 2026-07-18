@@ -16,8 +16,12 @@
 BUILD_CONFIGURATION ?= debug
 WARNINGS_AS_ERRORS ?= true
 CONTAINER_SKIP_VIRTUALIZATION_TESTS ?= 0
-SWIFT_CONFIGURATION := $(if $(filter-out false,$(WARNINGS_AS_ERRORS)),-Xswiftc -warnings-as-errors)
+SWIFT_CONFIGURATION := $(if $(filter-out false,$(WARNINGS_AS_ERRORS)),-Xswiftc -warnings-as-errors) -Xswiftc -enable-testing
 SKIP_VIRTUALIZATION_TESTS := $(filter 1 true TRUE yes YES,$(CONTAINER_SKIP_VIRTUALIZATION_TESTS))
+# Code-coverage instrumentation, layered onto the shared build stages. Empty for
+# ordinary builds; the coverage-* targets opt in via a target-specific value so
+# only those goals compile instrumented binaries.
+COVERAGE_FLAG ?=
 export RELEASE_VERSION ?= $(shell git describe --tags --always)
 export GIT_COMMIT := $(shell git rev-parse HEAD)
 
@@ -135,24 +139,30 @@ $(STAGING_DIR):
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share)"
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/macos-image-prepare/bin)"
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/macos-vm-manager/bin)"
+	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/machine-apiserver/bin)"
+	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/machine-apiserver/resources)"
 
 	@install "$(BUILD_BIN_DIR)/container" "$(join $(STAGING_DIR), bin/container)"
 	@install "$(BUILD_BIN_DIR)/container-apiserver" "$(join $(STAGING_DIR), bin/container-apiserver)"
 	@install "$(BUILD_BIN_DIR)/container-runtime-linux" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
-	@install config/container-runtime-linux-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/config.json)"
+	@install Sources/Plugins/RuntimeLinux/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/config.toml)"
 	@install "$(BUILD_BIN_DIR)/container-runtime-macos" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
 	@install "$(BUILD_BIN_DIR)/container-runtime-macos-sidecar" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar)"
-	@install config/container-runtime-macos-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/config.json)"
+	@install Sources/Helpers/RuntimeMacOS/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/config.toml)"
 	@install "$(BUILD_BIN_DIR)/container-network-vmnet" "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet)"
 	@install Sources/Plugins/NetworkVmnet/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/container-network-vmnet/config.toml)"
 	@install "$(BUILD_BIN_DIR)/container-core-images" "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin/container-core-images)"
-	@install config/container-core-images-config.json "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/config.json)"
+	@install Sources/Plugins/CoreImages/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/config.toml)"
 	@install "$(BUILD_BIN_DIR)/container-macos-guest-agent" "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
 	@install -m 0755 scripts/macos-guest-agent/install.sh "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share/install.sh)"
 	@install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share/install-in-guest-from-seed.sh)"
 	@install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share/container-macos-guest-agent.plist)"
 	@install "$(BUILD_BIN_DIR)/container-macos-image-prepare" "$(join $(STAGING_DIR), libexec/container/macos-image-prepare/bin/container-macos-image-prepare)"
 	@install "$(BUILD_BIN_DIR)/container-macos-vm-manager" "$(join $(STAGING_DIR), libexec/container/macos-vm-manager/bin/container-macos-vm-manager)"
+	@install "$(BUILD_BIN_DIR)/machine-apiserver" "$(join $(STAGING_DIR), libexec/container/plugins/machine-apiserver/bin/machine-apiserver)"
+	@install Sources/Plugins/MachineAPIServer/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/machine-apiserver/config.toml)"
+	@install Sources/Plugins/MachineAPIServer/Resources/init "$(join $(STAGING_DIR), libexec/container/plugins/machine-apiserver/resources/init)"
+	@install Sources/Plugins/MachineAPIServer/Resources/create-user.sh "$(join $(STAGING_DIR), libexec/container/plugins/machine-apiserver/resources/create-user.sh)"
 
 	@echo Install update script
 	@install scripts/update-container.sh "$(join $(STAGING_DIR), bin/update-container.sh)"
@@ -172,6 +182,7 @@ installer-pkg: $(STAGING_DIR)
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/macos-image-prepare/bin/container-macos-image-prepare)"
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/macos-vm-manager/bin/container-macos-vm-manager)"
+	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/machine-apiserver/bin/machine-apiserver)"
 
 	@echo Creating application installer
 	@pkgbuild --root "$(STAGING_DIR)" --identifier com.apple.container-installer --install-location /usr/local --version ${RELEASE_VERSION} "$(PKG_UNSIGNED_PATH)"
@@ -217,16 +228,18 @@ dsym:
 	@(cd "$(dir $(DSYM_DIR))" ; zip -r $(notdir $(DSYM_PATH)) $(notdir $(DSYM_DIR)))
 
 .PHONY: test
-test:
-	@$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI
+test: build-tests
+	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests
 
 .PHONY: install-kernel
 install-kernel:
 ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
 	@echo Skipping kernel installation because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
 else
+	@echo Stopping system before installing kernel
 	@bin/container system stop || true
-	@bin/container system start --timeout 60 --enable-kernel-install $(SYSTEM_START_OPTS)
+	@echo Starting system to install kernel
+	@bin/container --debug system start --timeout 60 --enable-kernel-install $(SYSTEM_START_OPTS)
 endif
 
 
@@ -242,6 +255,8 @@ COV_BINARIES := \
 	$(BUILD_BIN_DIR)/container \
 	$(BUILD_BIN_DIR)/container-apiserver \
 	$(BUILD_BIN_DIR)/container-runtime-linux \
+	$(BUILD_BIN_DIR)/container-runtime-macos \
+	$(BUILD_BIN_DIR)/container-runtime-macos-sidecar \
 	$(BUILD_BIN_DIR)/container-network-vmnet \
 	$(BUILD_BIN_DIR)/container-core-images \
 	$(BUILD_BIN_DIR)/machine-apiserver
@@ -344,40 +359,11 @@ define RUN_INTEGRATION
 endef
 
 .PHONY: integration
-integration:
+integration: init-block
 ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
 	@echo Skipping CLI integration tests because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
 else
-	@"$(MAKE)" init-block
-	@echo Ensuring apiserver stopped before the CLI integration tests...
-	@bin/container system stop && sleep 3 && scripts/ensure-container-stopped.sh
-	@echo Running the integration tests...
-	@bin/container system start --timeout 60 $(SYSTEM_START_OPTS) && \
-	echo "Starting CLI integration tests" && \
-	{ \
-		exit_code=0; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLINetwork || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunLifecycle || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIExecCommand || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLICreateCommand || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunCommand1 || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunCommand2 || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunCommand3 || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIPruneCommand || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRegistry || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIStatsCommand || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIImagesCommand || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunBase || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIRunInitImage || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIBuildBase || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIVolumes || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIKernelSet || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLIAnonymousVolumes || exit_code=1 ; \
-		$(SWIFT) test -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter TestCLINoParallelCases || exit_code=1 ; \
-		echo Ensuring apiserver stopped after the CLI integration tests ; \
-		scripts/ensure-container-stopped.sh ; \
-		exit $${exit_code} ; \
-	}
+	$(RUN_INTEGRATION)
 endif
 
 .PHONY: cri-crictl-smoke
@@ -387,6 +373,52 @@ ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
 else
 	@BUILD_CONFIGURATION=$(BUILD_CONFIGURATION) scripts/cri-crictl-smoke.sh
 endif
+
+.PHONY: coverage-integration
+coverage-integration: INTEGRATION_SWIFT_EXTRA = --skip-build --enable-code-coverage
+coverage-integration: INTEGRATION_POST_TEST = cp $(COV_DATA_DIR)/*.profraw $(COVERAGE_OUTPUT_DIR)/integration/ || true ;
+# Continuous mode (%c) mmaps the profraw and syncs counters live. The XPC helper
+# services are torn down by `launchctl bootout` (SIGTERM/SIGKILL) rather than
+# exiting cleanly, so a non-continuous profile (written by an atexit handler that
+# never runs on SIGKILL) would lose the helpers' counters. %p-%m keeps each
+# process/module profile in its own file so they don't collide.
+coverage-integration: INTEGRATION_PROFILE_ENV = LLVM_PROFILE_FILE=$(COVERAGE_OUTPUT_DIR)/integration/%p-%m%c.profraw
+coverage-integration: coverage-all
+	@mkdir -p $(COVERAGE_OUTPUT_DIR)/integration
+	@rm -f $(COVERAGE_OUTPUT_DIR)/integration/*.profraw
+	$(RUN_INTEGRATION)
+	@echo Merging integration coverage profdata...
+	@xcrun llvm-profdata merge -sparse $(COVERAGE_OUTPUT_DIR)/integration/*.profraw -o $(COVERAGE_OUTPUT_DIR)/integration/default.profdata
+	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/integration/default.profdata,integration,$(COV_OBJECT_FLAGS))
+
+empty :=
+space := $(empty) $(empty)
+
+# Opt the coverage targets in to instrumentation. The value propagates to the
+# shared build-tests target so compilation is instrumented when necessary.
+coverage coverage-all coverage-unit coverage-integration: COVERAGE_FLAG = --enable-code-coverage -Xswiftc -DCONTAINER_COVERAGE
+
+.PHONY: coverage
+# Merge the per-tier profdata from coverage-unit and coverage-integration into a
+# combined report. Each prerequisite target produces its own tier report first.
+coverage: coverage-unit coverage-integration
+	@echo Merging combined coverage profdata...
+	@mkdir -p $(COVERAGE_OUTPUT_DIR)/combined
+	@xcrun llvm-profdata merge -sparse \
+		$(COVERAGE_OUTPUT_DIR)/unit/default.profdata \
+		$(COVERAGE_OUTPUT_DIR)/integration/default.profdata \
+		-o $(COVERAGE_OUTPUT_DIR)/combined/default.profdata
+	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/combined/default.profdata,combined,$(COV_OBJECT_FLAGS))
+
+.PHONY: coverage-unit
+coverage-unit: build-tests
+	@echo Running unit test coverage...
+	@rm -f $(COV_DATA_DIR)/*.profraw
+	@mkdir -p $(COVERAGE_OUTPUT_DIR)/unit
+	@$(SWIFT) test --skip-build --enable-code-coverage -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests
+	@echo Merging unit coverage profdata...
+	@xcrun llvm-profdata merge -sparse $(COV_DATA_DIR)/*.profraw -o $(COVERAGE_OUTPUT_DIR)/unit/default.profdata
+	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/unit/default.profdata,unit)
 
 .PHONY: fmt
 fmt: swift-fmt update-licenses

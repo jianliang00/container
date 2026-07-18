@@ -15,14 +15,13 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
-import ContainerSandboxServiceClient
 import ContainerXPC
 import ContainerizationError
 import ContainerizationOS
 import Foundation
 
 public struct ClientNetwork {
-    static let serviceIdentifier = "com.apple.container.apiserver"
+    static let serviceIdentifier = NetworkClient.defaultServiceIdentifier
 
     public static let defaultNetworkName = "default"
     public static let noNetworkName = "none"
@@ -41,51 +40,22 @@ extension ClientNetwork {
         try await client.send(message, responseTimeout: timeout)
     }
 
-    public static func create(configuration: NetworkConfiguration) async throws -> NetworkState {
-        let client = Self.newClient()
-        let request = XPCMessage(route: .networkCreate)
-        request.set(key: .networkId, value: configuration.id)
-
-        let data = try JSONEncoder().encode(configuration)
-        request.set(key: .networkConfig, value: data)
-
-        let response = try await xpcSend(client: client, message: request)
-        let responseData = response.dataNoCopy(key: .networkState)
-        guard let responseData else {
-            throw ContainerizationError(.invalidArgument, message: "network configuration not received")
-        }
-        let state = try JSONDecoder().decode(NetworkState.self, from: responseData)
-        return state
+    public static func create(configuration: NetworkConfiguration) async throws -> NetworkResource {
+        try await NetworkClient().create(configuration: configuration)
     }
 
-    public static func list() async throws -> [NetworkState] {
-        let client = Self.newClient()
-        let request = XPCMessage(route: .networkList)
-
-        let response = try await xpcSend(client: client, message: request, timeout: .seconds(1))
-        let responseData = response.dataNoCopy(key: .networkStates)
-        guard let responseData else {
-            return []
-        }
-        let states = try JSONDecoder().decode([NetworkState].self, from: responseData)
-        return states
+    public static func list() async throws -> [NetworkResource] {
+        try await NetworkClient().list()
     }
 
     /// Get the network for the provided id.
-    public static func get(id: String) async throws -> NetworkState {
-        let networks = try await list()
-        guard let network = networks.first(where: { $0.id == id }) else {
-            throw ContainerizationError(.notFound, message: "network \(id) not found")
-        }
-        return network
+    public static func get(id: String) async throws -> NetworkResource {
+        try await NetworkClient().get(id: id)
     }
 
     /// Delete the network with the given id.
     public static func delete(id: String) async throws {
-        let client = XPCClient(service: Self.serviceIdentifier)
-        let request = XPCMessage(route: .networkDelete)
-        request.set(key: .networkId, value: id)
-        try await client.send(request)
+        try await NetworkClient().delete(id: id)
     }
 
     public static func prepareSandboxNetwork(sandboxID: String) async throws -> SandboxNetworkState {
@@ -149,16 +119,16 @@ extension ClientNetwork {
     }
 
     /// Retrieve the builtin network.
-    public static var builtin: NetworkState? {
+    public static var builtin: NetworkResource? {
         get async throws {
-            try await list().first { $0.isBuiltin }
+            try await NetworkClient().builtin
         }
     }
 }
 
 extension XPCMessage {
     fileprivate func sandboxNetworkState() throws -> SandboxNetworkState {
-        guard let data = dataNoCopy(key: SandboxKeys.networkState.rawValue) else {
+        guard let data = dataNoCopy(key: .networkState) else {
             throw ContainerizationError(
                 .invalidArgument,
                 message: "sandbox network state not received"

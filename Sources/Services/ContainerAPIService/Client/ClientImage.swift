@@ -71,6 +71,23 @@ public struct ClientImage: Sendable {
         return try content.decode()
     }
 
+    /// Returns annotations resolved from the image descriptor and the selected platform manifest.
+    package func resolvedAnnotations(for platform: Platform) async throws -> [String: String] {
+        var annotations = self.descriptor.annotations ?? [:]
+        let index = try await self.index()
+        guard let manifestDescriptor = index.manifests.first(where: { $0.platform == platform }) else {
+            return annotations
+        }
+        guard let content: Content = try await contentStore.get(digest: manifestDescriptor.digest) else {
+            throw ContainerizationError(.notFound, message: "content with digest \(manifestDescriptor.digest)")
+        }
+        let manifest: Manifest = try content.decode()
+
+        annotations.merge(manifest.annotations ?? [:]) { _, manifestValue in manifestValue }
+        annotations.merge(manifestDescriptor.annotations ?? [:]) { _, descriptorValue in descriptorValue }
+        return annotations
+    }
+
     /// Exports a macOS sandbox image into a runnable local VM image directory.
     public func exportMacOSImageDirectory(
         to outputDirectory: URL,
@@ -738,11 +755,22 @@ extension ClientImage {
     }
 
     private func macOSPlatformsToPrewarm(requestedPlatform: Platform?) async throws -> [Platform] {
+        let platforms: [Platform]
         if let requestedPlatform {
-            return requestedPlatform.os == "darwin" ? [requestedPlatform] : []
+            platforms = requestedPlatform.os == "darwin" ? [requestedPlatform] : []
+        } else {
+            platforms = try await self.availablePlatformsForRuntimeAutoDetect().filter { $0.os == "darwin" }
         }
 
-        return try await self.availablePlatformsForRuntimeAutoDetect().filter { $0.os == "darwin" }
+        var sandboxPlatforms = [Platform]()
+        for platform in platforms {
+            let annotations = try await self.resolvedAnnotations(for: platform)
+            let role = try MacOSImageContract.role(descriptorAnnotations: annotations)
+            if role != .workload {
+                sandboxPlatforms.append(platform)
+            }
+        }
+        return sandboxPlatforms
     }
 }
 

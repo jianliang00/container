@@ -1964,7 +1964,13 @@ extension MacOSSandboxService {
                 }
                 let extractedLayerDirectory = stagingDirectory.appendingPathComponent("layer-\(index)", isDirectory: true)
                 let layerMetadata = try readWorkloadLayerMetadata(from: layerContent.path)
-                let rejectedMembers = try ArchiveReader(file: layerContent.path).extractContents(to: extractedLayerDirectory)
+                let rejectedMembers: [String]
+                do {
+                    rejectedMembers = try ArchiveReader(file: layerContent.path).extractContents(to: extractedLayerDirectory)
+                } catch ArchiveError.failedToExtractArchive(let reason) where reason == "no entries found in archive" {
+                    try? fileManager.removeItem(at: extractedLayerDirectory)
+                    continue
+                }
                 guard rejectedMembers.isEmpty else {
                     throw ContainerizationError(
                         .invalidArgument,

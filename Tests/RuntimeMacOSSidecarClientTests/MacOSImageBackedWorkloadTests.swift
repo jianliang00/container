@@ -215,6 +215,51 @@ struct MacOSImageBackedWorkloadTests {
     }
 
     @Test
+    func startImageBackedWorkloadAcceptsEmptyNoOpLayer() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-empty-layer-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory, includeEmptyLayer: true)
+        let socketPath = "/tmp/sidecar-empty-layer-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        try await service.testingPrepareSandbox(Self.baseContainerConfiguration(indexDigest: image.indexDigest))
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let workloadID = "image-backed-empty-layer"
+        try await service.testingCreateWorkload(
+            WorkloadConfiguration(
+                id: workloadID,
+                processConfiguration: ProcessConfiguration(
+                    executable: "",
+                    arguments: [],
+                    environment: [],
+                    workingDirectory: "/",
+                    terminal: false,
+                    user: .id(uid: 0, gid: 0)
+                ),
+                workloadImageReference: "registry.local/example/workload:empty@\(image.indexDigest)",
+                workloadImageDigest: image.indexDigest
+            )
+        )
+        try await service.testingStartWorkload(workloadID)
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let snapshot = try await service.testingInspectWorkload(workloadID)
+        #expect(snapshot.configuration.injectionState == .injected)
+    }
+
+    @Test
     func imageBackedWorkloadMergesSandboxWorkloadAndRequestEnvironment() async throws {
         let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-environment-tests")
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
@@ -1012,7 +1057,10 @@ extension MacOSImageBackedWorkloadTests {
         )
     }
 
-    private static func makeWorkloadImage(in directory: URL) throws -> CreatedWorkloadImage {
+    private static func makeWorkloadImage(
+        in directory: URL,
+        includeEmptyLayer: Bool = false
+    ) throws -> CreatedWorkloadImage {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let layer1Root = directory.appendingPathComponent("layer1-root")
         let layer2Root = directory.appendingPathComponent("layer2-root")
@@ -1043,6 +1091,13 @@ extension MacOSImageBackedWorkloadTests {
         )
         try createTarArchive(from: layer2Root, to: layer2Tar)
 
+        let emptyLayerTar = directory.appendingPathComponent("empty-layer.tar")
+        if includeEmptyLayer {
+            let writer = try ArchiveWriter(format: .pax, filter: .none, file: emptyLayerTar)
+            try writer.finishEncoding()
+        }
+
+        let emptyLayerDigest = "sha256:empty-layer-\(UUID().uuidString)"
         let layer1Digest = "sha256:layer1-\(UUID().uuidString)"
         let layer2Digest = "sha256:layer2-\(UUID().uuidString)"
         let configDigest = "sha256:config-\(UUID().uuidString)"
@@ -1064,12 +1119,23 @@ extension MacOSImageBackedWorkloadTests {
             rootfs: .init(type: "layers", diffIDs: [])
         )
         let configURL = try writeJSON(imageConfig, named: "config.json", in: directory)
+        var layers = [Descriptor]()
+        if includeEmptyLayer {
+            layers.append(
+                Descriptor(
+                    mediaType: MediaTypes.imageLayer,
+                    digest: emptyLayerDigest,
+                    size: Int64(try Data(contentsOf: emptyLayerTar).count)
+                )
+            )
+        }
+        layers.append(contentsOf: [
+            Descriptor(mediaType: MediaTypes.imageLayer, digest: layer1Digest, size: Int64(try Data(contentsOf: layer1Tar).count)),
+            Descriptor(mediaType: MediaTypes.imageLayer, digest: layer2Digest, size: Int64(try Data(contentsOf: layer2Tar).count)),
+        ])
         let manifest = Manifest(
             config: Descriptor(mediaType: MediaTypes.imageConfig, digest: configDigest, size: Int64(try Data(contentsOf: configURL).count)),
-            layers: [
-                Descriptor(mediaType: MediaTypes.imageLayer, digest: layer1Digest, size: Int64(try Data(contentsOf: layer1Tar).count)),
-                Descriptor(mediaType: MediaTypes.imageLayer, digest: layer2Digest, size: Int64(try Data(contentsOf: layer2Tar).count)),
-            ],
+            layers: layers,
             annotations: MacOSImageContract.annotations(for: .workload)
         )
         let manifestURL = try writeJSON(manifest, named: "manifest.json", in: directory)
@@ -1087,17 +1153,20 @@ extension MacOSImageBackedWorkloadTests {
 
         let indexURL = try writeJSON(index, named: "index.json", in: directory)
 
+        var entries = [
+            indexDigest: indexURL,
+            manifestDigest: manifestURL,
+            configDigest: configURL,
+            layer1Digest: layer1Tar,
+            layer2Digest: layer2Tar,
+        ]
+        if includeEmptyLayer {
+            entries[emptyLayerDigest] = emptyLayerTar
+        }
+
         return CreatedWorkloadImage(
             indexDigest: indexDigest,
-            store: MockContentStore(
-                entries: [
-                    indexDigest: indexURL,
-                    manifestDigest: manifestURL,
-                    configDigest: configURL,
-                    layer1Digest: layer1Tar,
-                    layer2Digest: layer2Tar,
-                ]
-            )
+            store: MockContentStore(entries: entries)
         )
     }
 

@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Containerization
 import Foundation
 import Testing
 
@@ -161,4 +162,131 @@ struct CRIShimImageServiceTests {
             requestedReference: record.reference
         )
     }
+
+    @Test
+    func imageRecordResolvesWorkloadAnnotationsFromDarwinManifest() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "cri-shim-image-record-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let platform = Platform(arch: "arm64", os: "darwin")
+        let indexDigest = "sha256:index-\(UUID().uuidString)"
+        let manifestDigest = "sha256:manifest-\(UUID().uuidString)"
+        let workloadAnnotations = MacOSImageContract.annotations(for: .workload)
+        let manifest = Manifest(
+            config: Descriptor(
+                mediaType: MediaTypes.imageConfig,
+                digest: "sha256:config-\(UUID().uuidString)",
+                size: 1
+            ),
+            layers: [],
+            annotations: workloadAnnotations
+        )
+        let index = Index(
+            manifests: [
+                Descriptor(
+                    mediaType: MediaTypes.imageManifest,
+                    digest: manifestDigest,
+                    size: 1,
+                    annotations: workloadAnnotations,
+                    platform: platform
+                )
+            ]
+        )
+        let store = MockContentStore(
+            entries: [
+                indexDigest: try Self.writeJSON(index, named: "index.json", in: tempDirectory),
+                manifestDigest: try Self.writeJSON(manifest, named: "manifest.json", in: tempDirectory),
+            ]
+        )
+        let image = ClientImage(
+            description: ImageDescription(
+                reference: "localhost/macos-workload:nested-annotations",
+                descriptor: Descriptor(
+                    mediaType: MediaTypes.index,
+                    digest: indexDigest,
+                    size: 1234,
+                    annotations: ["org.opencontainers.image.ref.name": "macos-workload:nested-annotations"]
+                )
+            ),
+            contentStore: store
+        )
+
+        let record = try await CRIShimImageRecord.resolve(image: image)
+
+        #expect(record.annotations[MacOSImageContract.roleAnnotation] == MacOSImageRole.workload.rawValue)
+        #expect(
+            record.annotations[MacOSImageContract.workloadFormatAnnotation]
+                == MacOSWorkloadImageFormat.v1.rawValue
+        )
+        try validateCRIShimImage(
+            record,
+            expectedRole: .workload,
+            requestedReference: record.reference
+        )
+    }
+
+    private static func writeJSON<T: Encodable>(
+        _ value: T,
+        named name: String,
+        in directory: URL
+    ) throws -> URL {
+        let url = directory.appendingPathComponent(name)
+        try JSONEncoder().encode(value).write(to: url)
+        return url
+    }
+
+    private struct MockContentStore: ContentStore {
+        let entries: [String: URL]
+
+        func get(digest: String) async throws -> Content? {
+            guard let path = entries[digest] else {
+                return nil
+            }
+            return try LocalContent(path: path)
+        }
+
+        func get<T: Decodable>(digest: String) async throws -> T? {
+            guard let content = try await self.get(digest: digest) else {
+                return nil
+            }
+            return try content.decode()
+        }
+
+        @discardableResult
+        func delete(digests: [String]) async throws -> ([String], UInt64) {
+            throw Unimplemented()
+        }
+
+        @discardableResult
+        func delete(keeping: [String]) async throws -> ([String], UInt64) {
+            throw Unimplemented()
+        }
+
+        @discardableResult
+        func ingest(_ body: @Sendable @escaping (URL) async throws -> Void) async throws -> [String] {
+            throw Unimplemented()
+        }
+
+        func newIngestSession() async throws -> (id: String, ingestDir: URL) {
+            throw Unimplemented()
+        }
+
+        @discardableResult
+        func completeIngestSession(_ id: String) async throws -> [String] {
+            throw Unimplemented()
+        }
+
+        func cancelIngestSession(_ id: String) async throws {
+            throw Unimplemented()
+        }
+
+        func totalAllocatedSize() async throws -> UInt64 {
+            throw Unimplemented()
+        }
+    }
+
+    private struct Unimplemented: Error {}
 }

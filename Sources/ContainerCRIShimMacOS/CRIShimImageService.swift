@@ -179,7 +179,11 @@ extension CRIShimImageRecord {
     }
 
     static func resolve(image: ContainerAPIClient.ClientImage) async throws -> CRIShimImageRecord {
-        CRIShimImageRecord(image: image)
+        var record = CRIShimImageRecord(image: image)
+        record.annotations = try await image.resolvedAnnotations(
+            for: Platform(arch: "arm64", os: "darwin")
+        )
+        return record
     }
 
     func matches(reference: String) -> Bool {

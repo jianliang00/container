@@ -240,6 +240,7 @@ let package = Package(
         .testTarget(
             name: "ContainerCRIShimMacOSTests",
             dependencies: [
+                .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "GRPC", package: "grpc-swift"),
                 .product(name: "NIO", package: "swift-nio"),

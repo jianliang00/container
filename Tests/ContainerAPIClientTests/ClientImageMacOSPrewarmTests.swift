@@ -23,6 +23,53 @@ import Testing
 
 struct ClientImageMacOSPrewarmTests {
     @Test
+    func prewarmMacOSChunkedDisksSkipsWorkloadImages() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let platform = Platform(arch: "arm64", os: "darwin")
+        let indexDigest = "sha256:index-\(UUID().uuidString)"
+        let manifestDigest = "sha256:manifest-\(UUID().uuidString)"
+        let workloadAnnotations = MacOSImageContract.annotations(for: .workload)
+        let manifest = Manifest(
+            config: Descriptor(
+                mediaType: MediaTypes.imageConfig,
+                digest: "sha256:config-\(UUID().uuidString)",
+                size: 1
+            ),
+            layers: [],
+            annotations: workloadAnnotations
+        )
+        let index = Index(
+            manifests: [
+                Descriptor(
+                    mediaType: MediaTypes.imageManifest,
+                    digest: manifestDigest,
+                    size: 1,
+                    annotations: workloadAnnotations,
+                    platform: platform
+                )
+            ]
+        )
+        let store = MockContentStore(
+            entries: [
+                indexDigest: try Self.writeJSON(index, named: "index.json", in: tempDirectory),
+                manifestDigest: try Self.writeJSON(manifest, named: "manifest.json", in: tempDirectory),
+            ]
+        )
+        let image = ClientImage(
+            description: ImageDescription(
+                reference: "registry.local/macos-workload:latest",
+                descriptor: Descriptor(mediaType: MediaTypes.index, digest: indexDigest, size: 1)
+            ),
+            contentStore: store
+        )
+
+        try await image.prewarmMacOSChunkedDisks(platform: platform)
+        try await image.prewarmMacOSChunkedDisks(platform: nil)
+    }
+
+    @Test
     func prewarmMacOSChunkedDisksBuildsDarwinCacheWhenPlatformIsNil() async throws {
         let tempDirectory = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }

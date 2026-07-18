@@ -301,6 +301,5 @@ private func makeTemporaryDirectory() -> URL {
 }
 
 private func normalizedDirectoryPath(_ url: URL) -> String {
-    let path = url.path
-    return path.hasSuffix("/") ? path : "\(path)/"
+    url.standardizedFileURL.path
 }

@@ -178,21 +178,8 @@ extension CRIShimImageRecord {
         )
     }
 
-    init(image: ContainerAPIClient.ClientImage, detail: ImageDetail) {
-        let descriptorSize = detail.index.size
-        self.init(
-            reference: image.reference,
-            digest: image.digest,
-            mediaType: detail.index.mediaType,
-            size: UInt64(max(0, descriptorSize)),
-            annotations: detail.index.annotations ?? [:],
-            pinned: false
-        )
-    }
-
     static func resolve(image: ContainerAPIClient.ClientImage) async throws -> CRIShimImageRecord {
-        let detail = try await image.details()
-        return CRIShimImageRecord(image: image, detail: detail)
+        CRIShimImageRecord(image: image)
     }
 
     func matches(reference: String) -> Bool {

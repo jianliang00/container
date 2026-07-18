@@ -49,22 +49,37 @@ struct VolumeJournalConfigTests {
     @Test("Parse ordered mode with mebibyte size")
     func parseOrderedWithMebibyteSize() throws {
         let config = try VolumesService.parseJournalConfig("ordered:128m")
+        guard let actualSize: UInt64 = config.size else {
+            Issue.record("Expected journal size to be set")
+            return
+        }
+        let expectedSize: UInt64 = 128 * 1024 * 1024
         #expect(config.defaultMode == .ordered)
-        #expect(config.size == 128 * 1024 * 1024)
+        #expect(actualSize == expectedSize)
     }
 
     @Test("Parse writeback mode with gibibyte size")
     func parseWritebackWithGibibyteSize() throws {
         let config = try VolumesService.parseJournalConfig("writeback:1g")
+        guard let actualSize: UInt64 = config.size else {
+            Issue.record("Expected journal size to be set")
+            return
+        }
+        let expectedSize: UInt64 = 1024 * 1024 * 1024
         #expect(config.defaultMode == .writeback)
-        #expect(config.size == 1024 * 1024 * 1024)
+        #expect(actualSize == expectedSize)
     }
 
     @Test("Parse journal mode with kibibyte size")
     func parseJournalWithKibibyteSize() throws {
         let config = try VolumesService.parseJournalConfig("journal:64m")
+        guard let actualSize: UInt64 = config.size else {
+            Issue.record("Expected journal size to be set")
+            return
+        }
+        let expectedSize: UInt64 = 64 * 1024 * 1024
         #expect(config.defaultMode == .journal)
-        #expect(config.size == 64 * 1024 * 1024)
+        #expect(actualSize == expectedSize)
     }
 
     // MARK: - Invalid mode

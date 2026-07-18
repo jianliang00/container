@@ -25,6 +25,12 @@ public enum RuntimeRoutes: String {
 
     // MARK: - Sandbox lifecycle
 
+    /// Create sandbox resources without booting the guest.
+    case createSandbox = "com.apple.container.runtime/createSandbox"
+    /// Start the sandbox guest without starting a workload.
+    case startSandbox = "com.apple.container.runtime/startSandbox"
+    /// Present the macOS guest GUI for a running sandbox.
+    case showGUI = "com.apple.container.runtime/showGUI"
     /// Bootstrap the sandbox: create the VM, configure networks, and boot the guest.
     case bootstrap = "com.apple.container.runtime/bootstrap"
     /// Stop the sandbox and all processes running inside it.
@@ -35,6 +41,23 @@ public enum RuntimeRoutes: String {
     case statistics = "com.apple.container.runtime/statistics"
     /// Open a vsock connection to a port inside the sandbox.
     case dial = "com.apple.container.runtime/dial"
+
+    // MARK: - Workload lifecycle
+
+    /// Create a workload inside an existing sandbox.
+    case createWorkload = "com.apple.container.runtime/createWorkload"
+    /// Start a workload inside an existing sandbox.
+    case startWorkload = "com.apple.container.runtime/startWorkload"
+    /// Attach stdio to a running workload.
+    case attachWorkload = "com.apple.container.runtime/attachWorkload"
+    /// Detach a workload stdio attachment.
+    case detachWorkloadAttachment = "com.apple.container.runtime/detachWorkloadAttachment"
+    /// Stop a workload inside an existing sandbox.
+    case stopWorkload = "com.apple.container.runtime/stopWorkload"
+    /// Remove a stopped workload from a sandbox.
+    case removeWorkload = "com.apple.container.runtime/removeWorkload"
+    /// Inspect a workload inside a sandbox.
+    case inspectWorkload = "com.apple.container.runtime/inspectWorkload"
 
     // MARK: - Process management
 
@@ -52,8 +75,38 @@ public enum RuntimeRoutes: String {
     case exec = "com.apple.container.runtime/exec"
 
     // MARK: - File Management
+
+    /// Begin a guest filesystem transaction.
+    case fsBegin = "com.apple.container.runtime/fsBegin"
+    /// Send a guest filesystem transaction chunk.
+    case fsChunk = "com.apple.container.runtime/fsChunk"
+    /// Complete a guest filesystem transaction.
+    case fsEnd = "com.apple.container.runtime/fsEnd"
+    /// Begin reading a path from the guest filesystem.
+    case fsReadBegin = "com.apple.container.runtime/fsReadBegin"
+    /// Read a chunk from the guest filesystem.
+    case fsReadChunk = "com.apple.container.runtime/fsReadChunk"
+    /// Complete a guest filesystem read transaction.
+    case fsReadEnd = "com.apple.container.runtime/fsReadEnd"
+    /// List a directory in the guest filesystem.
+    case fsListDir = "com.apple.container.runtime/fsListDir"
     /// Copy a file or directory into the container.
     case copyIn = "com.apple.container.runtime/copyIn"
     /// Copy a file or directory out of the container.
     case copyOut = "com.apple.container.runtime/copyOut"
+
+    // MARK: - Sandbox network management
+
+    /// Prepare and persist sandbox network state.
+    case prepareNetwork = "com.apple.container.runtime/prepareNetwork"
+    /// Inspect persisted or live sandbox network state.
+    case inspectNetwork = "com.apple.container.runtime/inspectNetwork"
+    /// Release sandbox network allocations.
+    case releaseNetwork = "com.apple.container.runtime/releaseNetwork"
+    /// Apply sandbox network policy state.
+    case applyNetworkPolicy = "com.apple.container.runtime/applyNetworkPolicy"
+    /// Remove sandbox network policy state.
+    case removeNetworkPolicy = "com.apple.container.runtime/removeNetworkPolicy"
+    /// Inspect sandbox network policy state.
+    case inspectNetworkPolicy = "com.apple.container.runtime/inspectNetworkPolicy"
 }

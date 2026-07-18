@@ -33,6 +33,11 @@ public struct ApplicationRoot {
     )
     .appending(FilePath.Component("com.apple.container"))
 
+    /// URL compatibility view of ``defaultPath`` for embedding APIs.
+    public static var defaultURL: URL {
+        URL(fileURLWithPath: defaultPath.string, isDirectory: true)
+    }
+
     /// The resolved root directory path, always lexically normalized.
     ///
     /// If the environment variable is set to an absolute path, that path is used directly.

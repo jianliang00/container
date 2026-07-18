@@ -18,7 +18,7 @@
 import ContainerAPIClient
 @testable import ContainerCommands
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import Containerization
 import ContainerizationOCI
 import Foundation
@@ -37,10 +37,14 @@ struct MacOSImageBackedWorkloadE2ETests {
 
         let containerClient = ContainerClient()
         let containerID = "macos-workload-e2e-\(UUID().uuidString.lowercased())"
+        let containerSystemConfig = try await Application.loadContainerSystemConfig()
 
         do {
             _ = try await ClientImage.load(from: archiveURL.path)
-            let workloadImage = try await ClientImage.get(reference: workloadReference)
+            let workloadImage = try await ClientImage.get(
+                reference: workloadReference,
+                containerSystemConfig: containerSystemConfig
+            )
             try await runImageBackedWorkloadLifecycle(
                 containerClient: containerClient,
                 baseReference: baseReference,
@@ -79,12 +83,19 @@ struct MacOSImageBackedWorkloadE2ETests {
 
         let containerClient = ContainerClient()
         let containerID = "macos-workload-multi-e2e-\(UUID().uuidString.lowercased())"
+        let containerSystemConfig = try await Application.loadContainerSystemConfig()
 
         do {
             _ = try await ClientImage.load(from: archiveA.path)
             _ = try await ClientImage.load(from: archiveB.path)
-            let workloadImageA = try await ClientImage.get(reference: workloadReferenceA)
-            let workloadImageB = try await ClientImage.get(reference: workloadReferenceB)
+            let workloadImageA = try await ClientImage.get(
+                reference: workloadReferenceA,
+                containerSystemConfig: containerSystemConfig
+            )
+            let workloadImageB = try await ClientImage.get(
+                reference: workloadReferenceB,
+                containerSystemConfig: containerSystemConfig
+            )
 
             let (_, sandboxClient) = try await bootstrapWorkloadSandbox(
                 containerClient: containerClient,
@@ -187,10 +198,14 @@ struct MacOSImageBackedWorkloadRegistryE2ETests {
         let archiveURL = try createWorkloadImageArchive(reference: workloadReference, in: tempDirectory)
         let containerClient = ContainerClient()
         let containerID = "macos-workload-registry-e2e-\(UUID().uuidString.lowercased())"
+        let containerSystemConfig = try await Application.loadContainerSystemConfig()
 
         do {
             _ = try await ClientImage.load(from: archiveURL.path)
-            let loadedImage = try await ClientImage.get(reference: workloadReference)
+            let loadedImage = try await ClientImage.get(
+                reference: workloadReference,
+                containerSystemConfig: containerSystemConfig
+            )
             try await loadedImage.push(scheme: .https, progressUpdate: nil)
             try await ClientImage.delete(reference: workloadReference, garbageCollect: true)
 
@@ -267,7 +282,7 @@ private func makeContainerConfiguration(
 }
 
 private func waitForSandboxStatus(
-    client: SandboxClient,
+    client: RuntimeClient,
     status: RuntimeStatus,
     timeoutSeconds: TimeInterval
 ) async throws {
@@ -372,8 +387,12 @@ private func bootstrapWorkloadSandbox(
     containerClient: ContainerClient,
     baseReference: String,
     containerID: String
-) async throws -> (ContainerConfiguration, SandboxClient) {
-    let baseImage = try await ClientImage.get(reference: baseReference)
+) async throws -> (ContainerConfiguration, RuntimeClient) {
+    let containerSystemConfig = try await Application.loadContainerSystemConfig()
+    let baseImage = try await ClientImage.get(
+        reference: baseReference,
+        containerSystemConfig: containerSystemConfig
+    )
     let configuration = makeContainerConfiguration(
         id: containerID,
         image: baseImage.description
@@ -382,7 +401,7 @@ private func bootstrapWorkloadSandbox(
     _ = try await containerClient.bootstrap(id: containerID, stdio: [nil, nil, nil])
     try await waitForContainerStatus(client: containerClient, id: containerID, status: .running, timeoutSeconds: 180)
 
-    let sandboxClient = try await SandboxClient.create(id: containerID, runtime: configuration.runtimeHandler)
+    let sandboxClient = try await RuntimeClient.create(id: containerID, runtime: configuration.runtimeHandler)
     try await waitForSandboxStatus(client: sandboxClient, status: .running, timeoutSeconds: 180)
     return (configuration, sandboxClient)
 }

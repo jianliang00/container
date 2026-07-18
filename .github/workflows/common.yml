@@ -26,11 +26,19 @@ on:
         type: boolean
         description: "Verify ContainerKit products can be consumed from an external Swift package"
         default: false
+      coverage:
+        type: boolean
+        description: "Run tests with code coverage enabled"
+        default: false
+      pr_number:
+        type: string
+        description: "PR number for coverage artifact naming (required when coverage is true)"
+        default: ""
 
 jobs:
   buildAndTest:
     name: Build and test the project
-    timeout-minutes: 60
+    timeout-minutes: 75
     runs-on: macos-26
     permissions:
       contents: read
@@ -192,16 +200,23 @@ jobs:
         if: ${{ inputs.verify_swiftpm_consumer }}
         run: ./scripts/verify-swiftpm-consumer.sh
 
+      - name: Validate coverage inputs
+        if: ${{ inputs.coverage }}
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "::error::pr_number input is required when coverage is true"
+            exit 1
+          fi
+
       - name: Create package
         run: |
           mkdir -p outputs
           mv "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}" outputs
           mv bin/${{ env.BUILD_CONFIGURATION }}/bundle/container-dSYM.zip outputs
 
-      - name: Test the container project
-        env:
-          CONTAINER_SKIP_VIRTUALIZATION_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
-          CONTAINER_FORCE_DISABLE_CLI_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
+      - name: Set up test environment
         run: |
           APP_ROOT=$(mktemp -d -p "${RUNNER_TEMP}")
           LOG_ROOT="${APP_ROOT}/logs"
@@ -211,7 +226,84 @@ jobs:
           echo NO_PROXY=${NO_PROXY}
           export no_proxy="${no_proxy},192.168.0.0/16,fe80::/10"
           echo no_proxy=${no_proxy}
-          make APP_ROOT="${APP_ROOT}" test install-kernel integration
+          echo "APP_ROOT=${APP_ROOT}" >> $GITHUB_ENV
+          echo "LOG_ROOT=${LOG_ROOT}" >> $GITHUB_ENV
+
+      - name: Test the container project
+        if: ${{ !inputs.coverage }}
+        env:
+          CONTAINER_SKIP_VIRTUALIZATION_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
+          CONTAINER_FORCE_DISABLE_CLI_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
+        run: make APP_ROOT="${APP_ROOT}" LOG_ROOT="${LOG_ROOT}" test install-kernel integration
+
+      - name: Test the container project with coverage
+        if: ${{ inputs.coverage }}
+        env:
+          CONTAINER_SKIP_VIRTUALIZATION_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
+          CONTAINER_FORCE_DISABLE_CLI_TESTS: ${{ inputs.skip_virtualization_tests && '1' || '0' }}
+        run: make APP_ROOT="${APP_ROOT}" LOG_ROOT="${LOG_ROOT}" install-kernel coverage
+
+      - name: Extract coverage percentages
+        if: ${{ inputs.coverage }}
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          mkdir -p pr-coverage
+          jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/unit/coverage-summary.json > pr-coverage/unit-line-coverage.txt
+          jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/integration/coverage-summary.json > pr-coverage/integration-line-coverage.txt
+          jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/combined/coverage-summary.json > pr-coverage/combined-line-coverage.txt
+          echo "${PR_NUMBER}" > pr-coverage/pr-number.txt
+          echo "Coverage data:"
+          cat pr-coverage/*.txt
+
+      - name: Upload coverage data
+        if: ${{ inputs.coverage }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-coverage-${{ inputs.pr_number }}
+          path: pr-coverage/
+          retention-days: 1
+          if-no-files-found: warn
+
+      - name: Upload coverage HTML reports
+        if: ${{ inputs.coverage }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-html-reports
+          path: |
+            coverage-reports/unit/html/
+            coverage-reports/integration/html/
+            coverage-reports/combined/html/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Archive test logs
+        if: always()
+        run: |
+          if [ -d "${APP_ROOT}/containers" ] && [ -n "${LOG_ROOT}" ]; then
+            rsync -a --include='*/' --include='*.log' --exclude='*' \
+              "${APP_ROOT}/containers/" \
+              "${LOG_ROOT}/containers/"
+          fi
+          if [ -n "${LOG_ROOT}" ] && [ -d "${LOG_ROOT}" ] ; then
+            echo "Collecting logs from ${LOG_ROOT}..."
+            tar czf container-logs.tar.gz -C "$(dirname "${LOG_ROOT}")" "$(basename "${LOG_ROOT}")"
+            echo "Log archive created: container-logs.tar.gz"
+          fi
+          if [ -n "${APP_ROOT}" ] ; then
+            rm -rf "${APP_ROOT}"
+            echo "Removed data directory ${APP_ROOT}"
+          fi
+          rm -rf coverage-reports pr-coverage
+
+      - name: Upload logs if present
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-test-logs
+          path: container-logs.tar.gz
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Save documentation artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

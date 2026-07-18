@@ -23,7 +23,9 @@ public struct Flags {
         public init() {}
 
         public init(debug: Bool) {
-            self.debug = debug
+            var value = Self()
+            value.debug = debug
+            self = value
         }
 
         @Flag(name: .long, help: "Enable debug output [environment: CONTAINER_DEBUG]")
@@ -44,15 +46,17 @@ public struct Flags {
             ulimits: [String],
             user: String?
         ) {
-            self.cwd = cwd
-            self.env = env
-            self.envFile = envFile
-            self.gid = gid
-            self.interactive = interactive
-            self.tty = tty
-            self.uid = uid
-            self.ulimits = ulimits
-            self.user = user
+            var value = Self()
+            value.cwd = cwd
+            value.env = env
+            value.envFile = envFile
+            value.gid = gid
+            value.interactive = interactive
+            value.tty = tty
+            value.uid = uid
+            value.ulimits = ulimits
+            value.user = user
+            self = value
         }
 
         @Option(name: .shortAndLong, help: "Set environment variables (key=value, or just key to inherit from host)")
@@ -102,8 +106,10 @@ public struct Flags {
         public init() {}
 
         public init(cpus: Int64?, memory: String?) {
-            self.cpus = cpus
-            self.memory = memory
+            var value = Self()
+            value.cpus = cpus
+            value.memory = memory
+            self = value
         }
 
         @Option(name: .shortAndLong, help: "Number of CPUs to allocate to the container")
@@ -120,10 +126,12 @@ public struct Flags {
         public init() {}
 
         public init(domain: String?, nameservers: [String], options: [String], searchDomains: [String]) {
-            self.domain = domain
-            self.nameservers = nameservers
-            self.options = options
-            self.searchDomains = searchDomains
+            var value = Self()
+            value.domain = domain
+            value.nameservers = nameservers
+            value.options = options
+            value.searchDomains = searchDomains
+            self = value
         }
 
         @Option(
@@ -166,7 +174,7 @@ public struct Flags {
         public init() {}
 
         public init(
-            arch: String,
+            arch: String?,
             capAdd: [String],
             capDrop: [String],
             cidfile: String,
@@ -195,34 +203,36 @@ public struct Flags {
             virtualization: Bool,
             volumes: [String]
         ) {
-            self.arch = arch
-            self.capAdd = capAdd
-            self.capDrop = capDrop
-            self.cidfile = cidfile
-            self.detach = detach
-            self.dns = dns
-            self.dnsDisabled = dnsDisabled
-            self.entrypoint = entrypoint
-            self.initImage = initImage
-            self.kernel = kernel
-            self.labels = labels
-            self.mounts = mounts
-            self.name = name
-            self.networks = networks
-            self.os = os
-            self.platform = platform
-            self.publishPorts = publishPorts
-            self.publishSockets = publishSockets
-            self.readOnly = readOnly
-            self.remove = remove
-            self.rosetta = rosetta
-            self.runtime = runtime
-            self.ssh = ssh
-            self.shmSize = shmSize
-            self.tmpFs = tmpFs
-            self.useInit = useInit
-            self.virtualization = virtualization
-            self.volumes = volumes
+            var value = Self()
+            value.arch = arch
+            value.capAdd = capAdd
+            value.capDrop = capDrop
+            value.cidfile = cidfile
+            value.detach = detach
+            value.dns = dns
+            value.dnsDisabled = dnsDisabled
+            value.entrypoint = entrypoint
+            value.initImage = initImage
+            value.kernel = kernel
+            value.labels = labels
+            value.mounts = mounts
+            value.name = name
+            value.networks = networks
+            value.os = os
+            value.platform = platform
+            value.publishPorts = publishPorts
+            value.publishSockets = publishSockets
+            value.readOnly = readOnly
+            value.remove = remove
+            value.rosetta = rosetta
+            value.runtime = runtime
+            value.ssh = ssh
+            value.shmSize = shmSize
+            value.tmpFs = tmpFs
+            value.useInit = useInit
+            value.virtualization = virtualization
+            value.volumes = volumes
+            self = value
         }
 
         @Option(name: .shortAndLong, help: "Set arch if image can target multiple architectures")
@@ -325,9 +335,6 @@ public struct Flags {
         @Flag(name: .long, help: "Enable Rosetta in the container")
         public var rosetta = false
 
-        @Option(name: .long, help: "Set the runtime handler for the container (default: container-runtime-linux)")
-        public var runtime: String?
-
         @Flag(name: .long, help: "Forward SSH agent socket to container")
         public var ssh = false
 
@@ -352,13 +359,30 @@ public struct Flags {
 
         @Flag(name: .long, help: "Show the guest VM in a local GUI window (macOS guest runtime only)")
         public var gui = false
+
+        public func validate() throws {
+            if dnsDisabled {
+                let hasDNSConfig =
+                    !dns.nameservers.isEmpty
+                    || dns.domain != nil
+                    || !dns.options.isEmpty
+                    || !dns.searchDomains.isEmpty
+                if hasDNSConfig {
+                    throw ValidationError(
+                        "`--no-dns` cannot be used with DNS configuration flags (`--dns`, `--dns-domain`, `--dns-option`, `--dns-search`)"
+                    )
+                }
+            }
+        }
     }
 
     public struct Progress: ParsableArguments {
         public init() {}
 
         public init(progress: ProgressType) {
-            self.progress = progress
+            var value = Self()
+            value.progress = progress
+            self = value
         }
 
         public enum ProgressType: String, ExpressibleByArgument {
@@ -377,7 +401,9 @@ public struct Flags {
         public init() {}
 
         public init(maxConcurrentDownloads: Int) {
-            self.maxConcurrentDownloads = maxConcurrentDownloads
+            var value = Self()
+            value.maxConcurrentDownloads = maxConcurrentDownloads
+            self = value
         }
 
         @Option(name: .long, help: "Maximum number of concurrent downloads")

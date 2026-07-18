@@ -21,14 +21,14 @@ import Testing
 
 @testable import ContainerAPIService
 @testable import ContainerResource
-@testable import ContainerSandboxServiceClient
+@testable import ContainerRuntimeClient
 
 struct ContainersServiceBootRecoveryTests {
     @Test
     func bootRecoveryKeepsRecoveredClientForStoppedSandbox() throws {
         let existing = try makeContainerState(status: .stopped, networks: [], startedDate: Date())
         let networks = try [makeAttachment()]
-        let recoveredClient = makeSandboxClient(id: existing.snapshot.id)
+        let recoveredClient = makeRuntimeClient(id: existing.snapshot.id)
         let sandboxSnapshot = SandboxSnapshot(
             status: .stopped,
             networks: networks,
@@ -52,7 +52,7 @@ struct ContainersServiceBootRecoveryTests {
         let startedDate = Date(timeIntervalSince1970: 1_711_111_111)
         let existing = try makeContainerState(status: .stopped, networks: [], startedDate: startedDate)
         let networks = try [makeAttachment()]
-        let recoveredClient = makeSandboxClient(id: existing.snapshot.id)
+        let recoveredClient = makeRuntimeClient(id: existing.snapshot.id)
         let sandboxSnapshot = SandboxSnapshot(
             status: .running,
             networks: networks,
@@ -108,7 +108,7 @@ struct ContainersServiceBootRecoveryTests {
         let recovered = ContainersService.makeBootRecoveredState(
             existing: existing,
             sandboxSnapshot: sandboxSnapshot,
-            client: makeSandboxClient(id: configuration.id)
+            client: makeRuntimeClient(id: configuration.id)
         )
 
         #expect(recovered.snapshot.status == .running)
@@ -169,8 +169,8 @@ struct ContainersServiceBootRecoveryTests {
         )
     }
 
-    private func makeSandboxClient(id: String) -> SandboxClient {
-        SandboxClient(
+    private func makeRuntimeClient(id: String) -> RuntimeClient {
+        RuntimeClient(
             id: id,
             runtime: "container-runtime-macos",
             client: XPCClient(service: "com.apple.container.tests.boot-recovery")

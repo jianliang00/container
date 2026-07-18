@@ -45,6 +45,8 @@ jobs:
     with:
       release: false
       skip_virtualization_tests: true
+      coverage: true
+      pr_number: ${{ github.event.pull_request.number }}
     secrets: inherit
     permissions:
       contents: read

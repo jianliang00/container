@@ -257,7 +257,10 @@ mkdir -p \
     "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/bin" \
     "${PKGROOT}/usr/local/libexec/container/plugins/container-network-vmnet/bin" \
     "${PKGROOT}/usr/local/libexec/container/plugins/container-core-images/bin" \
+    "${PKGROOT}/usr/local/libexec/container/plugins/machine-apiserver/bin" \
+    "${PKGROOT}/usr/local/libexec/container/plugins/machine-apiserver/resources" \
     "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/bin" \
+    "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share" \
     "${PKGROOT}/usr/local/libexec/container/macos-image-prepare/bin" \
     "${PKGROOT}/usr/local/libexec/container/macos-vm-manager/bin" \
     "${PKGROOT}/usr/local/share/container-macos-node/manifests" \
@@ -284,12 +287,19 @@ stage_file "$KUBELET_BINARY" "${PKGROOT}/usr/local/bin/kubelet" 0755
 
 stage_file "${BUILD_BIN_DIR}/container-runtime-macos" "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos" 0755
 stage_file "${BUILD_BIN_DIR}/container-runtime-macos-sidecar" "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar" 0755
-stage_file "${ROOT_DIR}/config/container-runtime-macos-config.json" "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/config.json" 0644
+stage_file "${ROOT_DIR}/Sources/Helpers/RuntimeMacOS/config.toml" "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/config.toml" 0644
 stage_file "${BUILD_BIN_DIR}/container-network-vmnet" "${PKGROOT}/usr/local/libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet" 0755
-stage_file "${ROOT_DIR}/config/container-network-vmnet-config.json" "${PKGROOT}/usr/local/libexec/container/plugins/container-network-vmnet/config.json" 0644
+stage_file "${ROOT_DIR}/Sources/Plugins/NetworkVmnet/config.toml" "${PKGROOT}/usr/local/libexec/container/plugins/container-network-vmnet/config.toml" 0644
 stage_file "${BUILD_BIN_DIR}/container-core-images" "${PKGROOT}/usr/local/libexec/container/plugins/container-core-images/bin/container-core-images" 0755
-stage_file "${ROOT_DIR}/config/container-core-images-config.json" "${PKGROOT}/usr/local/libexec/container/plugins/container-core-images/config.json" 0644
+stage_file "${ROOT_DIR}/Sources/Plugins/CoreImages/config.toml" "${PKGROOT}/usr/local/libexec/container/plugins/container-core-images/config.toml" 0644
+stage_file "${BUILD_BIN_DIR}/machine-apiserver" "${PKGROOT}/usr/local/libexec/container/plugins/machine-apiserver/bin/machine-apiserver" 0755
+stage_file "${ROOT_DIR}/Sources/Plugins/MachineAPIServer/config.toml" "${PKGROOT}/usr/local/libexec/container/plugins/machine-apiserver/config.toml" 0644
+stage_file "${ROOT_DIR}/Sources/Plugins/MachineAPIServer/Resources/init" "${PKGROOT}/usr/local/libexec/container/plugins/machine-apiserver/resources/init" 0755
+stage_file "${ROOT_DIR}/Sources/Plugins/MachineAPIServer/Resources/create-user.sh" "${PKGROOT}/usr/local/libexec/container/plugins/machine-apiserver/resources/create-user.sh" 0755
 stage_file "${BUILD_BIN_DIR}/container-macos-guest-agent" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/bin/container-macos-guest-agent" 0755
+stage_file "${ROOT_DIR}/scripts/macos-guest-agent/install.sh" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share/install.sh" 0755
+stage_file "${ROOT_DIR}/scripts/macos-guest-agent/install-in-guest-from-seed.sh" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share/install-in-guest-from-seed.sh" 0755
+stage_file "${ROOT_DIR}/scripts/macos-guest-agent/container-macos-guest-agent.plist" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share/container-macos-guest-agent.plist" 0644
 stage_file "${BUILD_BIN_DIR}/container-macos-image-prepare" "${PKGROOT}/usr/local/libexec/container/macos-image-prepare/bin/container-macos-image-prepare" 0755
 stage_file "${BUILD_BIN_DIR}/container-macos-vm-manager" "${PKGROOT}/usr/local/libexec/container/macos-vm-manager/bin/container-macos-vm-manager" 0755
 
@@ -332,6 +342,7 @@ if [[ "$SKIP_CODESIGN" != true ]]; then
     codesign_path "${PKGROOT}/usr/local/libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar" --prefix=com.apple.container. --entitlements="${ROOT_DIR}/signing/container-runtime-macos.entitlements"
     codesign_path "${PKGROOT}/usr/local/libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet" --prefix=com.apple.container. --entitlements="${ROOT_DIR}/signing/container-network-vmnet.entitlements"
     codesign_path "${PKGROOT}/usr/local/libexec/container/plugins/container-core-images/bin/container-core-images" --prefix=com.apple.container.
+    codesign_path "${PKGROOT}/usr/local/libexec/container/plugins/machine-apiserver/bin/machine-apiserver" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/bin/container-macos-guest-agent" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/libexec/container/macos-image-prepare/bin/container-macos-image-prepare" --prefix=com.apple.container. --entitlements="${ROOT_DIR}/signing/container-runtime-macos.entitlements"
     codesign_path "${PKGROOT}/usr/local/libexec/container/macos-vm-manager/bin/container-macos-vm-manager" --prefix=com.apple.container. --entitlements="${ROOT_DIR}/signing/container-runtime-macos.entitlements"

@@ -209,6 +209,13 @@ jobs:
             "etc/kubernetes/kubelet-config.yaml"
             "Library/LaunchDaemons/com.apple.container.kubelet.plist"
             "opt/cni/bin/container-cni-macvmnet"
+            "usr/local/libexec/container/plugins/machine-apiserver/bin/machine-apiserver"
+            "usr/local/libexec/container/plugins/machine-apiserver/config.toml"
+            "usr/local/libexec/container/plugins/machine-apiserver/resources/init"
+            "usr/local/libexec/container/plugins/machine-apiserver/resources/create-user.sh"
+            "usr/local/libexec/container/macos-guest-agent/share/install.sh"
+            "usr/local/libexec/container/macos-guest-agent/share/install-in-guest-from-seed.sh"
+            "usr/local/libexec/container/macos-guest-agent/share/container-macos-guest-agent.plist"
             "usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml"
             "usr/local/share/container-macos-node/manifests/runtimeclass-macos-compat.yaml"
             "usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml"
@@ -233,6 +240,7 @@ jobs:
             "usr/local/bin/container-macos-kubeadm"
             "usr/local/bin/kubelet"
             "opt/cni/bin/container-cni-macvmnet"
+            "usr/local/libexec/container/plugins/machine-apiserver/bin/machine-apiserver"
           )
 
           for binary_path in "${signed_payload_binaries[@]}"; do

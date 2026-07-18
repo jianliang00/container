@@ -36,11 +36,6 @@ public struct Utility {
     static let defaultMacOSGuestAgentPort: UInt32 = 27000
     static let defaultContainerOS = "linux"
 
-    private static let infraImages = [
-        DefaultsStore.get(key: .defaultBuilderImage),
-        DefaultsStore.get(key: .defaultInitImage),
-    ]
-
     public struct MacOSGuestNetworkingOverride: Sendable {
         public let networks: [AttachmentConfiguration]
         public let dns: ContainerConfiguration.DNSConfiguration?
@@ -53,7 +48,6 @@ public struct Utility {
             self.dns = dns
         }
     }
-
     public static func createContainerID(name: String?) -> String {
         guard let name else {
             return UUID().uuidString.lowercased()
@@ -104,20 +98,21 @@ public struct Utility {
         registry: Flags.Registry,
         imageFetch: Flags.ImageFetch,
         macOSGuestNetworking: MacOSGuestNetworkingOverride? = nil,
+        containerSystemConfig: ContainerSystemConfig,
         progressUpdate: @escaping ProgressUpdateHandler,
         log: Logger
     ) async throws -> (ContainerConfiguration, Kernel?, String?) {
-        let defaultRequestedPlatform = Parser.platform(
-            os: management.os ?? defaultContainerOS,
-            arch: management.arch ?? Platform.current.architecture
+        let explicitlyResolvedPlatform = try DefaultPlatform.resolve(
+            platform: management.platform,
+            os: management.os,
+            arch: management.arch,
+            log: log
         )
-        var requestedPlatform = defaultRequestedPlatform
-        // Prefer --platform
-        if let platform = management.platform {
-            requestedPlatform = try Parser.platform(from: platform)
-        }
+        var requestedPlatform =
+            explicitlyResolvedPlatform
+            ?? Parser.platform(os: defaultContainerOS, arch: Platform.current.architecture)
         let canAutoDetectPlatformFromImage =
-            management.os == nil && management.arch == nil && management.platform == nil && management.runtime == nil
+            explicitlyResolvedPlatform == nil && management.runtime == nil
 
         var prefetchedImage: ClientImage?
         if canAutoDetectPlatformFromImage {
@@ -125,6 +120,7 @@ public struct Utility {
                 reference: image,
                 platform: nil,
                 scheme: try RequestScheme(registry.scheme),
+                containerSystemConfig: containerSystemConfig,
                 progressUpdate: progressUpdate,
                 maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
             )
@@ -159,7 +155,6 @@ public struct Utility {
         } else if management.gui {
             throw ContainerizationError(.unsupported, message: "--gui requires --os darwin")
         }
-
         let scheme = try RequestScheme(registry.scheme)
 
         await progressUpdate([
@@ -175,6 +170,7 @@ public struct Utility {
                 reference: image,
                 platform: requestedPlatform,
                 scheme: scheme,
+                containerSystemConfig: containerSystemConfig,
                 progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
                 maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
             )
@@ -183,6 +179,7 @@ public struct Utility {
                 reference: image,
                 platform: requestedPlatform,
                 scheme: scheme,
+                containerSystemConfig: containerSystemConfig,
                 progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
                 maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
             )
@@ -209,7 +206,11 @@ public struct Utility {
                 .setItemsName("binary"),
             ])
 
-            kernel = try await self.getKernel(management: management, progressUpdate: progressUpdate)
+            kernel = try await self.getKernel(
+                management: management,
+                containerSystemConfig: containerSystemConfig,
+                progressUpdate: progressUpdate
+            )
 
             // Pull and unpack the initial filesystem for Linux runtime.
             await progressUpdate([
@@ -217,9 +218,10 @@ public struct Utility {
                 .setItemsName("blobs"),
             ])
             let fetchInitTask = await taskManager.startTask()
-            let initImageRef = management.initImage ?? ClientImage.initImageRef
+            let initImageRef = management.initImage ?? containerSystemConfig.vminit.image
             let initImage = try await ClientImage.fetch(
                 reference: initImageRef, platform: .current, scheme: scheme,
+                containerSystemConfig: containerSystemConfig,
                 progressUpdate: ProgressTaskCoordinator.handler(for: fetchInitTask, from: progressUpdate),
                 maxConcurrentDownloads: imageFetch.maxConcurrentDownloads)
 
@@ -299,7 +301,8 @@ public struct Utility {
             ? try resolveMacOSGuestNetworking(
                 containerID: id,
                 management: management,
-                override: macOSGuestNetworking
+                override: macOSGuestNetworking,
+                dnsDomain: containerSystemConfig.dns.domain
             )
             : nil
 
@@ -314,17 +317,16 @@ public struct Utility {
                 }
                 config.networks = []
             } else {
-                let builtinNetworkId = try await ClientNetwork.builtin?.id
+                let networkClient = NetworkClient()
+                let builtinNetworkId = try await networkClient.builtin?.id
                 config.networks = try getAttachmentConfigurations(
                     containerId: config.id,
                     builtinNetworkId: builtinNetworkId,
-                    networks: parsedNetworks
+                    networks: parsedNetworks,
+                    dnsDomain: containerSystemConfig.dns.domain
                 )
                 for attachmentConfiguration in config.networks {
-                    let network: NetworkState = try await ClientNetwork.get(id: attachmentConfiguration.network)
-                    guard case .running(_, _) = network else {
-                        throw ContainerizationError(.invalidState, message: "network \(attachmentConfiguration.network) is not running")
-                    }
+                    _ = try await networkClient.get(id: attachmentConfiguration.network)
                 }
             }
         }
@@ -396,7 +398,8 @@ public struct Utility {
     static func resolveMacOSGuestNetworking(
         containerID: String,
         management: Flags.Management,
-        override: MacOSGuestNetworkingOverride?
+        override: MacOSGuestNetworkingOverride?,
+        dnsDomain: String? = nil
     ) throws -> (networks: [AttachmentConfiguration], dns: ContainerConfiguration.DNSConfiguration?)? {
         if let override {
             guard !management.dnsDisabled else {
@@ -408,7 +411,7 @@ public struct Utility {
             }
 
             try validateMacOSGuestDNSOptions(management.dns.options)
-            let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
+            let domain = management.dns.domain ?? dnsDomain
             return (
                 override.networks,
                 .init(
@@ -449,7 +452,8 @@ public struct Utility {
         let attachments = try getAttachmentConfigurations(
             containerId: containerID,
             builtinNetworkId: ClientNetwork.defaultNetworkName,
-            networks: parsedNetworks
+            networks: parsedNetworks,
+            dnsDomain: dnsDomain
         )
 
         guard !management.dnsDisabled else {
@@ -457,7 +461,7 @@ public struct Utility {
         }
 
         try validateMacOSGuestDNSOptions(management.dns.options)
-        let domain = management.dns.domain ?? DefaultsStore.getOptional(key: .defaultDNSDomain)
+        let domain = management.dns.domain ?? dnsDomain
         return (
             attachments,
             .init(
@@ -525,6 +529,7 @@ public struct Utility {
         reference: String,
         platform: ContainerizationOCI.Platform,
         scheme: RequestScheme,
+        containerSystemConfig: ContainerSystemConfig,
         progressUpdate: ProgressUpdateHandler?,
         maxConcurrentDownloads: Int
     ) async throws -> ClientImage {
@@ -540,6 +545,7 @@ public struct Utility {
             reference: reference,
             platform: platform,
             scheme: scheme,
+            containerSystemConfig: containerSystemConfig,
             progressUpdate: progressUpdate,
             maxConcurrentDownloads: maxConcurrentDownloads
         )
@@ -645,7 +651,11 @@ public struct Utility {
         return [AttachmentConfiguration(network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil, mtu: 1280))]
     }
 
-    private static func getKernel(management: Flags.Management, progressUpdate: ProgressUpdateHandler? = nil) async throws -> Kernel {
+    private static func getKernel(
+        management: Flags.Management,
+        containerSystemConfig: ContainerSystemConfig,
+        progressUpdate: ProgressUpdateHandler? = nil
+    ) async throws -> Kernel {
         // For the image itself we'll take the user input and try with it as we can do userspace
         // emulation for x86, but for the kernel we need it to match the hosts architecture.
         let s: SystemPlatform = .current
@@ -662,14 +672,22 @@ public struct Utility {
             guard error.isCode(.notFound) else {
                 throw error
             }
-            try await installRecommendedKernelIfConfirmed(platform: s, progressUpdate: progressUpdate)
+            try await installRecommendedKernelIfConfirmed(
+                platform: s,
+                kernelConfig: containerSystemConfig.kernel,
+                progressUpdate: progressUpdate
+            )
             return try await ClientKernel.getDefaultKernel(for: s)
         }
     }
 
-    private static func installRecommendedKernelIfConfirmed(platform: SystemPlatform, progressUpdate: ProgressUpdateHandler?) async throws {
-        let url = DefaultsStore.get(key: .defaultKernelURL)
-        let path = DefaultsStore.get(key: .defaultKernelBinaryPath)
+    private static func installRecommendedKernelIfConfirmed(
+        platform: SystemPlatform,
+        kernelConfig: KernelConfig,
+        progressUpdate: ProgressUpdateHandler?
+    ) async throws {
+        let url = kernelConfig.url.absoluteString
+        let path = kernelConfig.binaryPath
 
         await progressUpdate?([
             .setDescription("Waiting for kernel install confirmation"),
@@ -700,6 +718,7 @@ public struct Utility {
             kernelFilePath: path,
             platform: platform,
             progressUpdate: progressUpdate,
+            expectedDigest: kernelConfig.digest,
             force: true
         )
     }

@@ -16,7 +16,7 @@
 
 import Testing
 
-@Suite(.enabled(if: CLITest.isCLIServiceAvailable(), "requires running container API service"))
+@Suite
 struct TestCLIPluginErrors {
     @Test func testHelpfulMessageWhenPluginsUnavailable() async throws {
         // Intentionally invoke an unknown plugin command. In CI this should run

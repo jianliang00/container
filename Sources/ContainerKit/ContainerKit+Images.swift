@@ -23,14 +23,20 @@ extension ContainerKit {
     }
 
     public func getImage(reference: String) async throws -> Image {
-        try await ClientImage.get(reference: reference)
+        let config = try await systemConfiguration()
+        return try await ClientImage.get(reference: reference, containerSystemConfig: config)
     }
 
     public func pullImage(
         reference: String,
         authentication: ClientImagePullAuthentication? = nil
     ) async throws -> Image {
-        try await ClientImage.pull(reference: reference, authentication: authentication)
+        let config = try await systemConfiguration()
+        return try await ClientImage.pull(
+            reference: reference,
+            authentication: authentication,
+            containerSystemConfig: config
+        )
     }
 
     public func deleteImage(reference: String, garbageCollect: Bool = false) async throws {

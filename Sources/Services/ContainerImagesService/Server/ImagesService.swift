@@ -89,8 +89,27 @@ public actor ImagesService {
     ) async throws
         -> ImageDescription
     {
-        self.log.info(
-            "ImagesService: \(#function) - ref: \(reference), platform: \(String(describing: platform)), insecure: \(insecure), maxConcurrentDownloads: \(maxConcurrentDownloads)")
+        self.log.debug(
+            "ImagesService: enter",
+            metadata: [
+                "func": "\(#function)",
+                "ref": "\(reference)",
+                "platform": "\(String(describing: platform))",
+                "insecure": "\(insecure)",
+                "maxConcurrentDownloads": "\(maxConcurrentDownloads)",
+            ]
+        )
+        defer {
+            self.log.debug(
+                "ImagesService: exit",
+                metadata: [
+                    "func": "\(#function)",
+                    "ref": "\(reference)",
+                    "platform": "\(String(describing: platform))",
+                ]
+            )
+        }
+
         let img =
             if let authentication {
                 try await self.imageStore.pull(

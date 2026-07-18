@@ -32,7 +32,7 @@ struct SandboxConfigurationTests {
         container.mounts = [.virtiofs(source: "/tmp/shared", destination: "/shared", options: [])]
         container.readOnlyFiles = [.init(source: "/tmp/config.json", destination: "/etc/config.json", mode: 0o444)]
         container.publishedPorts = [
-            .init(
+            try PublishPort(
                 hostAddress: try IPAddress("127.0.0.1"),
                 hostPort: 8080,
                 containerPort: 80,

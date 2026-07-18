@@ -16,79 +16,226 @@
 
 import ArgumentParser
 import ContainerAPIClient
-import ContainerSandboxServiceClient
+import ContainerResource
+import ContainerRuntimeClient
+import Containerization
 import ContainerizationError
 import Foundation
 import RuntimeMacOSSidecarShared
+import SystemPackage
 
 extension Application {
     public struct ContainerCopy: AsyncLoggableCommand {
-        public init() {}
+        enum PathRef {
+            case local(String)
+            case container(id: String, path: String)
+        }
 
-        public static let configuration = CommandConfiguration(
-            commandName: "cp",
-            abstract: "Copy files between a container and the local filesystem"
-        )
-
-        @OptionGroup
-        public var logOptions: Flags.Logging
-
-        @Argument(help: "Source path (use CONTAINER:PATH for container paths)")
-        var src: String
-
-        @Argument(help: "Destination path (use CONTAINER:PATH for container paths)")
-        var dst: String
-
-        public func run() async throws {
-            let (srcContainer, srcPath) = parsePath(src)
-            let (dstContainer, dstPath) = parsePath(dst)
-
-            guard (srcContainer == nil) != (dstContainer == nil) else {
-                guard srcContainer != nil && dstContainer != nil else {
-                    throw ContainerizationError(.invalidArgument, message: "source or destination must be a container path (CONTAINER:PATH)")
-                }
-                throw ContainerizationError(.invalidArgument, message: "cannot copy between two containers")
-            }
-
-            let client = ContainerClient()
-
-            if let containerID = dstContainer {
-                // Host -> Container
-                let container = try await client.get(id: containerID)
-                try Application.ensureRunning(container: container)
-                guard container.configuration.macosGuest != nil else {
-                    throw ContainerizationError(.unsupported, message: "container cp is only supported for macOS containers")
-                }
-                let runtime = container.configuration.runtimeHandler
-                let sandboxClient = try await SandboxClient.create(id: container.id, runtime: runtime)
-                let srcURL = URL(fileURLWithPath: srcPath)
-                try await copyHostToContainer(srcURL: srcURL, dstPath: dstPath, sandboxClient: sandboxClient)
-            } else {
-                // Container -> Host
-                let containerID = srcContainer!
-                let container = try await client.get(id: containerID)
-                try Application.ensureRunning(container: container)
-                guard container.configuration.macosGuest != nil else {
-                    throw ContainerizationError(.unsupported, message: "container cp is only supported for macOS containers")
-                }
-                let runtime = container.configuration.runtimeHandler
-                let sandboxClient = try await SandboxClient.create(id: container.id, runtime: runtime)
-                let dstURL = URL(fileURLWithPath: dstPath)
-                try await copyContainerToHost(srcPath: srcPath, dstURL: dstURL, sandboxClient: sandboxClient)
+        static func parsePathRef(_ ref: String) throws -> PathRef {
+            let parts = ref.components(separatedBy: ":")
+            switch parts.count {
+            case 1:
+                return .local(ref)
+            case 2 where !parts[0].isEmpty && parts[1].starts(with: "/"):
+                return .container(id: parts[0], path: parts[1])
+            default:
+                throw ContainerizationError(.invalidArgument, message: "invalid path given: \(ref)")
             }
         }
 
-        // Parse "container:path" or "localpath"
-        private func parsePath(_ s: String) -> (containerID: String?, path: String) {
-            let parts = s.split(separator: ":", maxSplits: 1)
-            if parts.count == 2 {
-                let maybeID = String(parts[0])
-                // Container ID does not contain '/'
-                if !maybeID.contains("/") && !maybeID.isEmpty {
-                    return (maybeID, String(parts[1]))
+        public init() {}
+
+        public static let configuration = CommandConfiguration(
+            commandName: "copy",
+            abstract: "Copy files/folders between a container and the local filesystem",
+            aliases: ["cp"])
+
+        @OptionGroup()
+        public var logOptions: Flags.Logging
+
+        @Argument(help: "Source path (container:path or local path)")
+        var source: String
+
+        @Argument(help: "Destination path (container:path or local path)")
+        var destination: String
+
+        public func run() async throws {
+            let client = ContainerClient()
+            let srcRef = try Self.parsePathRef(source)
+            let dstRef = try Self.parsePathRef(destination)
+
+            switch (srcRef, dstRef) {
+            case (.container(let id, let path), .local(let localPath)):
+                let container = try await client.get(id: id)
+                try Application.ensureRunning(container: container)
+
+                let srcPath = FilePath(path)
+                let destPath = FilePath(
+                    URL(fileURLWithPath: localPath, relativeTo: .currentDirectory()).absoluteURL.path(percentEncoded: false))
+                var isDirectory: ObjCBool = false
+                let exists = FileManager.default.fileExists(atPath: destPath.string, isDirectory: &isDirectory)
+
+                var finalDestPath = destPath
+                if exists && isDirectory.boolValue {
+                    guard let lastComponent = srcPath.lastComponent else {
+                        throw ContainerizationError(.invalidArgument, message: "source path has no last component: \(path)")
+                    }
+                    finalDestPath = destPath.appending(lastComponent)
+                    try await copyOut(
+                        client: client,
+                        container: container,
+                        source: path,
+                        destination: finalDestPath.string
+                    )
+                } else if localPath.hasSuffix("/") {
+                    try await copyOut(
+                        client: client,
+                        container: container,
+                        source: path,
+                        destination: destPath.string
+                    )
+                    var resultIsDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: destPath.string, isDirectory: &resultIsDir),
+                        !resultIsDir.boolValue
+                    {
+                        try? FileManager.default.removeItem(atPath: destPath.string)
+                        throw ContainerizationError(
+                            .invalidArgument,
+                            message: "destination is not a directory: \(localPath)")
+                    }
+                } else {
+                    try await copyOut(
+                        client: client,
+                        container: container,
+                        source: path,
+                        destination: destPath.string
+                    )
                 }
+                print(finalDestPath.string)
+
+            case (.local(let localPath), .container(let id, let path)):
+                let container = try await client.get(id: id)
+                try Application.ensureRunning(container: container)
+
+                let srcPath = FilePath(
+                    URL(fileURLWithPath: localPath, relativeTo: .currentDirectory()).absoluteURL.path(percentEncoded: false))
+                var isDirectory: ObjCBool = false
+
+                guard let lastComponent = srcPath.lastComponent else {
+                    throw ContainerizationError(.invalidArgument, message: "source path has no last component: \(localPath)")
+                }
+
+                guard FileManager.default.fileExists(atPath: srcPath.string, isDirectory: &isDirectory) else {
+                    throw ContainerizationError(.notFound, message: "source path does not exist: \(localPath)")
+                }
+                if localPath.hasSuffix("/") && !isDirectory.boolValue {
+                    throw ContainerizationError(.invalidArgument, message: "source path is not a directory: \(localPath)")
+                }
+
+                try await copyIn(
+                    client: client,
+                    container: container,
+                    source: srcPath.string,
+                    destination: path,
+                    sourceName: lastComponent.string
+                )
+                let printedDest = path.hasSuffix("/") ? "\(id):\(path)\(lastComponent.string)" : "\(id):\(path)"
+                print(printedDest)
+
+            case (.container, .container):
+                throw ContainerizationError(.invalidArgument, message: "copying between containers is not supported")
+            case (.local, .local):
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "one of source or destination must be a container reference (container_id:path)")
             }
-            return (nil, s)
+        }
+
+        private func copyIn(
+            client: ContainerClient,
+            container: ContainerSnapshot,
+            source: String,
+            destination: String,
+            sourceName: String
+        ) async throws {
+            guard container.configuration.macosGuest != nil else {
+                try await client.copyIn(
+                    id: container.id,
+                    source: source,
+                    destination: destination,
+                    createParents: true
+                )
+                return
+            }
+
+            let runtimeClient = try await RuntimeClient.create(
+                id: container.id,
+                runtime: container.configuration.runtimeHandler
+            )
+            let resolvedDestination = try await macOSCopyInDestination(
+                destination,
+                sourceName: sourceName,
+                runtimeClient: runtimeClient
+            )
+            try await copyHostToContainer(
+                srcURL: URL(fileURLWithPath: source),
+                dstPath: resolvedDestination,
+                runtimeClient: runtimeClient
+            )
+        }
+
+        private func copyOut(
+            client: ContainerClient,
+            container: ContainerSnapshot,
+            source: String,
+            destination: String
+        ) async throws {
+            guard container.configuration.macosGuest != nil else {
+                try await client.copyOut(
+                    id: container.id,
+                    source: source,
+                    destination: destination
+                )
+                return
+            }
+
+            let runtimeClient = try await RuntimeClient.create(
+                id: container.id,
+                runtime: container.configuration.runtimeHandler
+            )
+            try await copyContainerToHost(
+                srcPath: source,
+                dstURL: URL(fileURLWithPath: destination),
+                runtimeClient: runtimeClient
+            )
+        }
+
+        private func macOSCopyInDestination(
+            _ destination: String,
+            sourceName: String,
+            runtimeClient: RuntimeClient
+        ) async throws -> String {
+            if destination.hasSuffix("/") {
+                return "\(destination)\(sourceName)"
+            }
+
+            let txID = UUID().uuidString
+            let metadata: MacOSSidecarFSReadBeginResponsePayload
+            do {
+                metadata = try await runtimeClient.fsReadBegin(
+                    MacOSSidecarFSReadBeginRequestPayload(txID: txID, path: destination)
+                )
+            } catch {
+                // This is only a best-effort probe to preserve directory destination
+                // semantics. The write path below will return the authoritative error.
+                return destination
+            }
+            try await runtimeClient.fsReadEnd(txID: txID)
+
+            guard metadata.fileType == .directory else {
+                return destination
+            }
+            return "\(destination)/\(sourceName)"
         }
 
         // MARK: - Host to Container
@@ -96,7 +243,7 @@ extension Application {
         private func copyHostToContainer(
             srcURL: URL,
             dstPath: String,
-            sandboxClient: SandboxClient
+            runtimeClient: RuntimeClient
         ) async throws {
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: srcURL.path, isDirectory: &isDirectory) else {
@@ -104,30 +251,38 @@ extension Application {
             }
 
             if isDirectory.boolValue {
-                try await copyDirectoryHostToContainer(srcURL: srcURL, dstPath: dstPath, sandboxClient: sandboxClient)
+                try await copyDirectoryHostToContainer(
+                    srcURL: srcURL,
+                    dstPath: dstPath,
+                    runtimeClient: runtimeClient
+                )
+                return
+            }
+
+            let attrs = try FileManager.default.attributesOfItem(atPath: srcURL.path)
+            if attrs[.type] as? FileAttributeType == .typeSymbolicLink {
+                let target = try FileManager.default.destinationOfSymbolicLink(atPath: srcURL.path)
+                let mtime = (attrs[.modificationDate] as? Date).map { Int64($0.timeIntervalSince1970) }
+                let options = MacOSSidecarFileTransfer.WriteOptions(mtime: mtime)
+                try await MacOSSidecarFileTransfer.createSymbolicLink(
+                    at: dstPath,
+                    target: target,
+                    options: options,
+                    begin: { payload in try await runtimeClient.fsBegin(payload) }
+                )
             } else {
-                // Check if it's a symlink
-                let attrs = try FileManager.default.attributesOfItem(atPath: srcURL.path)
-                if attrs[.type] as? FileAttributeType == .typeSymbolicLink {
-                    let target = try FileManager.default.destinationOfSymbolicLink(atPath: srcURL.path)
-                    let mtime = (attrs[.modificationDate] as? Date).map { Int64($0.timeIntervalSince1970) }
-                    let options = MacOSSidecarFileTransfer.WriteOptions(mtime: mtime)
-                    try await MacOSSidecarFileTransfer.createSymbolicLink(
-                        at: dstPath,
-                        target: target,
-                        options: options,
-                        begin: { payload in try await sandboxClient.fsBegin(payload) }
-                    )
-                } else {
-                    try await copySingleFileHostToContainer(srcURL: srcURL, dstPath: dstPath, sandboxClient: sandboxClient)
-                }
+                try await copySingleFileHostToContainer(
+                    srcURL: srcURL,
+                    dstPath: dstPath,
+                    runtimeClient: runtimeClient
+                )
             }
         }
 
         private func copySingleFileHostToContainer(
             srcURL: URL,
             dstPath: String,
-            sandboxClient: SandboxClient
+            runtimeClient: RuntimeClient
         ) async throws {
             let attrs = try FileManager.default.attributesOfItem(atPath: srcURL.path)
             let mode = (attrs[.posixPermissions] as? NSNumber)?.uint32Value
@@ -138,16 +293,16 @@ extension Application {
                 from: srcURL,
                 to: dstPath,
                 options: options,
-                begin: { payload in try await sandboxClient.fsBegin(payload) },
-                chunk: { payload in try await sandboxClient.fsChunk(payload) },
-                end: { payload in try await sandboxClient.fsEnd(payload) }
+                begin: { payload in try await runtimeClient.fsBegin(payload) },
+                chunk: { payload in try await runtimeClient.fsChunk(payload) },
+                end: { payload in try await runtimeClient.fsEnd(payload) }
             )
         }
 
         private func copyDirectoryHostToContainer(
             srcURL: URL,
             dstPath: String,
-            sandboxClient: SandboxClient
+            runtimeClient: RuntimeClient
         ) async throws {
             let attrs = try FileManager.default.attributesOfItem(atPath: srcURL.path)
             let mode = (attrs[.posixPermissions] as? NSNumber)?.uint32Value
@@ -157,7 +312,7 @@ extension Application {
             try await MacOSSidecarFileTransfer.createDirectory(
                 at: dstPath,
                 options: options,
-                begin: { payload in try await sandboxClient.fsBegin(payload) }
+                begin: { payload in try await runtimeClient.fsBegin(payload) }
             )
 
             let contents = try FileManager.default.contentsOfDirectory(atPath: srcURL.path)
@@ -174,15 +329,23 @@ extension Application {
                         at: childDst,
                         target: target,
                         options: symlinkOptions,
-                        begin: { payload in try await sandboxClient.fsBegin(payload) }
+                        begin: { payload in try await runtimeClient.fsBegin(payload) }
                     )
                 } else {
                     var isDir: ObjCBool = false
                     FileManager.default.fileExists(atPath: childSrc.path, isDirectory: &isDir)
                     if isDir.boolValue {
-                        try await copyDirectoryHostToContainer(srcURL: childSrc, dstPath: childDst, sandboxClient: sandboxClient)
+                        try await copyDirectoryHostToContainer(
+                            srcURL: childSrc,
+                            dstPath: childDst,
+                            runtimeClient: runtimeClient
+                        )
                     } else {
-                        try await copySingleFileHostToContainer(srcURL: childSrc, dstPath: childDst, sandboxClient: sandboxClient)
+                        try await copySingleFileHostToContainer(
+                            srcURL: childSrc,
+                            dstPath: childDst,
+                            runtimeClient: runtimeClient
+                        )
                     }
                 }
             }
@@ -193,24 +356,32 @@ extension Application {
         private func copyContainerToHost(
             srcPath: String,
             dstURL: URL,
-            sandboxClient: SandboxClient
+            runtimeClient: RuntimeClient
         ) async throws {
             let txID = UUID().uuidString
-            let meta = try await sandboxClient.fsReadBegin(
+            let meta = try await runtimeClient.fsReadBegin(
                 MacOSSidecarFSReadBeginRequestPayload(txID: txID, path: srcPath)
             )
 
             do {
                 switch meta.fileType {
                 case .file:
-                    try await copyFileContainerToHost(txID: txID, meta: meta, dstURL: dstURL, sandboxClient: sandboxClient)
-                    try await sandboxClient.fsReadEnd(txID: txID)
+                    try await copyFileContainerToHost(
+                        txID: txID,
+                        meta: meta,
+                        dstURL: dstURL,
+                        runtimeClient: runtimeClient
+                    )
+                    try await runtimeClient.fsReadEnd(txID: txID)
                 case .directory:
-                    // For directory, we don't need the read session - close it and use fsListDir
-                    try await sandboxClient.fsReadEnd(txID: txID)
-                    try await copyDirectoryContainerToHost(srcPath: srcPath, dstURL: dstURL, sandboxClient: sandboxClient)
+                    try await runtimeClient.fsReadEnd(txID: txID)
+                    try await copyDirectoryContainerToHost(
+                        srcPath: srcPath,
+                        dstURL: dstURL,
+                        runtimeClient: runtimeClient
+                    )
                 case .symlink:
-                    try await sandboxClient.fsReadEnd(txID: txID)
+                    try await runtimeClient.fsReadEnd(txID: txID)
                     guard let target = meta.linkTarget else {
                         throw ContainerizationError(.internalError, message: "symlink target missing for \(srcPath)")
                     }
@@ -220,8 +391,7 @@ extension Application {
                     try FileManager.default.createSymbolicLink(atPath: dstURL.path, withDestinationPath: target)
                 }
             } catch {
-                // Best-effort cleanup: ignore error from fsReadEnd
-                try? await sandboxClient.fsReadEnd(txID: txID)
+                try? await runtimeClient.fsReadEnd(txID: txID)
                 throw error
             }
         }
@@ -230,20 +400,20 @@ extension Application {
             txID: String,
             meta: MacOSSidecarFSReadBeginResponsePayload,
             dstURL: URL,
-            sandboxClient: SandboxClient
+            runtimeClient: RuntimeClient
         ) async throws {
             let parent = dstURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
             let chunkSize = 256 * 1024
-            FileManager.default.createFile(atPath: dstURL.path, contents: nil)
+            _ = FileManager.default.createFile(atPath: dstURL.path, contents: nil)
             let fileHandle = try FileHandle(forWritingTo: dstURL)
             defer { try? fileHandle.close() }
             try fileHandle.truncate(atOffset: 0)
 
             var offset: UInt64 = 0
             while true {
-                let data = try await sandboxClient.fsReadChunk(
+                let data = try await runtimeClient.fsReadChunk(
                     MacOSSidecarFSReadChunkRequestPayload(txID: txID, offset: offset, maxLength: chunkSize)
                 )
                 guard let data, !data.isEmpty else { break }
@@ -252,7 +422,10 @@ extension Application {
             }
 
             if let mode = meta.mode {
-                try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: mode)], ofItemAtPath: dstURL.path)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: NSNumber(value: mode)],
+                    ofItemAtPath: dstURL.path
+                )
             }
             if let mtime = meta.mtime {
                 let date = Date(timeIntervalSince1970: TimeInterval(mtime))
@@ -263,13 +436,12 @@ extension Application {
         private func copyDirectoryContainerToHost(
             srcPath: String,
             dstURL: URL,
-            sandboxClient: SandboxClient
+            runtimeClient: RuntimeClient
         ) async throws {
             try FileManager.default.createDirectory(at: dstURL, withIntermediateDirectories: true)
 
-            let txID = UUID().uuidString
-            let entries = try await sandboxClient.fsListDir(
-                MacOSSidecarFSListDirRequestPayload(txID: txID, path: srcPath)
+            let entries = try await runtimeClient.fsListDir(
+                MacOSSidecarFSListDirRequestPayload(txID: UUID().uuidString, path: srcPath)
             )
 
             for entry in entries {
@@ -278,18 +450,27 @@ extension Application {
                 switch entry.fileType {
                 case .file:
                     let fileTxID = UUID().uuidString
-                    let fileMeta = try await sandboxClient.fsReadBegin(
+                    let fileMeta = try await runtimeClient.fsReadBegin(
                         MacOSSidecarFSReadBeginRequestPayload(txID: fileTxID, path: childSrc)
                     )
                     do {
-                        try await copyFileContainerToHost(txID: fileTxID, meta: fileMeta, dstURL: childDst, sandboxClient: sandboxClient)
-                        try await sandboxClient.fsReadEnd(txID: fileTxID)
+                        try await copyFileContainerToHost(
+                            txID: fileTxID,
+                            meta: fileMeta,
+                            dstURL: childDst,
+                            runtimeClient: runtimeClient
+                        )
+                        try await runtimeClient.fsReadEnd(txID: fileTxID)
                     } catch {
-                        try? await sandboxClient.fsReadEnd(txID: fileTxID)
+                        try? await runtimeClient.fsReadEnd(txID: fileTxID)
                         throw error
                     }
                 case .directory:
-                    try await copyDirectoryContainerToHost(srcPath: childSrc, dstURL: childDst, sandboxClient: sandboxClient)
+                    try await copyDirectoryContainerToHost(
+                        srcPath: childSrc,
+                        dstURL: childDst,
+                        runtimeClient: runtimeClient
+                    )
                 case .symlink:
                     if let target = entry.linkTarget {
                         try? FileManager.default.removeItem(at: childDst)

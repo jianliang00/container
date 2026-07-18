@@ -15,8 +15,9 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerCommands
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import Containerization
 import Foundation
 import Testing
@@ -487,10 +488,17 @@ extension TestCLIMacOSBuildBase {
             assertDidNotDialLinuxBuilder(response)
 
             do {
-                let workloadImage = try await ClientImage.get(reference: imageName)
+                let containerSystemConfig = try await Application.loadContainerSystemConfig()
+                let workloadImage = try await ClientImage.get(
+                    reference: imageName,
+                    containerSystemConfig: containerSystemConfig
+                )
                 try await validateCLIWorkloadImageContract(workloadImage)
 
-                let baseImage = try await ClientImage.get(reference: macOSBaseReference)
+                let baseImage = try await ClientImage.get(
+                    reference: macOSBaseReference,
+                    containerSystemConfig: containerSystemConfig
+                )
                 let configuration = makeCLIWorkloadContainerConfiguration(
                     id: containerID,
                     image: baseImage.description
@@ -499,7 +507,7 @@ extension TestCLIMacOSBuildBase {
                 _ = try await containerClient.bootstrap(id: containerID, stdio: [nil, nil, nil])
                 try await waitForCLIContainerStatus(client: containerClient, id: containerID, status: .running, timeoutSeconds: 180)
 
-                let sandboxClient = try await SandboxClient.create(id: containerID, runtime: configuration.runtimeHandler)
+                let sandboxClient = try await RuntimeClient.create(id: containerID, runtime: configuration.runtimeHandler)
                 try await waitForCLISandboxStatus(client: sandboxClient, status: .running, timeoutSeconds: 180)
 
                 let stdoutPipe = Pipe()
@@ -609,7 +617,7 @@ private func waitForCLIContainerStatus(
 }
 
 private func waitForCLISandboxStatus(
-    client: SandboxClient,
+    client: RuntimeClient,
     status: RuntimeStatus,
     timeoutSeconds: TimeInterval
 ) async throws {

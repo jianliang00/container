@@ -7,10 +7,12 @@ builder:
         - ContainerAPIClient
         - ContainerKit
         - ContainerKitServices
-        - ContainerSandboxService
-        - ContainerSandboxServiceClient
-        - ContainerNetworkService
-        - ContainerNetworkServiceClient
+        - ContainerRuntimeClient
+        - ContainerRuntimeLinuxClient
+        - ContainerRuntimeLinuxServer
+        - ContainerNetworkClient
+        - ContainerNetworkServer
+        - ContainerNetworkVmnetServer
         - ContainerImagesService
         - ContainerImagesServiceClient
         - ContainerResource

@@ -79,15 +79,15 @@ into an executable checklist. It highlights what is already done and what still 
     - `fsChunk(request:)`
     - `fsEnd(request:)`
 - [x] sandbox client now wraps file-system routes over XPC
-  - file: `Sources/Services/ContainerSandboxService/Client/SandboxClient+FileSystem.swift`
+  - file: `Sources/Services/Runtime/RuntimeClient/RuntimeClient+FileSystem.swift`
   - added:
     - `SandboxClient.fsBegin`
     - `SandboxClient.fsChunk`
     - `SandboxClient.fsEnd`
 - [x] sandbox routes and keys registered
   - files:
-    - `Sources/Services/ContainerSandboxService/Client/SandboxRoutes.swift`
-    - `Sources/Services/ContainerSandboxService/Client/SandboxKeys.swift`
+    - `Sources/Services/Runtime/RuntimeClient/RuntimeRoutes.swift`
+    - `Sources/Services/Runtime/RuntimeClient/RuntimeKeys.swift`
   - added:
     - `fsBegin`
     - `fsChunk`

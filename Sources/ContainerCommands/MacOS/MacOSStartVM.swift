@@ -210,7 +210,7 @@ extension Application {
                 )
             }
 
-            let executableURL = CommandLine.executablePathUrl.standardizedFileURL
+            let executableURL = URL(filePath: CommandLine.executablePath.string).standardizedFileURL
             let executableDir = executableURL.deletingLastPathComponent()
             let installRoot = executableDir.appendingPathComponent("..").standardizedFileURL
             let candidates = [

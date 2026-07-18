@@ -90,11 +90,11 @@ struct CRIShimRuntimeOperationsTests {
         graceful.timeout = 3
         let gracefulOptions = try makeCRIShimStopOptions(graceful)
         #expect(gracefulOptions.timeoutInSeconds == 3)
-        #expect(gracefulOptions.signal == Int32(SIGTERM))
+        #expect(gracefulOptions.signal == String(SIGTERM))
 
         let immediateOptions = try makeCRIShimStopOptions(Runtime_V1_StopContainerRequest())
         #expect(immediateOptions.timeoutInSeconds == 0)
-        #expect(immediateOptions.signal == Int32(SIGKILL))
+        #expect(immediateOptions.signal == String(SIGKILL))
 
         var negative = Runtime_V1_StopContainerRequest()
         negative.timeout = -1

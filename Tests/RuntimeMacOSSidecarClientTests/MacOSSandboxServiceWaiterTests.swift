@@ -16,6 +16,8 @@
 
 #if os(macOS)
 import ContainerResource
+import ContainerRuntimeClient
+import ContainerXPC
 import Containerization
 import ContainerizationError
 import Darwin
@@ -278,6 +280,45 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(!sawInternalWorkloadID)
         let snapshotIDs = (await service.testingWorkloadSnapshots()).map(\.id)
         #expect(!snapshotIDs.contains(processID))
+    }
+
+    @Test
+    func killHandlerAcceptsStringSignalFromCurrentRuntimeClient() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(baseContainerConfiguration())
+
+        let processID = "exec-string-signal"
+        let socketPath = tempRoot.appendingPathComponent("sidecar.sock").path
+        let server = try RecordingExecSidecarServer(
+            socketPath: socketPath,
+            exitOnSignalProcessIDs: [processID]
+        )
+        defer { server.stop() }
+        server.start()
+
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+        try await service.testingCreateProcess(
+            processID,
+            config: makeProcessConfiguration(executable: "/bin/sleep", arguments: ["5"])
+        )
+        try await service.testingStartProcess(processID)
+
+        let request = XPCMessage(route: RuntimeRoutes.kill.rawValue)
+        request.set(key: RuntimeKeys.id.rawValue, value: processID)
+        request.set(key: RuntimeKeys.signal.rawValue, value: "TERM")
+        try await service.testingHandleKill(request)
+        _ = try await service.testingWaitExternalProcess(processID)
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let sawSignal = server.recordedRequests().contains {
+            $0.method == .processSignal && $0.processID == processID && $0.signal == SIGTERM
+        }
+        #expect(sawSignal)
     }
 
     @Test
@@ -636,6 +677,24 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(snapshot.status == .running)
         #expect(snapshot.configuration?.id == "sandbox-under-test")
         #expect(snapshot.workloads.contains(where: { $0.id == "sandbox-under-test" }))
+    }
+
+    @Test
+    func invalidStopSignalDoesNotTransitionSandboxToStopping() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(try baseContainerConfiguration(), state: "booted")
+
+        await #expect(throws: Error.self) {
+            try await service.testingStop(
+                .init(timeoutInSeconds: 1, signal: "definitely-not-a-signal")
+            )
+        }
+
+        let snapshot = try await service.testingStateSnapshot()
+        #expect(snapshot.status == .running)
     }
 
     @Test

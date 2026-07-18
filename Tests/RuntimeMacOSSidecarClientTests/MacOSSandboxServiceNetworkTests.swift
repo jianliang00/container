@@ -55,12 +55,12 @@ struct MacOSSandboxServiceNetworkTests {
         let lease = try #require(maybeLease)
         #expect(lease.attachments == prepared.attachments)
         #expect(await recorder.allocateCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
-        #expect(await recorder.lookupCalls().isEmpty)
+        #expect(await recorder.lookupCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
 
         let recoveredService = makeService(root: root, recorder: recorder)
         let recovered = await recoveredService.inspectSandboxNetworkState(containerConfig: config)
         #expect(recovered == prepared)
-        #expect(await recorder.lookupCalls().isEmpty)
+        #expect(await recorder.lookupCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
 
         try await recoveredService.releaseSandboxNetworkState(containerConfig: config)
         #expect(try MacOSGuestNetworkLeaseStore.load(from: root) == nil)
@@ -68,17 +68,18 @@ struct MacOSSandboxServiceNetworkTests {
 
         let afterRelease = await recoveredService.inspectSandboxNetworkState(containerConfig: config)
         #expect(afterRelease.attachments.isEmpty)
-        #expect(await recorder.lookupCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
+        #expect(
+            await recorder.lookupCalls() == [
+                RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host"),
+                RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host"),
+            ])
     }
 
     @Test
-    func prepareReusesPersistedLeaseWithoutAllocatingAgain() async throws {
+    func prepareValidatesAndAdoptsPersistedLease() async throws {
         let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-reuse")
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let recorder = RecordingSandboxNetworkControl()
-        let service = makeService(root: root, recorder: recorder)
-        let config = try makeConfiguration()
         let persistedAttachment = try makeAttachment(
             network: "default",
             hostname: "sandbox-host",
@@ -91,6 +92,13 @@ struct MacOSSandboxServiceNetworkTests {
                 options: []
             )
         )
+        let recorder = RecordingSandboxNetworkControl(
+            seededAttachments: [
+                RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host"): persistedAttachment
+            ]
+        )
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
         try MacOSGuestNetworkLeaseStore.save(
             MacOSGuestNetworkLease(
                 interfaces: [
@@ -103,9 +111,39 @@ struct MacOSSandboxServiceNetworkTests {
         let prepared = try await service.prepareSandboxNetworkState(containerConfig: config)
 
         #expect(prepared.attachments == [persistedAttachment])
-        #expect(await recorder.allocateCalls().isEmpty)
-        #expect(await recorder.lookupCalls().isEmpty)
+        #expect(await recorder.allocateCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
+        #expect(await recorder.lookupCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
         #expect(await recorder.deallocateCalls().isEmpty)
+    }
+
+    @Test
+    func prepareRefreshesPersistedLeaseAfterSessionDisconnect() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-session-recovery")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let key = RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")
+        let recorder = RecordingSandboxNetworkControl()
+        let config = try makeConfiguration()
+        let initialService = makeService(root: root, recorder: recorder)
+        let initial = try await initialService.prepareSandboxNetworkState(containerConfig: config)
+        let initialAttachment = try #require(initial.attachments.first)
+
+        await recorder.simulateSessionDisconnect(key)
+
+        let recoveredService = makeService(root: root, recorder: recorder)
+        let recovered = try await recoveredService.prepareSandboxNetworkState(containerConfig: config)
+        let recoveredAttachment = try #require(recovered.attachments.first)
+
+        #expect(initialAttachment.ipv4Address.address.description == "192.168.64.2")
+        #expect(recoveredAttachment.ipv4Address.address.description == "192.168.64.3")
+        #expect(recoveredAttachment.macAddress == initialAttachment.macAddress)
+        #expect(try MacOSGuestNetworkLeaseStore.load(from: root)?.attachments == recovered.attachments)
+        #expect(await recorder.allocateCalls() == [key, key])
+        #expect(await recorder.lookupCalls() == [key, key])
+        #expect(await recorder.requestedMACAddresses() == [nil, initialAttachment.macAddress])
+
+        try await recoveredService.releaseSandboxNetworkState(containerConfig: config)
+        #expect(await recorder.deallocateCalls() == [key])
     }
 
     @Test
@@ -383,7 +421,7 @@ struct MacOSSandboxServiceNetworkTests {
             address: "192.168.64.2",
             gateway: "192.168.64.1"
         )
-        let publishedPort = PublishPort(
+        let publishedPort = try PublishPort(
             hostAddress: try IPAddress("127.0.0.1"),
             hostPort: 0,
             containerPort: 8080,
@@ -415,6 +453,7 @@ private actor RecordingSandboxNetworkControl {
     private var seededAttachments: [Key: NetworkAttachment]
     private var nextAddressOctet: UInt8
     private var allocateHistory: [Key] = []
+    private var requestedMACAddressHistory: [MACAddress?] = []
     private var lookupHistory: [Key] = []
     private var deallocateHistory: [Key] = []
 
@@ -429,6 +468,7 @@ private actor RecordingSandboxNetworkControl {
     func allocate(network: String, hostname: String, macAddress: MACAddress?) async throws -> NetworkAttachment {
         let key = Key(network: network, hostname: hostname)
         allocateHistory.append(key)
+        requestedMACAddressHistory.append(macAddress)
         if let existing = seededAttachments[key] {
             return existing
         }
@@ -458,12 +498,20 @@ private actor RecordingSandboxNetworkControl {
         seededAttachments.removeValue(forKey: key)
     }
 
+    func simulateSessionDisconnect(_ key: Key) {
+        seededAttachments.removeValue(forKey: key)
+    }
+
     func allocateCalls() -> [Key] {
         allocateHistory
     }
 
     func lookupCalls() -> [Key] {
         lookupHistory
+    }
+
+    func requestedMACAddresses() -> [MACAddress?] {
+        requestedMACAddressHistory
     }
 
     func deallocateCalls() -> [Key] {
@@ -526,7 +574,7 @@ private func makeConfiguration(
             network: "default",
             options: .init(
                 hostname: "sandbox-host",
-                macAddress: try MACAddress("02:42:ac:11:00:02")
+                macAddress: nil
             )
         )
     ]

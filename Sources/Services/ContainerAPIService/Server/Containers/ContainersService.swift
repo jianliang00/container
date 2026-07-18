@@ -45,9 +45,9 @@ public actor ContainersService {
 
     struct ContainerState {
         var snapshot: ContainerSnapshot
-        var client: SandboxClient?
-        var sandboxStartTask: Task<SandboxClient, Error>?
-        var bootstrapTask: Task<SandboxClient, Error>?
+        var client: RuntimeClient?
+        var sandboxStartTask: Task<RuntimeClient, Error>?
+        var bootstrapTask: Task<RuntimeClient, Error>?
         var processStartTasks: [String: Task<StartProcessResult, Error>] = [:]
 
         func getClient() throws -> RuntimeClient {
@@ -281,8 +281,29 @@ public actor ContainersService {
     }
 
     /// Create a new container from the provided id and configuration.
-    public func create(configuration: ContainerConfiguration, kernel: Kernel?, options: ContainerCreateOptions, initImage: String? = nil) async throws {
-        self.log.debug("\(#function)")
+    public func create(
+        configuration: ContainerConfiguration,
+        kernel: Kernel?,
+        options: ContainerCreateOptions,
+        initImage: String? = nil,
+        runtimeData: Data? = nil
+    ) async throws {
+        log.debug(
+            "ContainersService: enter",
+            metadata: [
+                "func": "\(#function)",
+                "id": "\(configuration.id)",
+            ]
+        )
+        defer {
+            log.debug(
+                "ContainersService: exit",
+                metadata: [
+                    "func": "\(#function)",
+                    "id": "\(configuration.id)",
+                ]
+            )
+        }
 
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(configuration.id)"]) { context in
             guard await self.containers[configuration.id] == nil else {
@@ -341,7 +362,8 @@ public actor ContainersService {
                 let runtimeConfig = RuntimeConfiguration(
                     path: path,
                     containerConfiguration: configuration,
-                    options: options
+                    options: options,
+                    runtimeData: runtimeData
                 )
                 try runtimeConfig.writeRuntimeConfiguration()
             } else {
@@ -354,9 +376,24 @@ public actor ContainersService {
 
                 let systemPlatform = kernel.platform
                 // Fetch init image (custom or default)
-                self.log.info("Using init image: \(initImage ?? ClientImage.initImageRef)")
-                let initFilesystem = try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
+                self.log.debug(
+                    "ContainersService: get init block",
+                    metadata: [
+                        "id": "\(configuration.id)"
+                    ]
+                )
+                let initFilesystem = try await self.getInitBlock(
+                    for: systemPlatform.ociPlatform(),
+                    imageRef: initImage
+                )
 
+                self.log.debug(
+                    "create snapshot",
+                    metadata: [
+                        "id": "\(configuration.id)",
+                        "ref": "\(configuration.image.reference)",
+                    ]
+                )
                 let containerImage = ClientImage(description: configuration.image)
                 let imageFs = try await options.rootFsOverride == nil ? containerImage.getCreateSnapshot(platform: configuration.platform) : nil
 
@@ -418,23 +455,37 @@ public actor ContainersService {
     public func bootstrap(
         id: String,
         stdio: [FileHandle?],
+        dynamicEnv: [String: String] = [:],
         presentGUI: Bool = true,
         progressUpdateEndpoint: xpc_endpoint_t? = nil
     ) async throws {
-        self.log.debug("\(#function)")
-        self.log.info(
-            "container service bootstrap request",
+        log.debug(
+            "ContainersService: enter",
             metadata: [
+                "func": "\(#function)",
                 "id": "\(id)",
+                "env": "\(dynamicEnv)",
                 "present_gui": "\(presentGUI)",
-            ])
+            ]
+        )
+        defer {
+            log.debug(
+                "ContainersService: exit",
+                metadata: [
+                    "func": "\(#function)",
+                    "id": "\(id)",
+                ]
+            )
+        }
         let progressUpdateEndpoint = SendableXPCEndpoint(value: progressUpdateEndpoint)
 
-        let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
+        let (task, config, cleanupOnFailure) = try await self.lock.withLock(
+            logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]
+        ) { context -> (Task<RuntimeClient, Error>, ContainerConfiguration, Bool) in
             var state = try await self.getContainerState(id: id, context: context)
 
             let path = self.containerRoot.appendingPathComponent(id)
-            let config = try Self.getContainerConfiguration(at: path)
+            let (config, _) = try Self.getContainerConfiguration(at: path)
             if let task = state.bootstrapTask {
                 return (task, config, false)
             }
@@ -442,9 +493,9 @@ public actor ContainersService {
                 let task = state.sandboxStartTask
             {
                 let task = Task {
-                    let sandboxClient = try await task.value
-                    try await sandboxClient.startWorkload(id)
-                    return sandboxClient
+                    let runtimeClient = try await task.value
+                    try await runtimeClient.startWorkload(id)
+                    return runtimeClient
                 }
                 state.bootstrapTask = task
                 await self.setContainerState(id, state, context: context)
@@ -452,7 +503,7 @@ public actor ContainersService {
             }
 
             if let client = state.client {
-                if state.snapshot.status == .running {
+                if state.snapshot.status == .running || config.runtimeHandler != Self.macOSRuntimeName {
                     return (Task { client }, config, false)
                 }
                 let task = Task {
@@ -465,17 +516,26 @@ public actor ContainersService {
             }
 
             let task = Task {
-                let sandboxClient = try await self.makeSandboxClient(
+                let runtimeClient = try await self.makeRuntimeClient(
                     id: id,
                     configuration: config,
                     existingClient: nil
                 )
-                try await sandboxClient.bootstrap(
-                    stdio: stdio,
-                    presentGUI: presentGUI,
-                    progressUpdateEndpoint: progressUpdateEndpoint.value
-                )
-                return sandboxClient
+                if config.runtimeHandler == Self.macOSRuntimeName {
+                    try await runtimeClient.bootstrap(
+                        stdio: stdio,
+                        presentGUI: presentGUI,
+                        progressUpdateEndpoint: progressUpdateEndpoint.value
+                    )
+                } else {
+                    let networkBootstrapInfos = try await self.networkBootstrapInfos(for: config)
+                    try await runtimeClient.bootstrap(
+                        stdio: stdio,
+                        networkBootstrapInfos: networkBootstrapInfos,
+                        dynamicEnv: dynamicEnv
+                    )
+                }
+                return runtimeClient
             }
 
             state.bootstrapTask = task
@@ -484,24 +544,26 @@ public actor ContainersService {
         }
 
         do {
-            let sandboxClient = try await task.value
+            let runtimeClient = try await task.value
             try await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
-                if state.client == nil {
-                    let sandboxSnapshot = try await sandboxClient.state()
-                    let runtimeStatus = Self.containerRuntimeStatus(from: sandboxSnapshot)
+                let previousStatus = state.snapshot.status
+                let sandboxSnapshot = try await runtimeClient.state()
+                let runtimeStatus = Self.containerRuntimeStatus(from: sandboxSnapshot)
+                let shouldRegisterExit = cleanupOnFailure || (previousStatus != .running && runtimeStatus == .running)
+                if shouldRegisterExit {
                     try await self.registerContainerExitCallback(id: id)
-                    if runtimeStatus == .running {
-                        try await self.trackContainerExit(id: id, client: sandboxClient)
-                    }
-                    state.snapshot.status = runtimeStatus
-                    state.snapshot.networks = sandboxSnapshot.networks
-                    state.snapshot.startedDate =
-                        state.snapshot.status == .running
-                        ? (state.snapshot.startedDate ?? Date())
-                        : nil
-                    state.client = sandboxClient
                 }
+                if runtimeStatus == .running, previousStatus != .running {
+                    try await self.trackContainerExit(id: id, client: runtimeClient)
+                }
+                state.snapshot.status = runtimeStatus
+                state.snapshot.networks = sandboxSnapshot.networks
+                state.snapshot.startedDate =
+                    runtimeStatus == .running
+                    ? (state.snapshot.startedDate ?? Date())
+                    : nil
+                state.client = runtimeClient
                 state.sandboxStartTask = nil
                 state.bootstrapTask = nil
                 await self.setContainerState(id, state, context: context)
@@ -509,7 +571,7 @@ public actor ContainersService {
         } catch {
             if cleanupOnFailure {
                 await self.exitMonitor.stopTracking(id: id)
-                try? self.deregisterSandboxService(id: id, runtimeName: config.runtimeHandler)
+                await self.cleanUpFailedRuntimeService(id: id, configuration: config)
             }
             try? await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
@@ -536,12 +598,12 @@ public actor ContainersService {
             ])
         let progressUpdateEndpoint = SendableXPCEndpoint(value: progressUpdateEndpoint)
 
-        let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<SandboxClient, Error>, ContainerConfiguration, Bool) in
+        let (task, config, cleanupOnFailure) = try await self.lock.withLock { context -> (Task<RuntimeClient, Error>, ContainerConfiguration, Bool) in
             var state = try await self.getContainerState(id: id, context: context)
             try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
 
             let path = self.containerRoot.appendingPathComponent(id)
-            let config = try Self.getContainerConfiguration(at: path)
+            let (config, _) = try Self.getContainerConfiguration(at: path)
 
             if let task = state.sandboxStartTask {
                 return (task, config, false)
@@ -552,18 +614,18 @@ public actor ContainersService {
 
             let existingClient = state.client
             let task = Task {
-                let sandboxClient = try await self.makeSandboxClient(
+                let runtimeClient = try await self.makeRuntimeClient(
                     id: id,
                     configuration: config,
                     existingClient: existingClient
                 )
-                try await sandboxClient.createSandbox()
-                try await sandboxClient.startSandbox(
+                try await runtimeClient.createSandbox()
+                try await runtimeClient.startSandbox(
                     stdio: [nil, nil, nil],
                     presentGUI: presentGUI,
                     progressUpdateEndpoint: progressUpdateEndpoint.value
                 )
-                return sandboxClient
+                return runtimeClient
             }
 
             state.sandboxStartTask = task
@@ -572,17 +634,17 @@ public actor ContainersService {
         }
 
         do {
-            let sandboxClient = try await task.value
-            let sandboxSnapshot = try await sandboxClient.state()
+            let runtimeClient = try await task.value
+            let sandboxSnapshot = try await runtimeClient.state()
             try await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
                 let runtimeStatus = Self.containerRuntimeStatus(from: sandboxSnapshot)
                 let shouldTrackExit = state.snapshot.status != .running && runtimeStatus == .running
                 if shouldTrackExit {
                     try await self.registerContainerExitCallback(id: id)
-                    try await self.trackContainerExit(id: id, client: sandboxClient)
+                    try await self.trackContainerExit(id: id, client: runtimeClient)
                 }
-                state.client = sandboxClient
+                state.client = runtimeClient
                 state.sandboxStartTask = nil
                 state.snapshot.status = runtimeStatus
                 state.snapshot.networks = sandboxSnapshot.networks
@@ -594,7 +656,7 @@ public actor ContainersService {
             }
         } catch {
             if cleanupOnFailure {
-                try? self.deregisterSandboxService(id: id, runtimeName: config.runtimeHandler)
+                await self.cleanUpFailedRuntimeService(id: id, configuration: config)
             }
             try? await self.lock.withLock { context in
                 var state = try await self.getContainerState(id: id, context: context)
@@ -608,7 +670,7 @@ public actor ContainersService {
     /// Present the desktop window for a running macOS sandbox guest.
     public func showSandboxGUI(id: String) async throws {
         self.log.info("container service showSandboxGUI request", metadata: ["id": "\(id)"])
-        let client = try await self.lock.withLock { context -> SandboxClient in
+        let client = try await self.lock.withLock { context -> RuntimeClient in
             let state = try await self.getContainerState(id: id, context: context)
             try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
             return try state.getClient()
@@ -632,7 +694,7 @@ public actor ContainersService {
         }
 
         let path = self.containerRoot.appendingPathComponent(id)
-        let configuration = try Self.getContainerConfiguration(at: path)
+        let (configuration, _) = try Self.getContainerConfiguration(at: path)
         return try Self.makePersistedSandboxSnapshot(
             root: path,
             configuration: configuration,
@@ -663,6 +725,12 @@ public actor ContainersService {
             && state.snapshot.status != .running
             && !configuration.mounts.isEmpty
         if shouldReplacePreparedClient {
+            if let existingClient = state.client {
+                // The macOS runtime owns the network allocation sessions. Release
+                // them before replacing the helper so a persisted lease never
+                // outlives the XPC session that owns the allocation.
+                try await existingClient.releaseSandboxNetwork()
+            }
             try? self.deregisterSandboxService(
                 id: id,
                 runtimeName: stagedContainerConfiguration?.runtimeHandler ?? state.snapshot.configuration.runtimeHandler
@@ -670,10 +738,11 @@ public actor ContainersService {
             try await self.lock.withLock { context in
                 var updated = try await self.getContainerState(id: id, context: context)
                 updated.client = nil
+                updated.snapshot.networks = []
                 await self.setContainerState(id, updated, context: context)
             }
         }
-        let client: SandboxClient
+        let client: RuntimeClient
         if let task = state.bootstrapTask ?? state.sandboxStartTask {
             client = try await task.value
         } else if let existingClient = shouldReplacePreparedClient ? nil : state.client {
@@ -683,11 +752,12 @@ public actor ContainersService {
             if let stagedContainerConfiguration {
                 containerConfiguration = stagedContainerConfiguration
             } else {
-                containerConfiguration = try Self.getContainerConfiguration(
+                let (loadedConfiguration, _) = try Self.getContainerConfiguration(
                     at: self.containerRoot.appendingPathComponent(id)
                 )
+                containerConfiguration = loadedConfiguration
             }
-            let preparedClient = try await self.makeSandboxClient(
+            let preparedClient = try await self.makeRuntimeClient(
                 id: id,
                 configuration: containerConfiguration,
                 existingClient: nil
@@ -695,7 +765,7 @@ public actor ContainersService {
             do {
                 try await preparedClient.createSandbox()
             } catch {
-                try? self.deregisterSandboxService(id: id, runtimeName: containerConfiguration.runtimeHandler)
+                await self.cleanUpFailedRuntimeService(id: id, configuration: containerConfiguration)
                 throw error
             }
             try await self.lock.withLock { context in
@@ -717,9 +787,10 @@ public actor ContainersService {
             if let stagedContainerConfiguration {
                 containerConfiguration = stagedContainerConfiguration
             } else {
-                containerConfiguration = try Self.getContainerConfiguration(
+                let (loadedConfiguration, _) = try Self.getContainerConfiguration(
                     at: self.containerRoot.appendingPathComponent(id)
                 )
+                containerConfiguration = loadedConfiguration
             }
             try await client.startSandbox(
                 stdio: [nil, nil, nil],
@@ -832,7 +903,7 @@ public actor ContainersService {
         }
 
         let path = self.containerRoot.appendingPathComponent(id)
-        let configuration = try Self.getContainerConfiguration(at: path)
+        let (configuration, _) = try Self.getContainerConfiguration(at: path)
         let sandboxSnapshot = try Self.makePersistedSandboxSnapshot(
             root: path,
             configuration: configuration,
@@ -859,20 +930,29 @@ public actor ContainersService {
         self.log.debug("\(#function)")
 
         let id = sandboxID
-        let (config, existingClient) = try await self.lock.withLock { context -> (ContainerConfiguration, SandboxClient?) in
+        let (config, existingClient) = try await self.lock.withLock { context -> (ContainerConfiguration, RuntimeClient?) in
             let state = try await self.getContainerState(id: id, context: context)
             try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
             let path = self.containerRoot.appendingPathComponent(id)
-            return (try Self.getContainerConfiguration(at: path), state.client)
+            let (configuration, _) = try Self.getContainerConfiguration(at: path)
+            return (configuration, state.client)
         }
 
-        let client = try await self.makeSandboxClient(
+        let client = try await self.makeRuntimeClient(
             id: id,
             configuration: config,
             existingClient: existingClient
         )
-        try await client.createSandbox()
-        let networkState = try await client.prepareSandboxNetwork()
+        let networkState: SandboxNetworkState
+        do {
+            try await client.createSandbox()
+            networkState = try await client.prepareSandboxNetwork()
+        } catch {
+            if existingClient == nil {
+                await self.cleanUpFailedRuntimeService(id: id, configuration: config)
+            }
+            throw error
+        }
 
         try await self.lock.withLock { context in
             var state = try await self.getContainerState(id: id, context: context)
@@ -919,19 +999,27 @@ public actor ContainersService {
         self.log.debug("\(#function)")
 
         let id = sandboxID
-        let (config, existingClient) = try await self.lock.withLock { context -> (ContainerConfiguration, SandboxClient?) in
+        let (config, existingClient) = try await self.lock.withLock { context -> (ContainerConfiguration, RuntimeClient?) in
             let state = try await self.getContainerState(id: id, context: context)
             try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
             let path = self.containerRoot.appendingPathComponent(id)
-            return (try Self.getContainerConfiguration(at: path), state.client)
+            let (configuration, _) = try Self.getContainerConfiguration(at: path)
+            return (configuration, state.client)
         }
 
-        let client = try await self.makeSandboxClient(
+        let client = try await self.makeRuntimeClient(
             id: id,
             configuration: config,
             existingClient: existingClient
         )
-        try await client.releaseSandboxNetwork()
+        do {
+            try await client.releaseSandboxNetwork()
+        } catch {
+            if existingClient == nil {
+                await self.cleanUpFailedRuntimeService(id: id, configuration: config)
+            }
+            throw error
+        }
 
         try await self.lock.withLock { context in
             var state = try await self.getContainerState(id: id, context: context)
@@ -968,14 +1056,15 @@ public actor ContainersService {
         self.log.debug("\(#function)")
 
         let id = policy.sandboxID
-        let (config, existingClient) = try await self.lock.withLock { context -> (ContainerConfiguration, SandboxClient?) in
+        let (config, existingClient) = try await self.lock.withLock { context -> (ContainerConfiguration, RuntimeClient?) in
             let state = try await self.getContainerState(id: id, context: context)
             try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
             let path = self.containerRoot.appendingPathComponent(id)
-            return (try Self.getContainerConfiguration(at: path), state.client)
+            let (configuration, _) = try Self.getContainerConfiguration(at: path)
+            return (configuration, state.client)
         }
 
-        let client = try await self.makeSandboxClient(
+        let client = try await self.makeRuntimeClient(
             id: id,
             configuration: config,
             existingClient: existingClient
@@ -1084,10 +1173,12 @@ public actor ContainersService {
 
         enum StartWork {
             case alreadyStarted
-            case run(task: Task<StartProcessResult, Error>, client: SandboxClient, isInit: Bool)
+            case run(task: Task<StartProcessResult, Error>, client: RuntimeClient, isInit: Bool)
         }
 
-        let work = try await self.lock.withLock { context -> StartWork in
+        let work = try await self.lock.withLock(
+            logMetadata: ["acquirer": "\(#function)", "id": "\(id)", "processId": "\(processID)"]
+        ) { context -> StartWork in
             var state = try await self.getContainerState(id: id, context: context)
 
             let isInit = Self.isInitProcess(id: id, processID: processID)
@@ -1164,6 +1255,46 @@ public actor ContainersService {
         let state = try self._getContainerState(id: id)
         let client = try state.getClient()
         try await client.kill(processID, signal: signal, attachmentID: attachmentID)
+
+        if processID == id,
+            let rawSignal = Int32(exactly: signal),
+            Signal(rawValue: rawSignal) == .kill
+        {
+            try await handleContainerExit(id: id)
+        }
+    }
+
+    public func kill(id: String, processID: String, signal: String) async throws {
+        log.debug(
+            "ContainersService: enter",
+            metadata: [
+                "func": "\(#function)",
+                "id": "\(id)",
+                "processId": "\(processID)",
+                "signal": "\(signal)",
+            ]
+        )
+        defer {
+            log.debug(
+                "ContainersService: exit",
+                metadata: [
+                    "func": "\(#function)",
+                    "id": "\(id)",
+                    "processId": "\(processID)",
+                ]
+            )
+        }
+
+        let state = try self._getContainerState(id: id)
+        let client = try state.getClient()
+        try await client.kill(processID, signal: signal)
+
+        // SIGKILL is guaranteed to terminate the target. When directed at the
+        // container's init process, follow up with the same API-server cleanup
+        // that `stop` performs.
+        if processID == id, (try? Signal(signal)) == .kill {
+            try await handleContainerExit(id: id)
+        }
     }
 
     /// Stop all containers inside the sandbox, aborting any processes currently
@@ -1270,7 +1401,24 @@ public actor ContainersService {
         size: Terminal.Size,
         attachmentID: String? = nil
     ) async throws {
-        self.log.debug("\(#function)")
+        log.trace(
+            "ContainersService: enter",
+            metadata: [
+                "func": "\(#function)",
+                "id": "\(id)",
+                "processId": "\(processID)",
+            ]
+        )
+        defer {
+            log.trace(
+                "ContainersService: exit",
+                metadata: [
+                    "func": "\(#function)",
+                    "id": "\(id)",
+                    "processId": "\(processID)",
+                ]
+            )
+        }
 
         let state = try self._getContainerState(id: id)
         let client = try state.getClient()
@@ -1553,11 +1701,11 @@ public actor ContainersService {
         "\(Self.launchdDomainString)/\(Self.machServicePrefix).\(runtimeName).\(instanceId)"
     }
 
-    private func makeSandboxClient(
+    private func makeRuntimeClient(
         id: String,
         configuration: ContainerConfiguration,
-        existingClient: SandboxClient?
-    ) async throws -> SandboxClient {
+        existingClient: RuntimeClient?
+    ) async throws -> RuntimeClient {
         if let existingClient {
             return existingClient
         }
@@ -1579,14 +1727,51 @@ public actor ContainersService {
                 plugin: plugin,
                 loader: self.pluginLoader,
                 configuration: configuration,
-                path: path
+                path: path,
+                debug: self.debugHelpers
             )
         }
 
-        return try await SandboxClient.create(
+        return try await RuntimeClient.create(
             id: id,
             runtime: configuration.runtimeHandler
         )
+    }
+
+    private func networkBootstrapInfos(for configuration: ContainerConfiguration) async throws -> [NetworkBootstrapInfo] {
+        var infos: [NetworkBootstrapInfo] = []
+        for attachment in configuration.networks {
+            guard let plugin = try await self.networksService?.plugin(for: attachment.network) else {
+                throw ContainerizationError(
+                    .internalError,
+                    message: "failed to get plugin for network \(attachment.network)"
+                )
+            }
+            infos.append(NetworkBootstrapInfo(plugin: plugin))
+        }
+        return infos
+    }
+
+    private func cleanUpFailedRuntimeService(
+        id: String,
+        configuration: ContainerConfiguration
+    ) async {
+        await self.exitMonitor.stopTracking(id: id)
+
+        if configuration.runtimeHandler == Self.macOSRuntimeName,
+            let client = try? await RuntimeClient.create(id: id, runtime: configuration.runtimeHandler)
+        {
+            // The network plugin owns an allocation only while this runtime's
+            // XPC session is alive. Explicitly release before terminating the
+            // helper, then discard any persisted projection of that lease.
+            try? await client.releaseSandboxNetwork()
+        }
+
+        try? self.deregisterSandboxService(id: id, runtimeName: configuration.runtimeHandler)
+        if configuration.runtimeHandler == Self.macOSRuntimeName {
+            let root = self.containerRoot.appendingPathComponent(id)
+            try? MacOSGuestNetworkLeaseStore.remove(from: root)
+        }
     }
 
     private func deregisterSandboxService(id: String, runtimeName: String) throws {
@@ -1602,7 +1787,7 @@ public actor ContainersService {
         workloadConfiguration: WorkloadConfiguration
     ) async throws -> ContainerConfiguration {
         let path = self.containerRoot.appendingPathComponent(id)
-        var containerConfiguration = try Self.getContainerConfiguration(at: path)
+        var (containerConfiguration, _) = try Self.getContainerConfiguration(at: path)
         try Self.requireMacOSGuestControl(configuration: containerConfiguration)
 
         let mergedMounts = try MacOSGuestMountMapping.mergeHostPathMounts([
@@ -1621,7 +1806,8 @@ public actor ContainersService {
                 kernel: runtimeConfiguration.kernel,
                 containerConfiguration: updatedConfiguration,
                 containerRootFilesystem: runtimeConfiguration.containerRootFilesystem,
-                options: runtimeConfiguration.options
+                options: runtimeConfiguration.options,
+                runtimeData: runtimeConfiguration.runtimeData
             )
             try updatedRuntimeConfiguration.writeRuntimeConfiguration()
             try await self.lock.withLock { context in
@@ -1878,7 +2064,7 @@ public actor ContainersService {
         }
 
         do {
-            let client = try await SandboxClient.create(id: id, runtime: runtimeName)
+            let client = try await RuntimeClient.create(id: id, runtime: runtimeName)
             let sandboxSnapshot = try await client.state()
             let shouldTrackExit = try await self.lock.withLock { context -> Bool in
                 var state = try await self.getContainerState(id: id, context: context)
@@ -1938,7 +2124,7 @@ public actor ContainersService {
         )
     }
 
-    private func trackContainerExit(id: String, client: SandboxClient) async throws {
+    private func trackContainerExit(id: String, client: RuntimeClient) async throws {
         let log = self.log
         let waitFunc: ExitMonitor.WaitHandler = {
             log.info("registering container \(id) with exit monitor")
@@ -1952,7 +2138,7 @@ public actor ContainersService {
     static func makeBootRecoveredState(
         existing: ContainerState,
         sandboxSnapshot: SandboxSnapshot,
-        client: SandboxClient
+        client: RuntimeClient
     ) -> ContainerState {
         var recovered = existing
         recovered.snapshot.status = containerRuntimeStatus(from: sandboxSnapshot)

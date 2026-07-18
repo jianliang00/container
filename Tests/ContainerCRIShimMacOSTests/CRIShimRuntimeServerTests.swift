@@ -607,7 +607,7 @@ struct CRIShimRuntimeServerTests {
         #expect(stopCall.sandboxID == "sandbox-1")
         #expect(stopCall.workloadID == created.containerID)
         #expect(stopCall.options.timeoutInSeconds == 2)
-        #expect(stopCall.options.signal == Int32(SIGTERM))
+        #expect(stopCall.options.signal == String(SIGTERM))
 
         let stoppedStatus = try await client.containerStatus(createdStatusRequest)
         #expect(stoppedStatus.status.state == .containerExited)
@@ -2053,8 +2053,7 @@ private func makeTemporaryDirectory() -> URL {
 }
 
 private func normalizedDirectoryPath(_ url: URL) -> String {
-    let path = url.path
-    return path.hasSuffix("/") ? path : "\(path)/"
+    url.standardizedFileURL.path
 }
 
 private struct OpaqueCRIShimError: Error, CustomStringConvertible {

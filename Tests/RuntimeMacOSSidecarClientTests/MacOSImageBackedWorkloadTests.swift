@@ -901,6 +901,10 @@ extension MacOSImageBackedWorkloadTests {
         func cancelIngestSession(_ id: String) async throws {
             throw Unimplemented()
         }
+
+        func totalAllocatedSize() async throws -> UInt64 {
+            throw Unimplemented()
+        }
     }
 
     private struct Unimplemented: Error {}
@@ -1208,8 +1212,7 @@ extension MacOSImageBackedWorkloadTests {
     }
 
     private static func normalizedDirectoryPath(_ url: URL) -> String {
-        let path = url.path
-        return path.hasSuffix("/") ? path : "\(path)/"
+        url.standardizedFileURL.path
     }
 }
 

@@ -191,7 +191,7 @@ extension TestCLIMacOSBuildBase {
             try waitForContainerRunning(name)
         }
 
-        private func inspectImageDetail(_ name: String) throws -> ImageDetail {
+        private func inspectImageDetail(_ name: String) throws -> ImageResource {
             let response = try run(arguments: ["image", "inspect", name])
             guard response.status == 0 else {
                 throw CLIError.executionFailed("image inspect failed: \(response.error)")
@@ -199,7 +199,7 @@ extension TestCLIMacOSBuildBase {
             guard let data = response.output.data(using: .utf8) else {
                 throw CLIError.invalidOutput("image inspect output invalid")
             }
-            let details = try JSONDecoder().decode([ImageDetail].self, from: data)
+            let details = try JSONDecoder().decode([ImageResource].self, from: data)
             return try #require(details.first)
         }
     }

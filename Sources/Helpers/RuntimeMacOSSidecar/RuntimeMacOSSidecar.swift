@@ -19,6 +19,7 @@ import ArgumentParser
 import ContainerLog
 import ContainerResource
 import ContainerVersion
+import ContainerXPC
 import ContainerizationError
 import Darwin
 import Foundation
@@ -422,6 +423,7 @@ actor MacOSSidecarService {
     private var vmWindowDelegate: UnsafeSendableBox<GUIWindowDelegate>?
     private var networkLease: MacOSGuestNetworkLease?
     private var ownedVMNetNetworks: [ManagedVMNetNetwork] = []
+    private var networkSessions: [XPCClientSession] = []
     private var state: State = .created
 
     init(rootURL: URL, log: Logging.Logger) {
@@ -750,6 +752,7 @@ actor MacOSSidecarService {
         )
         networkLease = preparedNetwork.lease
         ownedVMNetNetworks = preparedNetwork.ownedNetworks
+        networkSessions = preparedNetwork.sessions
         if let lease = preparedNetwork.lease {
             try MacOSGuestNetworkLeaseStore.save(lease, in: rootURL)
         } else {
@@ -770,6 +773,10 @@ actor MacOSSidecarService {
     private func discardPreparedNetworkResources() {
         let lease = networkLease ?? (try? MacOSGuestNetworkLeaseStore.load(from: rootURL)) ?? nil
         networkLease = nil
+        for session in networkSessions {
+            session.close()
+        }
+        networkSessions = []
         ownedVMNetNetworks = []
         guard let lease else {
             return

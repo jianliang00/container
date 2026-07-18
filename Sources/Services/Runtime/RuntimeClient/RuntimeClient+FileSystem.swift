@@ -19,10 +19,10 @@ import ContainerizationError
 import Foundation
 import RuntimeMacOSSidecarShared
 
-extension SandboxClient {
+extension RuntimeClient {
     public func fsBegin(_ payload: MacOSSidecarFSBeginRequestPayload) async throws {
-        let request = XPCMessage(route: SandboxRoutes.fsBegin.rawValue)
-        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        let request = XPCMessage(route: RuntimeRoutes.fsBegin.rawValue)
+        request.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
         do {
             try await client.send(request)
         } catch {
@@ -34,8 +34,8 @@ extension SandboxClient {
     }
 
     public func fsChunk(_ payload: MacOSSidecarFSChunkRequestPayload) async throws {
-        let request = XPCMessage(route: SandboxRoutes.fsChunk.rawValue)
-        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        let request = XPCMessage(route: RuntimeRoutes.fsChunk.rawValue)
+        request.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
         do {
             try await client.send(request)
         } catch {
@@ -47,8 +47,8 @@ extension SandboxClient {
     }
 
     public func fsEnd(_ payload: MacOSSidecarFSEndRequestPayload) async throws {
-        let request = XPCMessage(route: SandboxRoutes.fsEnd.rawValue)
-        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        let request = XPCMessage(route: RuntimeRoutes.fsEnd.rawValue)
+        request.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
         do {
             try await client.send(request)
         } catch {
@@ -60,11 +60,11 @@ extension SandboxClient {
     }
 
     public func fsReadBegin(_ payload: MacOSSidecarFSReadBeginRequestPayload) async throws -> MacOSSidecarFSReadBeginResponsePayload {
-        let request = XPCMessage(route: SandboxRoutes.fsReadBegin.rawValue)
-        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        let request = XPCMessage(route: RuntimeRoutes.fsReadBegin.rawValue)
+        request.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
         do {
             let response = try await client.send(request)
-            guard let data = response.dataNoCopy(key: SandboxKeys.fsPayload.rawValue) else {
+            guard let data = response.dataNoCopy(key: RuntimeKeys.fsPayload.rawValue) else {
                 throw ContainerizationError(.internalError, message: "missing filesystem read begin response payload")
             }
             return try JSONDecoder().decode(MacOSSidecarFSReadBeginResponsePayload.self, from: data)
@@ -77,12 +77,12 @@ extension SandboxClient {
     }
 
     public func fsReadChunk(_ payload: MacOSSidecarFSReadChunkRequestPayload) async throws -> Data? {
-        let request = XPCMessage(route: SandboxRoutes.fsReadChunk.rawValue)
-        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        let request = XPCMessage(route: RuntimeRoutes.fsReadChunk.rawValue)
+        request.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
         do {
             let response = try await client.send(request)
             // nil data means EOF
-            return response.data(key: SandboxKeys.fsPayload.rawValue)
+            return response.data(key: RuntimeKeys.fsPayload.rawValue)
         } catch {
             throw wrapFileSystemError(
                 error,
@@ -92,8 +92,8 @@ extension SandboxClient {
     }
 
     public func fsReadEnd(txID: String) async throws {
-        let request = XPCMessage(route: SandboxRoutes.fsReadEnd.rawValue)
-        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(["txID": txID]))
+        let request = XPCMessage(route: RuntimeRoutes.fsReadEnd.rawValue)
+        request.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(["txID": txID]))
         do {
             try await client.send(request)
         } catch {
@@ -105,11 +105,11 @@ extension SandboxClient {
     }
 
     public func fsListDir(_ payload: MacOSSidecarFSListDirRequestPayload) async throws -> [MacOSSidecarFSListDirEntry] {
-        let request = XPCMessage(route: SandboxRoutes.fsListDir.rawValue)
-        request.set(key: SandboxKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
+        let request = XPCMessage(route: RuntimeRoutes.fsListDir.rawValue)
+        request.set(key: RuntimeKeys.fsPayload.rawValue, value: try JSONEncoder().encode(payload))
         do {
             let response = try await client.send(request)
-            guard let data = response.dataNoCopy(key: SandboxKeys.fsPayload.rawValue) else {
+            guard let data = response.dataNoCopy(key: RuntimeKeys.fsPayload.rawValue) else {
                 throw ContainerizationError(.internalError, message: "missing filesystem list dir response payload")
             }
             return try JSONDecoder().decode([MacOSSidecarFSListDirEntry].self, from: data)

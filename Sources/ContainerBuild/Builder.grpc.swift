@@ -109,48 +109,48 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >
     /// > Builder service implements APIs for performing an image build with
     /// > Container image builder agent.
-    /// > 
+    /// >
     /// > To perform a build:
-    /// > 
+    /// >
     /// > 1. CreateBuild to create a new build
     /// > 2. StartBuild to start the build execution where client and server
     /// >    both have a stream for exchanging data during the build.
-    /// > 
+    /// >
     /// >    The client may send:
     /// >      a) signal packet to signal to the build process (e.g. SIGINT)
-    /// > 
+    /// >
     /// >      b) command packet for executing a command in the build file on the
     /// >      server
     /// >         NOTE: the server will need to switch on the command to determine the
     /// >         type of command to execute (e.g. RUN, ENV, etc.)
-    /// > 
+    /// >
     /// >      c) transfer build data either to or from the server
     /// >         - INTO direction is for sending build data to the server at specific
     /// >         location (e.g. COPY)
     /// >         - OUTOF direction is for copying build data from the server to be
     /// >         used in subsequent build stages
-    /// > 
+    /// >
     /// >      d) transfer image content data either to or from the server
     /// >         - INTO direction is for sending inherited image content data to the
     /// >         server's local content store
     /// >         - OUTOF direction is for copying successfully built OCI image from
     /// >         the server to the client
-    /// > 
+    /// >
     /// >    The server may send:
     /// >      a) stdio packet for the build progress
-    /// > 
+    /// >
     /// >      b) build error indicating unsuccessful build
-    /// > 
+    /// >
     /// >      c) command complete packet indicating a command has finished executing
-    /// > 
+    /// >
     /// >      d) handle transfer build data either to or from the client
-    /// > 
+    /// >
     /// >      e) handle transfer image content data either to or from the client
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: The build data and image content data transfer is ALWAYS initiated
     /// >    by the client.
-    /// > 
+    /// >
     /// >    Sequence for transferring from the client to the server:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'INTO',
@@ -169,7 +169,7 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client waits for the last BuildTransfer/ImageTransfer with 'complete'
     /// >      set to true
     /// >         before proceeding with the rest of the commands
-    /// > 
+    /// >
     /// >    Sequence for transferring from the server to the client:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'OUTOF',
@@ -187,8 +187,8 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client MAY choose to send one last BuildTransfer/ImageTransfer with
     /// >      'complete'
     /// >         set to true, but NOT required.
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: the client should close the send stream once it has finished
     /// >    receiving the build output or abandon the current build due to error.
     /// >    Server should keep the stream open until it receives the EOF that client
@@ -259,48 +259,48 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >
     /// > Builder service implements APIs for performing an image build with
     /// > Container image builder agent.
-    /// > 
+    /// >
     /// > To perform a build:
-    /// > 
+    /// >
     /// > 1. CreateBuild to create a new build
     /// > 2. StartBuild to start the build execution where client and server
     /// >    both have a stream for exchanging data during the build.
-    /// > 
+    /// >
     /// >    The client may send:
     /// >      a) signal packet to signal to the build process (e.g. SIGINT)
-    /// > 
+    /// >
     /// >      b) command packet for executing a command in the build file on the
     /// >      server
     /// >         NOTE: the server will need to switch on the command to determine the
     /// >         type of command to execute (e.g. RUN, ENV, etc.)
-    /// > 
+    /// >
     /// >      c) transfer build data either to or from the server
     /// >         - INTO direction is for sending build data to the server at specific
     /// >         location (e.g. COPY)
     /// >         - OUTOF direction is for copying build data from the server to be
     /// >         used in subsequent build stages
-    /// > 
+    /// >
     /// >      d) transfer image content data either to or from the server
     /// >         - INTO direction is for sending inherited image content data to the
     /// >         server's local content store
     /// >         - OUTOF direction is for copying successfully built OCI image from
     /// >         the server to the client
-    /// > 
+    /// >
     /// >    The server may send:
     /// >      a) stdio packet for the build progress
-    /// > 
+    /// >
     /// >      b) build error indicating unsuccessful build
-    /// > 
+    /// >
     /// >      c) command complete packet indicating a command has finished executing
-    /// > 
+    /// >
     /// >      d) handle transfer build data either to or from the client
-    /// > 
+    /// >
     /// >      e) handle transfer image content data either to or from the client
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: The build data and image content data transfer is ALWAYS initiated
     /// >    by the client.
-    /// > 
+    /// >
     /// >    Sequence for transferring from the client to the server:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'INTO',
@@ -319,7 +319,7 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client waits for the last BuildTransfer/ImageTransfer with 'complete'
     /// >      set to true
     /// >         before proceeding with the rest of the commands
-    /// > 
+    /// >
     /// >    Sequence for transferring from the server to the client:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'OUTOF',
@@ -337,8 +337,8 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client MAY choose to send one last BuildTransfer/ImageTransfer with
     /// >      'complete'
     /// >         set to true, but NOT required.
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: the client should close the send stream once it has finished
     /// >    receiving the build output or abandon the current build due to error.
     /// >    Server should keep the stream open until it receives the EOF that client
@@ -407,48 +407,48 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >
     /// > Builder service implements APIs for performing an image build with
     /// > Container image builder agent.
-    /// > 
+    /// >
     /// > To perform a build:
-    /// > 
+    /// >
     /// > 1. CreateBuild to create a new build
     /// > 2. StartBuild to start the build execution where client and server
     /// >    both have a stream for exchanging data during the build.
-    /// > 
+    /// >
     /// >    The client may send:
     /// >      a) signal packet to signal to the build process (e.g. SIGINT)
-    /// > 
+    /// >
     /// >      b) command packet for executing a command in the build file on the
     /// >      server
     /// >         NOTE: the server will need to switch on the command to determine the
     /// >         type of command to execute (e.g. RUN, ENV, etc.)
-    /// > 
+    /// >
     /// >      c) transfer build data either to or from the server
     /// >         - INTO direction is for sending build data to the server at specific
     /// >         location (e.g. COPY)
     /// >         - OUTOF direction is for copying build data from the server to be
     /// >         used in subsequent build stages
-    /// > 
+    /// >
     /// >      d) transfer image content data either to or from the server
     /// >         - INTO direction is for sending inherited image content data to the
     /// >         server's local content store
     /// >         - OUTOF direction is for copying successfully built OCI image from
     /// >         the server to the client
-    /// > 
+    /// >
     /// >    The server may send:
     /// >      a) stdio packet for the build progress
-    /// > 
+    /// >
     /// >      b) build error indicating unsuccessful build
-    /// > 
+    /// >
     /// >      c) command complete packet indicating a command has finished executing
-    /// > 
+    /// >
     /// >      d) handle transfer build data either to or from the client
-    /// > 
+    /// >
     /// >      e) handle transfer image content data either to or from the client
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: The build data and image content data transfer is ALWAYS initiated
     /// >    by the client.
-    /// > 
+    /// >
     /// >    Sequence for transferring from the client to the server:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'INTO',
@@ -467,7 +467,7 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client waits for the last BuildTransfer/ImageTransfer with 'complete'
     /// >      set to true
     /// >         before proceeding with the rest of the commands
-    /// > 
+    /// >
     /// >    Sequence for transferring from the server to the client:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'OUTOF',
@@ -485,8 +485,8 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client MAY choose to send one last BuildTransfer/ImageTransfer with
     /// >      'complete'
     /// >         set to true, but NOT required.
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: the client should close the send stream once it has finished
     /// >    receiving the build output or abandon the current build due to error.
     /// >    Server should keep the stream open until it receives the EOF that client
@@ -673,48 +673,48 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >
     /// > Builder service implements APIs for performing an image build with
     /// > Container image builder agent.
-    /// > 
+    /// >
     /// > To perform a build:
-    /// > 
+    /// >
     /// > 1. CreateBuild to create a new build
     /// > 2. StartBuild to start the build execution where client and server
     /// >    both have a stream for exchanging data during the build.
-    /// > 
+    /// >
     /// >    The client may send:
     /// >      a) signal packet to signal to the build process (e.g. SIGINT)
-    /// > 
+    /// >
     /// >      b) command packet for executing a command in the build file on the
     /// >      server
     /// >         NOTE: the server will need to switch on the command to determine the
     /// >         type of command to execute (e.g. RUN, ENV, etc.)
-    /// > 
+    /// >
     /// >      c) transfer build data either to or from the server
     /// >         - INTO direction is for sending build data to the server at specific
     /// >         location (e.g. COPY)
     /// >         - OUTOF direction is for copying build data from the server to be
     /// >         used in subsequent build stages
-    /// > 
+    /// >
     /// >      d) transfer image content data either to or from the server
     /// >         - INTO direction is for sending inherited image content data to the
     /// >         server's local content store
     /// >         - OUTOF direction is for copying successfully built OCI image from
     /// >         the server to the client
-    /// > 
+    /// >
     /// >    The server may send:
     /// >      a) stdio packet for the build progress
-    /// > 
+    /// >
     /// >      b) build error indicating unsuccessful build
-    /// > 
+    /// >
     /// >      c) command complete packet indicating a command has finished executing
-    /// > 
+    /// >
     /// >      d) handle transfer build data either to or from the client
-    /// > 
+    /// >
     /// >      e) handle transfer image content data either to or from the client
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: The build data and image content data transfer is ALWAYS initiated
     /// >    by the client.
-    /// > 
+    /// >
     /// >    Sequence for transferring from the client to the server:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'INTO',
@@ -733,7 +733,7 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client waits for the last BuildTransfer/ImageTransfer with 'complete'
     /// >      set to true
     /// >         before proceeding with the rest of the commands
-    /// > 
+    /// >
     /// >    Sequence for transferring from the server to the client:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'OUTOF',
@@ -751,8 +751,8 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client MAY choose to send one last BuildTransfer/ImageTransfer with
     /// >      'complete'
     /// >         set to true, but NOT required.
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: the client should close the send stream once it has finished
     /// >    receiving the build output or abandon the current build due to error.
     /// >    Server should keep the stream open until it receives the EOF that client
@@ -836,48 +836,48 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >
     /// > Builder service implements APIs for performing an image build with
     /// > Container image builder agent.
-    /// > 
+    /// >
     /// > To perform a build:
-    /// > 
+    /// >
     /// > 1. CreateBuild to create a new build
     /// > 2. StartBuild to start the build execution where client and server
     /// >    both have a stream for exchanging data during the build.
-    /// > 
+    /// >
     /// >    The client may send:
     /// >      a) signal packet to signal to the build process (e.g. SIGINT)
-    /// > 
+    /// >
     /// >      b) command packet for executing a command in the build file on the
     /// >      server
     /// >         NOTE: the server will need to switch on the command to determine the
     /// >         type of command to execute (e.g. RUN, ENV, etc.)
-    /// > 
+    /// >
     /// >      c) transfer build data either to or from the server
     /// >         - INTO direction is for sending build data to the server at specific
     /// >         location (e.g. COPY)
     /// >         - OUTOF direction is for copying build data from the server to be
     /// >         used in subsequent build stages
-    /// > 
+    /// >
     /// >      d) transfer image content data either to or from the server
     /// >         - INTO direction is for sending inherited image content data to the
     /// >         server's local content store
     /// >         - OUTOF direction is for copying successfully built OCI image from
     /// >         the server to the client
-    /// > 
+    /// >
     /// >    The server may send:
     /// >      a) stdio packet for the build progress
-    /// > 
+    /// >
     /// >      b) build error indicating unsuccessful build
-    /// > 
+    /// >
     /// >      c) command complete packet indicating a command has finished executing
-    /// > 
+    /// >
     /// >      d) handle transfer build data either to or from the client
-    /// > 
+    /// >
     /// >      e) handle transfer image content data either to or from the client
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: The build data and image content data transfer is ALWAYS initiated
     /// >    by the client.
-    /// > 
+    /// >
     /// >    Sequence for transferring from the client to the server:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'INTO',
@@ -896,7 +896,7 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client waits for the last BuildTransfer/ImageTransfer with 'complete'
     /// >      set to true
     /// >         before proceeding with the rest of the commands
-    /// > 
+    /// >
     /// >    Sequence for transferring from the server to the client:
     /// >      1. client send a BuildTransfer/ImageTransfer request with ID, direction
     /// >      of 'OUTOF',
@@ -914,8 +914,8 @@ extension Com_Apple_Container_Build_V1_Builder {
     /// >      6. client MAY choose to send one last BuildTransfer/ImageTransfer with
     /// >      'complete'
     /// >         set to true, but NOT required.
-    /// > 
-    /// > 
+    /// >
+    /// >
     /// >    NOTE: the client should close the send stream once it has finished
     /// >    receiving the build output or abandon the current build due to error.
     /// >    Server should keep the stream open until it receives the EOF that client

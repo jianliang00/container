@@ -30,10 +30,12 @@ public enum RuntimeKeys: String {
     case stopOptions
     /// Whether a macOS guest GUI window should be presented during startup.
     case presentGUI
-    /// An endpoint to talk to a sandbox service.
+    /// Legacy endpoint key used by the macOS runtime before runtime service unification.
     case sandboxServiceEndpoint
     /// An endpoint for sending progress updates back to a client.
     case progressUpdateEndpoint
+    /// An endpoint to talk to the runtime service.
+    case runtimeServiceEndpoint
 
     /// Process request keys.
     case signal
@@ -61,4 +63,16 @@ public enum RuntimeKeys: String {
     case networkPolicyState
     /// Workload snapshot payload.
     case workloadSnapshot
+
+    /// Copy parameters
+    case sourcePath
+    case destinationPath
+    case fileMode
+    case createParents
+
+    /// Special-case environment variables recomputed on each container start
+    case dynamicEnv
+
+    /// Per-network connection info passed to the runtime so it can allocate directly.
+    case networkBootstrapInfos
 }

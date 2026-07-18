@@ -15,7 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
-import ContainerSandboxServiceClient
+import ContainerRuntimeClient
 import ContainerizationError
 import ContainerizationExtras
 import Foundation
@@ -449,16 +449,16 @@ struct MacvmnetBackendTests {
 }
 
 private final class FakeMacvmnetNetworkHealthClient: MacvmnetNetworkHealthClient, @unchecked Sendable {
-    var stateResult: NetworkState
+    var statusResult: NetworkStatus
     var stateRequests = 0
 
-    init(stateResult: NetworkState) {
-        self.stateResult = stateResult
+    init(stateResult: NetworkStatus) {
+        self.statusResult = stateResult
     }
 
-    func state() async throws -> NetworkState {
+    func status() async throws -> NetworkStatus {
         stateRequests += 1
-        return stateResult
+        return statusResult
     }
 }
 
@@ -706,6 +706,10 @@ private func makeAttachment(
     )
 }
 
-private func makeNetworkState(id: String) throws -> NetworkState {
-    try .created(NetworkConfiguration(id: id, mode: .nat))
+private func makeNetworkState(id _: String) throws -> NetworkStatus {
+    NetworkStatus(
+        ipv4Subnet: try CIDRv4("192.168.64.0/24"),
+        ipv4Gateway: try IPv4Address("192.168.64.1"),
+        ipv6Subnet: nil
+    )
 }

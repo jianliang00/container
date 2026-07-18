@@ -30,7 +30,7 @@ extension Application {
         private static let apiServerServiceLabel = "com.apple.container.apiserver"
         private static let launchctlPrintLineLimit = 30
         private static let apiServerHealthPollInterval: Duration = .milliseconds(250)
-        private static let apiServerSinglePingTimeoutSeconds = 1.0
+        private static let apiServerSinglePingTimeout: Duration = .seconds(1)
 
         public static let configuration = CommandConfiguration(
             commandName: "start",
@@ -131,7 +131,7 @@ extension Application {
             let data = try plist.encode()
             try data.write(to: plistURL)
 
-            print("Registering API server with launchd...")
+            log.info("Launching container-apiserver...")
             do {
                 try ServiceManager.register(plistPath: plistURL.path)
             } catch {
@@ -145,7 +145,7 @@ extension Application {
                 )
             }
 
-            try await verifyAPIServer(plistURL: plistURL, timeoutSeconds: timeout)
+            try await verifyAPIServer(plistURL: plistURL, timeout: timeout)
 
             do {
                 print("Verifying machine API server is running...")
@@ -162,10 +162,13 @@ extension Application {
             }
 
             if kernelInstall == true {
-                guard await !kernelExists() else {
-                    return
+                if await !kernelExists() {
+                    try await installDefaultKernel(
+                        kernelURL: containerSystemConfig.kernel.url,
+                        kernelBinaryPath: containerSystemConfig.kernel.binaryPath,
+                        kernelDigest: containerSystemConfig.kernel.digest
+                    )
                 }
-                try await installDefaultKernel()
             }
         }
 
@@ -229,10 +232,10 @@ extension Application {
             }
         }
 
-        private func verifyAPIServer(plistURL: URL, timeoutSeconds: Double) async throws {
+        private func verifyAPIServer(plistURL: URL, timeout: Duration) async throws {
             print("Verifying apiserver is running...")
             do {
-                try await waitForAPIServer(timeoutSeconds: timeoutSeconds)
+                try await waitForAPIServer(timeout: timeout)
                 return
             } catch {
                 let firstError = error
@@ -242,7 +245,7 @@ extension Application {
                     try ServiceManager.deregister(fullServiceLabel: "\(domain)/\(Self.apiServerServiceLabel)")
                     try ServiceManager.register(plistPath: plistURL.path)
                     print("Verifying apiserver is running...")
-                    try await waitForAPIServer(timeoutSeconds: timeoutSeconds)
+                    try await waitForAPIServer(timeout: timeout)
                 } catch {
                     let diagnostics = self.collectAPIServerDiagnostics()
                     throw ContainerizationError(
@@ -257,29 +260,31 @@ extension Application {
             }
         }
 
-        private func waitForAPIServer(timeoutSeconds: Double) async throws {
-            let deadline = Date().addingTimeInterval(timeoutSeconds)
+        private func waitForAPIServer(timeout: Duration) async throws {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: timeout)
             var lastError: Error?
 
             repeat {
-                let remaining = deadline.timeIntervalSinceNow
-                let pingTimeoutSeconds = max(
-                    0.1,
-                    min(Self.apiServerSinglePingTimeoutSeconds, max(0, remaining))
-                )
+                let remaining = clock.now.duration(to: deadline)
+                guard remaining > .zero else {
+                    break
+                }
+                let pingTimeout = min(Self.apiServerSinglePingTimeout, remaining)
 
                 do {
-                    _ = try await ClientHealthCheck.ping(timeout: .seconds(pingTimeoutSeconds))
+                    _ = try await ClientHealthCheck.ping(timeout: pingTimeout)
                     return
                 } catch {
                     lastError = error
                 }
 
-                guard Date() < deadline else {
+                guard clock.now < deadline else {
                     break
                 }
 
-                try await Task.sleep(for: Self.apiServerHealthPollInterval)
+                let sleepDuration = min(Self.apiServerHealthPollInterval, clock.now.duration(to: deadline))
+                try await Task.sleep(for: sleepDuration)
             } while true
 
             if let lastError {

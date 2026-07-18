@@ -15,7 +15,9 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerPersistence
 import Foundation
+import SystemPackage
 
 /// Thin facade for talking to already-installed, already-running container services.
 ///
@@ -27,5 +29,17 @@ public struct ContainerKit: Sendable {
 
     public init() {
         self.containerClient = ContainerClient()
+    }
+
+    package func systemConfiguration() async throws -> ContainerSystemConfig {
+        let health = try await health(timeout: .seconds(10))
+        let appRoot = FilePath(health.appRoot.path(percentEncoded: false))
+        let installRoot = FilePath(health.installRoot.path(percentEncoded: false))
+        return try await ConfigurationLoader.load(
+            configurationFiles: [
+                ConfigurationLoader.configurationFile(in: appRoot, of: .appRoot),
+                ConfigurationLoader.configurationFile(in: installRoot, of: .installRoot),
+            ]
+        )
     }
 }

@@ -436,6 +436,7 @@ extension ClientImage {
         platform: Platform? = nil,
         scheme: RequestScheme = .auto,
         authentication: ClientImagePullAuthentication? = nil,
+        containerSystemConfig: ContainerSystemConfig = .init(),
         progressUpdate: ProgressUpdateHandler? = nil,
         maxConcurrentDownloads: Int = 3
     ) async throws -> ClientImage {
@@ -575,7 +576,12 @@ extension ClientImage {
     private static let dockerReferenceTypeAnnotation = "vnd.docker.reference.type"
     private static let attestationManifestReferenceType = "attestation-manifest"
 
-    public func push(platform: Platform? = nil, scheme: RequestScheme, progressUpdate: ProgressUpdateHandler?) async throws {
+    public func push(
+        platform: Platform? = nil,
+        scheme: RequestScheme,
+        containerSystemConfig: ContainerSystemConfig = .init(),
+        progressUpdate: ProgressUpdateHandler?
+    ) async throws {
         let client = Self.newXPCClient()
         let request = Self.newRequest(.imagePush)
 

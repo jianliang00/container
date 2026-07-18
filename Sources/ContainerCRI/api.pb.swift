@@ -41,7 +41,11 @@
 
 /// To regenerate api.pb.go run `hack/update-codegen.sh protobindings`
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -870,11 +874,11 @@ public struct Runtime_V1_Mount: Sendable {
   /// required.
   /// Introduced in the Image Volume Source KEP: https://kep.k8s.io/4639
   public var image: Runtime_V1_ImageSpec {
-    get {return _image ?? Runtime_V1_ImageSpec()}
+    get {_image ?? Runtime_V1_ImageSpec()}
     set {_image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return self._image != nil}
+  public var hasImage: Bool {self._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {self._image = nil}
 
@@ -966,11 +970,11 @@ public struct Runtime_V1_NamespaceOption: Sendable {
   /// must be assumed.  This is done for backward compatibility with older Kubelet versions that
   /// do not set a user namespace.
   public var usernsOptions: Runtime_V1_UserNamespace {
-    get {return _usernsOptions ?? Runtime_V1_UserNamespace()}
+    get {_usernsOptions ?? Runtime_V1_UserNamespace()}
     set {_usernsOptions = newValue}
   }
   /// Returns true if `usernsOptions` has been explicitly set.
-  public var hasUsernsOptions: Bool {return self._usernsOptions != nil}
+  public var hasUsernsOptions: Bool {self._usernsOptions != nil}
   /// Clears the value of `usernsOptions`. Subsequent reads from it will return its default value.
   public mutating func clearUsernsOptions() {self._usernsOptions = nil}
 
@@ -1008,55 +1012,55 @@ public struct Runtime_V1_LinuxSandboxSecurityContext: @unchecked Sendable {
   /// Configurations for the sandbox's namespaces.
   /// This will be used only if the PodSandbox uses namespace for isolation.
   public var namespaceOptions: Runtime_V1_NamespaceOption {
-    get {return _storage._namespaceOptions ?? Runtime_V1_NamespaceOption()}
+    get {_storage._namespaceOptions ?? Runtime_V1_NamespaceOption()}
     set {_uniqueStorage()._namespaceOptions = newValue}
   }
   /// Returns true if `namespaceOptions` has been explicitly set.
-  public var hasNamespaceOptions: Bool {return _storage._namespaceOptions != nil}
+  public var hasNamespaceOptions: Bool {_storage._namespaceOptions != nil}
   /// Clears the value of `namespaceOptions`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceOptions() {_uniqueStorage()._namespaceOptions = nil}
 
   /// Optional SELinux context to be applied.
   public var selinuxOptions: Runtime_V1_SELinuxOption {
-    get {return _storage._selinuxOptions ?? Runtime_V1_SELinuxOption()}
+    get {_storage._selinuxOptions ?? Runtime_V1_SELinuxOption()}
     set {_uniqueStorage()._selinuxOptions = newValue}
   }
   /// Returns true if `selinuxOptions` has been explicitly set.
-  public var hasSelinuxOptions: Bool {return _storage._selinuxOptions != nil}
+  public var hasSelinuxOptions: Bool {_storage._selinuxOptions != nil}
   /// Clears the value of `selinuxOptions`. Subsequent reads from it will return its default value.
   public mutating func clearSelinuxOptions() {_uniqueStorage()._selinuxOptions = nil}
 
   /// UID to run sandbox processes as, when applicable.
   public var runAsUser: Runtime_V1_Int64Value {
-    get {return _storage._runAsUser ?? Runtime_V1_Int64Value()}
+    get {_storage._runAsUser ?? Runtime_V1_Int64Value()}
     set {_uniqueStorage()._runAsUser = newValue}
   }
   /// Returns true if `runAsUser` has been explicitly set.
-  public var hasRunAsUser: Bool {return _storage._runAsUser != nil}
+  public var hasRunAsUser: Bool {_storage._runAsUser != nil}
   /// Clears the value of `runAsUser`. Subsequent reads from it will return its default value.
   public mutating func clearRunAsUser() {_uniqueStorage()._runAsUser = nil}
 
   /// GID to run sandbox processes as, when applicable. run_as_group should only
   /// be specified when run_as_user is specified; otherwise, the runtime MUST error.
   public var runAsGroup: Runtime_V1_Int64Value {
-    get {return _storage._runAsGroup ?? Runtime_V1_Int64Value()}
+    get {_storage._runAsGroup ?? Runtime_V1_Int64Value()}
     set {_uniqueStorage()._runAsGroup = newValue}
   }
   /// Returns true if `runAsGroup` has been explicitly set.
-  public var hasRunAsGroup: Bool {return _storage._runAsGroup != nil}
+  public var hasRunAsGroup: Bool {_storage._runAsGroup != nil}
   /// Clears the value of `runAsGroup`. Subsequent reads from it will return its default value.
   public mutating func clearRunAsGroup() {_uniqueStorage()._runAsGroup = nil}
 
   /// If set, the root filesystem of the sandbox is read-only.
   public var readonlyRootfs: Bool {
-    get {return _storage._readonlyRootfs}
+    get {_storage._readonlyRootfs}
     set {_uniqueStorage()._readonlyRootfs = newValue}
   }
 
   /// List of groups applied to the first process run in each container.
   /// supplemental_groups_policy can control how groups will be calculated.
   public var supplementalGroups: [Int64] {
-    get {return _storage._supplementalGroups}
+    get {_storage._supplementalGroups}
     set {_uniqueStorage()._supplementalGroups = newValue}
   }
 
@@ -1065,7 +1069,7 @@ public struct Runtime_V1_LinuxSandboxSecurityContext: @unchecked Sendable {
   /// Valid values are "Merge" and "Strict".
   /// If not specified, "Merge" is used.
   public var supplementalGroupsPolicy: Runtime_V1_SupplementalGroupsPolicy {
-    get {return _storage._supplementalGroupsPolicy}
+    get {_storage._supplementalGroupsPolicy}
     set {_uniqueStorage()._supplementalGroupsPolicy = newValue}
   }
 
@@ -1075,27 +1079,27 @@ public struct Runtime_V1_LinuxSandboxSecurityContext: @unchecked Sendable {
   /// This allows a sandbox to take additional security precautions if no
   /// privileged containers are expected to be run.
   public var privileged: Bool {
-    get {return _storage._privileged}
+    get {_storage._privileged}
     set {_uniqueStorage()._privileged = newValue}
   }
 
   /// Seccomp profile for the sandbox.
   public var seccomp: Runtime_V1_SecurityProfile {
-    get {return _storage._seccomp ?? Runtime_V1_SecurityProfile()}
+    get {_storage._seccomp ?? Runtime_V1_SecurityProfile()}
     set {_uniqueStorage()._seccomp = newValue}
   }
   /// Returns true if `seccomp` has been explicitly set.
-  public var hasSeccomp: Bool {return _storage._seccomp != nil}
+  public var hasSeccomp: Bool {_storage._seccomp != nil}
   /// Clears the value of `seccomp`. Subsequent reads from it will return its default value.
   public mutating func clearSeccomp() {_uniqueStorage()._seccomp = nil}
 
   /// AppArmor profile for the sandbox.
   public var apparmor: Runtime_V1_SecurityProfile {
-    get {return _storage._apparmor ?? Runtime_V1_SecurityProfile()}
+    get {_storage._apparmor ?? Runtime_V1_SecurityProfile()}
     set {_uniqueStorage()._apparmor = newValue}
   }
   /// Returns true if `apparmor` has been explicitly set.
-  public var hasApparmor: Bool {return _storage._apparmor != nil}
+  public var hasApparmor: Bool {_storage._apparmor != nil}
   /// Clears the value of `apparmor`. Subsequent reads from it will return its default value.
   public mutating func clearApparmor() {_uniqueStorage()._apparmor = nil}
 
@@ -1108,7 +1112,7 @@ public struct Runtime_V1_LinuxSandboxSecurityContext: @unchecked Sendable {
   ///
   /// NOTE: This field was marked as deprecated in the .proto file.
   public var seccompProfilePath: String {
-    get {return _storage._seccompProfilePath}
+    get {_storage._seccompProfilePath}
     set {_uniqueStorage()._seccompProfilePath = newValue}
   }
 
@@ -1195,43 +1199,43 @@ public struct Runtime_V1_LinuxPodSandboxConfig: @unchecked Sendable {
   /// The cgroupfs style syntax will be used, but the container runtime can
   /// convert it to systemd semantics if needed.
   public var cgroupParent: String {
-    get {return _storage._cgroupParent}
+    get {_storage._cgroupParent}
     set {_uniqueStorage()._cgroupParent = newValue}
   }
 
   /// LinuxSandboxSecurityContext holds sandbox security attributes.
   public var securityContext: Runtime_V1_LinuxSandboxSecurityContext {
-    get {return _storage._securityContext ?? Runtime_V1_LinuxSandboxSecurityContext()}
+    get {_storage._securityContext ?? Runtime_V1_LinuxSandboxSecurityContext()}
     set {_uniqueStorage()._securityContext = newValue}
   }
   /// Returns true if `securityContext` has been explicitly set.
-  public var hasSecurityContext: Bool {return _storage._securityContext != nil}
+  public var hasSecurityContext: Bool {_storage._securityContext != nil}
   /// Clears the value of `securityContext`. Subsequent reads from it will return its default value.
   public mutating func clearSecurityContext() {_uniqueStorage()._securityContext = nil}
 
   /// Sysctls holds linux sysctls config for the sandbox.
   public var sysctls: Dictionary<String,String> {
-    get {return _storage._sysctls}
+    get {_storage._sysctls}
     set {_uniqueStorage()._sysctls = newValue}
   }
 
   /// Optional overhead represents the overheads associated with this sandbox
   public var overhead: Runtime_V1_LinuxContainerResources {
-    get {return _storage._overhead ?? Runtime_V1_LinuxContainerResources()}
+    get {_storage._overhead ?? Runtime_V1_LinuxContainerResources()}
     set {_uniqueStorage()._overhead = newValue}
   }
   /// Returns true if `overhead` has been explicitly set.
-  public var hasOverhead: Bool {return _storage._overhead != nil}
+  public var hasOverhead: Bool {_storage._overhead != nil}
   /// Clears the value of `overhead`. Subsequent reads from it will return its default value.
   public mutating func clearOverhead() {_uniqueStorage()._overhead = nil}
 
   /// Optional resources represents the sum of container resources for this sandbox
   public var resources: Runtime_V1_LinuxContainerResources {
-    get {return _storage._resources ?? Runtime_V1_LinuxContainerResources()}
+    get {_storage._resources ?? Runtime_V1_LinuxContainerResources()}
     set {_uniqueStorage()._resources = newValue}
   }
   /// Returns true if `resources` has been explicitly set.
-  public var hasResources: Bool {return _storage._resources != nil}
+  public var hasResources: Bool {_storage._resources != nil}
   /// Clears the value of `resources`. Subsequent reads from it will return its default value.
   public mutating func clearResources() {_uniqueStorage()._resources = nil}
 
@@ -1280,18 +1284,18 @@ public struct Runtime_V1_PodSandboxConfig: @unchecked Sendable {
   /// operation. The runtime may also use this information to improve UX, such
   /// as by constructing a readable name.
   public var metadata: Runtime_V1_PodSandboxMetadata {
-    get {return _storage._metadata ?? Runtime_V1_PodSandboxMetadata()}
+    get {_storage._metadata ?? Runtime_V1_PodSandboxMetadata()}
     set {_uniqueStorage()._metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return _storage._metadata != nil}
+  public var hasMetadata: Bool {_storage._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {_uniqueStorage()._metadata = nil}
 
   /// Hostname of the sandbox. Hostname could only be empty when the pod
   /// network namespace is NODE.
   public var hostname: String {
-    get {return _storage._hostname}
+    get {_storage._hostname}
     set {_uniqueStorage()._hostname = newValue}
   }
 
@@ -1306,29 +1310,29 @@ public struct Runtime_V1_PodSandboxConfig: @unchecked Sendable {
   ///     PodSandboxConfig.LogDirectory = `/var/log/pods/<NAMESPACE>_<NAME>_<UID>/`
   ///     ContainerConfig.LogPath = `containerName/Instance#.log`
   public var logDirectory: String {
-    get {return _storage._logDirectory}
+    get {_storage._logDirectory}
     set {_uniqueStorage()._logDirectory = newValue}
   }
 
   /// DNS config for the sandbox.
   public var dnsConfig: Runtime_V1_DNSConfig {
-    get {return _storage._dnsConfig ?? Runtime_V1_DNSConfig()}
+    get {_storage._dnsConfig ?? Runtime_V1_DNSConfig()}
     set {_uniqueStorage()._dnsConfig = newValue}
   }
   /// Returns true if `dnsConfig` has been explicitly set.
-  public var hasDnsConfig: Bool {return _storage._dnsConfig != nil}
+  public var hasDnsConfig: Bool {_storage._dnsConfig != nil}
   /// Clears the value of `dnsConfig`. Subsequent reads from it will return its default value.
   public mutating func clearDnsConfig() {_uniqueStorage()._dnsConfig = nil}
 
   /// Port mappings for the sandbox.
   public var portMappings: [Runtime_V1_PortMapping] {
-    get {return _storage._portMappings}
+    get {_storage._portMappings}
     set {_uniqueStorage()._portMappings = newValue}
   }
 
   /// Key-value pairs that may be used to scope and select individual resources.
   public var labels: Dictionary<String,String> {
-    get {return _storage._labels}
+    get {_storage._labels}
     set {_uniqueStorage()._labels = newValue}
   }
 
@@ -1349,27 +1353,27 @@ public struct Runtime_V1_PodSandboxConfig: @unchecked Sendable {
   /// and the CRI). Whenever possible, however, runtime authors SHOULD
   /// consider proposing new typed fields for any new features instead.
   public var annotations: Dictionary<String,String> {
-    get {return _storage._annotations}
+    get {_storage._annotations}
     set {_uniqueStorage()._annotations = newValue}
   }
 
   /// Optional configurations specific to Linux hosts.
   public var linux: Runtime_V1_LinuxPodSandboxConfig {
-    get {return _storage._linux ?? Runtime_V1_LinuxPodSandboxConfig()}
+    get {_storage._linux ?? Runtime_V1_LinuxPodSandboxConfig()}
     set {_uniqueStorage()._linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return _storage._linux != nil}
+  public var hasLinux: Bool {_storage._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {_uniqueStorage()._linux = nil}
 
   /// Optional configurations specific to Windows hosts.
   public var windows: Runtime_V1_WindowsPodSandboxConfig {
-    get {return _storage._windows ?? Runtime_V1_WindowsPodSandboxConfig()}
+    get {_storage._windows ?? Runtime_V1_WindowsPodSandboxConfig()}
     set {_uniqueStorage()._windows = newValue}
   }
   /// Returns true if `windows` has been explicitly set.
-  public var hasWindows: Bool {return _storage._windows != nil}
+  public var hasWindows: Bool {_storage._windows != nil}
   /// Clears the value of `windows`. Subsequent reads from it will return its default value.
   public mutating func clearWindows() {_uniqueStorage()._windows = nil}
 
@@ -1387,11 +1391,11 @@ public struct Runtime_V1_RunPodSandboxRequest: Sendable {
 
   /// Configuration for creating a PodSandbox.
   public var config: Runtime_V1_PodSandboxConfig {
-    get {return _config ?? Runtime_V1_PodSandboxConfig()}
+    get {_config ?? Runtime_V1_PodSandboxConfig()}
     set {_config = newValue}
   }
   /// Returns true if `config` has been explicitly set.
-  public var hasConfig: Bool {return self._config != nil}
+  public var hasConfig: Bool {self._config != nil}
   /// Clears the value of `config`. Subsequent reads from it will return its default value.
   public mutating func clearConfig() {self._config = nil}
 
@@ -1524,11 +1528,11 @@ public struct Runtime_V1_Namespace: Sendable {
 
   /// Namespace options for Linux namespaces.
   public var options: Runtime_V1_NamespaceOption {
-    get {return _options ?? Runtime_V1_NamespaceOption()}
+    get {_options ?? Runtime_V1_NamespaceOption()}
     set {_options = newValue}
   }
   /// Returns true if `options` has been explicitly set.
-  public var hasOptions: Bool {return self._options != nil}
+  public var hasOptions: Bool {self._options != nil}
   /// Clears the value of `options`. Subsequent reads from it will return its default value.
   public mutating func clearOptions() {self._options = nil}
 
@@ -1547,11 +1551,11 @@ public struct Runtime_V1_LinuxPodSandboxStatus: Sendable {
 
   /// Paths to the sandbox's namespaces.
   public var namespaces: Runtime_V1_Namespace {
-    get {return _namespaces ?? Runtime_V1_Namespace()}
+    get {_namespaces ?? Runtime_V1_Namespace()}
     set {_namespaces = newValue}
   }
   /// Returns true if `namespaces` has been explicitly set.
-  public var hasNamespaces: Bool {return self._namespaces != nil}
+  public var hasNamespaces: Bool {self._namespaces != nil}
   /// Clears the value of `namespaces`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaces() {self._namespaces = nil}
 
@@ -1570,55 +1574,55 @@ public struct Runtime_V1_PodSandboxStatus: @unchecked Sendable {
 
   /// ID of the sandbox.
   public var id: String {
-    get {return _storage._id}
+    get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
   /// Metadata of the sandbox.
   public var metadata: Runtime_V1_PodSandboxMetadata {
-    get {return _storage._metadata ?? Runtime_V1_PodSandboxMetadata()}
+    get {_storage._metadata ?? Runtime_V1_PodSandboxMetadata()}
     set {_uniqueStorage()._metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return _storage._metadata != nil}
+  public var hasMetadata: Bool {_storage._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {_uniqueStorage()._metadata = nil}
 
   /// State of the sandbox.
   public var state: Runtime_V1_PodSandboxState {
-    get {return _storage._state}
+    get {_storage._state}
     set {_uniqueStorage()._state = newValue}
   }
 
   /// Creation timestamp of the sandbox in nanoseconds. Must be > 0.
   public var createdAt: Int64 {
-    get {return _storage._createdAt}
+    get {_storage._createdAt}
     set {_uniqueStorage()._createdAt = newValue}
   }
 
   /// Network contains network status if network is handled by the runtime.
   public var network: Runtime_V1_PodSandboxNetworkStatus {
-    get {return _storage._network ?? Runtime_V1_PodSandboxNetworkStatus()}
+    get {_storage._network ?? Runtime_V1_PodSandboxNetworkStatus()}
     set {_uniqueStorage()._network = newValue}
   }
   /// Returns true if `network` has been explicitly set.
-  public var hasNetwork: Bool {return _storage._network != nil}
+  public var hasNetwork: Bool {_storage._network != nil}
   /// Clears the value of `network`. Subsequent reads from it will return its default value.
   public mutating func clearNetwork() {_uniqueStorage()._network = nil}
 
   /// Linux-specific status to a pod sandbox.
   public var linux: Runtime_V1_LinuxPodSandboxStatus {
-    get {return _storage._linux ?? Runtime_V1_LinuxPodSandboxStatus()}
+    get {_storage._linux ?? Runtime_V1_LinuxPodSandboxStatus()}
     set {_uniqueStorage()._linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return _storage._linux != nil}
+  public var hasLinux: Bool {_storage._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {_uniqueStorage()._linux = nil}
 
   /// Labels are key-value pairs that may be used to scope and select individual resources.
   public var labels: Dictionary<String,String> {
-    get {return _storage._labels}
+    get {_storage._labels}
     set {_uniqueStorage()._labels = newValue}
   }
 
@@ -1627,13 +1631,13 @@ public struct Runtime_V1_PodSandboxStatus: @unchecked Sendable {
   /// MUST be identical to that of the corresponding PodSandboxConfig used to
   /// instantiate the pod sandbox this status represents.
   public var annotations: Dictionary<String,String> {
-    get {return _storage._annotations}
+    get {_storage._annotations}
     set {_uniqueStorage()._annotations = newValue}
   }
 
   /// runtime configuration used for this PodSandbox.
   public var runtimeHandler: String {
-    get {return _storage._runtimeHandler}
+    get {_storage._runtimeHandler}
     set {_uniqueStorage()._runtimeHandler = newValue}
   }
 
@@ -1651,11 +1655,11 @@ public struct Runtime_V1_PodSandboxStatusResponse: Sendable {
 
   /// Status of the PodSandbox.
   public var status: Runtime_V1_PodSandboxStatus {
-    get {return _status ?? Runtime_V1_PodSandboxStatus()}
+    get {_status ?? Runtime_V1_PodSandboxStatus()}
     set {_status = newValue}
   }
   /// Returns true if `status` has been explicitly set.
-  public var hasStatus: Bool {return self._status != nil}
+  public var hasStatus: Bool {self._status != nil}
   /// Clears the value of `status`. Subsequent reads from it will return its default value.
   public mutating func clearStatus() {self._status = nil}
 
@@ -1704,11 +1708,11 @@ public struct Runtime_V1_PodSandboxFilter: Sendable {
 
   /// State of the sandbox.
   public var state: Runtime_V1_PodSandboxStateValue {
-    get {return _state ?? Runtime_V1_PodSandboxStateValue()}
+    get {_state ?? Runtime_V1_PodSandboxStateValue()}
     set {_state = newValue}
   }
   /// Returns true if `state` has been explicitly set.
-  public var hasState: Bool {return self._state != nil}
+  public var hasState: Bool {self._state != nil}
   /// Clears the value of `state`. Subsequent reads from it will return its default value.
   public mutating func clearState() {self._state = nil}
 
@@ -1731,11 +1735,11 @@ public struct Runtime_V1_ListPodSandboxRequest: Sendable {
 
   /// PodSandboxFilter to filter a list of PodSandboxes.
   public var filter: Runtime_V1_PodSandboxFilter {
-    get {return _filter ?? Runtime_V1_PodSandboxFilter()}
+    get {_filter ?? Runtime_V1_PodSandboxFilter()}
     set {_filter = newValue}
   }
   /// Returns true if `filter` has been explicitly set.
-  public var hasFilter: Bool {return self._filter != nil}
+  public var hasFilter: Bool {self._filter != nil}
   /// Clears the value of `filter`. Subsequent reads from it will return its default value.
   public mutating func clearFilter() {self._filter = nil}
 
@@ -1757,11 +1761,11 @@ public struct Runtime_V1_PodSandbox: Sendable {
 
   /// Metadata of the PodSandbox.
   public var metadata: Runtime_V1_PodSandboxMetadata {
-    get {return _metadata ?? Runtime_V1_PodSandboxMetadata()}
+    get {_metadata ?? Runtime_V1_PodSandboxMetadata()}
     set {_metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return self._metadata != nil}
+  public var hasMetadata: Bool {self._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {self._metadata = nil}
 
@@ -1822,11 +1826,11 @@ public struct Runtime_V1_PodSandboxStatsResponse: Sendable {
   // methods supported on all messages.
 
   public var stats: Runtime_V1_PodSandboxStats {
-    get {return _stats ?? Runtime_V1_PodSandboxStats()}
+    get {_stats ?? Runtime_V1_PodSandboxStats()}
     set {_stats = newValue}
   }
   /// Returns true if `stats` has been explicitly set.
-  public var hasStats: Bool {return self._stats != nil}
+  public var hasStats: Bool {self._stats != nil}
   /// Clears the value of `stats`. Subsequent reads from it will return its default value.
   public mutating func clearStats() {self._stats = nil}
 
@@ -1864,11 +1868,11 @@ public struct Runtime_V1_ListPodSandboxStatsRequest: Sendable {
 
   /// Filter for the list request.
   public var filter: Runtime_V1_PodSandboxStatsFilter {
-    get {return _filter ?? Runtime_V1_PodSandboxStatsFilter()}
+    get {_filter ?? Runtime_V1_PodSandboxStatsFilter()}
     set {_filter = newValue}
   }
   /// Returns true if `filter` has been explicitly set.
-  public var hasFilter: Bool {return self._filter != nil}
+  public var hasFilter: Bool {self._filter != nil}
   /// Clears the value of `filter`. Subsequent reads from it will return its default value.
   public mutating func clearFilter() {self._filter = nil}
 
@@ -1903,11 +1907,11 @@ public struct Runtime_V1_PodSandboxAttributes: Sendable {
 
   /// Metadata of the pod sandbox.
   public var metadata: Runtime_V1_PodSandboxMetadata {
-    get {return _metadata ?? Runtime_V1_PodSandboxMetadata()}
+    get {_metadata ?? Runtime_V1_PodSandboxMetadata()}
     set {_metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return self._metadata != nil}
+  public var hasMetadata: Bool {self._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {self._metadata = nil}
 
@@ -1936,31 +1940,31 @@ public struct Runtime_V1_PodSandboxStats: Sendable {
 
   /// Information of the pod.
   public var attributes: Runtime_V1_PodSandboxAttributes {
-    get {return _attributes ?? Runtime_V1_PodSandboxAttributes()}
+    get {_attributes ?? Runtime_V1_PodSandboxAttributes()}
     set {_attributes = newValue}
   }
   /// Returns true if `attributes` has been explicitly set.
-  public var hasAttributes: Bool {return self._attributes != nil}
+  public var hasAttributes: Bool {self._attributes != nil}
   /// Clears the value of `attributes`. Subsequent reads from it will return its default value.
   public mutating func clearAttributes() {self._attributes = nil}
 
   /// Stats from linux.
   public var linux: Runtime_V1_LinuxPodSandboxStats {
-    get {return _linux ?? Runtime_V1_LinuxPodSandboxStats()}
+    get {_linux ?? Runtime_V1_LinuxPodSandboxStats()}
     set {_linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return self._linux != nil}
+  public var hasLinux: Bool {self._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {self._linux = nil}
 
   /// Stats from windows.
   public var windows: Runtime_V1_WindowsPodSandboxStats {
-    get {return _windows ?? Runtime_V1_WindowsPodSandboxStats()}
+    get {_windows ?? Runtime_V1_WindowsPodSandboxStats()}
     set {_windows = newValue}
   }
   /// Returns true if `windows` has been explicitly set.
-  public var hasWindows: Bool {return self._windows != nil}
+  public var hasWindows: Bool {self._windows != nil}
   /// Clears the value of `windows`. Subsequent reads from it will return its default value.
   public mutating func clearWindows() {self._windows = nil}
 
@@ -1981,57 +1985,57 @@ public struct Runtime_V1_LinuxPodSandboxStats: @unchecked Sendable {
 
   /// CPU usage gathered for the pod sandbox.
   public var cpu: Runtime_V1_CpuUsage {
-    get {return _storage._cpu ?? Runtime_V1_CpuUsage()}
+    get {_storage._cpu ?? Runtime_V1_CpuUsage()}
     set {_uniqueStorage()._cpu = newValue}
   }
   /// Returns true if `cpu` has been explicitly set.
-  public var hasCpu: Bool {return _storage._cpu != nil}
+  public var hasCpu: Bool {_storage._cpu != nil}
   /// Clears the value of `cpu`. Subsequent reads from it will return its default value.
   public mutating func clearCpu() {_uniqueStorage()._cpu = nil}
 
   /// Memory usage gathered for the pod sandbox.
   public var memory: Runtime_V1_MemoryUsage {
-    get {return _storage._memory ?? Runtime_V1_MemoryUsage()}
+    get {_storage._memory ?? Runtime_V1_MemoryUsage()}
     set {_uniqueStorage()._memory = newValue}
   }
   /// Returns true if `memory` has been explicitly set.
-  public var hasMemory: Bool {return _storage._memory != nil}
+  public var hasMemory: Bool {_storage._memory != nil}
   /// Clears the value of `memory`. Subsequent reads from it will return its default value.
   public mutating func clearMemory() {_uniqueStorage()._memory = nil}
 
   /// Network usage gathered for the pod sandbox
   public var network: Runtime_V1_NetworkUsage {
-    get {return _storage._network ?? Runtime_V1_NetworkUsage()}
+    get {_storage._network ?? Runtime_V1_NetworkUsage()}
     set {_uniqueStorage()._network = newValue}
   }
   /// Returns true if `network` has been explicitly set.
-  public var hasNetwork: Bool {return _storage._network != nil}
+  public var hasNetwork: Bool {_storage._network != nil}
   /// Clears the value of `network`. Subsequent reads from it will return its default value.
   public mutating func clearNetwork() {_uniqueStorage()._network = nil}
 
   /// Stats pertaining to processes in the pod sandbox.
   public var process: Runtime_V1_ProcessUsage {
-    get {return _storage._process ?? Runtime_V1_ProcessUsage()}
+    get {_storage._process ?? Runtime_V1_ProcessUsage()}
     set {_uniqueStorage()._process = newValue}
   }
   /// Returns true if `process` has been explicitly set.
-  public var hasProcess: Bool {return _storage._process != nil}
+  public var hasProcess: Bool {_storage._process != nil}
   /// Clears the value of `process`. Subsequent reads from it will return its default value.
   public mutating func clearProcess() {_uniqueStorage()._process = nil}
 
   /// Stats of containers in the measured pod sandbox.
   public var containers: [Runtime_V1_ContainerStats] {
-    get {return _storage._containers}
+    get {_storage._containers}
     set {_uniqueStorage()._containers = newValue}
   }
 
   /// IO usage gathered for the pod sandbox.
   public var io: Runtime_V1_IoUsage {
-    get {return _storage._io ?? Runtime_V1_IoUsage()}
+    get {_storage._io ?? Runtime_V1_IoUsage()}
     set {_uniqueStorage()._io = newValue}
   }
   /// Returns true if `io` has been explicitly set.
-  public var hasIo: Bool {return _storage._io != nil}
+  public var hasIo: Bool {_storage._io != nil}
   /// Clears the value of `io`. Subsequent reads from it will return its default value.
   public mutating func clearIo() {_uniqueStorage()._io = nil}
 
@@ -2050,47 +2054,47 @@ public struct Runtime_V1_WindowsPodSandboxStats: @unchecked Sendable {
 
   /// CPU usage gathered for the pod sandbox.
   public var cpu: Runtime_V1_WindowsCpuUsage {
-    get {return _storage._cpu ?? Runtime_V1_WindowsCpuUsage()}
+    get {_storage._cpu ?? Runtime_V1_WindowsCpuUsage()}
     set {_uniqueStorage()._cpu = newValue}
   }
   /// Returns true if `cpu` has been explicitly set.
-  public var hasCpu: Bool {return _storage._cpu != nil}
+  public var hasCpu: Bool {_storage._cpu != nil}
   /// Clears the value of `cpu`. Subsequent reads from it will return its default value.
   public mutating func clearCpu() {_uniqueStorage()._cpu = nil}
 
   /// Memory usage gathered for the pod sandbox.
   public var memory: Runtime_V1_WindowsMemoryUsage {
-    get {return _storage._memory ?? Runtime_V1_WindowsMemoryUsage()}
+    get {_storage._memory ?? Runtime_V1_WindowsMemoryUsage()}
     set {_uniqueStorage()._memory = newValue}
   }
   /// Returns true if `memory` has been explicitly set.
-  public var hasMemory: Bool {return _storage._memory != nil}
+  public var hasMemory: Bool {_storage._memory != nil}
   /// Clears the value of `memory`. Subsequent reads from it will return its default value.
   public mutating func clearMemory() {_uniqueStorage()._memory = nil}
 
   /// Network usage gathered for the pod sandbox
   public var network: Runtime_V1_WindowsNetworkUsage {
-    get {return _storage._network ?? Runtime_V1_WindowsNetworkUsage()}
+    get {_storage._network ?? Runtime_V1_WindowsNetworkUsage()}
     set {_uniqueStorage()._network = newValue}
   }
   /// Returns true if `network` has been explicitly set.
-  public var hasNetwork: Bool {return _storage._network != nil}
+  public var hasNetwork: Bool {_storage._network != nil}
   /// Clears the value of `network`. Subsequent reads from it will return its default value.
   public mutating func clearNetwork() {_uniqueStorage()._network = nil}
 
   /// Stats pertaining to processes in the pod sandbox.
   public var process: Runtime_V1_WindowsProcessUsage {
-    get {return _storage._process ?? Runtime_V1_WindowsProcessUsage()}
+    get {_storage._process ?? Runtime_V1_WindowsProcessUsage()}
     set {_uniqueStorage()._process = newValue}
   }
   /// Returns true if `process` has been explicitly set.
-  public var hasProcess: Bool {return _storage._process != nil}
+  public var hasProcess: Bool {_storage._process != nil}
   /// Clears the value of `process`. Subsequent reads from it will return its default value.
   public mutating func clearProcess() {_uniqueStorage()._process = nil}
 
   /// Stats of containers in the measured pod sandbox.
   public var containers: [Runtime_V1_WindowsContainerStats] {
-    get {return _storage._containers}
+    get {_storage._containers}
     set {_uniqueStorage()._containers = newValue}
   }
 
@@ -2112,11 +2116,11 @@ public struct Runtime_V1_NetworkUsage: Sendable {
 
   /// Stats for the default network interface.
   public var defaultInterface: Runtime_V1_NetworkInterfaceUsage {
-    get {return _defaultInterface ?? Runtime_V1_NetworkInterfaceUsage()}
+    get {_defaultInterface ?? Runtime_V1_NetworkInterfaceUsage()}
     set {_defaultInterface = newValue}
   }
   /// Returns true if `defaultInterface` has been explicitly set.
-  public var hasDefaultInterface: Bool {return self._defaultInterface != nil}
+  public var hasDefaultInterface: Bool {self._defaultInterface != nil}
   /// Clears the value of `defaultInterface`. Subsequent reads from it will return its default value.
   public mutating func clearDefaultInterface() {self._defaultInterface = nil}
 
@@ -2141,11 +2145,11 @@ public struct Runtime_V1_WindowsNetworkUsage: Sendable {
 
   /// Stats for the default network interface.
   public var defaultInterface: Runtime_V1_WindowsNetworkInterfaceUsage {
-    get {return _defaultInterface ?? Runtime_V1_WindowsNetworkInterfaceUsage()}
+    get {_defaultInterface ?? Runtime_V1_WindowsNetworkInterfaceUsage()}
     set {_defaultInterface = newValue}
   }
   /// Returns true if `defaultInterface` has been explicitly set.
-  public var hasDefaultInterface: Bool {return self._defaultInterface != nil}
+  public var hasDefaultInterface: Bool {self._defaultInterface != nil}
   /// Clears the value of `defaultInterface`. Subsequent reads from it will return its default value.
   public mutating func clearDefaultInterface() {self._defaultInterface = nil}
 
@@ -2170,41 +2174,41 @@ public struct Runtime_V1_NetworkInterfaceUsage: Sendable {
 
   /// Cumulative count of bytes received.
   public var rxBytes: Runtime_V1_UInt64Value {
-    get {return _rxBytes ?? Runtime_V1_UInt64Value()}
+    get {_rxBytes ?? Runtime_V1_UInt64Value()}
     set {_rxBytes = newValue}
   }
   /// Returns true if `rxBytes` has been explicitly set.
-  public var hasRxBytes: Bool {return self._rxBytes != nil}
+  public var hasRxBytes: Bool {self._rxBytes != nil}
   /// Clears the value of `rxBytes`. Subsequent reads from it will return its default value.
   public mutating func clearRxBytes() {self._rxBytes = nil}
 
   /// Cumulative count of receive errors encountered.
   public var rxErrors: Runtime_V1_UInt64Value {
-    get {return _rxErrors ?? Runtime_V1_UInt64Value()}
+    get {_rxErrors ?? Runtime_V1_UInt64Value()}
     set {_rxErrors = newValue}
   }
   /// Returns true if `rxErrors` has been explicitly set.
-  public var hasRxErrors: Bool {return self._rxErrors != nil}
+  public var hasRxErrors: Bool {self._rxErrors != nil}
   /// Clears the value of `rxErrors`. Subsequent reads from it will return its default value.
   public mutating func clearRxErrors() {self._rxErrors = nil}
 
   /// Cumulative count of bytes transmitted.
   public var txBytes: Runtime_V1_UInt64Value {
-    get {return _txBytes ?? Runtime_V1_UInt64Value()}
+    get {_txBytes ?? Runtime_V1_UInt64Value()}
     set {_txBytes = newValue}
   }
   /// Returns true if `txBytes` has been explicitly set.
-  public var hasTxBytes: Bool {return self._txBytes != nil}
+  public var hasTxBytes: Bool {self._txBytes != nil}
   /// Clears the value of `txBytes`. Subsequent reads from it will return its default value.
   public mutating func clearTxBytes() {self._txBytes = nil}
 
   /// Cumulative count of transmit errors encountered.
   public var txErrors: Runtime_V1_UInt64Value {
-    get {return _txErrors ?? Runtime_V1_UInt64Value()}
+    get {_txErrors ?? Runtime_V1_UInt64Value()}
     set {_txErrors = newValue}
   }
   /// Returns true if `txErrors` has been explicitly set.
-  public var hasTxErrors: Bool {return self._txErrors != nil}
+  public var hasTxErrors: Bool {self._txErrors != nil}
   /// Clears the value of `txErrors`. Subsequent reads from it will return its default value.
   public mutating func clearTxErrors() {self._txErrors = nil}
 
@@ -2229,41 +2233,41 @@ public struct Runtime_V1_WindowsNetworkInterfaceUsage: Sendable {
 
   /// Cumulative count of bytes received.
   public var rxBytes: Runtime_V1_UInt64Value {
-    get {return _rxBytes ?? Runtime_V1_UInt64Value()}
+    get {_rxBytes ?? Runtime_V1_UInt64Value()}
     set {_rxBytes = newValue}
   }
   /// Returns true if `rxBytes` has been explicitly set.
-  public var hasRxBytes: Bool {return self._rxBytes != nil}
+  public var hasRxBytes: Bool {self._rxBytes != nil}
   /// Clears the value of `rxBytes`. Subsequent reads from it will return its default value.
   public mutating func clearRxBytes() {self._rxBytes = nil}
 
   /// Cumulative count of receive errors encountered.
   public var rxPacketsDropped: Runtime_V1_UInt64Value {
-    get {return _rxPacketsDropped ?? Runtime_V1_UInt64Value()}
+    get {_rxPacketsDropped ?? Runtime_V1_UInt64Value()}
     set {_rxPacketsDropped = newValue}
   }
   /// Returns true if `rxPacketsDropped` has been explicitly set.
-  public var hasRxPacketsDropped: Bool {return self._rxPacketsDropped != nil}
+  public var hasRxPacketsDropped: Bool {self._rxPacketsDropped != nil}
   /// Clears the value of `rxPacketsDropped`. Subsequent reads from it will return its default value.
   public mutating func clearRxPacketsDropped() {self._rxPacketsDropped = nil}
 
   /// Cumulative count of bytes transmitted.
   public var txBytes: Runtime_V1_UInt64Value {
-    get {return _txBytes ?? Runtime_V1_UInt64Value()}
+    get {_txBytes ?? Runtime_V1_UInt64Value()}
     set {_txBytes = newValue}
   }
   /// Returns true if `txBytes` has been explicitly set.
-  public var hasTxBytes: Bool {return self._txBytes != nil}
+  public var hasTxBytes: Bool {self._txBytes != nil}
   /// Clears the value of `txBytes`. Subsequent reads from it will return its default value.
   public mutating func clearTxBytes() {self._txBytes = nil}
 
   /// Cumulative count of transmit errors encountered.
   public var txPacketsDropped: Runtime_V1_UInt64Value {
-    get {return _txPacketsDropped ?? Runtime_V1_UInt64Value()}
+    get {_txPacketsDropped ?? Runtime_V1_UInt64Value()}
     set {_txPacketsDropped = newValue}
   }
   /// Returns true if `txPacketsDropped` has been explicitly set.
-  public var hasTxPacketsDropped: Bool {return self._txPacketsDropped != nil}
+  public var hasTxPacketsDropped: Bool {self._txPacketsDropped != nil}
   /// Clears the value of `txPacketsDropped`. Subsequent reads from it will return its default value.
   public mutating func clearTxPacketsDropped() {self._txPacketsDropped = nil}
 
@@ -2288,11 +2292,11 @@ public struct Runtime_V1_ProcessUsage: Sendable {
 
   /// Number of processes.
   public var processCount: Runtime_V1_UInt64Value {
-    get {return _processCount ?? Runtime_V1_UInt64Value()}
+    get {_processCount ?? Runtime_V1_UInt64Value()}
     set {_processCount = newValue}
   }
   /// Returns true if `processCount` has been explicitly set.
-  public var hasProcessCount: Bool {return self._processCount != nil}
+  public var hasProcessCount: Bool {self._processCount != nil}
   /// Clears the value of `processCount`. Subsequent reads from it will return its default value.
   public mutating func clearProcessCount() {self._processCount = nil}
 
@@ -2314,11 +2318,11 @@ public struct Runtime_V1_WindowsProcessUsage: Sendable {
 
   /// Number of processes.
   public var processCount: Runtime_V1_UInt64Value {
-    get {return _processCount ?? Runtime_V1_UInt64Value()}
+    get {_processCount ?? Runtime_V1_UInt64Value()}
     set {_processCount = newValue}
   }
   /// Returns true if `processCount` has been explicitly set.
-  public var hasProcessCount: Bool {return self._processCount != nil}
+  public var hasProcessCount: Bool {self._processCount != nil}
   /// Clears the value of `processCount`. Subsequent reads from it will return its default value.
   public mutating func clearProcessCount() {self._processCount = nil}
 
@@ -2489,11 +2493,11 @@ public struct Runtime_V1_LinuxContainerSecurityContext: @unchecked Sendable {
 
   /// Capabilities to add or drop.
   public var capabilities: Runtime_V1_Capability {
-    get {return _storage._capabilities ?? Runtime_V1_Capability()}
+    get {_storage._capabilities ?? Runtime_V1_Capability()}
     set {_uniqueStorage()._capabilities = newValue}
   }
   /// Returns true if `capabilities` has been explicitly set.
-  public var hasCapabilities: Bool {return _storage._capabilities != nil}
+  public var hasCapabilities: Bool {_storage._capabilities != nil}
   /// Clears the value of `capabilities`. Subsequent reads from it will return its default value.
   public mutating func clearCapabilities() {_uniqueStorage()._capabilities = nil}
 
@@ -2515,39 +2519,39 @@ public struct Runtime_V1_LinuxContainerSecurityContext: @unchecked Sendable {
   /// 7. All devices from the host's /dev are available within the container.
   /// 8. SELinux restrictions are not applied (e.g. label=disabled).
   public var privileged: Bool {
-    get {return _storage._privileged}
+    get {_storage._privileged}
     set {_uniqueStorage()._privileged = newValue}
   }
 
   /// Configurations for the container's namespaces.
   /// Only used if the container uses namespace for isolation.
   public var namespaceOptions: Runtime_V1_NamespaceOption {
-    get {return _storage._namespaceOptions ?? Runtime_V1_NamespaceOption()}
+    get {_storage._namespaceOptions ?? Runtime_V1_NamespaceOption()}
     set {_uniqueStorage()._namespaceOptions = newValue}
   }
   /// Returns true if `namespaceOptions` has been explicitly set.
-  public var hasNamespaceOptions: Bool {return _storage._namespaceOptions != nil}
+  public var hasNamespaceOptions: Bool {_storage._namespaceOptions != nil}
   /// Clears the value of `namespaceOptions`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceOptions() {_uniqueStorage()._namespaceOptions = nil}
 
   /// SELinux context to be optionally applied.
   public var selinuxOptions: Runtime_V1_SELinuxOption {
-    get {return _storage._selinuxOptions ?? Runtime_V1_SELinuxOption()}
+    get {_storage._selinuxOptions ?? Runtime_V1_SELinuxOption()}
     set {_uniqueStorage()._selinuxOptions = newValue}
   }
   /// Returns true if `selinuxOptions` has been explicitly set.
-  public var hasSelinuxOptions: Bool {return _storage._selinuxOptions != nil}
+  public var hasSelinuxOptions: Bool {_storage._selinuxOptions != nil}
   /// Clears the value of `selinuxOptions`. Subsequent reads from it will return its default value.
   public mutating func clearSelinuxOptions() {_uniqueStorage()._selinuxOptions = nil}
 
   /// UID to run the container process as. Only one of run_as_user and
   /// run_as_username can be specified at a time.
   public var runAsUser: Runtime_V1_Int64Value {
-    get {return _storage._runAsUser ?? Runtime_V1_Int64Value()}
+    get {_storage._runAsUser ?? Runtime_V1_Int64Value()}
     set {_uniqueStorage()._runAsUser = newValue}
   }
   /// Returns true if `runAsUser` has been explicitly set.
-  public var hasRunAsUser: Bool {return _storage._runAsUser != nil}
+  public var hasRunAsUser: Bool {_storage._runAsUser != nil}
   /// Clears the value of `runAsUser`. Subsequent reads from it will return its default value.
   public mutating func clearRunAsUser() {_uniqueStorage()._runAsUser = nil}
 
@@ -2555,11 +2559,11 @@ public struct Runtime_V1_LinuxContainerSecurityContext: @unchecked Sendable {
   /// when run_as_user or run_as_username is specified; otherwise, the runtime
   /// MUST error.
   public var runAsGroup: Runtime_V1_Int64Value {
-    get {return _storage._runAsGroup ?? Runtime_V1_Int64Value()}
+    get {_storage._runAsGroup ?? Runtime_V1_Int64Value()}
     set {_uniqueStorage()._runAsGroup = newValue}
   }
   /// Returns true if `runAsGroup` has been explicitly set.
-  public var hasRunAsGroup: Bool {return _storage._runAsGroup != nil}
+  public var hasRunAsGroup: Bool {_storage._runAsGroup != nil}
   /// Clears the value of `runAsGroup`. Subsequent reads from it will return its default value.
   public mutating func clearRunAsGroup() {_uniqueStorage()._runAsGroup = nil}
 
@@ -2567,20 +2571,20 @@ public struct Runtime_V1_LinuxContainerSecurityContext: @unchecked Sendable {
   /// exist in the container image (i.e. in the /etc/passwd inside the image),
   /// and be resolved there by the runtime; otherwise, the runtime MUST error.
   public var runAsUsername: String {
-    get {return _storage._runAsUsername}
+    get {_storage._runAsUsername}
     set {_uniqueStorage()._runAsUsername = newValue}
   }
 
   /// If set, the root filesystem of the container is read-only.
   public var readonlyRootfs: Bool {
-    get {return _storage._readonlyRootfs}
+    get {_storage._readonlyRootfs}
     set {_uniqueStorage()._readonlyRootfs = newValue}
   }
 
   /// List of groups applied to the first process run in each container.
   /// supplemental_groups_policy can control how groups will be calculated.
   public var supplementalGroups: [Int64] {
-    get {return _storage._supplementalGroups}
+    get {_storage._supplementalGroups}
     set {_uniqueStorage()._supplementalGroups = newValue}
   }
 
@@ -2589,48 +2593,48 @@ public struct Runtime_V1_LinuxContainerSecurityContext: @unchecked Sendable {
   /// Valid values are "Merge" and "Strict".
   /// If not specified, "Merge" is used.
   public var supplementalGroupsPolicy: Runtime_V1_SupplementalGroupsPolicy {
-    get {return _storage._supplementalGroupsPolicy}
+    get {_storage._supplementalGroupsPolicy}
     set {_uniqueStorage()._supplementalGroupsPolicy = newValue}
   }
 
   /// no_new_privs defines if the flag for no_new_privs should be set on the
   /// container.
   public var noNewPrivs: Bool {
-    get {return _storage._noNewPrivs}
+    get {_storage._noNewPrivs}
     set {_uniqueStorage()._noNewPrivs = newValue}
   }
 
   /// masked_paths is a slice of paths that should be masked by the container
   /// runtime, this can be passed directly to the OCI spec.
   public var maskedPaths: [String] {
-    get {return _storage._maskedPaths}
+    get {_storage._maskedPaths}
     set {_uniqueStorage()._maskedPaths = newValue}
   }
 
   /// readonly_paths is a slice of paths that should be set as readonly by the
   /// container runtime, this can be passed directly to the OCI spec.
   public var readonlyPaths: [String] {
-    get {return _storage._readonlyPaths}
+    get {_storage._readonlyPaths}
     set {_uniqueStorage()._readonlyPaths = newValue}
   }
 
   /// Seccomp profile for the container.
   public var seccomp: Runtime_V1_SecurityProfile {
-    get {return _storage._seccomp ?? Runtime_V1_SecurityProfile()}
+    get {_storage._seccomp ?? Runtime_V1_SecurityProfile()}
     set {_uniqueStorage()._seccomp = newValue}
   }
   /// Returns true if `seccomp` has been explicitly set.
-  public var hasSeccomp: Bool {return _storage._seccomp != nil}
+  public var hasSeccomp: Bool {_storage._seccomp != nil}
   /// Clears the value of `seccomp`. Subsequent reads from it will return its default value.
   public mutating func clearSeccomp() {_uniqueStorage()._seccomp = nil}
 
   /// AppArmor profile for the container.
   public var apparmor: Runtime_V1_SecurityProfile {
-    get {return _storage._apparmor ?? Runtime_V1_SecurityProfile()}
+    get {_storage._apparmor ?? Runtime_V1_SecurityProfile()}
     set {_uniqueStorage()._apparmor = newValue}
   }
   /// Returns true if `apparmor` has been explicitly set.
-  public var hasApparmor: Bool {return _storage._apparmor != nil}
+  public var hasApparmor: Bool {_storage._apparmor != nil}
   /// Clears the value of `apparmor`. Subsequent reads from it will return its default value.
   public mutating func clearApparmor() {_uniqueStorage()._apparmor = nil}
 
@@ -2643,7 +2647,7 @@ public struct Runtime_V1_LinuxContainerSecurityContext: @unchecked Sendable {
   ///
   /// NOTE: This field was marked as deprecated in the .proto file.
   public var apparmorProfile: String {
-    get {return _storage._apparmorProfile}
+    get {_storage._apparmorProfile}
     set {_uniqueStorage()._apparmorProfile = newValue}
   }
 
@@ -2656,7 +2660,7 @@ public struct Runtime_V1_LinuxContainerSecurityContext: @unchecked Sendable {
   ///
   /// NOTE: This field was marked as deprecated in the .proto file.
   public var seccompProfilePath: String {
-    get {return _storage._seccompProfilePath}
+    get {_storage._seccompProfilePath}
     set {_uniqueStorage()._seccompProfilePath = newValue}
   }
 
@@ -2676,21 +2680,21 @@ public struct Runtime_V1_LinuxContainerConfig: Sendable {
 
   /// Resources specification for the container.
   public var resources: Runtime_V1_LinuxContainerResources {
-    get {return _resources ?? Runtime_V1_LinuxContainerResources()}
+    get {_resources ?? Runtime_V1_LinuxContainerResources()}
     set {_resources = newValue}
   }
   /// Returns true if `resources` has been explicitly set.
-  public var hasResources: Bool {return self._resources != nil}
+  public var hasResources: Bool {self._resources != nil}
   /// Clears the value of `resources`. Subsequent reads from it will return its default value.
   public mutating func clearResources() {self._resources = nil}
 
   /// LinuxContainerSecurityContext configuration for the container.
   public var securityContext: Runtime_V1_LinuxContainerSecurityContext {
-    get {return _securityContext ?? Runtime_V1_LinuxContainerSecurityContext()}
+    get {_securityContext ?? Runtime_V1_LinuxContainerSecurityContext()}
     set {_securityContext = newValue}
   }
   /// Returns true if `securityContext` has been explicitly set.
-  public var hasSecurityContext: Bool {return self._securityContext != nil}
+  public var hasSecurityContext: Bool {self._securityContext != nil}
   /// Clears the value of `securityContext`. Subsequent reads from it will return its default value.
   public mutating func clearSecurityContext() {self._securityContext = nil}
 
@@ -2757,11 +2761,11 @@ public struct Runtime_V1_WindowsSandboxSecurityContext: Sendable {
 
   /// Configuration for the sandbox's namespaces
   public var namespaceOptions: Runtime_V1_WindowsNamespaceOption {
-    get {return _namespaceOptions ?? Runtime_V1_WindowsNamespaceOption()}
+    get {_namespaceOptions ?? Runtime_V1_WindowsNamespaceOption()}
     set {_namespaceOptions = newValue}
   }
   /// Returns true if `namespaceOptions` has been explicitly set.
-  public var hasNamespaceOptions: Bool {return self._namespaceOptions != nil}
+  public var hasNamespaceOptions: Bool {self._namespaceOptions != nil}
   /// Clears the value of `namespaceOptions`. Subsequent reads from it will return its default value.
   public mutating func clearNamespaceOptions() {self._namespaceOptions = nil}
 
@@ -2781,11 +2785,11 @@ public struct Runtime_V1_WindowsPodSandboxConfig: Sendable {
 
   /// WindowsSandboxSecurityContext holds sandbox security attributes.
   public var securityContext: Runtime_V1_WindowsSandboxSecurityContext {
-    get {return _securityContext ?? Runtime_V1_WindowsSandboxSecurityContext()}
+    get {_securityContext ?? Runtime_V1_WindowsSandboxSecurityContext()}
     set {_securityContext = newValue}
   }
   /// Returns true if `securityContext` has been explicitly set.
-  public var hasSecurityContext: Bool {return self._securityContext != nil}
+  public var hasSecurityContext: Bool {self._securityContext != nil}
   /// Clears the value of `securityContext`. Subsequent reads from it will return its default value.
   public mutating func clearSecurityContext() {self._securityContext = nil}
 
@@ -2827,21 +2831,21 @@ public struct Runtime_V1_WindowsContainerConfig: Sendable {
 
   /// Resources specification for the container.
   public var resources: Runtime_V1_WindowsContainerResources {
-    get {return _resources ?? Runtime_V1_WindowsContainerResources()}
+    get {_resources ?? Runtime_V1_WindowsContainerResources()}
     set {_resources = newValue}
   }
   /// Returns true if `resources` has been explicitly set.
-  public var hasResources: Bool {return self._resources != nil}
+  public var hasResources: Bool {self._resources != nil}
   /// Clears the value of `resources`. Subsequent reads from it will return its default value.
   public mutating func clearResources() {self._resources = nil}
 
   /// WindowsContainerSecurityContext configuration for the container.
   public var securityContext: Runtime_V1_WindowsContainerSecurityContext {
-    get {return _securityContext ?? Runtime_V1_WindowsContainerSecurityContext()}
+    get {_securityContext ?? Runtime_V1_WindowsContainerSecurityContext()}
     set {_securityContext = newValue}
   }
   /// Returns true if `securityContext` has been explicitly set.
-  public var hasSecurityContext: Bool {return self._securityContext != nil}
+  public var hasSecurityContext: Bool {self._securityContext != nil}
   /// Clears the value of `securityContext`. Subsequent reads from it will return its default value.
   public mutating func clearSecurityContext() {self._securityContext = nil}
 
@@ -2976,57 +2980,57 @@ public struct Runtime_V1_ContainerConfig: @unchecked Sendable {
   /// operation. The runtime may also use this information to improve UX, such
   /// as by constructing a readable name.
   public var metadata: Runtime_V1_ContainerMetadata {
-    get {return _storage._metadata ?? Runtime_V1_ContainerMetadata()}
+    get {_storage._metadata ?? Runtime_V1_ContainerMetadata()}
     set {_uniqueStorage()._metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return _storage._metadata != nil}
+  public var hasMetadata: Bool {_storage._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {_uniqueStorage()._metadata = nil}
 
   /// Image to use.
   public var image: Runtime_V1_ImageSpec {
-    get {return _storage._image ?? Runtime_V1_ImageSpec()}
+    get {_storage._image ?? Runtime_V1_ImageSpec()}
     set {_uniqueStorage()._image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return _storage._image != nil}
+  public var hasImage: Bool {_storage._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {_uniqueStorage()._image = nil}
 
   /// Command to execute (i.e., entrypoint for docker)
   public var command: [String] {
-    get {return _storage._command}
+    get {_storage._command}
     set {_uniqueStorage()._command = newValue}
   }
 
   /// Args for the Command (i.e., command for docker)
   public var args: [String] {
-    get {return _storage._args}
+    get {_storage._args}
     set {_uniqueStorage()._args = newValue}
   }
 
   /// Current working directory of the command.
   public var workingDir: String {
-    get {return _storage._workingDir}
+    get {_storage._workingDir}
     set {_uniqueStorage()._workingDir = newValue}
   }
 
   /// List of environment variable to set in the container.
   public var envs: [Runtime_V1_KeyValue] {
-    get {return _storage._envs}
+    get {_storage._envs}
     set {_uniqueStorage()._envs = newValue}
   }
 
   /// Mounts for the container.
   public var mounts: [Runtime_V1_Mount] {
-    get {return _storage._mounts}
+    get {_storage._mounts}
     set {_uniqueStorage()._mounts = newValue}
   }
 
   /// Devices for the container.
   public var devices: [Runtime_V1_Device] {
-    get {return _storage._devices}
+    get {_storage._devices}
     set {_uniqueStorage()._devices = newValue}
   }
 
@@ -3037,7 +3041,7 @@ public struct Runtime_V1_ContainerConfig: @unchecked Sendable {
   ///     prefix ::= DNS_SUBDOMAIN
   ///     name ::= DNS_LABEL
   public var labels: Dictionary<String,String> {
-    get {return _storage._labels}
+    get {_storage._labels}
     set {_uniqueStorage()._labels = newValue}
   }
 
@@ -3052,7 +3056,7 @@ public struct Runtime_V1_ContainerConfig: @unchecked Sendable {
   /// kubelet and the container runtime, annotations SHOULD NOT influence
   /// runtime behaviour.
   public var annotations: Dictionary<String,String> {
-    get {return _storage._annotations}
+    get {_storage._annotations}
     set {_uniqueStorage()._annotations = newValue}
   }
 
@@ -3062,56 +3066,56 @@ public struct Runtime_V1_ContainerConfig: @unchecked Sendable {
   ///     PodSandboxConfig.LogDirectory = `/var/log/pods/<NAMESPACE>_<NAME>_<UID>/`
   ///     ContainerConfig.LogPath = `containerName/Instance#.log`
   public var logPath: String {
-    get {return _storage._logPath}
+    get {_storage._logPath}
     set {_uniqueStorage()._logPath = newValue}
   }
 
   /// Variables for interactive containers, these have very specialized
   /// use-cases (e.g. debugging).
   public var stdin: Bool {
-    get {return _storage._stdin}
+    get {_storage._stdin}
     set {_uniqueStorage()._stdin = newValue}
   }
 
   public var stdinOnce: Bool {
-    get {return _storage._stdinOnce}
+    get {_storage._stdinOnce}
     set {_uniqueStorage()._stdinOnce = newValue}
   }
 
   public var tty: Bool {
-    get {return _storage._tty}
+    get {_storage._tty}
     set {_uniqueStorage()._tty = newValue}
   }
 
   /// Configuration specific to Linux containers.
   public var linux: Runtime_V1_LinuxContainerConfig {
-    get {return _storage._linux ?? Runtime_V1_LinuxContainerConfig()}
+    get {_storage._linux ?? Runtime_V1_LinuxContainerConfig()}
     set {_uniqueStorage()._linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return _storage._linux != nil}
+  public var hasLinux: Bool {_storage._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {_uniqueStorage()._linux = nil}
 
   /// Configuration specific to Windows containers.
   public var windows: Runtime_V1_WindowsContainerConfig {
-    get {return _storage._windows ?? Runtime_V1_WindowsContainerConfig()}
+    get {_storage._windows ?? Runtime_V1_WindowsContainerConfig()}
     set {_uniqueStorage()._windows = newValue}
   }
   /// Returns true if `windows` has been explicitly set.
-  public var hasWindows: Bool {return _storage._windows != nil}
+  public var hasWindows: Bool {_storage._windows != nil}
   /// Clears the value of `windows`. Subsequent reads from it will return its default value.
   public mutating func clearWindows() {_uniqueStorage()._windows = nil}
 
   /// CDI devices for the container.
   public var cdiDevices: [Runtime_V1_CDIDevice] {
-    get {return _storage._cdiDevices}
+    get {_storage._cdiDevices}
     set {_uniqueStorage()._cdiDevices = newValue}
   }
 
   /// The custom stop signal for the container
   public var stopSignal: Runtime_V1_Signal {
-    get {return _storage._stopSignal}
+    get {_storage._stopSignal}
     set {_uniqueStorage()._stopSignal = newValue}
   }
 
@@ -3132,11 +3136,11 @@ public struct Runtime_V1_CreateContainerRequest: Sendable {
 
   /// Config of the container.
   public var config: Runtime_V1_ContainerConfig {
-    get {return _config ?? Runtime_V1_ContainerConfig()}
+    get {_config ?? Runtime_V1_ContainerConfig()}
     set {_config = newValue}
   }
   /// Returns true if `config` has been explicitly set.
-  public var hasConfig: Bool {return self._config != nil}
+  public var hasConfig: Bool {self._config != nil}
   /// Clears the value of `config`. Subsequent reads from it will return its default value.
   public mutating func clearConfig() {self._config = nil}
 
@@ -3145,11 +3149,11 @@ public struct Runtime_V1_CreateContainerRequest: Sendable {
   /// here just for easy reference. The PodSandboxConfig is immutable and
   /// remains the same throughout the lifetime of the pod.
   public var sandboxConfig: Runtime_V1_PodSandboxConfig {
-    get {return _sandboxConfig ?? Runtime_V1_PodSandboxConfig()}
+    get {_sandboxConfig ?? Runtime_V1_PodSandboxConfig()}
     set {_sandboxConfig = newValue}
   }
   /// Returns true if `sandboxConfig` has been explicitly set.
-  public var hasSandboxConfig: Bool {return self._sandboxConfig != nil}
+  public var hasSandboxConfig: Bool {self._sandboxConfig != nil}
   /// Clears the value of `sandboxConfig`. Subsequent reads from it will return its default value.
   public mutating func clearSandboxConfig() {self._sandboxConfig = nil}
 
@@ -3273,11 +3277,11 @@ public struct Runtime_V1_ContainerFilter: Sendable {
 
   /// State of the container.
   public var state: Runtime_V1_ContainerStateValue {
-    get {return _state ?? Runtime_V1_ContainerStateValue()}
+    get {_state ?? Runtime_V1_ContainerStateValue()}
     set {_state = newValue}
   }
   /// Returns true if `state` has been explicitly set.
-  public var hasState: Bool {return self._state != nil}
+  public var hasState: Bool {self._state != nil}
   /// Clears the value of `state`. Subsequent reads from it will return its default value.
   public mutating func clearState() {self._state = nil}
 
@@ -3302,11 +3306,11 @@ public struct Runtime_V1_ListContainersRequest: Sendable {
   // methods supported on all messages.
 
   public var filter: Runtime_V1_ContainerFilter {
-    get {return _filter ?? Runtime_V1_ContainerFilter()}
+    get {_filter ?? Runtime_V1_ContainerFilter()}
     set {_filter = newValue}
   }
   /// Returns true if `filter` has been explicitly set.
-  public var hasFilter: Bool {return self._filter != nil}
+  public var hasFilter: Bool {self._filter != nil}
   /// Clears the value of `filter`. Subsequent reads from it will return its default value.
   public mutating func clearFilter() {self._filter = nil}
 
@@ -3333,21 +3337,21 @@ public struct Runtime_V1_Container: Sendable {
 
   /// Metadata of the container.
   public var metadata: Runtime_V1_ContainerMetadata {
-    get {return _metadata ?? Runtime_V1_ContainerMetadata()}
+    get {_metadata ?? Runtime_V1_ContainerMetadata()}
     set {_metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return self._metadata != nil}
+  public var hasMetadata: Bool {self._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {self._metadata = nil}
 
   /// Spec of the image.
   public var image: Runtime_V1_ImageSpec {
-    get {return _image ?? Runtime_V1_ImageSpec()}
+    get {_image ?? Runtime_V1_ImageSpec()}
     set {_image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return self._image != nil}
+  public var hasImage: Bool {self._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {self._image = nil}
 
@@ -3425,83 +3429,83 @@ public struct Runtime_V1_ContainerStatus: @unchecked Sendable {
 
   /// ID of the container.
   public var id: String {
-    get {return _storage._id}
+    get {_storage._id}
     set {_uniqueStorage()._id = newValue}
   }
 
   /// Metadata of the container.
   public var metadata: Runtime_V1_ContainerMetadata {
-    get {return _storage._metadata ?? Runtime_V1_ContainerMetadata()}
+    get {_storage._metadata ?? Runtime_V1_ContainerMetadata()}
     set {_uniqueStorage()._metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return _storage._metadata != nil}
+  public var hasMetadata: Bool {_storage._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {_uniqueStorage()._metadata = nil}
 
   /// Status of the container.
   public var state: Runtime_V1_ContainerState {
-    get {return _storage._state}
+    get {_storage._state}
     set {_uniqueStorage()._state = newValue}
   }
 
   /// Creation time of the container in nanoseconds.
   public var createdAt: Int64 {
-    get {return _storage._createdAt}
+    get {_storage._createdAt}
     set {_uniqueStorage()._createdAt = newValue}
   }
 
   /// Start time of the container in nanoseconds. Default: 0 (not specified).
   public var startedAt: Int64 {
-    get {return _storage._startedAt}
+    get {_storage._startedAt}
     set {_uniqueStorage()._startedAt = newValue}
   }
 
   /// Finish time of the container in nanoseconds. Default: 0 (not specified).
   public var finishedAt: Int64 {
-    get {return _storage._finishedAt}
+    get {_storage._finishedAt}
     set {_uniqueStorage()._finishedAt = newValue}
   }
 
   /// Exit code of the container. Only required when finished_at != 0. Default: 0.
   public var exitCode: Int32 {
-    get {return _storage._exitCode}
+    get {_storage._exitCode}
     set {_uniqueStorage()._exitCode = newValue}
   }
 
   /// Spec of the image.
   public var image: Runtime_V1_ImageSpec {
-    get {return _storage._image ?? Runtime_V1_ImageSpec()}
+    get {_storage._image ?? Runtime_V1_ImageSpec()}
     set {_uniqueStorage()._image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return _storage._image != nil}
+  public var hasImage: Bool {_storage._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {_uniqueStorage()._image = nil}
 
   /// Digested reference to the image in use.
   public var imageRef: String {
-    get {return _storage._imageRef}
+    get {_storage._imageRef}
     set {_uniqueStorage()._imageRef = newValue}
   }
 
   /// Brief CamelCase string explaining why container is in its current state.
   /// Must be set to "OOMKilled" for containers terminated by cgroup-based Out-of-Memory killer.
   public var reason: String {
-    get {return _storage._reason}
+    get {_storage._reason}
     set {_uniqueStorage()._reason = newValue}
   }
 
   /// Human-readable message indicating details about why container is in its
   /// current state.
   public var message: String {
-    get {return _storage._message}
+    get {_storage._message}
     set {_uniqueStorage()._message = newValue}
   }
 
   /// Key-value pairs that may be used to scope and select individual resources.
   public var labels: Dictionary<String,String> {
-    get {return _storage._labels}
+    get {_storage._labels}
     set {_uniqueStorage()._labels = newValue}
   }
 
@@ -3510,29 +3514,29 @@ public struct Runtime_V1_ContainerStatus: @unchecked Sendable {
   /// MUST be identical to that of the corresponding ContainerConfig used to
   /// instantiate the Container this status represents.
   public var annotations: Dictionary<String,String> {
-    get {return _storage._annotations}
+    get {_storage._annotations}
     set {_uniqueStorage()._annotations = newValue}
   }
 
   /// Mounts for the container.
   public var mounts: [Runtime_V1_Mount] {
-    get {return _storage._mounts}
+    get {_storage._mounts}
     set {_uniqueStorage()._mounts = newValue}
   }
 
   /// Log path of container.
   public var logPath: String {
-    get {return _storage._logPath}
+    get {_storage._logPath}
     set {_uniqueStorage()._logPath = newValue}
   }
 
   /// Resource limits configuration of the container.
   public var resources: Runtime_V1_ContainerResources {
-    get {return _storage._resources ?? Runtime_V1_ContainerResources()}
+    get {_storage._resources ?? Runtime_V1_ContainerResources()}
     set {_uniqueStorage()._resources = newValue}
   }
   /// Returns true if `resources` has been explicitly set.
-  public var hasResources: Bool {return _storage._resources != nil}
+  public var hasResources: Bool {_storage._resources != nil}
   /// Clears the value of `resources`. Subsequent reads from it will return its default value.
   public mutating func clearResources() {_uniqueStorage()._resources = nil}
 
@@ -3544,23 +3548,23 @@ public struct Runtime_V1_ContainerStatus: @unchecked Sendable {
   /// misusage, we now introduce the image_id field, which should always refer
   /// to a unique image identifier on the node.
   public var imageID: String {
-    get {return _storage._imageID}
+    get {_storage._imageID}
     set {_uniqueStorage()._imageID = newValue}
   }
 
   /// User identities initially attached to the container
   public var user: Runtime_V1_ContainerUser {
-    get {return _storage._user ?? Runtime_V1_ContainerUser()}
+    get {_storage._user ?? Runtime_V1_ContainerUser()}
     set {_uniqueStorage()._user = newValue}
   }
   /// Returns true if `user` has been explicitly set.
-  public var hasUser: Bool {return _storage._user != nil}
+  public var hasUser: Bool {_storage._user != nil}
   /// Clears the value of `user`. Subsequent reads from it will return its default value.
   public mutating func clearUser() {_uniqueStorage()._user = nil}
 
   /// Returns the stop signal used by the container runtime to terminate the container 
   public var stopSignal: Runtime_V1_Signal {
-    get {return _storage._stopSignal}
+    get {_storage._stopSignal}
     set {_uniqueStorage()._stopSignal = newValue}
   }
 
@@ -3578,11 +3582,11 @@ public struct Runtime_V1_ContainerStatusResponse: Sendable {
 
   /// Status of the container.
   public var status: Runtime_V1_ContainerStatus {
-    get {return _status ?? Runtime_V1_ContainerStatus()}
+    get {_status ?? Runtime_V1_ContainerStatus()}
     set {_status = newValue}
   }
   /// Returns true if `status` has been explicitly set.
-  public var hasStatus: Bool {return self._status != nil}
+  public var hasStatus: Bool {self._status != nil}
   /// Clears the value of `status`. Subsequent reads from it will return its default value.
   public mutating func clearStatus() {self._status = nil}
 
@@ -3607,21 +3611,21 @@ public struct Runtime_V1_ContainerResources: Sendable {
 
   /// Resource limits configuration specific to Linux container.
   public var linux: Runtime_V1_LinuxContainerResources {
-    get {return _linux ?? Runtime_V1_LinuxContainerResources()}
+    get {_linux ?? Runtime_V1_LinuxContainerResources()}
     set {_linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return self._linux != nil}
+  public var hasLinux: Bool {self._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {self._linux = nil}
 
   /// Resource limits configuration specific to Windows container.
   public var windows: Runtime_V1_WindowsContainerResources {
-    get {return _windows ?? Runtime_V1_WindowsContainerResources()}
+    get {_windows ?? Runtime_V1_WindowsContainerResources()}
     set {_windows = newValue}
   }
   /// Returns true if `windows` has been explicitly set.
-  public var hasWindows: Bool {return self._windows != nil}
+  public var hasWindows: Bool {self._windows != nil}
   /// Clears the value of `windows`. Subsequent reads from it will return its default value.
   public mutating func clearWindows() {self._windows = nil}
 
@@ -3641,11 +3645,11 @@ public struct Runtime_V1_ContainerUser: Sendable {
   /// User identities initially attached to first process in the Linux container.
   /// Note that the actual running identity can be changed if the process has enough privilege to do so.
   public var linux: Runtime_V1_LinuxContainerUser {
-    get {return _linux ?? Runtime_V1_LinuxContainerUser()}
+    get {_linux ?? Runtime_V1_LinuxContainerUser()}
     set {_linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return self._linux != nil}
+  public var hasLinux: Bool {self._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {self._linux = nil}
 
@@ -3663,27 +3667,27 @@ public struct Runtime_V1_UpdateContainerResourcesRequest: @unchecked Sendable {
 
   /// ID of the container to update.
   public var containerID: String {
-    get {return _storage._containerID}
+    get {_storage._containerID}
     set {_uniqueStorage()._containerID = newValue}
   }
 
   /// Resource configuration specific to Linux containers.
   public var linux: Runtime_V1_LinuxContainerResources {
-    get {return _storage._linux ?? Runtime_V1_LinuxContainerResources()}
+    get {_storage._linux ?? Runtime_V1_LinuxContainerResources()}
     set {_uniqueStorage()._linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return _storage._linux != nil}
+  public var hasLinux: Bool {_storage._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {_uniqueStorage()._linux = nil}
 
   /// Resource configuration specific to Windows containers.
   public var windows: Runtime_V1_WindowsContainerResources {
-    get {return _storage._windows ?? Runtime_V1_WindowsContainerResources()}
+    get {_storage._windows ?? Runtime_V1_WindowsContainerResources()}
     set {_uniqueStorage()._windows = newValue}
   }
   /// Returns true if `windows` has been explicitly set.
-  public var hasWindows: Bool {return _storage._windows != nil}
+  public var hasWindows: Bool {_storage._windows != nil}
   /// Clears the value of `windows`. Subsequent reads from it will return its default value.
   public mutating func clearWindows() {_uniqueStorage()._windows = nil}
 
@@ -3691,7 +3695,7 @@ public struct Runtime_V1_UpdateContainerResourcesRequest: @unchecked Sendable {
   /// container resources updating. This can be used for specifying experimental
   /// resources to update or other options to use when updating the container.
   public var annotations: Dictionary<String,String> {
-    get {return _storage._annotations}
+    get {_storage._annotations}
     set {_uniqueStorage()._annotations = newValue}
   }
 
@@ -3731,7 +3735,7 @@ public struct Runtime_V1_ExecSyncRequest: Sendable {
   public init() {}
 }
 
-public struct Runtime_V1_ExecSyncResponse: @unchecked Sendable {
+public struct Runtime_V1_ExecSyncResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3886,11 +3890,11 @@ public struct Runtime_V1_ImageFilter: Sendable {
 
   /// Spec of the image.
   public var image: Runtime_V1_ImageSpec {
-    get {return _image ?? Runtime_V1_ImageSpec()}
+    get {_image ?? Runtime_V1_ImageSpec()}
     set {_image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return self._image != nil}
+  public var hasImage: Bool {self._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {self._image = nil}
 
@@ -3908,11 +3912,11 @@ public struct Runtime_V1_ListImagesRequest: Sendable {
 
   /// Filter to list images.
   public var filter: Runtime_V1_ImageFilter {
-    get {return _filter ?? Runtime_V1_ImageFilter()}
+    get {_filter ?? Runtime_V1_ImageFilter()}
     set {_filter = newValue}
   }
   /// Returns true if `filter` has been explicitly set.
-  public var hasFilter: Bool {return self._filter != nil}
+  public var hasFilter: Bool {self._filter != nil}
   /// Clears the value of `filter`. Subsequent reads from it will return its default value.
   public mutating func clearFilter() {self._filter = nil}
 
@@ -3945,11 +3949,11 @@ public struct Runtime_V1_Image: Sendable {
   /// specified when creating the container. UID and the following user name
   /// are mutually exclusive.
   public var uid: Runtime_V1_Int64Value {
-    get {return _uid ?? Runtime_V1_Int64Value()}
+    get {_uid ?? Runtime_V1_Int64Value()}
     set {_uid = newValue}
   }
   /// Returns true if `uid` has been explicitly set.
-  public var hasUid: Bool {return self._uid != nil}
+  public var hasUid: Bool {self._uid != nil}
   /// Clears the value of `uid`. Subsequent reads from it will return its default value.
   public mutating func clearUid() {self._uid = nil}
 
@@ -3959,11 +3963,11 @@ public struct Runtime_V1_Image: Sendable {
 
   /// ImageSpec for image which includes annotations
   public var spec: Runtime_V1_ImageSpec {
-    get {return _spec ?? Runtime_V1_ImageSpec()}
+    get {_spec ?? Runtime_V1_ImageSpec()}
     set {_spec = newValue}
   }
   /// Returns true if `spec` has been explicitly set.
-  public var hasSpec: Bool {return self._spec != nil}
+  public var hasSpec: Bool {self._spec != nil}
   /// Clears the value of `spec`. Subsequent reads from it will return its default value.
   public mutating func clearSpec() {self._spec = nil}
 
@@ -4000,11 +4004,11 @@ public struct Runtime_V1_ImageStatusRequest: Sendable {
 
   /// Spec of the image.
   public var image: Runtime_V1_ImageSpec {
-    get {return _image ?? Runtime_V1_ImageSpec()}
+    get {_image ?? Runtime_V1_ImageSpec()}
     set {_image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return self._image != nil}
+  public var hasImage: Bool {self._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {self._image = nil}
 
@@ -4025,11 +4029,11 @@ public struct Runtime_V1_ImageStatusResponse: Sendable {
 
   /// Status of the image.
   public var image: Runtime_V1_Image {
-    get {return _image ?? Runtime_V1_Image()}
+    get {_image ?? Runtime_V1_Image()}
     set {_image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return self._image != nil}
+  public var hasImage: Bool {self._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {self._image = nil}
 
@@ -4079,31 +4083,31 @@ public struct Runtime_V1_PullImageRequest: Sendable {
 
   /// Spec of the image.
   public var image: Runtime_V1_ImageSpec {
-    get {return _image ?? Runtime_V1_ImageSpec()}
+    get {_image ?? Runtime_V1_ImageSpec()}
     set {_image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return self._image != nil}
+  public var hasImage: Bool {self._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {self._image = nil}
 
   /// Authentication configuration for pulling the image.
   public var auth: Runtime_V1_AuthConfig {
-    get {return _auth ?? Runtime_V1_AuthConfig()}
+    get {_auth ?? Runtime_V1_AuthConfig()}
     set {_auth = newValue}
   }
   /// Returns true if `auth` has been explicitly set.
-  public var hasAuth: Bool {return self._auth != nil}
+  public var hasAuth: Bool {self._auth != nil}
   /// Clears the value of `auth`. Subsequent reads from it will return its default value.
   public mutating func clearAuth() {self._auth = nil}
 
   /// Config of the PodSandbox, which is used to pull image in PodSandbox context.
   public var sandboxConfig: Runtime_V1_PodSandboxConfig {
-    get {return _sandboxConfig ?? Runtime_V1_PodSandboxConfig()}
+    get {_sandboxConfig ?? Runtime_V1_PodSandboxConfig()}
     set {_sandboxConfig = newValue}
   }
   /// Returns true if `sandboxConfig` has been explicitly set.
-  public var hasSandboxConfig: Bool {return self._sandboxConfig != nil}
+  public var hasSandboxConfig: Bool {self._sandboxConfig != nil}
   /// Clears the value of `sandboxConfig`. Subsequent reads from it will return its default value.
   public mutating func clearSandboxConfig() {self._sandboxConfig = nil}
 
@@ -4137,11 +4141,11 @@ public struct Runtime_V1_RemoveImageRequest: Sendable {
 
   /// Spec of the image to remove.
   public var image: Runtime_V1_ImageSpec {
-    get {return _image ?? Runtime_V1_ImageSpec()}
+    get {_image ?? Runtime_V1_ImageSpec()}
     set {_image = newValue}
   }
   /// Returns true if `image` has been explicitly set.
-  public var hasImage: Bool {return self._image != nil}
+  public var hasImage: Bool {self._image != nil}
   /// Clears the value of `image`. Subsequent reads from it will return its default value.
   public mutating func clearImage() {self._image = nil}
 
@@ -4182,11 +4186,11 @@ public struct Runtime_V1_RuntimeConfig: Sendable {
   // methods supported on all messages.
 
   public var networkConfig: Runtime_V1_NetworkConfig {
-    get {return _networkConfig ?? Runtime_V1_NetworkConfig()}
+    get {_networkConfig ?? Runtime_V1_NetworkConfig()}
     set {_networkConfig = newValue}
   }
   /// Returns true if `networkConfig` has been explicitly set.
-  public var hasNetworkConfig: Bool {return self._networkConfig != nil}
+  public var hasNetworkConfig: Bool {self._networkConfig != nil}
   /// Clears the value of `networkConfig`. Subsequent reads from it will return its default value.
   public mutating func clearNetworkConfig() {self._networkConfig = nil}
 
@@ -4203,11 +4207,11 @@ public struct Runtime_V1_UpdateRuntimeConfigRequest: Sendable {
   // methods supported on all messages.
 
   public var runtimeConfig: Runtime_V1_RuntimeConfig {
-    get {return _runtimeConfig ?? Runtime_V1_RuntimeConfig()}
+    get {_runtimeConfig ?? Runtime_V1_RuntimeConfig()}
     set {_runtimeConfig = newValue}
   }
   /// Returns true if `runtimeConfig` has been explicitly set.
-  public var hasRuntimeConfig: Bool {return self._runtimeConfig != nil}
+  public var hasRuntimeConfig: Bool {self._runtimeConfig != nil}
   /// Clears the value of `runtimeConfig`. Subsequent reads from it will return its default value.
   public mutating func clearRuntimeConfig() {self._runtimeConfig = nil}
 
@@ -4322,11 +4326,11 @@ public struct Runtime_V1_RuntimeHandler: Sendable {
 
   /// Supported features.
   public var features: Runtime_V1_RuntimeHandlerFeatures {
-    get {return _features ?? Runtime_V1_RuntimeHandlerFeatures()}
+    get {_features ?? Runtime_V1_RuntimeHandlerFeatures()}
     set {_features = newValue}
   }
   /// Returns true if `features` has been explicitly set.
-  public var hasFeatures: Bool {return self._features != nil}
+  public var hasFeatures: Bool {self._features != nil}
   /// Clears the value of `features`. Subsequent reads from it will return its default value.
   public mutating func clearFeatures() {self._features = nil}
 
@@ -4360,11 +4364,11 @@ public struct Runtime_V1_StatusResponse: Sendable {
 
   /// Status of the Runtime.
   public var status: Runtime_V1_RuntimeStatus {
-    get {return _status ?? Runtime_V1_RuntimeStatus()}
+    get {_status ?? Runtime_V1_RuntimeStatus()}
     set {_status = newValue}
   }
   /// Returns true if `status` has been explicitly set.
-  public var hasStatus: Bool {return self._status != nil}
+  public var hasStatus: Bool {self._status != nil}
   /// Clears the value of `status`. Subsequent reads from it will return its default value.
   public mutating func clearStatus() {self._status = nil}
 
@@ -4380,11 +4384,11 @@ public struct Runtime_V1_StatusResponse: Sendable {
   /// features describes the set of features implemented by the CRI implementation.
   /// This field is supposed to propagate to NodeFeatures in Kubernetes API.
   public var features: Runtime_V1_RuntimeFeatures {
-    get {return _features ?? Runtime_V1_RuntimeFeatures()}
+    get {_features ?? Runtime_V1_RuntimeFeatures()}
     set {_features = newValue}
   }
   /// Returns true if `features` has been explicitly set.
-  public var hasFeatures: Bool {return self._features != nil}
+  public var hasFeatures: Bool {self._features != nil}
   /// Clears the value of `features`. Subsequent reads from it will return its default value.
   public mutating func clearFeatures() {self._features = nil}
 
@@ -4445,11 +4449,11 @@ public struct Runtime_V1_FilesystemUsage: Sendable {
 
   /// The unique identifier of the filesystem.
   public var fsID: Runtime_V1_FilesystemIdentifier {
-    get {return _fsID ?? Runtime_V1_FilesystemIdentifier()}
+    get {_fsID ?? Runtime_V1_FilesystemIdentifier()}
     set {_fsID = newValue}
   }
   /// Returns true if `fsID` has been explicitly set.
-  public var hasFsID: Bool {return self._fsID != nil}
+  public var hasFsID: Bool {self._fsID != nil}
   /// Clears the value of `fsID`. Subsequent reads from it will return its default value.
   public mutating func clearFsID() {self._fsID = nil}
 
@@ -4457,11 +4461,11 @@ public struct Runtime_V1_FilesystemUsage: Sendable {
   /// This may differ from the total bytes used on the filesystem and may not
   /// equal CapacityBytes - AvailableBytes.
   public var usedBytes: Runtime_V1_UInt64Value {
-    get {return _usedBytes ?? Runtime_V1_UInt64Value()}
+    get {_usedBytes ?? Runtime_V1_UInt64Value()}
     set {_usedBytes = newValue}
   }
   /// Returns true if `usedBytes` has been explicitly set.
-  public var hasUsedBytes: Bool {return self._usedBytes != nil}
+  public var hasUsedBytes: Bool {self._usedBytes != nil}
   /// Clears the value of `usedBytes`. Subsequent reads from it will return its default value.
   public mutating func clearUsedBytes() {self._usedBytes = nil}
 
@@ -4469,11 +4473,11 @@ public struct Runtime_V1_FilesystemUsage: Sendable {
   /// This may not equal InodesCapacity - InodesAvailable because the underlying
   /// filesystem may also be used for purposes other than storing images.
   public var inodesUsed: Runtime_V1_UInt64Value {
-    get {return _inodesUsed ?? Runtime_V1_UInt64Value()}
+    get {_inodesUsed ?? Runtime_V1_UInt64Value()}
     set {_inodesUsed = newValue}
   }
   /// Returns true if `inodesUsed` has been explicitly set.
-  public var hasInodesUsed: Bool {return self._inodesUsed != nil}
+  public var hasInodesUsed: Bool {self._inodesUsed != nil}
   /// Clears the value of `inodesUsed`. Subsequent reads from it will return its default value.
   public mutating func clearInodesUsed() {self._inodesUsed = nil}
 
@@ -4497,11 +4501,11 @@ public struct Runtime_V1_WindowsFilesystemUsage: Sendable {
 
   /// The unique identifier of the filesystem.
   public var fsID: Runtime_V1_FilesystemIdentifier {
-    get {return _fsID ?? Runtime_V1_FilesystemIdentifier()}
+    get {_fsID ?? Runtime_V1_FilesystemIdentifier()}
     set {_fsID = newValue}
   }
   /// Returns true if `fsID` has been explicitly set.
-  public var hasFsID: Bool {return self._fsID != nil}
+  public var hasFsID: Bool {self._fsID != nil}
   /// Clears the value of `fsID`. Subsequent reads from it will return its default value.
   public mutating func clearFsID() {self._fsID = nil}
 
@@ -4509,11 +4513,11 @@ public struct Runtime_V1_WindowsFilesystemUsage: Sendable {
   /// This may differ from the total bytes used on the filesystem and may not
   /// equal CapacityBytes - AvailableBytes.
   public var usedBytes: Runtime_V1_UInt64Value {
-    get {return _usedBytes ?? Runtime_V1_UInt64Value()}
+    get {_usedBytes ?? Runtime_V1_UInt64Value()}
     set {_usedBytes = newValue}
   }
   /// Returns true if `usedBytes` has been explicitly set.
-  public var hasUsedBytes: Bool {return self._usedBytes != nil}
+  public var hasUsedBytes: Bool {self._usedBytes != nil}
   /// Clears the value of `usedBytes`. Subsequent reads from it will return its default value.
   public mutating func clearUsedBytes() {self._usedBytes = nil}
 
@@ -4564,11 +4568,11 @@ public struct Runtime_V1_ContainerStatsResponse: Sendable {
 
   /// Stats of the container.
   public var stats: Runtime_V1_ContainerStats {
-    get {return _stats ?? Runtime_V1_ContainerStats()}
+    get {_stats ?? Runtime_V1_ContainerStats()}
     set {_stats = newValue}
   }
   /// Returns true if `stats` has been explicitly set.
-  public var hasStats: Bool {return self._stats != nil}
+  public var hasStats: Bool {self._stats != nil}
   /// Clears the value of `stats`. Subsequent reads from it will return its default value.
   public mutating func clearStats() {self._stats = nil}
 
@@ -4586,11 +4590,11 @@ public struct Runtime_V1_ListContainerStatsRequest: Sendable {
 
   /// Filter for the list request.
   public var filter: Runtime_V1_ContainerStatsFilter {
-    get {return _filter ?? Runtime_V1_ContainerStatsFilter()}
+    get {_filter ?? Runtime_V1_ContainerStatsFilter()}
     set {_filter = newValue}
   }
   /// Returns true if `filter` has been explicitly set.
-  public var hasFilter: Bool {return self._filter != nil}
+  public var hasFilter: Bool {self._filter != nil}
   /// Clears the value of `filter`. Subsequent reads from it will return its default value.
   public mutating func clearFilter() {self._filter = nil}
 
@@ -4648,11 +4652,11 @@ public struct Runtime_V1_ContainerAttributes: Sendable {
 
   /// Metadata of the container.
   public var metadata: Runtime_V1_ContainerMetadata {
-    get {return _metadata ?? Runtime_V1_ContainerMetadata()}
+    get {_metadata ?? Runtime_V1_ContainerMetadata()}
     set {_metadata = newValue}
   }
   /// Returns true if `metadata` has been explicitly set.
-  public var hasMetadata: Bool {return self._metadata != nil}
+  public var hasMetadata: Bool {self._metadata != nil}
   /// Clears the value of `metadata`. Subsequent reads from it will return its default value.
   public mutating func clearMetadata() {self._metadata = nil}
 
@@ -4680,61 +4684,61 @@ public struct Runtime_V1_ContainerStats: @unchecked Sendable {
 
   /// Information of the container.
   public var attributes: Runtime_V1_ContainerAttributes {
-    get {return _storage._attributes ?? Runtime_V1_ContainerAttributes()}
+    get {_storage._attributes ?? Runtime_V1_ContainerAttributes()}
     set {_uniqueStorage()._attributes = newValue}
   }
   /// Returns true if `attributes` has been explicitly set.
-  public var hasAttributes: Bool {return _storage._attributes != nil}
+  public var hasAttributes: Bool {_storage._attributes != nil}
   /// Clears the value of `attributes`. Subsequent reads from it will return its default value.
   public mutating func clearAttributes() {_uniqueStorage()._attributes = nil}
 
   /// CPU usage gathered from the container.
   public var cpu: Runtime_V1_CpuUsage {
-    get {return _storage._cpu ?? Runtime_V1_CpuUsage()}
+    get {_storage._cpu ?? Runtime_V1_CpuUsage()}
     set {_uniqueStorage()._cpu = newValue}
   }
   /// Returns true if `cpu` has been explicitly set.
-  public var hasCpu: Bool {return _storage._cpu != nil}
+  public var hasCpu: Bool {_storage._cpu != nil}
   /// Clears the value of `cpu`. Subsequent reads from it will return its default value.
   public mutating func clearCpu() {_uniqueStorage()._cpu = nil}
 
   /// Memory usage gathered from the container.
   public var memory: Runtime_V1_MemoryUsage {
-    get {return _storage._memory ?? Runtime_V1_MemoryUsage()}
+    get {_storage._memory ?? Runtime_V1_MemoryUsage()}
     set {_uniqueStorage()._memory = newValue}
   }
   /// Returns true if `memory` has been explicitly set.
-  public var hasMemory: Bool {return _storage._memory != nil}
+  public var hasMemory: Bool {_storage._memory != nil}
   /// Clears the value of `memory`. Subsequent reads from it will return its default value.
   public mutating func clearMemory() {_uniqueStorage()._memory = nil}
 
   /// Usage of the writable layer.
   public var writableLayer: Runtime_V1_FilesystemUsage {
-    get {return _storage._writableLayer ?? Runtime_V1_FilesystemUsage()}
+    get {_storage._writableLayer ?? Runtime_V1_FilesystemUsage()}
     set {_uniqueStorage()._writableLayer = newValue}
   }
   /// Returns true if `writableLayer` has been explicitly set.
-  public var hasWritableLayer: Bool {return _storage._writableLayer != nil}
+  public var hasWritableLayer: Bool {_storage._writableLayer != nil}
   /// Clears the value of `writableLayer`. Subsequent reads from it will return its default value.
   public mutating func clearWritableLayer() {_uniqueStorage()._writableLayer = nil}
 
   /// Swap usage gathered from the container.
   public var swap: Runtime_V1_SwapUsage {
-    get {return _storage._swap ?? Runtime_V1_SwapUsage()}
+    get {_storage._swap ?? Runtime_V1_SwapUsage()}
     set {_uniqueStorage()._swap = newValue}
   }
   /// Returns true if `swap` has been explicitly set.
-  public var hasSwap: Bool {return _storage._swap != nil}
+  public var hasSwap: Bool {_storage._swap != nil}
   /// Clears the value of `swap`. Subsequent reads from it will return its default value.
   public mutating func clearSwap() {_uniqueStorage()._swap = nil}
 
   /// IO usage gathered from the container.
   public var io: Runtime_V1_IoUsage {
-    get {return _storage._io ?? Runtime_V1_IoUsage()}
+    get {_storage._io ?? Runtime_V1_IoUsage()}
     set {_uniqueStorage()._io = newValue}
   }
   /// Returns true if `io` has been explicitly set.
-  public var hasIo: Bool {return _storage._io != nil}
+  public var hasIo: Bool {_storage._io != nil}
   /// Clears the value of `io`. Subsequent reads from it will return its default value.
   public mutating func clearIo() {_uniqueStorage()._io = nil}
 
@@ -4753,41 +4757,41 @@ public struct Runtime_V1_WindowsContainerStats: Sendable {
 
   /// Information of the container.
   public var attributes: Runtime_V1_ContainerAttributes {
-    get {return _attributes ?? Runtime_V1_ContainerAttributes()}
+    get {_attributes ?? Runtime_V1_ContainerAttributes()}
     set {_attributes = newValue}
   }
   /// Returns true if `attributes` has been explicitly set.
-  public var hasAttributes: Bool {return self._attributes != nil}
+  public var hasAttributes: Bool {self._attributes != nil}
   /// Clears the value of `attributes`. Subsequent reads from it will return its default value.
   public mutating func clearAttributes() {self._attributes = nil}
 
   /// CPU usage gathered from the container.
   public var cpu: Runtime_V1_WindowsCpuUsage {
-    get {return _cpu ?? Runtime_V1_WindowsCpuUsage()}
+    get {_cpu ?? Runtime_V1_WindowsCpuUsage()}
     set {_cpu = newValue}
   }
   /// Returns true if `cpu` has been explicitly set.
-  public var hasCpu: Bool {return self._cpu != nil}
+  public var hasCpu: Bool {self._cpu != nil}
   /// Clears the value of `cpu`. Subsequent reads from it will return its default value.
   public mutating func clearCpu() {self._cpu = nil}
 
   /// Memory usage gathered from the container.
   public var memory: Runtime_V1_WindowsMemoryUsage {
-    get {return _memory ?? Runtime_V1_WindowsMemoryUsage()}
+    get {_memory ?? Runtime_V1_WindowsMemoryUsage()}
     set {_memory = newValue}
   }
   /// Returns true if `memory` has been explicitly set.
-  public var hasMemory: Bool {return self._memory != nil}
+  public var hasMemory: Bool {self._memory != nil}
   /// Clears the value of `memory`. Subsequent reads from it will return its default value.
   public mutating func clearMemory() {self._memory = nil}
 
   /// Usage of the writable layer.
   public var writableLayer: Runtime_V1_WindowsFilesystemUsage {
-    get {return _writableLayer ?? Runtime_V1_WindowsFilesystemUsage()}
+    get {_writableLayer ?? Runtime_V1_WindowsFilesystemUsage()}
     set {_writableLayer = newValue}
   }
   /// Returns true if `writableLayer` has been explicitly set.
-  public var hasWritableLayer: Bool {return self._writableLayer != nil}
+  public var hasWritableLayer: Bool {self._writableLayer != nil}
   /// Clears the value of `writableLayer`. Subsequent reads from it will return its default value.
   public mutating func clearWritableLayer() {self._writableLayer = nil}
 
@@ -4809,21 +4813,21 @@ public struct Runtime_V1_PsiStats: Sendable {
 
   /// PSI data for all tasks in the cgroup.
   public var full: Runtime_V1_PsiData {
-    get {return _full ?? Runtime_V1_PsiData()}
+    get {_full ?? Runtime_V1_PsiData()}
     set {_full = newValue}
   }
   /// Returns true if `full` has been explicitly set.
-  public var hasFull: Bool {return self._full != nil}
+  public var hasFull: Bool {self._full != nil}
   /// Clears the value of `full`. Subsequent reads from it will return its default value.
   public mutating func clearFull() {self._full = nil}
 
   /// PSI data for some tasks in the cgroup.
   public var some: Runtime_V1_PsiData {
-    get {return _some ?? Runtime_V1_PsiData()}
+    get {_some ?? Runtime_V1_PsiData()}
     set {_some = newValue}
   }
   /// Returns true if `some` has been explicitly set.
-  public var hasSome: Bool {return self._some != nil}
+  public var hasSome: Bool {self._some != nil}
   /// Clears the value of `some`. Subsequent reads from it will return its default value.
   public mutating func clearSome() {self._some = nil}
 
@@ -4870,32 +4874,32 @@ public struct Runtime_V1_CpuUsage: Sendable {
 
   /// Cumulative CPU usage (sum across all cores) since object creation.
   public var usageCoreNanoSeconds: Runtime_V1_UInt64Value {
-    get {return _usageCoreNanoSeconds ?? Runtime_V1_UInt64Value()}
+    get {_usageCoreNanoSeconds ?? Runtime_V1_UInt64Value()}
     set {_usageCoreNanoSeconds = newValue}
   }
   /// Returns true if `usageCoreNanoSeconds` has been explicitly set.
-  public var hasUsageCoreNanoSeconds: Bool {return self._usageCoreNanoSeconds != nil}
+  public var hasUsageCoreNanoSeconds: Bool {self._usageCoreNanoSeconds != nil}
   /// Clears the value of `usageCoreNanoSeconds`. Subsequent reads from it will return its default value.
   public mutating func clearUsageCoreNanoSeconds() {self._usageCoreNanoSeconds = nil}
 
   /// Total CPU usage (sum of all cores) averaged over the sample window.
   /// The "core" unit can be interpreted as CPU core-nanoseconds per second.
   public var usageNanoCores: Runtime_V1_UInt64Value {
-    get {return _usageNanoCores ?? Runtime_V1_UInt64Value()}
+    get {_usageNanoCores ?? Runtime_V1_UInt64Value()}
     set {_usageNanoCores = newValue}
   }
   /// Returns true if `usageNanoCores` has been explicitly set.
-  public var hasUsageNanoCores: Bool {return self._usageNanoCores != nil}
+  public var hasUsageNanoCores: Bool {self._usageNanoCores != nil}
   /// Clears the value of `usageNanoCores`. Subsequent reads from it will return its default value.
   public mutating func clearUsageNanoCores() {self._usageNanoCores = nil}
 
   /// CPU PSI statistics.
   public var psi: Runtime_V1_PsiStats {
-    get {return _psi ?? Runtime_V1_PsiStats()}
+    get {_psi ?? Runtime_V1_PsiStats()}
     set {_psi = newValue}
   }
   /// Returns true if `psi` has been explicitly set.
-  public var hasPsi: Bool {return self._psi != nil}
+  public var hasPsi: Bool {self._psi != nil}
   /// Clears the value of `psi`. Subsequent reads from it will return its default value.
   public mutating func clearPsi() {self._psi = nil}
 
@@ -4919,22 +4923,22 @@ public struct Runtime_V1_WindowsCpuUsage: Sendable {
 
   /// Cumulative CPU usage (sum across all cores) since object creation.
   public var usageCoreNanoSeconds: Runtime_V1_UInt64Value {
-    get {return _usageCoreNanoSeconds ?? Runtime_V1_UInt64Value()}
+    get {_usageCoreNanoSeconds ?? Runtime_V1_UInt64Value()}
     set {_usageCoreNanoSeconds = newValue}
   }
   /// Returns true if `usageCoreNanoSeconds` has been explicitly set.
-  public var hasUsageCoreNanoSeconds: Bool {return self._usageCoreNanoSeconds != nil}
+  public var hasUsageCoreNanoSeconds: Bool {self._usageCoreNanoSeconds != nil}
   /// Clears the value of `usageCoreNanoSeconds`. Subsequent reads from it will return its default value.
   public mutating func clearUsageCoreNanoSeconds() {self._usageCoreNanoSeconds = nil}
 
   /// Total CPU usage (sum of all cores) averaged over the sample window.
   /// The "core" unit can be interpreted as CPU core-nanoseconds per second.
   public var usageNanoCores: Runtime_V1_UInt64Value {
-    get {return _usageNanoCores ?? Runtime_V1_UInt64Value()}
+    get {_usageNanoCores ?? Runtime_V1_UInt64Value()}
     set {_usageNanoCores = newValue}
   }
   /// Returns true if `usageNanoCores` has been explicitly set.
-  public var hasUsageNanoCores: Bool {return self._usageNanoCores != nil}
+  public var hasUsageNanoCores: Bool {self._usageNanoCores != nil}
   /// Clears the value of `usageNanoCores`. Subsequent reads from it will return its default value.
   public mutating func clearUsageNanoCores() {self._usageNanoCores = nil}
 
@@ -4957,71 +4961,71 @@ public struct Runtime_V1_MemoryUsage: Sendable {
 
   /// The amount of working set memory in bytes.
   public var workingSetBytes: Runtime_V1_UInt64Value {
-    get {return _workingSetBytes ?? Runtime_V1_UInt64Value()}
+    get {_workingSetBytes ?? Runtime_V1_UInt64Value()}
     set {_workingSetBytes = newValue}
   }
   /// Returns true if `workingSetBytes` has been explicitly set.
-  public var hasWorkingSetBytes: Bool {return self._workingSetBytes != nil}
+  public var hasWorkingSetBytes: Bool {self._workingSetBytes != nil}
   /// Clears the value of `workingSetBytes`. Subsequent reads from it will return its default value.
   public mutating func clearWorkingSetBytes() {self._workingSetBytes = nil}
 
   /// Available memory for use. This is defined as the memory limit - workingSetBytes.
   public var availableBytes: Runtime_V1_UInt64Value {
-    get {return _availableBytes ?? Runtime_V1_UInt64Value()}
+    get {_availableBytes ?? Runtime_V1_UInt64Value()}
     set {_availableBytes = newValue}
   }
   /// Returns true if `availableBytes` has been explicitly set.
-  public var hasAvailableBytes: Bool {return self._availableBytes != nil}
+  public var hasAvailableBytes: Bool {self._availableBytes != nil}
   /// Clears the value of `availableBytes`. Subsequent reads from it will return its default value.
   public mutating func clearAvailableBytes() {self._availableBytes = nil}
 
   /// Total memory in use. This includes all memory regardless of when it was accessed.
   public var usageBytes: Runtime_V1_UInt64Value {
-    get {return _usageBytes ?? Runtime_V1_UInt64Value()}
+    get {_usageBytes ?? Runtime_V1_UInt64Value()}
     set {_usageBytes = newValue}
   }
   /// Returns true if `usageBytes` has been explicitly set.
-  public var hasUsageBytes: Bool {return self._usageBytes != nil}
+  public var hasUsageBytes: Bool {self._usageBytes != nil}
   /// Clears the value of `usageBytes`. Subsequent reads from it will return its default value.
   public mutating func clearUsageBytes() {self._usageBytes = nil}
 
   /// The amount of anonymous and swap cache memory (includes transparent hugepages).
   public var rssBytes: Runtime_V1_UInt64Value {
-    get {return _rssBytes ?? Runtime_V1_UInt64Value()}
+    get {_rssBytes ?? Runtime_V1_UInt64Value()}
     set {_rssBytes = newValue}
   }
   /// Returns true if `rssBytes` has been explicitly set.
-  public var hasRssBytes: Bool {return self._rssBytes != nil}
+  public var hasRssBytes: Bool {self._rssBytes != nil}
   /// Clears the value of `rssBytes`. Subsequent reads from it will return its default value.
   public mutating func clearRssBytes() {self._rssBytes = nil}
 
   /// Cumulative number of minor page faults.
   public var pageFaults: Runtime_V1_UInt64Value {
-    get {return _pageFaults ?? Runtime_V1_UInt64Value()}
+    get {_pageFaults ?? Runtime_V1_UInt64Value()}
     set {_pageFaults = newValue}
   }
   /// Returns true if `pageFaults` has been explicitly set.
-  public var hasPageFaults: Bool {return self._pageFaults != nil}
+  public var hasPageFaults: Bool {self._pageFaults != nil}
   /// Clears the value of `pageFaults`. Subsequent reads from it will return its default value.
   public mutating func clearPageFaults() {self._pageFaults = nil}
 
   /// Cumulative number of major page faults.
   public var majorPageFaults: Runtime_V1_UInt64Value {
-    get {return _majorPageFaults ?? Runtime_V1_UInt64Value()}
+    get {_majorPageFaults ?? Runtime_V1_UInt64Value()}
     set {_majorPageFaults = newValue}
   }
   /// Returns true if `majorPageFaults` has been explicitly set.
-  public var hasMajorPageFaults: Bool {return self._majorPageFaults != nil}
+  public var hasMajorPageFaults: Bool {self._majorPageFaults != nil}
   /// Clears the value of `majorPageFaults`. Subsequent reads from it will return its default value.
   public mutating func clearMajorPageFaults() {self._majorPageFaults = nil}
 
   /// Memory PSI statistics.
   public var psi: Runtime_V1_PsiStats {
-    get {return _psi ?? Runtime_V1_PsiStats()}
+    get {_psi ?? Runtime_V1_PsiStats()}
     set {_psi = newValue}
   }
   /// Returns true if `psi` has been explicitly set.
-  public var hasPsi: Bool {return self._psi != nil}
+  public var hasPsi: Bool {self._psi != nil}
   /// Clears the value of `psi`. Subsequent reads from it will return its default value.
   public mutating func clearPsi() {self._psi = nil}
 
@@ -5048,11 +5052,11 @@ public struct Runtime_V1_IoUsage: Sendable {
 
   /// IO PSI statistics.
   public var psi: Runtime_V1_PsiStats {
-    get {return _psi ?? Runtime_V1_PsiStats()}
+    get {_psi ?? Runtime_V1_PsiStats()}
     set {_psi = newValue}
   }
   /// Returns true if `psi` has been explicitly set.
-  public var hasPsi: Bool {return self._psi != nil}
+  public var hasPsi: Bool {self._psi != nil}
   /// Clears the value of `psi`. Subsequent reads from it will return its default value.
   public mutating func clearPsi() {self._psi = nil}
 
@@ -5073,21 +5077,21 @@ public struct Runtime_V1_SwapUsage: Sendable {
 
   /// Available swap for use. This is defined as the swap limit - swapUsageBytes.
   public var swapAvailableBytes: Runtime_V1_UInt64Value {
-    get {return _swapAvailableBytes ?? Runtime_V1_UInt64Value()}
+    get {_swapAvailableBytes ?? Runtime_V1_UInt64Value()}
     set {_swapAvailableBytes = newValue}
   }
   /// Returns true if `swapAvailableBytes` has been explicitly set.
-  public var hasSwapAvailableBytes: Bool {return self._swapAvailableBytes != nil}
+  public var hasSwapAvailableBytes: Bool {self._swapAvailableBytes != nil}
   /// Clears the value of `swapAvailableBytes`. Subsequent reads from it will return its default value.
   public mutating func clearSwapAvailableBytes() {self._swapAvailableBytes = nil}
 
   /// Total memory in use. This includes all memory regardless of when it was accessed.
   public var swapUsageBytes: Runtime_V1_UInt64Value {
-    get {return _swapUsageBytes ?? Runtime_V1_UInt64Value()}
+    get {_swapUsageBytes ?? Runtime_V1_UInt64Value()}
     set {_swapUsageBytes = newValue}
   }
   /// Returns true if `swapUsageBytes` has been explicitly set.
-  public var hasSwapUsageBytes: Bool {return self._swapUsageBytes != nil}
+  public var hasSwapUsageBytes: Bool {self._swapUsageBytes != nil}
   /// Clears the value of `swapUsageBytes`. Subsequent reads from it will return its default value.
   public mutating func clearSwapUsageBytes() {self._swapUsageBytes = nil}
 
@@ -5110,41 +5114,41 @@ public struct Runtime_V1_WindowsMemoryUsage: Sendable {
 
   /// The amount of working set memory in bytes.
   public var workingSetBytes: Runtime_V1_UInt64Value {
-    get {return _workingSetBytes ?? Runtime_V1_UInt64Value()}
+    get {_workingSetBytes ?? Runtime_V1_UInt64Value()}
     set {_workingSetBytes = newValue}
   }
   /// Returns true if `workingSetBytes` has been explicitly set.
-  public var hasWorkingSetBytes: Bool {return self._workingSetBytes != nil}
+  public var hasWorkingSetBytes: Bool {self._workingSetBytes != nil}
   /// Clears the value of `workingSetBytes`. Subsequent reads from it will return its default value.
   public mutating func clearWorkingSetBytes() {self._workingSetBytes = nil}
 
   /// Available memory for use. This is defined as the memory limit - commit_memory_bytes.
   public var availableBytes: Runtime_V1_UInt64Value {
-    get {return _availableBytes ?? Runtime_V1_UInt64Value()}
+    get {_availableBytes ?? Runtime_V1_UInt64Value()}
     set {_availableBytes = newValue}
   }
   /// Returns true if `availableBytes` has been explicitly set.
-  public var hasAvailableBytes: Bool {return self._availableBytes != nil}
+  public var hasAvailableBytes: Bool {self._availableBytes != nil}
   /// Clears the value of `availableBytes`. Subsequent reads from it will return its default value.
   public mutating func clearAvailableBytes() {self._availableBytes = nil}
 
   /// Cumulative number of page faults.
   public var pageFaults: Runtime_V1_UInt64Value {
-    get {return _pageFaults ?? Runtime_V1_UInt64Value()}
+    get {_pageFaults ?? Runtime_V1_UInt64Value()}
     set {_pageFaults = newValue}
   }
   /// Returns true if `pageFaults` has been explicitly set.
-  public var hasPageFaults: Bool {return self._pageFaults != nil}
+  public var hasPageFaults: Bool {self._pageFaults != nil}
   /// Clears the value of `pageFaults`. Subsequent reads from it will return its default value.
   public mutating func clearPageFaults() {self._pageFaults = nil}
 
   /// Total commit memory in use. Commit memory is total of physical and virtual memory in use.
   public var commitMemoryBytes: Runtime_V1_UInt64Value {
-    get {return _commitMemoryBytes ?? Runtime_V1_UInt64Value()}
+    get {_commitMemoryBytes ?? Runtime_V1_UInt64Value()}
     set {_commitMemoryBytes = newValue}
   }
   /// Returns true if `commitMemoryBytes` has been explicitly set.
-  public var hasCommitMemoryBytes: Bool {return self._commitMemoryBytes != nil}
+  public var hasCommitMemoryBytes: Bool {self._commitMemoryBytes != nil}
   /// Clears the value of `commitMemoryBytes`. Subsequent reads from it will return its default value.
   public mutating func clearCommitMemoryBytes() {self._commitMemoryBytes = nil}
 
@@ -5238,11 +5242,11 @@ public struct Runtime_V1_ContainerEventResponse: Sendable {
 
   /// Sandbox status
   public var podSandboxStatus: Runtime_V1_PodSandboxStatus {
-    get {return _podSandboxStatus ?? Runtime_V1_PodSandboxStatus()}
+    get {_podSandboxStatus ?? Runtime_V1_PodSandboxStatus()}
     set {_podSandboxStatus = newValue}
   }
   /// Returns true if `podSandboxStatus` has been explicitly set.
-  public var hasPodSandboxStatus: Bool {return self._podSandboxStatus != nil}
+  public var hasPodSandboxStatus: Bool {self._podSandboxStatus != nil}
   /// Clears the value of `podSandboxStatus`. Subsequent reads from it will return its default value.
   public mutating func clearPodSandboxStatus() {self._podSandboxStatus = nil}
 
@@ -5373,11 +5377,11 @@ public struct Runtime_V1_Metric: Sendable {
   public var labelValues: [String] = []
 
   public var value: Runtime_V1_UInt64Value {
-    get {return _value ?? Runtime_V1_UInt64Value()}
+    get {_value ?? Runtime_V1_UInt64Value()}
     set {_value = newValue}
   }
   /// Returns true if `value` has been explicitly set.
-  public var hasValue: Bool {return self._value != nil}
+  public var hasValue: Bool {self._value != nil}
   /// Clears the value of `value`. Subsequent reads from it will return its default value.
   public mutating func clearValue() {self._value = nil}
 
@@ -5407,11 +5411,11 @@ public struct Runtime_V1_RuntimeConfigResponse: Sendable {
   /// global runtime configuration options that are not specific to runtime
   /// handlers.
   public var linux: Runtime_V1_LinuxRuntimeConfiguration {
-    get {return _linux ?? Runtime_V1_LinuxRuntimeConfiguration()}
+    get {_linux ?? Runtime_V1_LinuxRuntimeConfiguration()}
     set {_linux = newValue}
   }
   /// Returns true if `linux` has been explicitly set.
-  public var hasLinux: Bool {return self._linux != nil}
+  public var hasLinux: Bool {self._linux != nil}
   /// Clears the value of `linux`. Subsequent reads from it will return its default value.
   public mutating func clearLinux() {self._linux = nil}
 
@@ -5448,27 +5452,27 @@ public struct Runtime_V1_UpdatePodSandboxResourcesRequest: @unchecked Sendable {
 
   /// ID of the PodSandbox to update.
   public var podSandboxID: String {
-    get {return _storage._podSandboxID}
+    get {_storage._podSandboxID}
     set {_uniqueStorage()._podSandboxID = newValue}
   }
 
   /// Optional overhead represents the overheads associated with this sandbox
   public var overhead: Runtime_V1_LinuxContainerResources {
-    get {return _storage._overhead ?? Runtime_V1_LinuxContainerResources()}
+    get {_storage._overhead ?? Runtime_V1_LinuxContainerResources()}
     set {_uniqueStorage()._overhead = newValue}
   }
   /// Returns true if `overhead` has been explicitly set.
-  public var hasOverhead: Bool {return _storage._overhead != nil}
+  public var hasOverhead: Bool {_storage._overhead != nil}
   /// Clears the value of `overhead`. Subsequent reads from it will return its default value.
   public mutating func clearOverhead() {_uniqueStorage()._overhead = nil}
 
   /// Optional resources represents the sum of container resources for this sandbox
   public var resources: Runtime_V1_LinuxContainerResources {
-    get {return _storage._resources ?? Runtime_V1_LinuxContainerResources()}
+    get {_storage._resources ?? Runtime_V1_LinuxContainerResources()}
     set {_uniqueStorage()._resources = newValue}
   }
   /// Returns true if `resources` has been explicitly set.
-  public var hasResources: Bool {return _storage._resources != nil}
+  public var hasResources: Bool {_storage._resources != nil}
   /// Clears the value of `resources`. Subsequent reads from it will return its default value.
   public mutating func clearResources() {_uniqueStorage()._resources = nil}
 
@@ -5494,152 +5498,48 @@ public struct Runtime_V1_UpdatePodSandboxResourcesResponse: Sendable {
 fileprivate let _protobuf_package = "runtime.v1"
 
 extension Runtime_V1_Protocol: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "TCP"),
-    1: .same(proto: "UDP"),
-    2: .same(proto: "SCTP"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0TCP\0\u{1}UDP\0\u{1}SCTP\0")
 }
 
 extension Runtime_V1_MountPropagation: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "PROPAGATION_PRIVATE"),
-    1: .same(proto: "PROPAGATION_HOST_TO_CONTAINER"),
-    2: .same(proto: "PROPAGATION_BIDIRECTIONAL"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0PROPAGATION_PRIVATE\0\u{1}PROPAGATION_HOST_TO_CONTAINER\0\u{1}PROPAGATION_BIDIRECTIONAL\0")
 }
 
 extension Runtime_V1_NamespaceMode: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "POD"),
-    1: .same(proto: "CONTAINER"),
-    2: .same(proto: "NODE"),
-    3: .same(proto: "TARGET"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0POD\0\u{1}CONTAINER\0\u{1}NODE\0\u{1}TARGET\0")
 }
 
 extension Runtime_V1_SupplementalGroupsPolicy: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "Merge"),
-    1: .same(proto: "Strict"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0Merge\0\u{1}Strict\0")
 }
 
 extension Runtime_V1_PodSandboxState: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "SANDBOX_READY"),
-    1: .same(proto: "SANDBOX_NOTREADY"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SANDBOX_READY\0\u{1}SANDBOX_NOTREADY\0")
 }
 
 extension Runtime_V1_Signal: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "RUNTIME_DEFAULT"),
-    1: .same(proto: "SIGABRT"),
-    2: .same(proto: "SIGALRM"),
-    3: .same(proto: "SIGBUS"),
-    4: .same(proto: "SIGCHLD"),
-    5: .same(proto: "SIGCLD"),
-    6: .same(proto: "SIGCONT"),
-    7: .same(proto: "SIGFPE"),
-    8: .same(proto: "SIGHUP"),
-    9: .same(proto: "SIGILL"),
-    10: .same(proto: "SIGINT"),
-    11: .same(proto: "SIGIO"),
-    12: .same(proto: "SIGIOT"),
-    13: .same(proto: "SIGKILL"),
-    14: .same(proto: "SIGPIPE"),
-    15: .same(proto: "SIGPOLL"),
-    16: .same(proto: "SIGPROF"),
-    17: .same(proto: "SIGPWR"),
-    18: .same(proto: "SIGQUIT"),
-    19: .same(proto: "SIGSEGV"),
-    20: .same(proto: "SIGSTKFLT"),
-    21: .same(proto: "SIGSTOP"),
-    22: .same(proto: "SIGSYS"),
-    23: .same(proto: "SIGTERM"),
-    24: .same(proto: "SIGTRAP"),
-    25: .same(proto: "SIGTSTP"),
-    26: .same(proto: "SIGTTIN"),
-    27: .same(proto: "SIGTTOU"),
-    28: .same(proto: "SIGURG"),
-    29: .same(proto: "SIGUSR1"),
-    30: .same(proto: "SIGUSR2"),
-    31: .same(proto: "SIGVTALRM"),
-    32: .same(proto: "SIGWINCH"),
-    33: .same(proto: "SIGXCPU"),
-    34: .same(proto: "SIGXFSZ"),
-    35: .same(proto: "SIGRTMIN"),
-    36: .same(proto: "SIGRTMINPLUS1"),
-    37: .same(proto: "SIGRTMINPLUS2"),
-    38: .same(proto: "SIGRTMINPLUS3"),
-    39: .same(proto: "SIGRTMINPLUS4"),
-    40: .same(proto: "SIGRTMINPLUS5"),
-    41: .same(proto: "SIGRTMINPLUS6"),
-    42: .same(proto: "SIGRTMINPLUS7"),
-    43: .same(proto: "SIGRTMINPLUS8"),
-    44: .same(proto: "SIGRTMINPLUS9"),
-    45: .same(proto: "SIGRTMINPLUS10"),
-    46: .same(proto: "SIGRTMINPLUS11"),
-    47: .same(proto: "SIGRTMINPLUS12"),
-    48: .same(proto: "SIGRTMINPLUS13"),
-    49: .same(proto: "SIGRTMINPLUS14"),
-    50: .same(proto: "SIGRTMINPLUS15"),
-    51: .same(proto: "SIGRTMAXMINUS14"),
-    52: .same(proto: "SIGRTMAXMINUS13"),
-    53: .same(proto: "SIGRTMAXMINUS12"),
-    54: .same(proto: "SIGRTMAXMINUS11"),
-    55: .same(proto: "SIGRTMAXMINUS10"),
-    56: .same(proto: "SIGRTMAXMINUS9"),
-    57: .same(proto: "SIGRTMAXMINUS8"),
-    58: .same(proto: "SIGRTMAXMINUS7"),
-    59: .same(proto: "SIGRTMAXMINUS6"),
-    60: .same(proto: "SIGRTMAXMINUS5"),
-    61: .same(proto: "SIGRTMAXMINUS4"),
-    62: .same(proto: "SIGRTMAXMINUS3"),
-    63: .same(proto: "SIGRTMAXMINUS2"),
-    64: .same(proto: "SIGRTMAXMINUS1"),
-    65: .same(proto: "SIGRTMAX"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0RUNTIME_DEFAULT\0\u{1}SIGABRT\0\u{1}SIGALRM\0\u{1}SIGBUS\0\u{1}SIGCHLD\0\u{1}SIGCLD\0\u{1}SIGCONT\0\u{1}SIGFPE\0\u{1}SIGHUP\0\u{1}SIGILL\0\u{1}SIGINT\0\u{1}SIGIO\0\u{1}SIGIOT\0\u{1}SIGKILL\0\u{1}SIGPIPE\0\u{1}SIGPOLL\0\u{1}SIGPROF\0\u{1}SIGPWR\0\u{1}SIGQUIT\0\u{1}SIGSEGV\0\u{1}SIGSTKFLT\0\u{1}SIGSTOP\0\u{1}SIGSYS\0\u{1}SIGTERM\0\u{1}SIGTRAP\0\u{1}SIGTSTP\0\u{1}SIGTTIN\0\u{1}SIGTTOU\0\u{1}SIGURG\0\u{1}SIGUSR1\0\u{1}SIGUSR2\0\u{1}SIGVTALRM\0\u{1}SIGWINCH\0\u{1}SIGXCPU\0\u{1}SIGXFSZ\0\u{1}SIGRTMIN\0\u{1}SIGRTMINPLUS1\0\u{1}SIGRTMINPLUS2\0\u{1}SIGRTMINPLUS3\0\u{1}SIGRTMINPLUS4\0\u{1}SIGRTMINPLUS5\0\u{1}SIGRTMINPLUS6\0\u{1}SIGRTMINPLUS7\0\u{1}SIGRTMINPLUS8\0\u{1}SIGRTMINPLUS9\0\u{1}SIGRTMINPLUS10\0\u{1}SIGRTMINPLUS11\0\u{1}SIGRTMINPLUS12\0\u{1}SIGRTMINPLUS13\0\u{1}SIGRTMINPLUS14\0\u{1}SIGRTMINPLUS15\0\u{1}SIGRTMAXMINUS14\0\u{1}SIGRTMAXMINUS13\0\u{1}SIGRTMAXMINUS12\0\u{1}SIGRTMAXMINUS11\0\u{1}SIGRTMAXMINUS10\0\u{1}SIGRTMAXMINUS9\0\u{1}SIGRTMAXMINUS8\0\u{1}SIGRTMAXMINUS7\0\u{1}SIGRTMAXMINUS6\0\u{1}SIGRTMAXMINUS5\0\u{1}SIGRTMAXMINUS4\0\u{1}SIGRTMAXMINUS3\0\u{1}SIGRTMAXMINUS2\0\u{1}SIGRTMAXMINUS1\0\u{1}SIGRTMAX\0")
 }
 
 extension Runtime_V1_ContainerState: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "CONTAINER_CREATED"),
-    1: .same(proto: "CONTAINER_RUNNING"),
-    2: .same(proto: "CONTAINER_EXITED"),
-    3: .same(proto: "CONTAINER_UNKNOWN"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CONTAINER_CREATED\0\u{1}CONTAINER_RUNNING\0\u{1}CONTAINER_EXITED\0\u{1}CONTAINER_UNKNOWN\0")
 }
 
 extension Runtime_V1_ContainerEventType: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "CONTAINER_CREATED_EVENT"),
-    1: .same(proto: "CONTAINER_STARTED_EVENT"),
-    2: .same(proto: "CONTAINER_STOPPED_EVENT"),
-    3: .same(proto: "CONTAINER_DELETED_EVENT"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0CONTAINER_CREATED_EVENT\0\u{1}CONTAINER_STARTED_EVENT\0\u{1}CONTAINER_STOPPED_EVENT\0\u{1}CONTAINER_DELETED_EVENT\0")
 }
 
 extension Runtime_V1_MetricType: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "COUNTER"),
-    1: .same(proto: "GAUGE"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0COUNTER\0\u{1}GAUGE\0")
 }
 
 extension Runtime_V1_CgroupDriver: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "SYSTEMD"),
-    1: .same(proto: "CGROUPFS"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0SYSTEMD\0\u{1}CGROUPFS\0")
 }
 
 extension Runtime_V1_VersionRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".VersionRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "version"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5669,12 +5569,7 @@ extension Runtime_V1_VersionRequest: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Runtime_V1_VersionResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".VersionResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "version"),
-    2: .standard(proto: "runtime_name"),
-    3: .standard(proto: "runtime_version"),
-    4: .standard(proto: "runtime_api_version"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}runtime_name\0\u{3}runtime_version\0\u{3}runtime_api_version\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5719,11 +5614,7 @@ extension Runtime_V1_VersionResponse: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_DNSConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".DNSConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "servers"),
-    2: .same(proto: "searches"),
-    3: .same(proto: "options"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}servers\0\u{1}searches\0\u{1}options\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5763,12 +5654,7 @@ extension Runtime_V1_DNSConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Runtime_V1_PortMapping: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PortMapping"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "protocol"),
-    2: .standard(proto: "container_port"),
-    3: .standard(proto: "host_port"),
-    4: .standard(proto: "host_ip"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}protocol\0\u{3}container_port\0\u{3}host_port\0\u{3}host_ip\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5813,18 +5699,7 @@ extension Runtime_V1_PortMapping: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Runtime_V1_Mount: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Mount"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_path"),
-    2: .standard(proto: "host_path"),
-    3: .same(proto: "readonly"),
-    4: .standard(proto: "selinux_relabel"),
-    5: .same(proto: "propagation"),
-    6: .same(proto: "uidMappings"),
-    7: .same(proto: "gidMappings"),
-    8: .standard(proto: "recursive_read_only"),
-    9: .same(proto: "image"),
-    10: .standard(proto: "image_sub_path"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_path\0\u{3}host_path\0\u{1}readonly\0\u{3}selinux_relabel\0\u{1}propagation\0\u{1}uidMappings\0\u{1}gidMappings\0\u{3}recursive_read_only\0\u{1}image\0\u{3}image_sub_path\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5903,11 +5778,7 @@ extension Runtime_V1_Mount: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
 
 extension Runtime_V1_IDMapping: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".IDMapping"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "host_id"),
-    2: .standard(proto: "container_id"),
-    3: .same(proto: "length"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}container_id\0\u{1}length\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5947,11 +5818,7 @@ extension Runtime_V1_IDMapping: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Runtime_V1_UserNamespace: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UserNamespace"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "mode"),
-    2: .same(proto: "uids"),
-    3: .same(proto: "gids"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}mode\0\u{1}uids\0\u{1}gids\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5991,13 +5858,7 @@ extension Runtime_V1_UserNamespace: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_NamespaceOption: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".NamespaceOption"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "network"),
-    2: .same(proto: "pid"),
-    3: .same(proto: "ipc"),
-    4: .standard(proto: "target_id"),
-    5: .standard(proto: "userns_options"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}network\0\u{1}pid\0\u{1}ipc\0\u{3}target_id\0\u{3}userns_options\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6051,9 +5912,7 @@ extension Runtime_V1_NamespaceOption: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_Int64Value: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Int64Value"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "value"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}value\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6083,19 +5942,7 @@ extension Runtime_V1_Int64Value: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Runtime_V1_LinuxSandboxSecurityContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxSandboxSecurityContext"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "namespace_options"),
-    2: .standard(proto: "selinux_options"),
-    3: .standard(proto: "run_as_user"),
-    8: .standard(proto: "run_as_group"),
-    4: .standard(proto: "readonly_rootfs"),
-    5: .standard(proto: "supplemental_groups"),
-    11: .standard(proto: "supplemental_groups_policy"),
-    6: .same(proto: "privileged"),
-    9: .same(proto: "seccomp"),
-    10: .same(proto: "apparmor"),
-    7: .standard(proto: "seccomp_profile_path"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}namespace_options\0\u{3}selinux_options\0\u{3}run_as_user\0\u{3}readonly_rootfs\0\u{3}supplemental_groups\0\u{1}privileged\0\u{3}seccomp_profile_path\0\u{3}run_as_group\0\u{1}seccomp\0\u{1}apparmor\0\u{3}supplemental_groups_policy\0")
 
   fileprivate class _StorageClass {
     var _namespaceOptions: Runtime_V1_NamespaceOption? = nil
@@ -6235,10 +6082,7 @@ extension Runtime_V1_LinuxSandboxSecurityContext: SwiftProtobuf.Message, SwiftPr
 
 extension Runtime_V1_SecurityProfile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SecurityProfile"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "profile_type"),
-    2: .standard(proto: "localhost_ref"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}profile_type\0\u{3}localhost_ref\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6272,22 +6116,12 @@ extension Runtime_V1_SecurityProfile: SwiftProtobuf.Message, SwiftProtobuf._Mess
 }
 
 extension Runtime_V1_SecurityProfile.ProfileType: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    0: .same(proto: "RuntimeDefault"),
-    1: .same(proto: "Unconfined"),
-    2: .same(proto: "Localhost"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0RuntimeDefault\0\u{1}Unconfined\0\u{1}Localhost\0")
 }
 
 extension Runtime_V1_LinuxPodSandboxConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxPodSandboxConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "cgroup_parent"),
-    2: .standard(proto: "security_context"),
-    3: .same(proto: "sysctls"),
-    4: .same(proto: "overhead"),
-    5: .same(proto: "resources"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cgroup_parent\0\u{3}security_context\0\u{1}sysctls\0\u{1}overhead\0\u{1}resources\0")
 
   fileprivate class _StorageClass {
     var _cgroupParent: String = String()
@@ -6385,12 +6219,7 @@ extension Runtime_V1_LinuxPodSandboxConfig: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_PodSandboxMetadata: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxMetadata"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-    2: .same(proto: "uid"),
-    3: .same(proto: "namespace"),
-    4: .same(proto: "attempt"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}uid\0\u{1}namespace\0\u{1}attempt\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6435,17 +6264,7 @@ extension Runtime_V1_PodSandboxMetadata: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_PodSandboxConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "metadata"),
-    2: .same(proto: "hostname"),
-    3: .standard(proto: "log_directory"),
-    4: .standard(proto: "dns_config"),
-    5: .standard(proto: "port_mappings"),
-    6: .same(proto: "labels"),
-    7: .same(proto: "annotations"),
-    8: .same(proto: "linux"),
-    9: .same(proto: "windows"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}metadata\0\u{1}hostname\0\u{3}log_directory\0\u{3}dns_config\0\u{3}port_mappings\0\u{1}labels\0\u{1}annotations\0\u{1}linux\0\u{1}windows\0")
 
   fileprivate class _StorageClass {
     var _metadata: Runtime_V1_PodSandboxMetadata? = nil
@@ -6571,10 +6390,7 @@ extension Runtime_V1_PodSandboxConfig: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_RunPodSandboxRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RunPodSandboxRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "config"),
-    2: .standard(proto: "runtime_handler"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}config\0\u{3}runtime_handler\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6613,9 +6429,7 @@ extension Runtime_V1_RunPodSandboxRequest: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_RunPodSandboxResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RunPodSandboxResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6645,9 +6459,7 @@ extension Runtime_V1_RunPodSandboxResponse: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_StopPodSandboxRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StopPodSandboxRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6696,9 +6508,7 @@ extension Runtime_V1_StopPodSandboxResponse: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_RemovePodSandboxRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RemovePodSandboxRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6747,10 +6557,7 @@ extension Runtime_V1_RemovePodSandboxResponse: SwiftProtobuf.Message, SwiftProto
 
 extension Runtime_V1_PodSandboxStatusRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStatusRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-    2: .same(proto: "verbose"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0\u{1}verbose\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6785,9 +6592,7 @@ extension Runtime_V1_PodSandboxStatusRequest: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_PodIP: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodIP"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "ip"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ip\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6817,10 +6622,7 @@ extension Runtime_V1_PodIP: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
 
 extension Runtime_V1_PodSandboxNetworkStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxNetworkStatus"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "ip"),
-    2: .standard(proto: "additional_ips"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}ip\0\u{3}additional_ips\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6855,9 +6657,7 @@ extension Runtime_V1_PodSandboxNetworkStatus: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_Namespace: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Namespace"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    2: .same(proto: "options"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\u{2}options\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6891,9 +6691,7 @@ extension Runtime_V1_Namespace: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Runtime_V1_LinuxPodSandboxStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxPodSandboxStatus"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "namespaces"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}namespaces\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6927,17 +6725,7 @@ extension Runtime_V1_LinuxPodSandboxStatus: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_PodSandboxStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStatus"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .same(proto: "metadata"),
-    3: .same(proto: "state"),
-    4: .standard(proto: "created_at"),
-    5: .same(proto: "network"),
-    6: .same(proto: "linux"),
-    7: .same(proto: "labels"),
-    8: .same(proto: "annotations"),
-    9: .standard(proto: "runtime_handler"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}metadata\0\u{1}state\0\u{3}created_at\0\u{1}network\0\u{1}linux\0\u{1}labels\0\u{1}annotations\0\u{3}runtime_handler\0")
 
   fileprivate class _StorageClass {
     var _id: String = String()
@@ -7063,12 +6851,7 @@ extension Runtime_V1_PodSandboxStatus: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_PodSandboxStatusResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStatusResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "status"),
-    2: .same(proto: "info"),
-    3: .standard(proto: "containers_statuses"),
-    4: .same(proto: "timestamp"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}status\0\u{1}info\0\u{3}containers_statuses\0\u{1}timestamp\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7117,9 +6900,7 @@ extension Runtime_V1_PodSandboxStatusResponse: SwiftProtobuf.Message, SwiftProto
 
 extension Runtime_V1_PodSandboxStateValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStateValue"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "state"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7149,11 +6930,7 @@ extension Runtime_V1_PodSandboxStateValue: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_PodSandboxFilter: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxFilter"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .same(proto: "state"),
-    3: .standard(proto: "label_selector"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}state\0\u{3}label_selector\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7197,9 +6974,7 @@ extension Runtime_V1_PodSandboxFilter: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_ListPodSandboxRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListPodSandboxRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "filter"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}filter\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7233,15 +7008,7 @@ extension Runtime_V1_ListPodSandboxRequest: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_PodSandbox: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandbox"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .same(proto: "metadata"),
-    3: .same(proto: "state"),
-    4: .standard(proto: "created_at"),
-    5: .same(proto: "labels"),
-    6: .same(proto: "annotations"),
-    7: .standard(proto: "runtime_handler"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}metadata\0\u{1}state\0\u{3}created_at\0\u{1}labels\0\u{1}annotations\0\u{3}runtime_handler\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7305,9 +7072,7 @@ extension Runtime_V1_PodSandbox: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Runtime_V1_ListPodSandboxResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListPodSandboxResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "items"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}items\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7337,9 +7102,7 @@ extension Runtime_V1_ListPodSandboxResponse: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_PodSandboxStatsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStatsRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7369,9 +7132,7 @@ extension Runtime_V1_PodSandboxStatsRequest: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_PodSandboxStatsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStatsResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "stats"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stats\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7405,10 +7166,7 @@ extension Runtime_V1_PodSandboxStatsResponse: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_PodSandboxStatsFilter: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStatsFilter"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .standard(proto: "label_selector"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}label_selector\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7443,9 +7201,7 @@ extension Runtime_V1_PodSandboxStatsFilter: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_ListPodSandboxStatsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListPodSandboxStatsRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "filter"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}filter\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7479,9 +7235,7 @@ extension Runtime_V1_ListPodSandboxStatsRequest: SwiftProtobuf.Message, SwiftPro
 
 extension Runtime_V1_ListPodSandboxStatsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListPodSandboxStatsResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "stats"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stats\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7511,12 +7265,7 @@ extension Runtime_V1_ListPodSandboxStatsResponse: SwiftProtobuf.Message, SwiftPr
 
 extension Runtime_V1_PodSandboxAttributes: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxAttributes"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .same(proto: "metadata"),
-    3: .same(proto: "labels"),
-    4: .same(proto: "annotations"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}metadata\0\u{1}labels\0\u{1}annotations\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7565,11 +7314,7 @@ extension Runtime_V1_PodSandboxAttributes: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_PodSandboxStats: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxStats"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "attributes"),
-    2: .same(proto: "linux"),
-    3: .same(proto: "windows"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attributes\0\u{1}linux\0\u{1}windows\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7613,14 +7358,7 @@ extension Runtime_V1_PodSandboxStats: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_LinuxPodSandboxStats: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxPodSandboxStats"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "cpu"),
-    2: .same(proto: "memory"),
-    3: .same(proto: "network"),
-    4: .same(proto: "process"),
-    5: .same(proto: "containers"),
-    6: .same(proto: "io"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cpu\0\u{1}memory\0\u{1}network\0\u{1}process\0\u{1}containers\0\u{1}io\0")
 
   fileprivate class _StorageClass {
     var _cpu: Runtime_V1_CpuUsage? = nil
@@ -7725,13 +7463,7 @@ extension Runtime_V1_LinuxPodSandboxStats: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_WindowsPodSandboxStats: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsPodSandboxStats"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "cpu"),
-    2: .same(proto: "memory"),
-    3: .same(proto: "network"),
-    4: .same(proto: "process"),
-    5: .same(proto: "containers"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cpu\0\u{1}memory\0\u{1}network\0\u{1}process\0\u{1}containers\0")
 
   fileprivate class _StorageClass {
     var _cpu: Runtime_V1_WindowsCpuUsage? = nil
@@ -7829,11 +7561,7 @@ extension Runtime_V1_WindowsPodSandboxStats: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_NetworkUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".NetworkUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "default_interface"),
-    3: .same(proto: "interfaces"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}default_interface\0\u{1}interfaces\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7877,11 +7605,7 @@ extension Runtime_V1_NetworkUsage: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Runtime_V1_WindowsNetworkUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsNetworkUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "default_interface"),
-    3: .same(proto: "interfaces"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}default_interface\0\u{1}interfaces\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7925,13 +7649,7 @@ extension Runtime_V1_WindowsNetworkUsage: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_NetworkInterfaceUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".NetworkInterfaceUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-    2: .standard(proto: "rx_bytes"),
-    3: .standard(proto: "rx_errors"),
-    4: .standard(proto: "tx_bytes"),
-    5: .standard(proto: "tx_errors"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{3}rx_bytes\0\u{3}rx_errors\0\u{3}tx_bytes\0\u{3}tx_errors\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7985,13 +7703,7 @@ extension Runtime_V1_NetworkInterfaceUsage: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_WindowsNetworkInterfaceUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsNetworkInterfaceUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-    2: .standard(proto: "rx_bytes"),
-    3: .standard(proto: "rx_packets_dropped"),
-    4: .standard(proto: "tx_bytes"),
-    5: .standard(proto: "tx_packets_dropped"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{3}rx_bytes\0\u{3}rx_packets_dropped\0\u{3}tx_bytes\0\u{3}tx_packets_dropped\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8045,10 +7757,7 @@ extension Runtime_V1_WindowsNetworkInterfaceUsage: SwiftProtobuf.Message, SwiftP
 
 extension Runtime_V1_ProcessUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ProcessUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "process_count"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}process_count\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8087,10 +7796,7 @@ extension Runtime_V1_ProcessUsage: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Runtime_V1_WindowsProcessUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsProcessUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "process_count"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}process_count\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8129,12 +7835,7 @@ extension Runtime_V1_WindowsProcessUsage: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_ImageSpec: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ImageSpec"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "image"),
-    2: .same(proto: "annotations"),
-    18: .standard(proto: "user_specified_image"),
-    19: .standard(proto: "runtime_handler"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}image\0\u{1}annotations\0\u{4}\u{10}user_specified_image\0\u{3}runtime_handler\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8179,10 +7880,7 @@ extension Runtime_V1_ImageSpec: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Runtime_V1_KeyValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".KeyValue"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "key"),
-    2: .same(proto: "value"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}key\0\u{1}value\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8217,18 +7915,7 @@ extension Runtime_V1_KeyValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Runtime_V1_LinuxContainerResources: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxContainerResources"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "cpu_period"),
-    2: .standard(proto: "cpu_quota"),
-    3: .standard(proto: "cpu_shares"),
-    4: .standard(proto: "memory_limit_in_bytes"),
-    5: .standard(proto: "oom_score_adj"),
-    6: .standard(proto: "cpuset_cpus"),
-    7: .standard(proto: "cpuset_mems"),
-    8: .standard(proto: "hugepage_limits"),
-    9: .same(proto: "unified"),
-    10: .standard(proto: "memory_swap_limit_in_bytes"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cpu_period\0\u{3}cpu_quota\0\u{3}cpu_shares\0\u{3}memory_limit_in_bytes\0\u{3}oom_score_adj\0\u{3}cpuset_cpus\0\u{3}cpuset_mems\0\u{3}hugepage_limits\0\u{1}unified\0\u{3}memory_swap_limit_in_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8303,10 +7990,7 @@ extension Runtime_V1_LinuxContainerResources: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_HugepageLimit: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".HugepageLimit"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "page_size"),
-    2: .same(proto: "limit"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}page_size\0\u{1}limit\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8341,12 +8025,7 @@ extension Runtime_V1_HugepageLimit: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_SELinuxOption: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SELinuxOption"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "user"),
-    2: .same(proto: "role"),
-    3: .same(proto: "type"),
-    4: .same(proto: "level"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}user\0\u{1}role\0\u{1}type\0\u{1}level\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8391,11 +8070,7 @@ extension Runtime_V1_SELinuxOption: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_Capability: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Capability"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "add_capabilities"),
-    2: .standard(proto: "drop_capabilities"),
-    3: .standard(proto: "add_ambient_capabilities"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}add_capabilities\0\u{3}drop_capabilities\0\u{3}add_ambient_capabilities\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8435,25 +8110,7 @@ extension Runtime_V1_Capability: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Runtime_V1_LinuxContainerSecurityContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxContainerSecurityContext"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "capabilities"),
-    2: .same(proto: "privileged"),
-    3: .standard(proto: "namespace_options"),
-    4: .standard(proto: "selinux_options"),
-    5: .standard(proto: "run_as_user"),
-    12: .standard(proto: "run_as_group"),
-    6: .standard(proto: "run_as_username"),
-    7: .standard(proto: "readonly_rootfs"),
-    8: .standard(proto: "supplemental_groups"),
-    17: .standard(proto: "supplemental_groups_policy"),
-    11: .standard(proto: "no_new_privs"),
-    13: .standard(proto: "masked_paths"),
-    14: .standard(proto: "readonly_paths"),
-    15: .same(proto: "seccomp"),
-    16: .same(proto: "apparmor"),
-    9: .standard(proto: "apparmor_profile"),
-    10: .standard(proto: "seccomp_profile_path"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}capabilities\0\u{1}privileged\0\u{3}namespace_options\0\u{3}selinux_options\0\u{3}run_as_user\0\u{3}run_as_username\0\u{3}readonly_rootfs\0\u{3}supplemental_groups\0\u{3}apparmor_profile\0\u{3}seccomp_profile_path\0\u{3}no_new_privs\0\u{3}run_as_group\0\u{3}masked_paths\0\u{3}readonly_paths\0\u{1}seccomp\0\u{1}apparmor\0\u{3}supplemental_groups_policy\0")
 
   fileprivate class _StorageClass {
     var _capabilities: Runtime_V1_Capability? = nil
@@ -8635,10 +8292,7 @@ extension Runtime_V1_LinuxContainerSecurityContext: SwiftProtobuf.Message, Swift
 
 extension Runtime_V1_LinuxContainerConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxContainerConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "resources"),
-    2: .standard(proto: "security_context"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}resources\0\u{3}security_context\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8677,11 +8331,7 @@ extension Runtime_V1_LinuxContainerConfig: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_LinuxContainerUser: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxContainerUser"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "uid"),
-    2: .same(proto: "gid"),
-    3: .standard(proto: "supplemental_groups"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}uid\0\u{1}gid\0\u{3}supplemental_groups\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8721,9 +8371,7 @@ extension Runtime_V1_LinuxContainerUser: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_WindowsNamespaceOption: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsNamespaceOption"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "network"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}network\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8753,12 +8401,7 @@ extension Runtime_V1_WindowsNamespaceOption: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_WindowsSandboxSecurityContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsSandboxSecurityContext"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "run_as_username"),
-    2: .standard(proto: "credential_spec"),
-    3: .standard(proto: "host_process"),
-    4: .standard(proto: "namespace_options"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_as_username\0\u{3}credential_spec\0\u{3}host_process\0\u{3}namespace_options\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8807,9 +8450,7 @@ extension Runtime_V1_WindowsSandboxSecurityContext: SwiftProtobuf.Message, Swift
 
 extension Runtime_V1_WindowsPodSandboxConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsPodSandboxConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "security_context"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}security_context\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8843,11 +8484,7 @@ extension Runtime_V1_WindowsPodSandboxConfig: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_WindowsContainerSecurityContext: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsContainerSecurityContext"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "run_as_username"),
-    2: .standard(proto: "credential_spec"),
-    3: .standard(proto: "host_process"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}run_as_username\0\u{3}credential_spec\0\u{3}host_process\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8887,10 +8524,7 @@ extension Runtime_V1_WindowsContainerSecurityContext: SwiftProtobuf.Message, Swi
 
 extension Runtime_V1_WindowsContainerConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsContainerConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "resources"),
-    2: .standard(proto: "security_context"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}resources\0\u{3}security_context\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8929,14 +8563,7 @@ extension Runtime_V1_WindowsContainerConfig: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_WindowsContainerResources: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsContainerResources"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "cpu_shares"),
-    2: .standard(proto: "cpu_count"),
-    3: .standard(proto: "cpu_maximum"),
-    4: .standard(proto: "memory_limit_in_bytes"),
-    5: .standard(proto: "rootfs_size_in_bytes"),
-    6: .standard(proto: "affinity_cpus"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cpu_shares\0\u{3}cpu_count\0\u{3}cpu_maximum\0\u{3}memory_limit_in_bytes\0\u{3}rootfs_size_in_bytes\0\u{3}affinity_cpus\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8991,10 +8618,7 @@ extension Runtime_V1_WindowsContainerResources: SwiftProtobuf.Message, SwiftProt
 
 extension Runtime_V1_WindowsCpuGroupAffinity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsCpuGroupAffinity"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "cpu_mask"),
-    2: .standard(proto: "cpu_group"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cpu_mask\0\u{3}cpu_group\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9029,10 +8653,7 @@ extension Runtime_V1_WindowsCpuGroupAffinity: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_ContainerMetadata: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerMetadata"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-    2: .same(proto: "attempt"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}attempt\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9067,11 +8688,7 @@ extension Runtime_V1_ContainerMetadata: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 extension Runtime_V1_Device: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Device"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_path"),
-    2: .standard(proto: "host_path"),
-    3: .same(proto: "permissions"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_path\0\u{3}host_path\0\u{1}permissions\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9111,9 +8728,7 @@ extension Runtime_V1_Device: SwiftProtobuf.Message, SwiftProtobuf._MessageImplem
 
 extension Runtime_V1_CDIDevice: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CDIDevice"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9143,26 +8758,7 @@ extension Runtime_V1_CDIDevice: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Runtime_V1_ContainerConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "metadata"),
-    2: .same(proto: "image"),
-    3: .same(proto: "command"),
-    4: .same(proto: "args"),
-    5: .standard(proto: "working_dir"),
-    6: .same(proto: "envs"),
-    7: .same(proto: "mounts"),
-    8: .same(proto: "devices"),
-    9: .same(proto: "labels"),
-    10: .same(proto: "annotations"),
-    11: .standard(proto: "log_path"),
-    12: .same(proto: "stdin"),
-    13: .standard(proto: "stdin_once"),
-    14: .same(proto: "tty"),
-    15: .same(proto: "linux"),
-    16: .same(proto: "windows"),
-    17: .standard(proto: "CDI_devices"),
-    18: .standard(proto: "stop_signal"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}metadata\0\u{1}image\0\u{1}command\0\u{1}args\0\u{3}working_dir\0\u{1}envs\0\u{1}mounts\0\u{1}devices\0\u{1}labels\0\u{1}annotations\0\u{3}log_path\0\u{1}stdin\0\u{3}stdin_once\0\u{1}tty\0\u{1}linux\0\u{1}windows\0\u{3}CDI_devices\0\u{3}stop_signal\0")
 
   fileprivate class _StorageClass {
     var _metadata: Runtime_V1_ContainerMetadata? = nil
@@ -9351,11 +8947,7 @@ extension Runtime_V1_ContainerConfig: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_CreateContainerRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CreateContainerRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-    2: .same(proto: "config"),
-    3: .standard(proto: "sandbox_config"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0\u{1}config\0\u{3}sandbox_config\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9399,9 +8991,7 @@ extension Runtime_V1_CreateContainerRequest: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_CreateContainerResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CreateContainerResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9431,9 +9021,7 @@ extension Runtime_V1_CreateContainerResponse: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_StartContainerRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StartContainerRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9482,10 +9070,7 @@ extension Runtime_V1_StartContainerResponse: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_StopContainerRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StopContainerRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "timeout"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}timeout\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9539,9 +9124,7 @@ extension Runtime_V1_StopContainerResponse: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_RemoveContainerRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RemoveContainerRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9590,9 +9173,7 @@ extension Runtime_V1_RemoveContainerResponse: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_ContainerStateValue: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStateValue"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "state"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}state\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9622,12 +9203,7 @@ extension Runtime_V1_ContainerStateValue: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_ContainerFilter: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerFilter"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .same(proto: "state"),
-    3: .standard(proto: "pod_sandbox_id"),
-    4: .standard(proto: "label_selector"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}state\0\u{3}pod_sandbox_id\0\u{3}label_selector\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9676,9 +9252,7 @@ extension Runtime_V1_ContainerFilter: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_ListContainersRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListContainersRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "filter"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}filter\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9712,18 +9286,7 @@ extension Runtime_V1_ListContainersRequest: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_Container: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Container"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .standard(proto: "pod_sandbox_id"),
-    3: .same(proto: "metadata"),
-    4: .same(proto: "image"),
-    5: .standard(proto: "image_ref"),
-    6: .same(proto: "state"),
-    7: .standard(proto: "created_at"),
-    8: .same(proto: "labels"),
-    9: .same(proto: "annotations"),
-    10: .standard(proto: "image_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}pod_sandbox_id\0\u{1}metadata\0\u{1}image\0\u{3}image_ref\0\u{1}state\0\u{3}created_at\0\u{1}labels\0\u{1}annotations\0\u{3}image_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9802,9 +9365,7 @@ extension Runtime_V1_Container: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Runtime_V1_ListContainersResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListContainersResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "containers"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}containers\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9834,10 +9395,7 @@ extension Runtime_V1_ListContainersResponse: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_ContainerStatusRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStatusRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "verbose"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}verbose\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9872,27 +9430,7 @@ extension Runtime_V1_ContainerStatusRequest: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_ContainerStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStatus"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .same(proto: "metadata"),
-    3: .same(proto: "state"),
-    4: .standard(proto: "created_at"),
-    5: .standard(proto: "started_at"),
-    6: .standard(proto: "finished_at"),
-    7: .standard(proto: "exit_code"),
-    8: .same(proto: "image"),
-    9: .standard(proto: "image_ref"),
-    10: .same(proto: "reason"),
-    11: .same(proto: "message"),
-    12: .same(proto: "labels"),
-    13: .same(proto: "annotations"),
-    14: .same(proto: "mounts"),
-    15: .standard(proto: "log_path"),
-    16: .same(proto: "resources"),
-    17: .standard(proto: "image_id"),
-    18: .same(proto: "user"),
-    19: .standard(proto: "stop_signal"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}metadata\0\u{1}state\0\u{3}created_at\0\u{3}started_at\0\u{3}finished_at\0\u{3}exit_code\0\u{1}image\0\u{3}image_ref\0\u{1}reason\0\u{1}message\0\u{1}labels\0\u{1}annotations\0\u{1}mounts\0\u{3}log_path\0\u{1}resources\0\u{3}image_id\0\u{1}user\0\u{3}stop_signal\0")
 
   fileprivate class _StorageClass {
     var _id: String = String()
@@ -10088,10 +9626,7 @@ extension Runtime_V1_ContainerStatus: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_ContainerStatusResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStatusResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "status"),
-    2: .same(proto: "info"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}status\0\u{1}info\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10130,10 +9665,7 @@ extension Runtime_V1_ContainerStatusResponse: SwiftProtobuf.Message, SwiftProtob
 
 extension Runtime_V1_ContainerResources: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerResources"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "linux"),
-    2: .same(proto: "windows"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}linux\0\u{1}windows\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10172,9 +9704,7 @@ extension Runtime_V1_ContainerResources: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_ContainerUser: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerUser"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "linux"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}linux\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10208,12 +9738,7 @@ extension Runtime_V1_ContainerUser: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_UpdateContainerResourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdateContainerResourcesRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "linux"),
-    3: .same(proto: "windows"),
-    4: .same(proto: "annotations"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}linux\0\u{1}windows\0\u{1}annotations\0")
 
   fileprivate class _StorageClass {
     var _containerID: String = String()
@@ -10323,11 +9848,7 @@ extension Runtime_V1_UpdateContainerResourcesResponse: SwiftProtobuf.Message, Sw
 
 extension Runtime_V1_ExecSyncRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecSyncRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "cmd"),
-    3: .same(proto: "timeout"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}cmd\0\u{1}timeout\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10367,11 +9888,7 @@ extension Runtime_V1_ExecSyncRequest: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_ExecSyncResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecSyncResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "stdout"),
-    2: .same(proto: "stderr"),
-    3: .standard(proto: "exit_code"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stdout\0\u{1}stderr\0\u{3}exit_code\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10411,14 +9928,7 @@ extension Runtime_V1_ExecSyncResponse: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_ExecRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "cmd"),
-    3: .same(proto: "tty"),
-    4: .same(proto: "stdin"),
-    5: .same(proto: "stdout"),
-    6: .same(proto: "stderr"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}cmd\0\u{1}tty\0\u{1}stdin\0\u{1}stdout\0\u{1}stderr\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10473,9 +9983,7 @@ extension Runtime_V1_ExecRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Runtime_V1_ExecResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ExecResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "url"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}url\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10505,13 +10013,7 @@ extension Runtime_V1_ExecResponse: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 extension Runtime_V1_AttachRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AttachRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "stdin"),
-    3: .same(proto: "tty"),
-    4: .same(proto: "stdout"),
-    5: .same(proto: "stderr"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}stdin\0\u{1}tty\0\u{1}stdout\0\u{1}stderr\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10561,9 +10063,7 @@ extension Runtime_V1_AttachRequest: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_AttachResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AttachResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "url"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}url\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10593,10 +10093,7 @@ extension Runtime_V1_AttachResponse: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Runtime_V1_PortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PortForwardRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-    2: .same(proto: "port"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0\u{1}port\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10631,9 +10128,7 @@ extension Runtime_V1_PortForwardRequest: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_PortForwardResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PortForwardResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "url"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}url\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10663,9 +10158,7 @@ extension Runtime_V1_PortForwardResponse: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_ImageFilter: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ImageFilter"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "image"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}image\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10699,9 +10192,7 @@ extension Runtime_V1_ImageFilter: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Runtime_V1_ListImagesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListImagesRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "filter"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}filter\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10735,16 +10226,7 @@ extension Runtime_V1_ListImagesRequest: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 extension Runtime_V1_Image: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Image"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .standard(proto: "repo_tags"),
-    3: .standard(proto: "repo_digests"),
-    4: .same(proto: "size"),
-    5: .same(proto: "uid"),
-    6: .same(proto: "username"),
-    7: .same(proto: "spec"),
-    8: .same(proto: "pinned"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}repo_tags\0\u{3}repo_digests\0\u{1}size\0\u{1}uid\0\u{1}username\0\u{1}spec\0\u{1}pinned\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10813,9 +10295,7 @@ extension Runtime_V1_Image: SwiftProtobuf.Message, SwiftProtobuf._MessageImpleme
 
 extension Runtime_V1_ListImagesResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListImagesResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "images"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}images\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10845,10 +10325,7 @@ extension Runtime_V1_ListImagesResponse: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_ImageStatusRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ImageStatusRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "image"),
-    2: .same(proto: "verbose"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}image\0\u{1}verbose\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10887,10 +10364,7 @@ extension Runtime_V1_ImageStatusRequest: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_ImageStatusResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ImageStatusResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "image"),
-    2: .same(proto: "info"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}image\0\u{1}info\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10929,14 +10403,7 @@ extension Runtime_V1_ImageStatusResponse: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_AuthConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".AuthConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "username"),
-    2: .same(proto: "password"),
-    3: .same(proto: "auth"),
-    4: .standard(proto: "server_address"),
-    5: .standard(proto: "identity_token"),
-    6: .standard(proto: "registry_token"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}username\0\u{1}password\0\u{1}auth\0\u{3}server_address\0\u{3}identity_token\0\u{3}registry_token\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -10991,11 +10458,7 @@ extension Runtime_V1_AuthConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageIm
 
 extension Runtime_V1_PullImageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PullImageRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "image"),
-    2: .same(proto: "auth"),
-    3: .standard(proto: "sandbox_config"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}image\0\u{1}auth\0\u{3}sandbox_config\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11039,9 +10502,7 @@ extension Runtime_V1_PullImageRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_PullImageResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PullImageResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "image_ref"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}image_ref\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11071,9 +10532,7 @@ extension Runtime_V1_PullImageResponse: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 extension Runtime_V1_RemoveImageRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RemoveImageRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "image"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}image\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11126,9 +10585,7 @@ extension Runtime_V1_RemoveImageResponse: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_NetworkConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".NetworkConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_cidr"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_cidr\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11158,9 +10615,7 @@ extension Runtime_V1_NetworkConfig: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_RuntimeConfig: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RuntimeConfig"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "network_config"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}network_config\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11194,9 +10649,7 @@ extension Runtime_V1_RuntimeConfig: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_UpdateRuntimeConfigRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdateRuntimeConfigRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "runtime_config"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}runtime_config\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11249,12 +10702,7 @@ extension Runtime_V1_UpdateRuntimeConfigResponse: SwiftProtobuf.Message, SwiftPr
 
 extension Runtime_V1_RuntimeCondition: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RuntimeCondition"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "type"),
-    2: .same(proto: "status"),
-    3: .same(proto: "reason"),
-    4: .same(proto: "message"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}type\0\u{1}status\0\u{1}reason\0\u{1}message\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11299,9 +10747,7 @@ extension Runtime_V1_RuntimeCondition: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_RuntimeStatus: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RuntimeStatus"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "conditions"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}conditions\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11331,9 +10777,7 @@ extension Runtime_V1_RuntimeStatus: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_StatusRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StatusRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "verbose"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}verbose\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11363,10 +10807,7 @@ extension Runtime_V1_StatusRequest: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 extension Runtime_V1_RuntimeHandlerFeatures: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RuntimeHandlerFeatures"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "recursive_read_only_mounts"),
-    2: .standard(proto: "user_namespaces"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}recursive_read_only_mounts\0\u{3}user_namespaces\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11401,10 +10842,7 @@ extension Runtime_V1_RuntimeHandlerFeatures: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_RuntimeHandler: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RuntimeHandler"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-    2: .same(proto: "features"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}features\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11443,9 +10881,7 @@ extension Runtime_V1_RuntimeHandler: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Runtime_V1_RuntimeFeatures: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RuntimeFeatures"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "supplemental_groups_policy"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}supplemental_groups_policy\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11475,12 +10911,7 @@ extension Runtime_V1_RuntimeFeatures: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_StatusResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StatusResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "status"),
-    2: .same(proto: "info"),
-    3: .standard(proto: "runtime_handlers"),
-    4: .same(proto: "features"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}status\0\u{1}info\0\u{3}runtime_handlers\0\u{1}features\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11548,9 +10979,7 @@ extension Runtime_V1_ImageFsInfoRequest: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_UInt64Value: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UInt64Value"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "value"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}value\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11580,9 +11009,7 @@ extension Runtime_V1_UInt64Value: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Runtime_V1_FilesystemIdentifier: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FilesystemIdentifier"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "mountpoint"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}mountpoint\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11612,12 +11039,7 @@ extension Runtime_V1_FilesystemIdentifier: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_FilesystemUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".FilesystemUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "fs_id"),
-    3: .standard(proto: "used_bytes"),
-    4: .standard(proto: "inodes_used"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}fs_id\0\u{3}used_bytes\0\u{3}inodes_used\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11666,11 +11088,7 @@ extension Runtime_V1_FilesystemUsage: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_WindowsFilesystemUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsFilesystemUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "fs_id"),
-    3: .standard(proto: "used_bytes"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}fs_id\0\u{3}used_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11714,10 +11132,7 @@ extension Runtime_V1_WindowsFilesystemUsage: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_ImageFsInfoResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ImageFsInfoResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "image_filesystems"),
-    2: .standard(proto: "container_filesystems"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}image_filesystems\0\u{3}container_filesystems\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11752,9 +11167,7 @@ extension Runtime_V1_ImageFsInfoResponse: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_ContainerStatsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStatsRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11784,9 +11197,7 @@ extension Runtime_V1_ContainerStatsRequest: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_ContainerStatsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStatsResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "stats"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stats\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11820,9 +11231,7 @@ extension Runtime_V1_ContainerStatsResponse: SwiftProtobuf.Message, SwiftProtobu
 
 extension Runtime_V1_ListContainerStatsRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListContainerStatsRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "filter"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}filter\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11856,11 +11265,7 @@ extension Runtime_V1_ListContainerStatsRequest: SwiftProtobuf.Message, SwiftProt
 
 extension Runtime_V1_ContainerStatsFilter: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStatsFilter"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .standard(proto: "pod_sandbox_id"),
-    3: .standard(proto: "label_selector"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{3}pod_sandbox_id\0\u{3}label_selector\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11900,9 +11305,7 @@ extension Runtime_V1_ContainerStatsFilter: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_ListContainerStatsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListContainerStatsResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "stats"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}stats\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11932,12 +11335,7 @@ extension Runtime_V1_ListContainerStatsResponse: SwiftProtobuf.Message, SwiftPro
 
 extension Runtime_V1_ContainerAttributes: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerAttributes"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "id"),
-    2: .same(proto: "metadata"),
-    3: .same(proto: "labels"),
-    4: .same(proto: "annotations"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}metadata\0\u{1}labels\0\u{1}annotations\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -11986,14 +11384,7 @@ extension Runtime_V1_ContainerAttributes: SwiftProtobuf.Message, SwiftProtobuf._
 
 extension Runtime_V1_ContainerStats: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerStats"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "attributes"),
-    2: .same(proto: "cpu"),
-    3: .same(proto: "memory"),
-    4: .standard(proto: "writable_layer"),
-    5: .same(proto: "swap"),
-    6: .same(proto: "io"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attributes\0\u{1}cpu\0\u{1}memory\0\u{3}writable_layer\0\u{1}swap\0\u{1}io\0")
 
   fileprivate class _StorageClass {
     var _attributes: Runtime_V1_ContainerAttributes? = nil
@@ -12098,12 +11489,7 @@ extension Runtime_V1_ContainerStats: SwiftProtobuf.Message, SwiftProtobuf._Messa
 
 extension Runtime_V1_WindowsContainerStats: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsContainerStats"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "attributes"),
-    2: .same(proto: "cpu"),
-    3: .same(proto: "memory"),
-    4: .standard(proto: "writable_layer"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}attributes\0\u{1}cpu\0\u{1}memory\0\u{3}writable_layer\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12152,10 +11538,7 @@ extension Runtime_V1_WindowsContainerStats: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_PsiStats: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PsiStats"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "Full"),
-    2: .same(proto: "Some"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}Full\0\u{1}Some\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12194,12 +11577,7 @@ extension Runtime_V1_PsiStats: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Runtime_V1_PsiData: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PsiData"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "Total"),
-    2: .same(proto: "Avg10"),
-    3: .same(proto: "Avg60"),
-    4: .same(proto: "Avg300"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}Total\0\u{1}Avg10\0\u{1}Avg60\0\u{1}Avg300\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12244,12 +11622,7 @@ extension Runtime_V1_PsiData: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
 
 extension Runtime_V1_CpuUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CpuUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "usage_core_nano_seconds"),
-    3: .standard(proto: "usage_nano_cores"),
-    4: .same(proto: "psi"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}usage_core_nano_seconds\0\u{3}usage_nano_cores\0\u{1}psi\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12298,11 +11671,7 @@ extension Runtime_V1_CpuUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImpl
 
 extension Runtime_V1_WindowsCpuUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsCpuUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "usage_core_nano_seconds"),
-    3: .standard(proto: "usage_nano_cores"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}usage_core_nano_seconds\0\u{3}usage_nano_cores\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12346,16 +11715,7 @@ extension Runtime_V1_WindowsCpuUsage: SwiftProtobuf.Message, SwiftProtobuf._Mess
 
 extension Runtime_V1_MemoryUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MemoryUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "working_set_bytes"),
-    3: .standard(proto: "available_bytes"),
-    4: .standard(proto: "usage_bytes"),
-    5: .standard(proto: "rss_bytes"),
-    6: .standard(proto: "page_faults"),
-    7: .standard(proto: "major_page_faults"),
-    8: .same(proto: "psi"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}working_set_bytes\0\u{3}available_bytes\0\u{3}usage_bytes\0\u{3}rss_bytes\0\u{3}page_faults\0\u{3}major_page_faults\0\u{1}psi\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12424,10 +11784,7 @@ extension Runtime_V1_MemoryUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageI
 
 extension Runtime_V1_IoUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".IoUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .same(proto: "psi"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{1}psi\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12466,11 +11823,7 @@ extension Runtime_V1_IoUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImple
 
 extension Runtime_V1_SwapUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SwapUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "swap_available_bytes"),
-    3: .standard(proto: "swap_usage_bytes"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}swap_available_bytes\0\u{3}swap_usage_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12514,13 +11867,7 @@ extension Runtime_V1_SwapUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImp
 
 extension Runtime_V1_WindowsMemoryUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".WindowsMemoryUsage"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "timestamp"),
-    2: .standard(proto: "working_set_bytes"),
-    3: .standard(proto: "available_bytes"),
-    4: .standard(proto: "page_faults"),
-    5: .standard(proto: "commit_memory_bytes"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}timestamp\0\u{3}working_set_bytes\0\u{3}available_bytes\0\u{3}page_faults\0\u{3}commit_memory_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12574,9 +11921,7 @@ extension Runtime_V1_WindowsMemoryUsage: SwiftProtobuf.Message, SwiftProtobuf._M
 
 extension Runtime_V1_ReopenContainerLogRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ReopenContainerLogRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12625,11 +11970,7 @@ extension Runtime_V1_ReopenContainerLogResponse: SwiftProtobuf.Message, SwiftPro
 
 extension Runtime_V1_CheckpointContainerRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".CheckpointContainerRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "location"),
-    3: .same(proto: "timeout"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}location\0\u{1}timeout\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12707,13 +12048,7 @@ extension Runtime_V1_GetEventsRequest: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_ContainerEventResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerEventResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .standard(proto: "container_event_type"),
-    3: .standard(proto: "created_at"),
-    4: .standard(proto: "pod_sandbox_status"),
-    5: .standard(proto: "containers_statuses"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{3}container_event_type\0\u{3}created_at\0\u{3}pod_sandbox_status\0\u{3}containers_statuses\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12786,9 +12121,7 @@ extension Runtime_V1_ListMetricDescriptorsRequest: SwiftProtobuf.Message, SwiftP
 
 extension Runtime_V1_ListMetricDescriptorsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListMetricDescriptorsResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "descriptors"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}descriptors\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12818,11 +12151,7 @@ extension Runtime_V1_ListMetricDescriptorsResponse: SwiftProtobuf.Message, Swift
 
 extension Runtime_V1_MetricDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MetricDescriptor"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-    2: .same(proto: "help"),
-    3: .standard(proto: "label_keys"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}help\0\u{3}label_keys\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12881,9 +12210,7 @@ extension Runtime_V1_ListPodSandboxMetricsRequest: SwiftProtobuf.Message, SwiftP
 
 extension Runtime_V1_ListPodSandboxMetricsResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListPodSandboxMetricsResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_metrics"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_metrics\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12913,11 +12240,7 @@ extension Runtime_V1_ListPodSandboxMetricsResponse: SwiftProtobuf.Message, Swift
 
 extension Runtime_V1_PodSandboxMetrics: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".PodSandboxMetrics"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-    2: .same(proto: "metrics"),
-    3: .standard(proto: "container_metrics"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0\u{1}metrics\0\u{3}container_metrics\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12957,10 +12280,7 @@ extension Runtime_V1_PodSandboxMetrics: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 extension Runtime_V1_ContainerMetrics: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ContainerMetrics"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "container_id"),
-    2: .same(proto: "metrics"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}container_id\0\u{1}metrics\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -12995,13 +12315,7 @@ extension Runtime_V1_ContainerMetrics: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 extension Runtime_V1_Metric: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Metric"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "name"),
-    2: .same(proto: "timestamp"),
-    3: .standard(proto: "metric_type"),
-    4: .standard(proto: "label_values"),
-    5: .same(proto: "value"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}timestamp\0\u{3}metric_type\0\u{3}label_values\0\u{1}value\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -13074,9 +12388,7 @@ extension Runtime_V1_RuntimeConfigRequest: SwiftProtobuf.Message, SwiftProtobuf.
 
 extension Runtime_V1_RuntimeConfigResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RuntimeConfigResponse"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .same(proto: "linux"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}linux\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -13110,9 +12422,7 @@ extension Runtime_V1_RuntimeConfigResponse: SwiftProtobuf.Message, SwiftProtobuf
 
 extension Runtime_V1_LinuxRuntimeConfiguration: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".LinuxRuntimeConfiguration"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "cgroup_driver"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cgroup_driver\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -13142,11 +12452,7 @@ extension Runtime_V1_LinuxRuntimeConfiguration: SwiftProtobuf.Message, SwiftProt
 
 extension Runtime_V1_UpdatePodSandboxResourcesRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UpdatePodSandboxResourcesRequest"
-  public static let _protobuf_nameMap: SwiftProtobuf._NameMap = [
-    1: .standard(proto: "pod_sandbox_id"),
-    2: .same(proto: "overhead"),
-    3: .same(proto: "resources"),
-  ]
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}pod_sandbox_id\0\u{1}overhead\0\u{1}resources\0")
 
   fileprivate class _StorageClass {
     var _podSandboxID: String = String()

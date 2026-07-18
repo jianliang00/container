@@ -29,4 +29,11 @@ public struct ContainerStopOptions: Sendable, Codable {
         self.timeoutInSeconds = timeoutInSeconds
         self.signal = signal
     }
+
+    /// Backward-compatible initializer for callers that still provide a POSIX
+    /// signal number. Runtime services parse the numeric string using their
+    /// platform-specific signal table.
+    public init(timeoutInSeconds: Int32, signal: Int32) {
+        self.init(timeoutInSeconds: timeoutInSeconds, signal: String(signal))
+    }
 }

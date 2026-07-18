@@ -143,22 +143,13 @@ struct CRIShimImageServiceTests {
                 descriptor: Descriptor(
                     mediaType: MediaTypes.index,
                     digest: "sha256:sandbox-index",
-                    size: 1
+                    size: 1234,
+                    annotations: MacOSImageContract.annotations(for: .sandbox)
                 )
             )
         )
-        let detail = ImageDetail(
-            name: image.reference,
-            index: Descriptor(
-                mediaType: MediaTypes.index,
-                digest: "sha256:sandbox-index",
-                size: 1234,
-                annotations: MacOSImageContract.annotations(for: .sandbox)
-            ),
-            variants: []
-        )
 
-        let record = CRIShimImageRecord(image: image, detail: detail)
+        let record = CRIShimImageRecord(image: image)
 
         #expect(record.reference == image.reference)
         #expect(record.digest == image.digest)

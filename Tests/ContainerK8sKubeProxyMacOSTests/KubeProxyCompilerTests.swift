@@ -86,7 +86,7 @@ struct KubeProxyCompilerTests {
 
         #expect(anchor.contains("# generation: 7"))
         #expect(anchor.contains("table <ckp_default_echo_http_tcp_80> persist { 192.168.65.10, 192.168.65.11 }"))
-        #expect(anchor.contains("nat on en0 inet proto tcp from bridge100:network to <ckp_default_echo_http_tcp_80> port 8080 -> (en0)"))
+        #expect(anchor.contains("nat on en0 inet proto tcp from 192.168.64.0/24 to <ckp_default_echo_http_tcp_80> port 8080 -> (en0)"))
         #expect(anchor.contains("rdr pass inet proto tcp from any to 10.96.0.42 port 80 -> <ckp_default_echo_http_tcp_80> port 8080 round-robin"))
     }
 
@@ -137,19 +137,28 @@ struct KubeProxyCompilerTests {
         #expect(config.contains("nat-anchor \"com.apple.container.kube-proxy.test\""))
         #expect(config.contains("rdr-anchor \"com.apple.container.kube-proxy.test\""))
         #expect(config.contains("load anchor \"com.apple.container.kube-proxy.test\" from \"\(anchorURL.path)\""))
-        #expect(anchor.contains("nat on en0 inet proto tcp from bridge100:network to <ckp_default_echo_http_tcp_80> port 8080 -> (en0)"))
+        #expect(anchor.contains("nat on en0 inet proto tcp from 192.168.64.0/24 to <ckp_default_echo_http_tcp_80> port 8080 -> (en0)"))
         #expect(anchor.contains("rdr pass inet proto tcp from any to 10.96.0.42 port 80 -> <ckp_default_echo_http_tcp_80> port 8080 round-robin"))
     }
 
     @Test
-    func decodesLegacyPFConfigWithDefaultInterfaces() throws {
+    func decodesLegacyPFConfigWithDefaultNetworkSettings() throws {
         let data = Data(
             #"{"anchorName":"test","configPath":"/tmp/pf.conf","anchorsPath":"/tmp/anchors","pfctlPath":"/tmp/pfctl"}"#.utf8
         )
         let config = try JSONDecoder().decode(KubeProxyPFConfig.self, from: data)
 
         #expect(config.resolvedEgressInterface == "en0")
-        #expect(config.resolvedVmnetInterface == "bridge100")
+        #expect(config.resolvedVmnetCIDR == "192.168.64.0/24")
+    }
+
+    @Test
+    func rejectsInvalidVmnetCIDR() {
+        let config = KubeProxyPFConfig(vmnetCIDR: "999.168.64.0/24")
+
+        #expect(throws: KubeProxyMacOSError.invalidConfiguration("pf.vmnetCIDR is not a valid IPv4 CIDR")) {
+            try config.validate()
+        }
     }
 
     @Test

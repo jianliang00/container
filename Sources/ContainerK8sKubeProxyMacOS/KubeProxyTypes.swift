@@ -61,7 +61,7 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
     public var anchorsPath: String
     public var pfctlPath: String
     public var egressInterface: String?
-    public var vmnetInterface: String?
+    public var vmnetCIDR: String?
 
     public init(
         anchorName: String = "com.apple.container.kube-proxy",
@@ -69,18 +69,18 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         anchorsPath: String = "/etc/pf.anchors",
         pfctlPath: String = "/sbin/pfctl",
         egressInterface: String? = "en0",
-        vmnetInterface: String? = "bridge100"
+        vmnetCIDR: String? = "192.168.64.0/24"
     ) {
         self.anchorName = anchorName
         self.configPath = configPath
         self.anchorsPath = anchorsPath
         self.pfctlPath = pfctlPath
         self.egressInterface = egressInterface
-        self.vmnetInterface = vmnetInterface
+        self.vmnetCIDR = vmnetCIDR
     }
 
     public var resolvedEgressInterface: String { egressInterface ?? "en0" }
-    public var resolvedVmnetInterface: String { vmnetInterface ?? "bridge100" }
+    public var resolvedVmnetCIDR: String { vmnetCIDR ?? "192.168.64.0/24" }
 
     public func validate() throws {
         guard !anchorName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -95,14 +95,27 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
                 throw KubeProxyMacOSError.invalidConfiguration("\(name) must be an absolute path")
             }
         }
-        for (name, interface) in [
-            ("pf.egressInterface", resolvedEgressInterface),
-            ("pf.vmnetInterface", resolvedVmnetInterface),
-        ] {
-            guard interface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
-                throw KubeProxyMacOSError.invalidConfiguration("\(name) is not a valid interface name")
-            }
+        guard resolvedEgressInterface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+            throw KubeProxyMacOSError.invalidConfiguration("pf.egressInterface is not a valid interface name")
         }
+        guard Self.isValidIPv4CIDR(resolvedVmnetCIDR) else {
+            throw KubeProxyMacOSError.invalidConfiguration("pf.vmnetCIDR is not a valid IPv4 CIDR")
+        }
+    }
+
+    private static func isValidIPv4CIDR(_ value: String) -> Bool {
+        let components = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 2, let prefixLength = Int(components[1]), (0...32).contains(prefixLength) else {
+            return false
+        }
+        let octets = components[0].split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4
+            && octets.allSatisfy { octet in
+                guard let number = Int(octet), (0...255).contains(number) else {
+                    return false
+                }
+                return String(number) == String(octet)
+            }
     }
 }
 

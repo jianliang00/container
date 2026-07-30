@@ -221,7 +221,7 @@ public enum MacOSKubeadmRenderer {
                 "anchorsPath": "/etc/pf.anchors",
                 "pfctlPath": "/sbin/pfctl",
                 "egressInterface": "en0",
-                "vmnetInterface": "bridge100"
+                "vmnetCIDR": "192.168.64.0/24"
             }
         }
 

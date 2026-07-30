@@ -158,7 +158,6 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
               "apiVersion": "authentication.k8s.io/v1",
               "kind": "TokenRequest",
               "spec": {
-                "audiences": ["https://kubernetes.default.svc"],
                 "expirationSeconds": 31536000
               }
             }

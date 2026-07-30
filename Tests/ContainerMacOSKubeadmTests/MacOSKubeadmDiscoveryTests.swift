@@ -55,6 +55,12 @@ struct MacOSKubeadmDiscoveryTests {
             requests.first { $0.path == "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token" })
         #expect(kubeProxyTokenRequest.method == "POST")
         #expect(kubeProxyTokenRequest.authorization == "Bearer abcdef.0123456789abcdef")
+        let tokenRequest = try #require(
+            JSONSerialization.jsonObject(with: kubeProxyTokenRequest.body ?? Data()) as? [String: Any]
+        )
+        let tokenRequestSpec = try #require(tokenRequest["spec"] as? [String: Any])
+        #expect(tokenRequestSpec["audiences"] == nil)
+        #expect(tokenRequestSpec["expirationSeconds"] as? Int == 31_536_000)
     }
 }
 
@@ -62,6 +68,7 @@ private struct RecordedKubernetesRequest: Sendable {
     var path: String
     var method: String
     var authorization: String?
+    var body: Data?
 }
 
 private final class KubernetesRequestRecorder: @unchecked Sendable {
@@ -113,7 +120,8 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
             RecordedKubernetesRequest(
                 path: path,
                 method: request.httpMethod ?? "GET",
-                authorization: request.value(forHTTPHeaderField: "Authorization")
+                authorization: request.value(forHTTPHeaderField: "Authorization"),
+                body: request.httpBody
             ))
 
         let statusCode = Self.statusCode(for: path)

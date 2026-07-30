@@ -90,6 +90,24 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
+    func limitsPFTableNamesToPlatformMaximum() throws {
+        let rule = KubeProxyServiceRule(
+            namespace: "default",
+            serviceName: "kubernetes",
+            portName: "https",
+            protocolName: .tcp,
+            clusterIP: "10.96.0.1",
+            servicePort: 443,
+            backends: [KubeProxyBackend(ip: "10.185.55.130", port: 6443)]
+        )
+        let tableName = KubeProxyPFRenderer.tableName(for: rule)
+
+        #expect(tableName.utf8.count == 31)
+        #expect(tableName.hasPrefix("ckp_default_kubernet_"))
+        #expect(tableName == KubeProxyPFRenderer.tableName(for: rule))
+    }
+
+    @Test
     func applierInstallsPFConfigAndAnchorAfterValidation() throws {
         let directory = try makeTemporaryDirectory()
         defer {

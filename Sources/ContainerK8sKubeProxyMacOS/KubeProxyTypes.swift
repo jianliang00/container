@@ -60,18 +60,27 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
     public var configPath: String
     public var anchorsPath: String
     public var pfctlPath: String
+    public var egressInterface: String?
+    public var vmnetInterface: String?
 
     public init(
         anchorName: String = "com.apple.container.kube-proxy",
         configPath: String = "/etc/pf.conf",
         anchorsPath: String = "/etc/pf.anchors",
-        pfctlPath: String = "/sbin/pfctl"
+        pfctlPath: String = "/sbin/pfctl",
+        egressInterface: String? = "en0",
+        vmnetInterface: String? = "bridge100"
     ) {
         self.anchorName = anchorName
         self.configPath = configPath
         self.anchorsPath = anchorsPath
         self.pfctlPath = pfctlPath
+        self.egressInterface = egressInterface
+        self.vmnetInterface = vmnetInterface
     }
+
+    public var resolvedEgressInterface: String { egressInterface ?? "en0" }
+    public var resolvedVmnetInterface: String { vmnetInterface ?? "bridge100" }
 
     public func validate() throws {
         guard !anchorName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -84,6 +93,14 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         ] {
             guard path.hasPrefix("/") else {
                 throw KubeProxyMacOSError.invalidConfiguration("\(name) must be an absolute path")
+            }
+        }
+        for (name, interface) in [
+            ("pf.egressInterface", resolvedEgressInterface),
+            ("pf.vmnetInterface", resolvedVmnetInterface),
+        ] {
+            guard interface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+                throw KubeProxyMacOSError.invalidConfiguration("\(name) is not a valid interface name")
             }
         }
     }

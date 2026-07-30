@@ -219,7 +219,9 @@ public enum MacOSKubeadmRenderer {
                 "anchorName": "com.apple.container.kube-proxy",
                 "configPath": "/etc/pf.conf",
                 "anchorsPath": "/etc/pf.anchors",
-                "pfctlPath": "/sbin/pfctl"
+                "pfctlPath": "/sbin/pfctl",
+                "egressInterface": "en0",
+                "vmnetInterface": "bridge100"
             }
         }
 

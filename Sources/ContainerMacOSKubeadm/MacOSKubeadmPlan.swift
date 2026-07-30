@@ -423,7 +423,18 @@ public enum MacOSKubeadmPlanner {
         networkMode: MacOSKubeadmNetworkMode,
         containerServiceUserID: Int
     ) -> [MacOSKubeadmStep] {
-        var steps = [
+        var steps: [MacOSKubeadmStep] = []
+        if containerServiceUserID != 0 {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "stop root container core services if present",
+                    action: .runCommand(
+                        arguments: containerSystemCommand(userID: 0, subcommand: "stop"),
+                        bestEffort: true
+                    )
+                ))
+        }
+        steps.append(contentsOf: [
             MacOSKubeadmStep(
                 message: "stop container core services if present",
                 action: .runCommand(
@@ -466,7 +477,7 @@ public enum MacOSKubeadmPlanner {
                 message: "wait for CRI socket",
                 action: .waitForPath(path: "/var/run/container-cri-macos.sock", timeoutSeconds: 30)
             ),
-        ]
+        ])
         if networkMode.usesPodNetworking {
             steps.append(contentsOf: [
                 MacOSKubeadmStep(

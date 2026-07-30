@@ -326,6 +326,23 @@ struct MacOSKubeadmPlanTests {
 
         #expect(
             plan.steps.contains { step in
+                guard step.message == "stop root container core services if present",
+                    case .runCommand(let arguments, true) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/launchctl",
+                    "asuser",
+                    "0",
+                    "/usr/local/bin/container",
+                    "system",
+                    "stop",
+                ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
                 guard step.message == "start container core services",
                     case .runCommand(let arguments, false) = step.action
                 else {

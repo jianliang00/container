@@ -28,6 +28,9 @@ public struct ClientNetwork {
 }
 
 extension ClientNetwork {
+    // Cold macOS sandboxes may materialize a large disk image before network setup can begin.
+    private static let sandboxPreparationTimeout = Duration.seconds(300)
+
     private static func newClient() -> XPCClient {
         XPCClient(service: serviceIdentifier)
     }
@@ -63,7 +66,11 @@ extension ClientNetwork {
         let request = XPCMessage(route: .networkPrepareSandbox)
         request.set(key: .id, value: sandboxID)
 
-        let response = try await xpcSend(client: client, message: request)
+        let response = try await xpcSend(
+            client: client,
+            message: request,
+            timeout: sandboxPreparationTimeout
+        )
         return try response.sandboxNetworkState()
     }
 

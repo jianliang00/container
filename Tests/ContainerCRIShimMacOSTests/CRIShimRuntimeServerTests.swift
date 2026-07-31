@@ -105,6 +105,12 @@ struct CRIShimRuntimeServerTests {
                     annotations: MacOSImageContract.annotations(for: .workload)
                         .merging(["org.opencontainers.image.ref.name": "example.com/macos/workload:latest"]) { current, _ in current }
                 ),
+                CRIShimImageRecord(
+                    reference: "example.com/macos/workload:stable",
+                    digest: "sha256:abc123",
+                    size: 4096,
+                    annotations: MacOSImageContract.annotations(for: .workload)
+                ),
             ],
             pulledImage: CRIShimImageRecord(
                 reference: "example.com/macos/pulled:latest",
@@ -631,7 +637,7 @@ struct CRIShimRuntimeServerTests {
 
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
-        #expect(listImages.images.count == 2)
+        #expect(listImages.images.count == 3)
         let listedWorkloadImage = try #require(
             listImages.images.first { $0.id == "sha256:abc123" }
         )
@@ -647,8 +653,14 @@ struct CRIShimRuntimeServerTests {
         #expect(imageStatus.info["image"]?.contains("example.com") == true)
 
         var removeImageRequest = Runtime_V1_RemoveImageRequest()
-        removeImageRequest.image.image = "example.com/macos/workload:latest"
+        removeImageRequest.image.image = "sha256:abc123"
         _ = try await imageClient.removeImage(removeImageRequest)
+        #expect(
+            imageManager.removedReferences == [
+                "example.com/macos/workload:latest",
+                "example.com/macos/workload:stable",
+            ]
+        )
 
         let imageFsInfo = try await imageClient.imageFsInfo(Runtime_V1_ImageFsInfoRequest())
         #expect(imageFsInfo.imageFilesystems.count == 1)
@@ -1800,8 +1812,8 @@ private final class RecordingImageManager: CRIShimImageManaging, @unchecked Send
         return pulledImage
     }
 
-    func removeImage(reference: String) async throws {
-        removedReferences.append(reference)
+    func removeImages(references: [String]) async throws {
+        removedReferences.append(contentsOf: references)
     }
 
     func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage {

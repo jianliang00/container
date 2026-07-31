@@ -552,9 +552,10 @@ private func makeCRIShimContainerMetadata(
         [
             workloadSnapshot.configuration.workloadImageReference,
             workloadSnapshot.configuration.workloadImageDigest,
+            sandboxMetadata.sandboxImage,
         ]
         .compactMap { $0?.trimmed.nonEmpty }
-        .first ?? ""
+        .first ?? sandboxMetadata.sandboxImage
 
     var metadata = CRIShimContainerMetadata(
         id: workloadSnapshot.id,

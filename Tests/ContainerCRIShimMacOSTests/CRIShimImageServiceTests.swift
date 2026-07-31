@@ -179,9 +179,15 @@ struct CRIShimImageServiceTests {
             config: Descriptor(
                 mediaType: MediaTypes.imageConfig,
                 digest: "sha256:config-\(UUID().uuidString)",
-                size: 1
+                size: 4096
             ),
-            layers: [],
+            layers: [
+                Descriptor(
+                    mediaType: MediaTypes.imageLayer,
+                    digest: "sha256:layer-\(UUID().uuidString)",
+                    size: 8192
+                )
+            ],
             annotations: workloadAnnotations
         )
         let index = Index(
@@ -189,7 +195,7 @@ struct CRIShimImageServiceTests {
                 Descriptor(
                     mediaType: MediaTypes.imageManifest,
                     digest: manifestDigest,
-                    size: 1,
+                    size: 1024,
                     annotations: workloadAnnotations,
                     platform: platform
                 )
@@ -216,6 +222,7 @@ struct CRIShimImageServiceTests {
 
         let record = try await CRIShimImageRecord.resolve(image: image)
 
+        #expect(record.size == 13_312)
         #expect(record.annotations[MacOSImageContract.roleAnnotation] == MacOSImageRole.workload.rawValue)
         #expect(
             record.annotations[MacOSImageContract.workloadFormatAnnotation]
@@ -226,6 +233,19 @@ struct CRIShimImageServiceTests {
             expectedRole: .workload,
             requestedReference: record.reference
         )
+    }
+
+    @Test
+    func imageFilesystemUsageIncludesAllRuntimeManagedStorage() {
+        let usage = DiskUsageStats(
+            images: ResourceUsage(total: 1, active: 1, sizeInBytes: 100, reclaimable: 0),
+            rebuildCache: ResourceUsage(total: 1, active: 1, sizeInBytes: 200, reclaimable: 0),
+            guestDiskCache: ResourceUsage(total: 1, active: 0, sizeInBytes: 300, reclaimable: 300),
+            containers: ResourceUsage(total: 1, active: 0, sizeInBytes: 400, reclaimable: 400),
+            volumes: ResourceUsage(total: 1, active: 0, sizeInBytes: 500, reclaimable: 500)
+        )
+
+        #expect(runtimeManagedFilesystemUsedBytes(usage) == 1500)
     }
 
     private static func writeJSON<T: Encodable>(

@@ -226,6 +226,42 @@ struct CRIShimReconcileTests {
     }
 
     @Test
+    func executorFallsBackToSandboxImageForLegacyWorkloadSnapshots() throws {
+        let storeURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = try CRIShimMetadataStore(rootURL: storeURL)
+        let now = Date(timeIntervalSince1970: 1_700_000_040)
+        let workloadSnapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: "container-1",
+                processConfiguration: ProcessConfiguration(executable: "/bin/echo", arguments: [], environment: [])
+            ),
+            status: .stopped,
+            exitCode: 0,
+            startedDate: now,
+            exitedAt: now
+        )
+        let sandboxSnapshot = SandboxSnapshot(
+            configuration: try makeSandboxConfiguration(id: "sandbox-1"),
+            status: .stopped,
+            networks: [],
+            containers: [],
+            workloads: [workloadSnapshot]
+        )
+
+        _ = try CRIShimReconcileExecutor().execute(
+            metadataStore: store,
+            runtimeSnapshots: CRIShimRuntimeSnapshotInventory(sandboxes: [sandboxSnapshot]),
+            now: now
+        )
+
+        let storedMetadata = try store.container(id: "container-1")
+        let metadata = try #require(storedMetadata)
+        #expect(metadata.image == "example.com/macos/sandbox:latest")
+        #expect(makeCRIContainerStatus(metadata).image.image == "example.com/macos/sandbox:latest")
+    }
+
+    @Test
     func executorDeletesMetadataMissingFromRuntimeSnapshots() throws {
         let storeURL = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: storeURL) }

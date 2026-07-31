@@ -950,7 +950,7 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
-    func stopRequestsTreatStoppedRuntimeSandboxAsAlreadyStopped() async throws {
+    func stopRequestsTreatStoppedOrMissingRuntimeAsAlreadyStopped() async throws {
         let socketPath = "/tmp/cri-shim-stop-runtime-stopped-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: stateDirectory) }
@@ -1087,6 +1087,16 @@ struct CRIShimRuntimeServerTests {
         let container1 = try #require(try metadataStore.container(id: "container-1"))
         #expect(container1.state == .exited)
 
+        runtimeManager.inspectWorkloadError = CRIShimError.notFound("workload missing from runtime")
+        runtimeManager.inspectSandboxError = CRIShimError.notFound("sandbox missing from runtime")
+        stopContainerRequest.containerID = "container-2"
+        _ = try await client.stopContainer(stopContainerRequest)
+        _ = try await client.stopContainer(stopContainerRequest)
+
+        #expect(runtimeManager.stopWorkloadCalls.map(\.workloadID) == ["container-1", "container-2"])
+        let container2 = try #require(try metadataStore.container(id: "container-2"))
+        #expect(container2.state == .exited)
+
         var stopSandboxRequest = Runtime_V1_StopPodSandboxRequest()
         stopSandboxRequest.podSandboxID = "sandbox-1"
         _ = try await client.stopPodSandbox(stopSandboxRequest)
@@ -1094,8 +1104,6 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.stopWorkloadCalls.map(\.workloadID) == ["container-1", "container-2"])
         #expect(runtimeManager.stopSandboxCalls.count == 1)
         #expect(cniManager.deleteCalls.isEmpty)
-        let container2 = try #require(try metadataStore.container(id: "container-2"))
-        #expect(container2.state == .exited)
         let sandbox = try #require(try metadataStore.sandbox(id: "sandbox-1"))
         #expect(sandbox.state == .stopped)
 
@@ -1647,6 +1655,8 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var stopWorkloadChangesState = true
     var stopWorkloadError: (any Error)?
     var removeWorkloadError: (any Error)?
+    var inspectSandboxError: (any Error)?
+    var inspectWorkloadError: (any Error)?
 
     init(
         execSyncResult: ExecSyncResult,
@@ -1717,6 +1727,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         id: String
     ) async throws -> SandboxSnapshot {
         inspectSandboxCalls.append(id)
+        if let inspectSandboxError {
+            throw inspectSandboxError
+        }
         guard let snapshot = sandboxSnapshots[id] else {
             throw CRIShimError.notFound("sandbox \(id) not found")
         }
@@ -1835,6 +1848,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         workloadID: String
     ) async throws -> WorkloadSnapshot {
+        if let inspectWorkloadError {
+            throw inspectWorkloadError
+        }
         guard let snapshot = workloadSnapshots[workloadID] else {
             throw CRIShimError.notFound("workload \(workloadID) not found")
         }

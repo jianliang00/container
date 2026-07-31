@@ -919,7 +919,14 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
     ) async throws -> Runtime_V1_RemoveImageResponse {
         try await handlerLogger.handle(operation: CRIImageOperation.removeImage.rawValue) {
             let reference = try CRIShimImageReference.resolve(request.image)
-            try await imageManager.removeImage(reference: reference)
+            let references = Array(
+                Set(
+                    try await imageManager.listImages()
+                        .filter { $0.matches(reference: reference) }
+                        .map(\.reference)
+                )
+            ).sorted()
+            try await imageManager.removeImages(references: references)
             return Runtime_V1_RemoveImageResponse()
         }
     }

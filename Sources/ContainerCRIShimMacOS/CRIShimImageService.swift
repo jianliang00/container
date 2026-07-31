@@ -68,7 +68,7 @@ public struct CRIShimImageFilesystemUsage: Equatable, Sendable {
 public protocol CRIShimImageManaging: Sendable {
     func listImages() async throws -> [CRIShimImageRecord]
     func pullImage(reference: String, authentication: CRIShimImagePullAuthentication?) async throws -> CRIShimImageRecord
-    func removeImage(reference: String) async throws
+    func removeImages(references: [String]) async throws
     func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage
 }
 
@@ -95,8 +95,15 @@ public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
         return try await CRIShimImageRecord.resolve(image: image)
     }
 
-    public func removeImage(reference: String) async throws {
-        try await kit.deleteImage(reference: reference, garbageCollect: false)
+    public func removeImages(references: [String]) async throws {
+        guard !references.isEmpty else {
+            return
+        }
+
+        for reference in references {
+            try await kit.deleteImage(reference: reference, garbageCollect: false)
+        }
+        _ = try await ClientImage.cleanUpOrphanedBlobs()
     }
 
     public func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage {
@@ -105,7 +112,7 @@ public struct ContainerKitCRIShimImageManager: CRIShimImageManaging {
         let (usage, healthSnapshot) = try await (diskUsage, health)
         return CRIShimImageFilesystemUsage(
             mountpoint: healthSnapshot.appRoot.path,
-            usedBytes: usage.images.sizeInBytes,
+            usedBytes: runtimeManagedFilesystemUsedBytes(usage),
             timestampNanoseconds: currentUnixTimeNanoseconds()
         )
     }
@@ -180,6 +187,7 @@ extension CRIShimImageRecord {
 
     static func resolve(image: ContainerAPIClient.ClientImage) async throws -> CRIShimImageRecord {
         var record = CRIShimImageRecord(image: image)
+        record.size = UInt64(max(0, try await ClientImage.getFullImageSize(image: image)))
         record.annotations = try await image.resolvedAnnotations(
             for: Platform(arch: "arm64", os: "darwin")
         )
@@ -204,6 +212,16 @@ extension CRIShimImageRecord {
             }
         return ["\(baseReference)@\(digest)"]
     }
+}
+
+func runtimeManagedFilesystemUsedBytes(_ usage: DiskUsageStats) -> UInt64 {
+    [
+        usage.images,
+        usage.rebuildCache,
+        usage.guestDiskCache,
+        usage.containers,
+        usage.volumes,
+    ].reduce(0) { $0 + $1.sizeInBytes }
 }
 
 func validateCRIShimImage(

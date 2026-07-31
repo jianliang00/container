@@ -671,10 +671,10 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         let confirmationSeconds = max(30, Int(stopOptions.timeoutInSeconds) + 5)
         let attempts = confirmationSeconds * 10
         for attempt in 0..<attempts {
-            if let snapshot = await workloadSnapshot(for: metadata), snapshot.status == .stopped {
+            if await workloadIsStoppedOrMissing(metadata: metadata) {
                 return true
             }
-            if await sandboxIsStopped(id: metadata.sandboxID) {
+            if await sandboxIsStoppedOrMissing(id: metadata.sandboxID) {
                 return true
             }
             if attempt < attempts - 1 {
@@ -682,6 +682,18 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             }
         }
         return false
+    }
+
+    private func workloadIsStoppedOrMissing(metadata: CRIShimContainerMetadata) async -> Bool {
+        do {
+            let snapshot = try await runtimeManager.inspectWorkload(
+                sandboxID: metadata.sandboxID,
+                workloadID: metadata.id
+            )
+            return snapshot.status == .stopped
+        } catch {
+            return isNotFound(error)
+        }
     }
 
     private func waitForStoppedSandbox(
@@ -691,7 +703,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         let confirmationSeconds = max(30, Int(stopOptions.timeoutInSeconds) + 5)
         let attempts = confirmationSeconds * 10
         for attempt in 0..<attempts {
-            if await sandboxIsStopped(id: metadata.id) {
+            if await sandboxIsStoppedOrMissing(id: metadata.id) {
                 return true
             }
             if attempt < attempts - 1 {
@@ -701,11 +713,12 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         return false
     }
 
-    private func sandboxIsStopped(id: String) async -> Bool {
-        guard let snapshot = try? await runtimeManager.inspectSandbox(id: id) else {
-            return false
+    private func sandboxIsStoppedOrMissing(id: String) async -> Bool {
+        do {
+            return try await runtimeManager.inspectSandbox(id: id).status == .stopped
+        } catch {
+            return isNotFound(error)
         }
-        return snapshot.status == .stopped
     }
 
     private func sandboxSnapshot(for metadata: CRIShimSandboxMetadata) async -> SandboxSnapshot? {

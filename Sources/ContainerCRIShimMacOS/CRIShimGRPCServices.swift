@@ -494,6 +494,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 operation: "StopContainer"
             )
             let options = try makeCRIShimStopOptions(request)
+            if metadata.state == .exited {
+                return Runtime_V1_StopContainerResponse()
+            }
             guard metadata.state == .running else {
                 throw CRIShimError.invalidArgument(
                     "StopContainer requires a running container, got \(metadata.state.rawValue)"
@@ -671,11 +674,38 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             if let snapshot = await workloadSnapshot(for: metadata), snapshot.status == .stopped {
                 return true
             }
+            if await sandboxIsStopped(id: metadata.sandboxID) {
+                return true
+            }
             if attempt < attempts - 1 {
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
         return false
+    }
+
+    private func waitForStoppedSandbox(
+        metadata: CRIShimSandboxMetadata,
+        stopOptions: ContainerStopOptions
+    ) async -> Bool {
+        let confirmationSeconds = max(30, Int(stopOptions.timeoutInSeconds) + 5)
+        let attempts = confirmationSeconds * 10
+        for attempt in 0..<attempts {
+            if await sandboxIsStopped(id: metadata.id) {
+                return true
+            }
+            if attempt < attempts - 1 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return false
+    }
+
+    private func sandboxIsStopped(id: String) async -> Bool {
+        guard let snapshot = try? await runtimeManager.inspectSandbox(id: id) else {
+            return false
+        }
+        return snapshot.status == .stopped
     }
 
     private func sandboxSnapshot(for metadata: CRIShimSandboxMetadata) async -> SandboxSnapshot? {
@@ -716,8 +746,14 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     )
                 } catch {
                     if !isNotFound(error) {
-                        record(error)
-                        stopped = false
+                        let isStopped = await waitForStoppedWorkload(
+                            metadata: container,
+                            stopOptions: criShimPodSandboxStopOptions
+                        )
+                        if !isStopped {
+                            record(error)
+                            stopped = false
+                        }
                     }
                 }
             }
@@ -735,7 +771,13 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 try await runtimeManager.stopSandbox(id: metadata.id, options: criShimPodSandboxStopOptions)
             } catch {
                 if !isNotFound(error) {
-                    record(error)
+                    let isStopped = await waitForStoppedSandbox(
+                        metadata: metadata,
+                        stopOptions: criShimPodSandboxStopOptions
+                    )
+                    if !isStopped {
+                        record(error)
+                    }
                 }
             }
         }

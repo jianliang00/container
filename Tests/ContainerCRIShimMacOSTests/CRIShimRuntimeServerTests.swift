@@ -950,6 +950,162 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func stopRequestsTreatStoppedRuntimeSandboxAsAlreadyStopped() async throws {
+        let socketPath = "/tmp/cri-shim-stop-runtime-stopped-\(UUID().uuidString.prefix(8)).sock"
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            stateDirectory: stateDirectory.path,
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            defaults: RuntimeProfile(
+                sandboxImage: "localhost/macos-sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: false),
+            kubeProxy: KubeProxyConfig(enabled: false)
+        )
+        let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1",
+                podUID: "pod-uid",
+                namespace: "default",
+                name: "stop-runtime-stopped",
+                attempt: 1,
+                runtimeHandler: "macos-compat",
+                sandboxImage: "localhost/macos-sandbox:latest",
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ))
+        for containerID in ["container-1", "container-2"] {
+            try metadataStore.upsertContainer(
+                CRIShimContainerMetadata(
+                    id: containerID,
+                    sandboxID: "sandbox-1",
+                    name: containerID,
+                    attempt: 1,
+                    image: "example.com/macos/workload:latest",
+                    runtimeHandler: "macos-compat",
+                    command: ["/bin/true"],
+                    args: [],
+                    logPath: stateDirectory.appendingPathComponent("\(containerID)/0.log").path,
+                    state: .running,
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_010),
+                    startedAt: Date(timeIntervalSince1970: 1_700_000_020)
+                ))
+        }
+
+        let container1Snapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: "container-1",
+                processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+            ),
+            status: .running,
+            startedDate: Date(timeIntervalSince1970: 1_700_000_020)
+        )
+        let container2Snapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: "container-2",
+                processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+            ),
+            status: .running,
+            startedDate: Date(timeIntervalSince1970: 1_700_000_020)
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": SandboxSnapshot(
+                    configuration: try makeSandboxConfiguration(id: "sandbox-1"),
+                    status: .stopped,
+                    networks: [],
+                    containers: [],
+                    workloads: [container1Snapshot, container2Snapshot]
+                )
+            ],
+            workloadSnapshots: [
+                "container-1": container1Snapshot,
+                "container-2": container2Snapshot,
+            ]
+        )
+        let stoppedRuntimeError = ContainerizationError(
+            .internalError,
+            message: "failed to stop workload in sandbox",
+            cause: ContainerizationError(.invalidState, message: "sandbox not started")
+        )
+        runtimeManager.stopWorkloadChangesState = false
+        runtimeManager.stopWorkloadError = stoppedRuntimeError
+        runtimeManager.stopSandboxChangesState = false
+        runtimeManager.stopSandboxError = stoppedRuntimeError
+
+        let imageManager = RecordingImageManager(images: [])
+        let cniManager = RecordingCNIManager()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    metadataStore: metadataStore,
+                    runtimeManager: runtimeManager,
+                    imageManager: imageManager,
+                    cniManager: cniManager
+                ),
+                CRIShimImageServiceProvider(imageManager: imageManager),
+            ],
+            eventLoopGroup: group,
+            startupTasks: []
+        )
+        let serverTask = Task {
+            try await server.run()
+        }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
+
+        try await waitForSocket(at: socketPath)
+
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+
+        var stopContainerRequest = Runtime_V1_StopContainerRequest()
+        stopContainerRequest.containerID = "container-1"
+        _ = try await client.stopContainer(stopContainerRequest)
+        _ = try await client.stopContainer(stopContainerRequest)
+
+        #expect(runtimeManager.stopWorkloadCalls.count == 1)
+        let container1 = try #require(try metadataStore.container(id: "container-1"))
+        #expect(container1.state == .exited)
+
+        var stopSandboxRequest = Runtime_V1_StopPodSandboxRequest()
+        stopSandboxRequest.podSandboxID = "sandbox-1"
+        _ = try await client.stopPodSandbox(stopSandboxRequest)
+
+        #expect(runtimeManager.stopWorkloadCalls.map(\.workloadID) == ["container-1", "container-2"])
+        #expect(runtimeManager.stopSandboxCalls.count == 1)
+        #expect(cniManager.deleteCalls.isEmpty)
+        let container2 = try #require(try metadataStore.container(id: "container-2"))
+        #expect(container2.state == .exited)
+        let sandbox = try #require(try metadataStore.sandbox(id: "sandbox-1"))
+        #expect(sandbox.state == .stopped)
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        await shutdown(group)
+    }
+
+    @Test
     func runPodSandboxPullsSandboxImageWhenMissing() async throws {
         let socketPath = "/tmp/cri-shim-sandbox-pull-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
@@ -1486,6 +1642,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var execSyncCalls: [RecordingExecSyncCall] = []
     private(set) var streamExecCalls: [RecordingStreamExecCall] = []
     private(set) var portForwardCalls: [RecordingPortForwardCall] = []
+    var stopSandboxChangesState = true
+    var stopSandboxError: (any Error)?
+    var stopWorkloadChangesState = true
     var stopWorkloadError: (any Error)?
     var removeWorkloadError: (any Error)?
 
@@ -1530,11 +1689,14 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         id: String,
         options: ContainerStopOptions
     ) async throws {
-        if var snapshot = sandboxSnapshots[id] {
+        if stopSandboxChangesState, var snapshot = sandboxSnapshots[id] {
             snapshot.status = .stopped
             sandboxSnapshots[id] = snapshot
         }
         stopSandboxCalls.append((id: id, options: options))
+        if let stopSandboxError {
+            throw stopSandboxError
+        }
     }
 
     func removeSandbox(
@@ -1625,24 +1787,26 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         workloadID: String,
         options: ContainerStopOptions
     ) async throws {
-        let configuration =
-            workloadConfigurations[workloadID]
-            ?? WorkloadConfiguration(
-                id: workloadID,
-                processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+        if stopWorkloadChangesState {
+            let configuration =
+                workloadConfigurations[workloadID]
+                ?? WorkloadConfiguration(
+                    id: workloadID,
+                    processConfiguration: ProcessConfiguration(executable: "/bin/true", arguments: [], environment: [])
+                )
+            let existingSnapshot = workloadSnapshots[workloadID]
+            let snapshot = WorkloadSnapshot(
+                configuration: configuration,
+                status: .stopped,
+                exitCode: 42,
+                startedDate: existingSnapshot?.startedDate,
+                exitedAt: Date(),
+                stdoutLogPath: existingSnapshot?.stdoutLogPath,
+                stderrLogPath: existingSnapshot?.stderrLogPath
             )
-        let existingSnapshot = workloadSnapshots[workloadID]
-        let snapshot = WorkloadSnapshot(
-            configuration: configuration,
-            status: .stopped,
-            exitCode: 42,
-            startedDate: existingSnapshot?.startedDate,
-            exitedAt: Date(),
-            stdoutLogPath: existingSnapshot?.stdoutLogPath,
-            stderrLogPath: existingSnapshot?.stderrLogPath
-        )
-        workloadSnapshots[workloadID] = snapshot
-        replaceWorkloadSnapshot(snapshot, sandboxID: sandboxID)
+            workloadSnapshots[workloadID] = snapshot
+            replaceWorkloadSnapshot(snapshot, sandboxID: sandboxID)
+        }
         stopWorkloadCalls.append(
             RecordingStopWorkloadCall(
                 sandboxID: sandboxID,

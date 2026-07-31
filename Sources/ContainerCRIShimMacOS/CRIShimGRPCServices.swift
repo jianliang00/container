@@ -533,13 +533,17 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
             }
 
-            do {
-                try await runtimeManager.removeWorkload(
-                    sandboxID: metadata.sandboxID,
-                    workloadID: metadata.id
-                )
-            } catch {
-                try throwUnlessNotFound(error)
+            if let sandbox = try metadataStore.sandbox(id: metadata.sandboxID),
+                sandbox.state == .ready || sandbox.state == .running
+            {
+                do {
+                    try await runtimeManager.removeWorkload(
+                        sandboxID: metadata.sandboxID,
+                        workloadID: metadata.id
+                    )
+                } catch {
+                    try throwUnlessNotFound(error)
+                }
             }
             await logManager.stop(containerID: metadata.id, removeState: true)
             try metadataStore.deleteContainer(id: metadata.id)

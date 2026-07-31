@@ -635,6 +635,33 @@ struct CRIShimRuntimeServerTests {
         #expect(removeCall.sandboxID == "sandbox-1")
         #expect(removeCall.workloadID == created.containerID)
 
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "stopped-sandbox",
+                runtimeHandler: "macos",
+                sandboxImage: "localhost/macos-sandbox:latest",
+                state: .stopped,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ))
+        try metadataStore.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "stopped-container",
+                sandboxID: "stopped-sandbox",
+                name: "workload",
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos",
+                logPath: "/var/log/pods/stopped/workload/0.log",
+                state: .exited,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_010),
+                exitedAt: Date(timeIntervalSince1970: 1_700_000_020)
+            ))
+        let removeWorkloadCallCount = runtimeManager.removeWorkloadCalls.count
+        removeRequest.containerID = "stopped-container"
+        _ = try await client.removeContainer(removeRequest)
+        #expect(runtimeManager.removeWorkloadCalls.count == removeWorkloadCallCount)
+        #expect(try metadataStore.container(id: "stopped-container") == nil)
+
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
         #expect(listImages.images.count == 3)

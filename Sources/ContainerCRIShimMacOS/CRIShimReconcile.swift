@@ -244,7 +244,7 @@ public struct CRIShimRuntimeSnapshotInventory: Sendable {
                         sandboxMetadata: sandboxMetadata,
                         now: now
                     )
-                guard let containerMetadata else {
+                guard let containerMetadata = containerMetadata?.applyingReconciledLogPath() else {
                     continue
                 }
                 containerInventory.append(
@@ -478,7 +478,10 @@ private struct CRIShimReconcileExecutionContext {
             skippedSteps.append(step)
             return
         }
-        metadata = metadata.applying(workloadSnapshot: workload.snapshot)
+        metadata =
+            metadata
+            .applying(workloadSnapshot: workload.snapshot)
+            .applyingReconciledLogPath()
         try metadataStore.upsertContainer(metadata)
         appliedSteps.append(step)
     }
@@ -566,7 +569,7 @@ private func makeCRIShimContainerMetadata(
         command: [process.executable].filter { !$0.trimmed.isEmpty },
         args: process.arguments,
         workingDirectory: process.workingDirectory,
-        logPath: nil,
+        logPath: makeReconciledContainerLogPath(containerID: workloadSnapshot.id),
         state: makeCRIShimContainerMetadataState(workloadSnapshot.status),
         createdAt: workloadSnapshot.startedDate ?? workloadSnapshot.exitedAt ?? now,
         startedAt: workloadSnapshot.startedDate,
@@ -574,6 +577,26 @@ private func makeCRIShimContainerMetadata(
     )
     metadata = metadata.applying(workloadSnapshot: workloadSnapshot)
     return metadata
+}
+
+private let reconciledContainerLogRoot = "/var/log/pods/.container-cri-shim-macos-reconciled"
+
+private func makeReconciledContainerLogPath(containerID: String) -> String {
+    URL(fileURLWithPath: reconciledContainerLogRoot, isDirectory: true)
+        .appendingPathComponent(containerID, isDirectory: true)
+        .appendingPathComponent("0.log", isDirectory: false)
+        .path
+}
+
+extension CRIShimContainerMetadata {
+    fileprivate func applyingReconciledLogPath() -> CRIShimContainerMetadata {
+        guard logPath?.trimmed.nonEmpty == nil else {
+            return self
+        }
+        var metadata = self
+        metadata.logPath = makeReconciledContainerLogPath(containerID: id)
+        return metadata
+    }
 }
 
 private func makeCRIShimSandboxMetadataState(_ status: RuntimeStatus) -> CRIShimSandboxMetadata.State {

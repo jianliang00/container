@@ -223,6 +223,10 @@ struct CRIShimReconcileTests {
         #expect(container.state == .exited)
         #expect(container.startedAt == newStart)
         #expect(container.exitedAt == exitedAt)
+        #expect(
+            container.logPath
+                == "/var/log/pods/.container-cri-shim-macos-reconciled/container-1/0.log"
+        )
     }
 
     @Test
@@ -258,7 +262,13 @@ struct CRIShimReconcileTests {
         let storedMetadata = try store.container(id: "container-1")
         let metadata = try #require(storedMetadata)
         #expect(metadata.image == "example.com/macos/sandbox:latest")
-        #expect(makeCRIContainerStatus(metadata).image.image == "example.com/macos/sandbox:latest")
+        #expect(
+            metadata.logPath
+                == "/var/log/pods/.container-cri-shim-macos-reconciled/container-1/0.log"
+        )
+        let status = makeCRIContainerStatus(metadata)
+        #expect(status.image.image == "example.com/macos/sandbox:latest")
+        #expect(status.logPath == metadata.logPath)
     }
 
     @Test

@@ -405,7 +405,7 @@ extension RuntimeClient {
         let data = try JSONEncoder().encode(options)
         request.set(key: RuntimeKeys.stopOptions.rawValue, value: data)
 
-        let responseTimeout = Duration(.seconds(Int64(options.timeoutInSeconds + 1)))
+        let responseTimeout = Self.stopWorkloadResponseTimeout(options: options)
         do {
             try await self.client.send(request, responseTimeout: responseTimeout)
         } catch {
@@ -415,6 +415,12 @@ extension RuntimeClient {
                 cause: error
             )
         }
+    }
+
+    static func stopWorkloadResponseTimeout(options: ContainerStopOptions) -> Duration {
+        let gracefulTimeout = max(Int64(options.timeoutInSeconds), 0)
+        let forcedTimeout = max(gracefulTimeout, 1)
+        return .seconds(gracefulTimeout + forcedTimeout + 1)
     }
 
     public func removeWorkload(_ id: String) async throws {

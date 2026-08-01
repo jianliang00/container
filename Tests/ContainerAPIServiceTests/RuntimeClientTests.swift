@@ -25,17 +25,17 @@ struct RuntimeClientTests {
         #expect(
             RuntimeClient.stopWorkloadResponseTimeout(
                 options: ContainerStopOptions(timeoutInSeconds: 30, signal: "SIGTERM")
-            ) == .seconds(61)
+            ) == .seconds(65)
         )
         #expect(
             RuntimeClient.stopWorkloadResponseTimeout(
                 options: ContainerStopOptions(timeoutInSeconds: 0, signal: "SIGKILL")
-            ) == .seconds(2)
+            ) == .seconds(7)
         )
         #expect(
             RuntimeClient.stopWorkloadResponseTimeout(
                 options: ContainerStopOptions(timeoutInSeconds: .max, signal: "SIGTERM")
-            ) == .seconds(4_294_967_295)
+            ) == .seconds(4_294_967_299)
         )
     }
 }

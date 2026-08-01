@@ -698,6 +698,20 @@ struct MacOSSandboxServiceWaiterTests {
     }
 
     @Test
+    func zeroStopTimeoutUsesBoundedWait() {
+        #expect(
+            MacOSSandboxService.stopWaitTimeout(
+                for: .init(timeoutInSeconds: 0, signal: "SIGKILL")
+            ) == 1
+        )
+        #expect(
+            MacOSSandboxService.stopWaitTimeout(
+                for: .init(timeoutInSeconds: 30, signal: "SIGTERM")
+            ) == 30
+        )
+    }
+
+    @Test
     func sandboxEventLogExcludesWorkloadStdoutAndStderr() async throws {
         let tempRoot = makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }

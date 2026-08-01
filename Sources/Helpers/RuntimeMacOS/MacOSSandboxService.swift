@@ -580,6 +580,7 @@ extension MacOSSandboxService {
     private func stopSandbox(stopOptions: ContainerStopOptions) async throws {
         let stopSignalName = stopOptions.signal ?? "SIGTERM"
         let stopSignal = try Signal(stopSignalName, from: Signal.platform).rawValue
+        let waitTimeout = Self.stopWaitTimeout(for: stopOptions)
         sandboxState = .stopping
         writeContainerLog(Data(("stop requested signal=\(stopSignalName) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
 
@@ -595,7 +596,7 @@ extension MacOSSandboxService {
             if current.exitStatus == nil {
                 writeContainerLog(Data(("stop: init workload \(workloadID) still running; sending signal \(stopSignalName)\n").utf8))
                 try? sendSignalToSession(processID: sessionID, signal: stopSignal)
-                _ = try? await waitForSession(sessionID, timeout: stopOptions.timeoutInSeconds)
+                _ = try? await waitForSession(sessionID, timeout: waitTimeout)
                 writeContainerLog(Data(("stop: wait for init workload \(workloadID) finished\n").utf8))
             } else {
                 writeContainerLog(Data(("stop: init workload \(workloadID) already exited; skipping signal/wait\n").utf8))
@@ -1168,6 +1169,7 @@ extension MacOSSandboxService {
         }
 
         let stopSignalName = stopOptions.signal ?? "SIGTERM"
+        let waitTimeout = Self.stopWaitTimeout(for: stopOptions)
         writeContainerLog(
             Data(
                 ("stopWorkload requested id=\(workloadID) signal=\(stopSignalName) timeout=\(stopOptions.timeoutInSeconds)\n").utf8
@@ -1177,15 +1179,16 @@ extension MacOSSandboxService {
         let stopSignal = try Signal(stopSignalName, from: Signal.platform).rawValue
         do {
             try sendSignalToWorkload(workloadID: workloadID, signal: stopSignal)
-            _ = try await waitForWorkload(workloadID, timeout: stopOptions.timeoutInSeconds)
+            _ = try await waitForWorkload(workloadID, timeout: waitTimeout)
         } catch let error as ContainerizationError where error.code == .timeout {
             writeContainerLog(Data(("stopWorkload timeout for \(workloadID); escalating to SIGKILL\n").utf8))
             try sendSignalToWorkload(workloadID: workloadID, signal: SIGKILL)
-            _ = try await waitForWorkload(
-                workloadID,
-                timeout: max(stopOptions.timeoutInSeconds, 1)
-            )
+            _ = try await waitForWorkload(workloadID, timeout: waitTimeout)
         }
+    }
+
+    static func stopWaitTimeout(for options: ContainerStopOptions) -> Int32 {
+        max(options.timeoutInSeconds, 1)
     }
 
     private func startWorkloadIfNeeded(workloadID: String) async throws {

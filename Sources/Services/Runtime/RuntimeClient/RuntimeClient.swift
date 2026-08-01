@@ -418,9 +418,8 @@ extension RuntimeClient {
     }
 
     static func stopWorkloadResponseTimeout(options: ContainerStopOptions) -> Duration {
-        let gracefulTimeout = max(Int64(options.timeoutInSeconds), 0)
-        let forcedTimeout = max(gracefulTimeout, 1)
-        return .seconds(gracefulTimeout + forcedTimeout + 1)
+        let phaseTimeout = max(Int64(options.timeoutInSeconds), 1)
+        return .seconds(phaseTimeout * 2 + 5)
     }
 
     public func removeWorkload(_ id: String) async throws {

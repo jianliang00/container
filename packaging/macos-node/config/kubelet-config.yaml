@@ -19,6 +19,9 @@ eventRecordQPS: 5
 enableServer: true
 localStorageCapacityIsolation: true
 makeIPTablesUtilChains: false
+clusterDNS:
+  - "10.96.0.10"
+clusterDomain: "cluster.local"
 authentication:
   anonymous:
     enabled: false

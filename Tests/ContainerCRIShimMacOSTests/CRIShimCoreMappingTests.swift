@@ -155,6 +155,31 @@ struct CRIShimCoreMappingTests {
     }
 
     @Test
+    func mapsSandboxDNSConfigurationToMacOSGuest() throws {
+        var request = Runtime_V1_RunPodSandboxRequest()
+        request.config.dnsConfig.servers = ["10.96.0.10"]
+        request.config.dnsConfig.searches = ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"]
+        request.config.dnsConfig.options = ["ndots:5"]
+
+        let configuration = try makeCRIShimSandboxConfiguration(
+            id: "sandbox-1",
+            request: request,
+            handler: resolvedRuntimeHandler,
+            sandboxImage: CRIShimImageRecord(
+                reference: "example.com/macos/sandbox:latest",
+                digest: "sha256:sandbox",
+                size: 1
+            )
+        )
+
+        let dns = try #require(configuration.dns)
+        #expect(dns.nameservers == ["10.96.0.10"])
+        #expect(dns.domain == nil)
+        #expect(dns.searchDomains == ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"])
+        #expect(dns.options == ["ndots:5"])
+    }
+
+    @Test
     func virtualizationNATSandboxConfigurationDoesNotAttachContainerNetwork() throws {
         let request = Runtime_V1_RunPodSandboxRequest()
         let configuration = try makeCRIShimSandboxConfiguration(

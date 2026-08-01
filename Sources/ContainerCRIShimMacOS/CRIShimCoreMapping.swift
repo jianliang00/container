@@ -78,6 +78,14 @@ func makeCRIShimSandboxConfiguration(
     )
     configuration.runtimeHandler = "container-runtime-macos"
     configuration.labels = request.config.labels
+    if request.config.hasDnsConfig {
+        let dns = request.config.dnsConfig
+        configuration.dns = ContainerConfiguration.DNSConfiguration(
+            nameservers: dns.servers,
+            searchDomains: dns.searches,
+            options: dns.options
+        )
+    }
     if handler.usesPodNetworking {
         configuration.networks = [
             AttachmentConfiguration(

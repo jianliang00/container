@@ -1,0 +1,48 @@
+name: macOS VXLAN validation
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/macos-vxlan-validation.yml"
+      - "scripts/macos-vxlan-validation/**"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate host forwarding and userspace VXLAN (${{ matrix.trial }})
+    timeout-minutes: 20
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate VMNET host forwarding
+        run: |
+          set -o pipefail
+          ./scripts/macos-vxlan-validation/run.sh forwarding 2>&1 |
+            tee "${RUNNER_TEMP}/host-forwarding.log"
+
+      - name: Benchmark userspace VXLAN
+        if: ${{ always() }}
+        run: |
+          set -o pipefail
+          ./scripts/macos-vxlan-validation/run.sh benchmark 2>&1 |
+            tee "${RUNNER_TEMP}/vxlan-benchmark.log"
+
+      - name: Save validation logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: macos-vxlan-validation-${{ matrix.trial }}
+          path: |
+            ${{ runner.temp }}/host-forwarding.log
+            ${{ runner.temp }}/vxlan-benchmark.log
+          if-no-files-found: warn
+          retention-days: 14

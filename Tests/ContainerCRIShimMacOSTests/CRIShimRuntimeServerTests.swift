@@ -407,7 +407,8 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.stopSandboxCalls.count == 1)
         let stopSandboxCall = try #require(runtimeManager.stopSandboxCalls.first)
         #expect(stopSandboxCall.id == runSandbox.podSandboxID)
-        #expect(stopSandboxCall.options.timeoutInSeconds == 30)
+        #expect(stopSandboxCall.options.timeoutInSeconds == 0)
+        #expect(stopSandboxCall.options.signal == String(SIGKILL))
         #expect(cniManager.deleteCalls.count == 1)
         let cniDeleteCall = try #require(cniManager.deleteCalls.first)
         #expect(cniDeleteCall.sandboxID == runSandbox.podSandboxID)
@@ -836,7 +837,7 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
-    func stopPodSandboxTreatsMissingWorkloadOptionsAsAlreadyStopped() async throws {
+    func stopPodSandboxStopsSandboxWithoutRedundantWorkloadCalls() async throws {
         let socketPath = "/tmp/cri-shim-stop-missing-options-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: stateDirectory) }
@@ -935,8 +936,11 @@ struct CRIShimRuntimeServerTests {
         stopRequest.podSandboxID = "sandbox-1"
         _ = try await client.stopPodSandbox(stopRequest)
 
-        #expect(runtimeManager.stopWorkloadCalls.count == 1)
+        #expect(runtimeManager.stopWorkloadCalls.isEmpty)
         #expect(runtimeManager.stopSandboxCalls.count == 1)
+        let stopSandboxCall = try #require(runtimeManager.stopSandboxCalls.first)
+        #expect(stopSandboxCall.options.timeoutInSeconds == 0)
+        #expect(stopSandboxCall.options.signal == String(SIGKILL))
         #expect(cniManager.deleteCalls.isEmpty)
         let container = try #require(try metadataStore.container(id: "container-1"))
         #expect(container.state == .exited)

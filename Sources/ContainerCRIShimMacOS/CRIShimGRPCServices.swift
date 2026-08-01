@@ -38,7 +38,7 @@ public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
     }
 }
 
-private let criShimPodSandboxStopOptions = ContainerStopOptions(timeoutInSeconds: 30, signal: SIGTERM)
+private let criShimPodSandboxStopOptions = ContainerStopOptions(timeoutInSeconds: 0, signal: SIGKILL)
 
 public enum CRIShimPodAnnotation {
     public static let sandboxImage = "container-macos.io/sandbox-image"
@@ -747,51 +747,35 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         let now = Date()
         let containers = try metadataStore.listContainers()
             .filter { $0.sandboxID == metadata.id }
+        var sandboxStopped = metadata.state == .stopped
 
-        for var container in containers where container.state == .created || container.state == .running {
-            var stopped = true
-            if container.state == .running {
-                do {
-                    try await runtimeManager.stopWorkload(
-                        sandboxID: metadata.id,
-                        workloadID: container.id,
-                        options: criShimPodSandboxStopOptions
-                    )
-                } catch {
-                    if !isNotFound(error) {
-                        let isStopped = await waitForStoppedWorkload(
-                            metadata: container,
-                            stopOptions: criShimPodSandboxStopOptions
-                        )
-                        if !isStopped {
-                            record(error)
-                            stopped = false
-                        }
-                    }
-                }
-            }
-            guard stopped else {
-                continue
-            }
-            container.state = .exited
-            container.exitedAt = now
-            try metadataStore.upsertContainer(container)
-            await logManager.stop(containerID: container.id, removeState: false)
-        }
-
-        if metadata.state != .stopped {
+        if !sandboxStopped {
             do {
                 try await runtimeManager.stopSandbox(id: metadata.id, options: criShimPodSandboxStopOptions)
+                sandboxStopped = true
             } catch {
-                if !isNotFound(error) {
+                if isNotFound(error) {
+                    sandboxStopped = true
+                } else {
                     let isStopped = await waitForStoppedSandbox(
                         metadata: metadata,
                         stopOptions: criShimPodSandboxStopOptions
                     )
-                    if !isStopped {
+                    if isStopped {
+                        sandboxStopped = true
+                    } else {
                         record(error)
                     }
                 }
+            }
+        }
+
+        if sandboxStopped {
+            for var container in containers where container.state == .created || container.state == .running {
+                container.state = .exited
+                container.exitedAt = now
+                try metadataStore.upsertContainer(container)
+                await logManager.stop(containerID: container.id, removeState: false)
             }
         }
 

@@ -47,13 +47,14 @@ struct GuestNetworkConfigurator {
             guard let interfaceName = interfaceLookup[normalizedMAC] else {
                 throw Self.makeError("guest network interface not found for MAC \(interface.macAddress)")
             }
-            try configureInterface(interfaceName: interfaceName, interface: interface)
+            let effectiveMTU = try configureInterface(interfaceName: interfaceName, interface: interface)
             appliedInterfaces.append(
                 .init(
                     networkID: interface.networkID,
                     interfaceName: interfaceName,
                     macAddress: interface.macAddress,
-                    ipv4Address: "\(interface.ipv4Address)/\(interface.ipv4PrefixLength)"
+                    ipv4Address: "\(interface.ipv4Address)/\(interface.ipv4PrefixLength)",
+                    effectiveMTU: effectiveMTU
                 )
             )
         }
@@ -73,7 +74,7 @@ struct GuestNetworkConfigurator {
     private func configureInterface(
         interfaceName: String,
         interface: MacOSGuestNetworkInterfaceConfiguration
-    ) throws {
+    ) throws -> UInt32 {
         var arguments = [
             interfaceName,
             "inet",
@@ -89,6 +90,14 @@ struct GuestNetworkConfigurator {
             "/sbin/ifconfig",
             arguments
         )
+        let output = try run("/sbin/ifconfig", [interfaceName]).stdout
+        let effectiveMTU = try Self.parseInterfaceMTU(from: output, interfaceName: interfaceName)
+        if let requestedMTU = interface.mtu, effectiveMTU != requestedMTU {
+            throw Self.makeError(
+                "guest network interface \(interfaceName) MTU mismatch: requested \(requestedMTU), effective \(effectiveMTU)"
+            )
+        }
+        return effectiveMTU
     }
 
     private func configureDefaultRoute(gateway: String) throws {
@@ -163,6 +172,24 @@ struct GuestNetworkConfigurator {
         }
 
         return result
+    }
+
+    static func parseInterfaceMTU(from ifconfigOutput: String, interfaceName: String) throws -> UInt32 {
+        guard
+            let header = ifconfigOutput.split(separator: "\n", omittingEmptySubsequences: false).first,
+            header.hasPrefix("\(interfaceName):")
+        else {
+            throw makeError("guest network interface status is missing for \(interfaceName)")
+        }
+        let fields = header.split(whereSeparator: { $0.isWhitespace })
+        guard
+            let mtuIndex = fields.firstIndex(of: "mtu"),
+            fields.indices.contains(mtuIndex + 1),
+            let mtu = UInt32(fields[mtuIndex + 1])
+        else {
+            throw makeError("guest network interface MTU is missing for \(interfaceName)")
+        }
+        return mtu
     }
 
     static func parseNetworkServicesByDevice(from serviceOrderOutput: String) throws -> [String: String] {

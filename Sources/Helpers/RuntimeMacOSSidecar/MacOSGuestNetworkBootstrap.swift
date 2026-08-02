@@ -57,6 +57,45 @@ enum MacOSGuestNetworkBootstrap {
         )
     }
 
+    static func validateResult(
+        _ result: MacOSGuestNetworkConfigurationResult,
+        for request: MacOSGuestNetworkConfigurationRequest
+    ) throws {
+        guard result.interfaces.count == request.interfaces.count else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "guest network configuration result contains \(result.interfaces.count) interfaces; expected \(request.interfaces.count)"
+            )
+        }
+
+        var unmatched = result.interfaces
+        for expected in request.interfaces {
+            guard
+                let index = unmatched.firstIndex(where: {
+                    $0.networkID == expected.networkID
+                        && $0.macAddress.caseInsensitiveCompare(expected.macAddress) == .orderedSame
+                })
+            else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message:
+                        "guest network configuration result is missing network \(expected.networkID) interface \(expected.macAddress)"
+                )
+            }
+
+            let applied = unmatched.remove(at: index)
+            if let requestedMTU = expected.mtu, applied.effectiveMTU != requestedMTU {
+                let effectiveMTU = applied.effectiveMTU.map { String($0) } ?? "unreported"
+                throw ContainerizationError(
+                    .invalidState,
+                    message:
+                        "guest network MTU mismatch for \(expected.networkID): requested \(requestedMTU), effective \(effectiveMTU)"
+                )
+            }
+        }
+    }
+
     private static func makeDNSConfiguration(
         lease: MacOSGuestNetworkLease
     ) -> MacOSGuestDNSConfiguration? {

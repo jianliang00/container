@@ -67,6 +67,78 @@ struct MacOSGuestNetworkBootstrapTests {
     }
 
     @Test
+    func acceptsGuestResultWithRequestedEffectiveMTU() throws {
+        let request = makeGuestNetworkRequest(mtu: 1_450)
+        let result = makeGuestNetworkResult(effectiveMTU: 1_450)
+
+        try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+    }
+
+    @Test
+    func acceptsLegacyGuestResultWhenMTUIsNotRequested() throws {
+        let request = makeGuestNetworkRequest(mtu: nil)
+        let result = makeGuestNetworkResult(effectiveMTU: nil)
+
+        try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+    }
+
+    @Test
+    func rejectsLegacyGuestResultWithoutEffectiveMTU() throws {
+        let request = makeGuestNetworkRequest(mtu: 1_450)
+        let legacyResult = makeGuestNetworkResult(effectiveMTU: nil)
+
+        #expect(throws: (any Error).self) {
+            try MacOSGuestNetworkBootstrap.validateResult(legacyResult, for: request)
+        }
+    }
+
+    @Test
+    func rejectsGuestResultWithDifferentEffectiveMTU() throws {
+        let request = makeGuestNetworkRequest(mtu: 1_450)
+        let result = makeGuestNetworkResult(effectiveMTU: 1_500)
+
+        #expect(throws: (any Error).self) {
+            try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+        }
+    }
+
+    @Test
+    func validatesReorderedGuestResultsByInterfaceIdentity() throws {
+        let request = MacOSGuestNetworkConfigurationRequest(
+            interfaces: [
+                makeGuestNetworkInterface(
+                    networkID: "primary",
+                    macAddress: "02:42:ac:11:00:02",
+                    mtu: 1_450
+                ),
+                makeGuestNetworkInterface(
+                    networkID: "secondary",
+                    macAddress: "02:42:ac:11:00:03",
+                    mtu: 1_400
+                ),
+            ],
+            dns: nil
+        )
+        let result = MacOSGuestNetworkConfigurationResult(
+            interfaces: [
+                makeAppliedGuestNetworkInterface(
+                    networkID: "secondary",
+                    macAddress: "02:42:ac:11:00:03",
+                    effectiveMTU: 1_400
+                ),
+                makeAppliedGuestNetworkInterface(
+                    networkID: "primary",
+                    macAddress: "02:42:ac:11:00:02",
+                    effectiveMTU: 1_450
+                ),
+            ],
+            dnsApplied: false
+        )
+
+        try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+    }
+
+    @Test
     func vmnetSharedUsesGatewayAsDefaultNameserverWhenDNSNameserversAreEmpty() throws {
         var config = makeConfiguration(backend: .vmnetShared)
         config.dns = .init(nameservers: [], domain: nil, searchDomains: [], options: [])
@@ -133,6 +205,56 @@ private func makeConfiguration(
         networkBackend: backend
     )
     return config
+}
+
+private func makeGuestNetworkRequest(mtu: UInt32?) -> MacOSGuestNetworkConfigurationRequest {
+    MacOSGuestNetworkConfigurationRequest(
+        interfaces: [makeGuestNetworkInterface(networkID: "default", macAddress: "02:42:ac:11:00:02", mtu: mtu)],
+        dns: nil
+    )
+}
+
+private func makeGuestNetworkInterface(
+    networkID: String,
+    macAddress: String,
+    mtu: UInt32?
+) -> MacOSGuestNetworkInterfaceConfiguration {
+    .init(
+        networkID: networkID,
+        hostname: "guest-1",
+        macAddress: macAddress,
+        ipv4Address: "192.168.64.2",
+        ipv4PrefixLength: 24,
+        ipv4Gateway: "192.168.64.1",
+        mtu: mtu
+    )
+}
+
+private func makeGuestNetworkResult(effectiveMTU: UInt32?) -> MacOSGuestNetworkConfigurationResult {
+    .init(
+        interfaces: [
+            makeAppliedGuestNetworkInterface(
+                networkID: "default",
+                macAddress: "02:42:ac:11:00:02",
+                effectiveMTU: effectiveMTU
+            )
+        ],
+        dnsApplied: false
+    )
+}
+
+private func makeAppliedGuestNetworkInterface(
+    networkID: String,
+    macAddress: String,
+    effectiveMTU: UInt32?
+) -> MacOSGuestAppliedNetworkInterface {
+    .init(
+        networkID: networkID,
+        interfaceName: "en0",
+        macAddress: macAddress,
+        ipv4Address: "192.168.64.2/24",
+        effectiveMTU: effectiveMTU
+    )
 }
 
 private func makeLease(

@@ -42,7 +42,7 @@ public actor DirectoryWatcher {
 
     private var task: Task<Void, any Error>?
     private let monitorQueue: DispatchQueue
-    private let source: Mutex<DispatchSourceFileSystemObject?>
+    private let source: Mutex<DirectoryWatcherSource?>
 
     private let log: Logger?
 
@@ -128,12 +128,20 @@ public actor DirectoryWatcher {
             }
         }
 
-        source.withLock { $0 = dispatchSource }
+        source.withLock { $0 = DirectoryWatcherSource(dispatchSource) }
         dispatchSource.resume()
     }
 
     deinit {
         self.task?.cancel()
-        source.withLock { $0?.cancel() }
+        source.withLock { $0?.value.cancel() }
+    }
+}
+
+private final class DirectoryWatcherSource: @unchecked Sendable {
+    let value: DispatchSourceFileSystemObject
+
+    init(_ value: DispatchSourceFileSystemObject) {
+        self.value = value
     }
 }

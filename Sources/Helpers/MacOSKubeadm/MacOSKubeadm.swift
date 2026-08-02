@@ -105,11 +105,10 @@ extension MacOSKubeadm {
         private func parseAPIServerEndpoint(_ value: String) throws -> URL {
             let candidate = value.contains("://") ? value : "https://\(value)"
             guard let url = URL(string: candidate),
-                let scheme = url.scheme?.lowercased(),
-                ["https", "http"].contains(scheme),
+                url.scheme?.lowercased() == "https",
                 url.host != nil
             else {
-                throw ValidationError("api-server-endpoint must be a valid host:port or URL")
+                throw ValidationError("api-server-endpoint must be a valid HTTPS host:port or URL")
             }
             return url
         }

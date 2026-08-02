@@ -39,6 +39,8 @@ struct MacOSKubeadmPlanTests {
                 }
                 return path == "/tmp/macos-node/etc/kubernetes/kube-proxy.conf"
                     && contents.contains(#""nodeName": "macos-ci-1""#)
+                    && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
+                    && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
             })
 
         #expect(
@@ -49,6 +51,10 @@ struct MacOSKubeadmPlanTests {
                 return path == "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kubelet.plist"
                     && contents.contains("<string>macos-ci-1</string>")
                     && contents.contains("<string>localhost/macos-sandbox:test</string>")
+                    && contents.contains("<string>/etc/kubernetes/kubelet.conf</string>")
+                    && contents.contains(
+                        "<string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full</string>"
+                    )
             })
 
         #expect(
@@ -72,8 +78,33 @@ struct MacOSKubeadmPlanTests {
                     return false
                 }
                 return path == "/tmp/macos-node/etc/cni/net.d/10-macvmnet.conflist"
-                    && contents.contains(#""name": "default""#)
-                    && contents.contains(#""network": "default""#)
+                    && contents.contains(#""name": "kubernetes-pod""#)
+                    && contents.contains(#""network": "kubernetes-pod""#)
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/etc/kubernetes/container-cri-shim-macos-config.json"
+                    && contents.contains(#""network": "kubernetes-pod""#)
+                    && !contents.contains(#""networkMTU""#)
+                    && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
+                    && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf"
+                    && contents.contains(#""nodeKubeconfig": "/etc/kubernetes/kubelet.conf""#)
+                    && contents.contains(#""nodeName": "macos-ci-1""#)
+                    && contents.contains(#""networkName": "kubernetes-pod""#)
+                    && contents.contains(#""networkVariant": "reserved""#)
+                    && !contents.contains("underlayInterface")
             })
 
         #expect(
@@ -91,6 +122,7 @@ struct MacOSKubeadmPlanTests {
         var options = try makeOptions(startServices: true)
         options.networkMode = .compat
         options.kubeProxyToken = nil
+        options.flannelToken = nil
 
         let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
         let descriptions = plan.steps.map(\.message)
@@ -102,11 +134,46 @@ struct MacOSKubeadmPlanTests {
         }
 
         #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/kube-proxy.kubeconfig"))
+        #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/flannel-macos.kubeconfig"))
+        #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf"))
         #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/kube-proxy.conf"))
         #expect(!writePaths.contains("/tmp/macos-node/etc/cni/net.d/10-macvmnet.conflist"))
         #expect(!writePaths.contains("/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist"))
+        #expect(!writePaths.contains("/tmp/macos-node/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist"))
+        #expect(!descriptions.contains("start flannel VXLAN launchd job"))
         #expect(!descriptions.contains("start kube-proxy launchd job"))
         #expect(!descriptions.contains("kickstart kube-proxy launchd job"))
+        #expect(descriptions.contains("stop previous flannel VXLAN launchd job if present"))
+        #expect(descriptions.contains("withdraw previous flannel VXLAN data plane"))
+        #expect(descriptions.contains("disable previous flannel VXLAN launchd job"))
+        #expect(descriptions.contains("stop previous kube-proxy launchd job if present"))
+        #expect(descriptions.contains("disable previous kube-proxy launchd job"))
+        #expect(descriptions.contains("flush previous kube-proxy PF anchor"))
+        #expect(descriptions.contains("purge owned pod network"))
+
+        for path in [
+            "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist",
+            "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
+            "/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf",
+            "/tmp/macos-node/etc/kubernetes/kube-proxy.conf",
+            "/tmp/macos-node/etc/cni/net.d/10-macvmnet.conflist",
+        ] {
+            #expect(
+                plan.steps.contains { step in
+                    guard case .removePath(let removedPath, false, true, _) = step.action else {
+                        return false
+                    }
+                    return removedPath == path
+                })
+        }
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .removePath(let path, true, true, true) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/container/kubernetes-credentials"
+            })
 
         #expect(
             plan.steps.contains { step in
@@ -118,6 +185,7 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""macos-compat""#)
                     && contents.contains(#""kubeProxy": {"#)
                     && contents.contains(#""enabled": false"#)
+                    && !contents.contains(#""networkMTU""#)
                     && !contents.contains(#""cni":"#)
                     && !contents.contains(#""plugin": "macvmnet""#)
             })
@@ -145,10 +213,105 @@ struct MacOSKubeadmPlanTests {
             })
     }
 
+    @Test func compatJoinPlanDoesNotMutateServicesWhenServicesAreNotStarted() throws {
+        var options = try makeOptions(startServices: false)
+        options.networkMode = .compat
+        options.kubeProxyToken = nil
+        options.flannelToken = nil
+
+        let descriptions = try MacOSKubeadmPlanner.joinPlan(options: options).steps.map(\.message)
+
+        #expect(!descriptions.contains("stop previous flannel VXLAN launchd job if present"))
+        #expect(!descriptions.contains("withdraw previous flannel VXLAN data plane"))
+        #expect(!descriptions.contains("disable previous flannel VXLAN launchd job"))
+        #expect(!descriptions.contains("stop previous kube-proxy launchd job if present"))
+        #expect(!descriptions.contains("disable previous kube-proxy launchd job"))
+        #expect(!descriptions.contains("flush previous kube-proxy PF anchor"))
+        #expect(!descriptions.contains("purge owned pod network"))
+        #expect(!descriptions.contains("start container core services"))
+        #expect(!descriptions.contains("start CRI shim launchd job"))
+    }
+
+    @Test func compatJoinWithdrawsAndPurgesFlannelBeforeRemovingCredentialsAndConfiguration() throws {
+        var options = try makeOptions(startServices: true)
+        options.networkMode = .compat
+        options.kubeProxyToken = nil
+        options.flannelToken = nil
+
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let descriptions = plan.steps.map(\.message)
+        let preflightIndex = try #require(descriptions.firstIndex(of: "preflight owned pod network purge"))
+        let stopKubeletIndex = try #require(descriptions.firstIndex(of: "stop previous kubelet launchd job if present"))
+        let stopProxyIndex = try #require(descriptions.firstIndex(of: "stop previous kube-proxy launchd job if present"))
+        let withdrawIndex = try #require(descriptions.firstIndex(of: "withdraw previous flannel VXLAN data plane"))
+        let stopIndex = try #require(descriptions.firstIndex(of: "stop previous flannel VXLAN launchd job if present"))
+        let stopCRIIndex = try #require(descriptions.firstIndex(of: "stop previous CRI shim launchd job if present"))
+        let purgeIndex = try #require(descriptions.firstIndex(of: "purge owned pod network"))
+        let configRemovalIndex = try #require(
+            descriptions.firstIndex(of: "remove full-mode artifact /etc/kubernetes/flannel-vxlan-macos.conf")
+        )
+        let credentialRemovalIndex = try #require(descriptions.firstIndex(of: "remove full-mode Kubernetes credentials"))
+
+        #expect(preflightIndex < stopKubeletIndex)
+        #expect(stopKubeletIndex < stopProxyIndex)
+        #expect(stopProxyIndex < withdrawIndex)
+        #expect(withdrawIndex < stopIndex)
+        #expect(stopIndex < stopCRIIndex)
+        #expect(stopCRIIndex < purgeIndex)
+        #expect(purgeIndex < configRemovalIndex)
+        #expect(purgeIndex < credentialRemovalIndex)
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "preflight owned pod network purge",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-flannel-vxlan-macos",
+                    "--config",
+                    "/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf",
+                    "--check-purge",
+                ] && !bestEffort
+            }
+        )
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "withdraw previous flannel VXLAN data plane",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-flannel-vxlan-macos",
+                    "--config",
+                    "/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf",
+                    "--withdraw",
+                ] && !bestEffort
+            }
+        )
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "purge owned pod network",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-flannel-vxlan-macos",
+                    "--config",
+                    "/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf",
+                    "--purge-network",
+                ] && !bestEffort
+            }
+        )
+    }
+
     @Test func joinPlanRendersAdditionalRuntimeClasses() throws {
         var options = try makeOptions(startServices: false)
         options.networkMode = .compat
         options.kubeProxyToken = nil
+        options.flannelToken = nil
         options.runtimeClasses = [
             MacOSKubeadmRuntimeClassProfile(
                 name: "macos-15-2",
@@ -228,15 +391,47 @@ struct MacOSKubeadmPlanTests {
             return path.hasSuffix(".kubeconfig")
         }
 
-        #expect(kubeconfigSteps.count == 2)
+        #expect(kubeconfigSteps.count == 3)
         for step in kubeconfigSteps {
-            guard case .writeFile(_, let contents, 0o600, true) = step.action else {
+            guard case .writeFile(let path, let contents, 0o600, true) = step.action else {
                 Issue.record("kubeconfig step should be mode 0600 and sensitive")
                 continue
             }
-            #expect(contents.contains("token:"))
+            if path.hasSuffix("bootstrap-kubelet.kubeconfig") {
+                #expect(contents.contains("token: abcdef.0123456789abcdef"))
+            } else {
+                #expect(contents.contains("tokenFile: /var/lib/container/kubernetes-credentials/"))
+                #expect(!contents.contains("proxy-token"))
+                #expect(!contents.contains("flannel-token"))
+            }
             #expect(!step.action.safeDescription.contains("abcdef.0123456789abcdef"))
             #expect(!step.action.safeDescription.contains("proxy-token"))
+            #expect(!step.action.safeDescription.contains("flannel-token"))
+        }
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .createDirectory(let path, 0o700) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/container/kubernetes-credentials"
+            })
+
+        let tokenSteps = plan.steps.filter { step in
+            guard case .writeFile(let path, _, _, _) = step.action else {
+                return false
+            }
+            return path.hasSuffix(".token")
+        }
+        #expect(tokenSteps.count == 2)
+        for step in tokenSteps {
+            guard case .writeFile(let path, let contents, 0o600, true) = step.action else {
+                Issue.record("ServiceAccount token should be mode 0600 and sensitive")
+                continue
+            }
+            #expect(path.hasPrefix("/tmp/macos-node/var/lib/container/kubernetes-credentials/"))
+            #expect(contents == "proxy-token" || contents == "flannel-token")
+            #expect(!step.action.safeDescription.contains(contents))
         }
     }
 
@@ -247,10 +442,47 @@ struct MacOSKubeadmPlanTests {
 
         let criIndex = try #require(descriptions.firstIndex(of: "start CRI shim launchd job"))
         let waitIndex = try #require(descriptions.firstIndex(of: "wait for CRI socket"))
+        let flannelEnableIndex = try #require(descriptions.firstIndex(of: "enable flannel VXLAN launchd job"))
+        let flannelIndex = try #require(descriptions.firstIndex(of: "start flannel VXLAN launchd job"))
         let kubeletIndex = try #require(descriptions.firstIndex(of: "start kubelet launchd job"))
+        let kubeProxyEnableIndex = try #require(descriptions.firstIndex(of: "enable kube-proxy launchd job"))
+        let kubeProxyIndex = try #require(descriptions.firstIndex(of: "start kube-proxy launchd job"))
 
         #expect(criIndex < waitIndex)
-        #expect(waitIndex < kubeletIndex)
+        #expect(waitIndex < flannelEnableIndex)
+        #expect(flannelEnableIndex < flannelIndex)
+        #expect(flannelIndex < kubeletIndex)
+        #expect(kubeletIndex < kubeProxyEnableIndex)
+        #expect(kubeProxyEnableIndex < kubeProxyIndex)
+        #expect(kubeletIndex < kubeProxyIndex)
+        #expect(!descriptions.contains("disable previous flannel VXLAN launchd job"))
+        #expect(!descriptions.contains("disable previous kube-proxy launchd job"))
+    }
+
+    @Test func serviceRestartUsesStrictIdempotentLaunchdStops() throws {
+        let options = try makeOptions(startServices: true)
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let expectedStops = [
+            ("stop previous kubelet launchd job if present", "system/com.apple.container.kubelet"),
+            ("stop previous kube-proxy launchd job if present", "system/com.apple.container.kube-proxy-macos"),
+            ("stop previous flannel VXLAN launchd job if present", "system/com.apple.container.flannel-vxlan-macos"),
+            ("stop previous CRI shim launchd job if present", "system/com.apple.container.cri-shim-macos"),
+        ]
+
+        for (message, label) in expectedStops {
+            let step = try #require(plan.steps.first { $0.message == message })
+            guard case .runCommand(let arguments, let bestEffort) = step.action else {
+                Issue.record("expected \(message) to run a command")
+                continue
+            }
+            #expect(!bestEffort)
+            #expect(arguments.first == "/bin/sh")
+            #expect(arguments.dropFirst().first == "-c")
+            #expect(arguments.count == 5)
+            #expect(arguments[2].contains("/bin/launchctl print"))
+            #expect(arguments[2].contains("/bin/launchctl bootout"))
+            #expect(arguments[4] == label)
+        }
     }
 
     @Test func serviceStartPlanUsesRootUserBootstrapForContainerRuntime() throws {
@@ -323,6 +555,31 @@ struct MacOSKubeadmPlanTests {
         options.containerServiceUserID = 501
 
         let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "write flannel VXLAN configuration",
+                    case .writeFile(_, let contents, 0o644, false) = step.action,
+                    let data = contents.data(using: .utf8),
+                    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else {
+                    return false
+                }
+                return object["containerServiceUserID"] as? Int == 501
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "write flannel VXLAN launchd plist",
+                    case .writeFile(_, let contents, 0o644, false) = step.action
+                else {
+                    return false
+                }
+                return contents.contains("<string>/bin/launchctl</string>")
+                    && contents.contains("<string>asuser</string>")
+                    && contents.contains("<string>501</string>")
+                    && contents.contains("<string>/usr/local/bin/container-flannel-vxlan-macos</string>")
+            })
 
         #expect(
             plan.steps.contains { step in
@@ -407,6 +664,15 @@ struct MacOSKubeadmPlanTests {
         }
     }
 
+    @Test func joinPlanRejectsHTTPAPIServer() throws {
+        var options = try makeOptions(startServices: false)
+        options.apiServer = try #require(URL(string: "http://127.0.0.1:6443"))
+
+        #expect(throws: MacOSKubeadmError.invalidInput("--apiserver must use HTTPS")) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
     @Test func resetRequiresForceUnlessDryRun() throws {
         #expect(throws: MacOSKubeadmError.invalidInput("reset requires --force unless --dry-run is set")) {
             try MacOSKubeadmPlanner.resetPlan(
@@ -435,10 +701,69 @@ struct MacOSKubeadmPlanTests {
         )
         let descriptions = plan.steps.map(\.message)
 
+        let preflightIndex = try #require(descriptions.firstIndex(of: "preflight owned pod network purge"))
         let stopKubeletIndex = try #require(descriptions.firstIndex(of: "stop kubelet launchd job if present"))
+        let stopProxyIndex = try #require(descriptions.firstIndex(of: "stop kube-proxy launchd job if present"))
+        let withdrawFlannelIndex = try #require(descriptions.firstIndex(of: "withdraw flannel VXLAN data plane"))
+        let stopFlannelIndex = try #require(descriptions.firstIndex(of: "stop flannel VXLAN launchd job if present"))
+        let stopCRIIndex = try #require(descriptions.firstIndex(of: "stop CRI shim launchd job if present"))
+        let purgeIndex = try #require(descriptions.firstIndex(of: "purge owned pod network"))
+        let removeFlannelConfigIndex = try #require(descriptions.firstIndex(of: "remove /etc/kubernetes/flannel-vxlan-macos.conf"))
         let firstRemoveIndex = try #require(descriptions.firstIndex { $0.hasPrefix("remove ") })
 
+        #expect(preflightIndex < stopKubeletIndex)
         #expect(stopKubeletIndex < firstRemoveIndex)
+        #expect(stopKubeletIndex < stopProxyIndex)
+        #expect(stopProxyIndex < withdrawFlannelIndex)
+        #expect(withdrawFlannelIndex < stopFlannelIndex)
+        #expect(stopFlannelIndex < stopCRIIndex)
+        #expect(stopCRIIndex < purgeIndex)
+        #expect(purgeIndex < removeFlannelConfigIndex)
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "preflight owned pod network purge",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-flannel-vxlan-macos",
+                    "--config",
+                    "/etc/kubernetes/flannel-vxlan-macos.conf",
+                    "--check-purge",
+                ] && !bestEffort
+            }
+        )
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "withdraw flannel VXLAN data plane",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-flannel-vxlan-macos",
+                    "--config",
+                    "/etc/kubernetes/flannel-vxlan-macos.conf",
+                    "--withdraw",
+                ] && !bestEffort
+            }
+        )
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "purge owned pod network",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-flannel-vxlan-macos",
+                    "--config",
+                    "/etc/kubernetes/flannel-vxlan-macos.conf",
+                    "--purge-network",
+                ] && !bestEffort
+            }
+        )
     }
 
     @Test func resetPurgeStateRemovesRuntimeStateRecursively() throws {
@@ -473,10 +798,10 @@ struct MacOSKubeadmPlanTests {
             guard case .removePath(let path, _, _, _) = step.action else {
                 return false
             }
-            return path.hasSuffix(".kubeconfig")
+            return path.hasSuffix(".kubeconfig") || path.hasSuffix("/kubelet.conf")
         }
 
-        #expect(kubeconfigSteps.count == 3)
+        #expect(kubeconfigSteps.count == 5)
         for step in kubeconfigSteps {
             guard case .removePath(_, let recursive, let bestEffort, let sensitive) = step.action,
                 !recursive && bestEffort && sensitive
@@ -487,6 +812,14 @@ struct MacOSKubeadmPlanTests {
             #expect(step.action.safeDescription.contains("sensitive"))
             #expect(!step.action.safeDescription.contains("token:"))
         }
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .removePath(let path, true, true, true) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/container/kubernetes-credentials"
+            })
     }
 
     private func makeOptions(startServices: Bool) throws -> MacOSKubeadmJoinOptions {
@@ -502,6 +835,7 @@ struct MacOSKubeadmPlanTests {
 
                 """,
             kubeProxyToken: "proxy-token",
+            flannelToken: "flannel-token",
             clusterDNS: "10.96.0.53",
             sandboxImage: "localhost/macos-sandbox:test",
             installRoot: "/tmp/macos-node",

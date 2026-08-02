@@ -45,7 +45,8 @@ enum MacOSGuestNetworkBootstrap {
                 macAddress: macAddress,
                 ipv4Address: attachment.ipv4Address.address.description,
                 ipv4PrefixLength: attachment.ipv4Address.prefix.length,
-                ipv4Gateway: attachment.ipv4Gateway.description
+                ipv4Gateway: attachment.ipv4Gateway.description,
+                mtu: attachment.mtu
             )
         }
 

@@ -24,19 +24,22 @@ public struct MacOSKubeadmDiscoveredCluster: Sendable, Equatable {
     public var clusterDNS: String
     public var clusterDomain: String
     public var kubeProxyToken: String
+    public var flannelToken: String
 
     public init(
         apiServer: URL,
         certificateAuthorityPEM: String,
         clusterDNS: String,
         clusterDomain: String,
-        kubeProxyToken: String
+        kubeProxyToken: String,
+        flannelToken: String
     ) {
         self.apiServer = apiServer
         self.certificateAuthorityPEM = certificateAuthorityPEM
         self.clusterDNS = clusterDNS
         self.clusterDomain = clusterDomain
         self.kubeProxyToken = kubeProxyToken
+        self.flannelToken = flannelToken
     }
 }
 
@@ -60,11 +63,18 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
 
     public func discover(
         apiServer: URL,
+        nodeName: String,
+        networkMode: MacOSKubeadmNetworkMode,
         token: String,
         expectedCACertHashes: [String],
-        requestKubeProxyToken: Bool = true,
         log: MacOSKubeadmLog
     ) throws -> MacOSKubeadmDiscoveredCluster {
+        guard apiServer.scheme?.lowercased() == "https", apiServer.host != nil else {
+            throw MacOSKubeadmError.invalidInput("Kubernetes API server endpoint must use HTTPS")
+        }
+        guard nodeName.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
+            throw MacOSKubeadmError.invalidInput("--node-name may only contain letters, numbers, '.', '_', and '-'")
+        }
         let normalizedHashes = try expectedCACertHashes.map(Self.normalizeDiscoveryHash)
 
         let insecureSession = URLSession(
@@ -100,23 +110,48 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
             delegateQueue: nil
         )
 
-        let kubeletSettings = discoverKubeletSettings(
+        let kubeletSettings = try discoverKubeletSettings(
             apiServer: parsedClusterInfo.apiServer,
             token: token,
             session: trustedSession,
+            requireCompleteSettings: networkMode.usesPodNetworking,
             log: log
         )
+
+        let nodeReadToken = try self.requestServiceAccountToken(
+            serviceAccount: "flannel-macos",
+            apiServer: parsedClusterInfo.apiServer,
+            token: token,
+            session: trustedSession
+        )
+        log.info("received flannel-macos ServiceAccount token")
+        if let existingNode = try existingNode(
+            named: nodeName,
+            apiServer: parsedClusterInfo.apiServer,
+            token: nodeReadToken,
+            session: trustedSession
+        ) {
+            try Self.validateExistingNode(existingNode, named: nodeName, networkMode: networkMode)
+            log.info("validated existing Node metadata for network mode \(networkMode.rawValue)")
+        } else {
+            log.info("Node \(nodeName) does not exist yet")
+        }
+
         let kubeProxyToken: String
-        if requestKubeProxyToken {
-            kubeProxyToken = try self.requestKubeProxyToken(
+        let flannelToken: String
+        if networkMode.usesPodNetworking {
+            kubeProxyToken = try requestServiceAccountToken(
+                serviceAccount: "kube-proxy-macos",
                 apiServer: parsedClusterInfo.apiServer,
                 token: token,
                 session: trustedSession
             )
             log.info("received kube-proxy ServiceAccount token")
+            flannelToken = nodeReadToken
         } else {
             kubeProxyToken = ""
-            log.info("skipped kube-proxy ServiceAccount token request")
+            flannelToken = ""
+            log.info("discarded transient flannel-macos token after Node metadata validation")
         }
 
         return MacOSKubeadmDiscoveredCluster(
@@ -124,7 +159,8 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
             certificateAuthorityPEM: Self.pemString(fromDER: certificateAuthorityDER),
             clusterDNS: kubeletSettings.clusterDNS,
             clusterDomain: kubeletSettings.clusterDomain,
-            kubeProxyToken: kubeProxyToken
+            kubeProxyToken: kubeProxyToken,
+            flannelToken: flannelToken
         )
     }
 
@@ -132,47 +168,131 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         apiServer: URL,
         token: String,
         session: URLSession,
+        requireCompleteSettings: Bool,
         log: MacOSKubeadmLog
-    ) -> MacOSKubeadmKubeletSettings {
+    ) throws -> MacOSKubeadmKubeletSettings {
+        func fallbackOrThrow(_ message: String) throws -> MacOSKubeadmKubeletSettings {
+            if requireCompleteSettings {
+                throw MacOSKubeadmError.preflightFailed(message)
+            }
+            log.warning("\(message); using default cluster DNS settings for compat mode")
+            return .default
+        }
+
+        let configMap: MacOSKubeadmClusterInfoConfigMap
         do {
-            let configMap: MacOSKubeadmClusterInfoConfigMap = try get(
+            configMap = try get(
                 "/api/v1/namespaces/kube-system/configmaps/kubelet-config",
                 apiServer: apiServer,
                 token: token,
                 session: session
             )
-            guard let kubeletConfig = configMap.data?["kubelet"] else {
-                log.warning("kube-system/kubelet-config does not contain data.kubelet; using default cluster DNS settings")
-                return .default
-            }
-            return Self.parseKubeletSettings(kubeletConfig) ?? .default
         } catch {
-            log.warning("failed to discover kubelet cluster DNS settings; using defaults: \(error)")
-            return .default
+            return try fallbackOrThrow("failed to read kube-system/kubelet-config: \(error)")
         }
+        guard let kubeletConfig = configMap.data?["kubelet"] else {
+            return try fallbackOrThrow("kube-system/kubelet-config does not contain data.kubelet")
+        }
+        guard
+            let settings = Self.parseKubeletSettings(
+                kubeletConfig,
+                requireCompleteSettings: requireCompleteSettings
+            )
+        else {
+            return try fallbackOrThrow(
+                "kube-system/kubelet-config does not contain a usable IPv4 clusterDNS and clusterDomain"
+            )
+        }
+        return settings
     }
 
-    private func requestKubeProxyToken(apiServer: URL, token: String, session: URLSession) throws -> String {
+    private func requestServiceAccountToken(
+        serviceAccount: String,
+        apiServer: URL,
+        token: String,
+        session: URLSession
+    ) throws -> String {
         let body = """
             {
               "apiVersion": "authentication.k8s.io/v1",
               "kind": "TokenRequest",
               "spec": {
-                "expirationSeconds": 31536000
+                "expirationSeconds": 86400
               }
             }
             """
         let response: MacOSKubeadmTokenRequestResponse = try post(
-            "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token",
+            "/api/v1/namespaces/kube-system/serviceaccounts/\(serviceAccount)/token",
             apiServer: apiServer,
             token: token,
             body: Data(body.utf8),
             session: session
         )
         guard let token = response.status.token, !token.isEmpty else {
-            throw MacOSKubeadmError.preflightFailed("kube-proxy TokenRequest returned no token")
+            throw MacOSKubeadmError.preflightFailed("\(serviceAccount) TokenRequest returned no token")
         }
         return token
+    }
+
+    private func existingNode(
+        named nodeName: String,
+        apiServer: URL,
+        token: String,
+        session: URLSession
+    ) throws -> MacOSKubeadmNode? {
+        let path = "/api/v1/nodes/\(nodeName)"
+        let url = try Self.url(apiServer: apiServer, path: path)
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try Self.executeResponse(request, session: session)
+        if response.statusCode == 404 {
+            return nil
+        }
+        let successfulData = try Self.successfulData(for: request, data: data, response: response)
+        return try JSONDecoder().decode(MacOSKubeadmNode.self, from: successfulData)
+    }
+
+    private static func validateExistingNode(
+        _ node: MacOSKubeadmNode,
+        named nodeName: String,
+        networkMode: MacOSKubeadmNetworkMode
+    ) throws {
+        let networkLabelKey = "node.kubernetes.io/macos-network"
+        let managedTaintKeys = Set(["node.kubernetes.io/macos", networkLabelKey])
+        let actualLabel = node.metadata?.labels?[networkLabelKey]
+        let actualTaints = (node.spec?.taints ?? []).filter { managedTaintKeys.contains($0.key) }
+        let expectedTaints: [MacOSKubeadmNodeTaint] =
+            switch networkMode {
+            case .full:
+                [MacOSKubeadmNodeTaint(key: "node.kubernetes.io/macos", value: "true", effect: "NoSchedule")]
+            case .compat:
+                [
+                    MacOSKubeadmNodeTaint(key: "node.kubernetes.io/macos", value: "true", effect: "NoSchedule"),
+                    MacOSKubeadmNodeTaint(key: networkLabelKey, value: "compat", effect: "NoSchedule"),
+                ]
+            }
+        let taintsMatch = actualTaints.count == expectedTaints.count && Set(actualTaints) == Set(expectedTaints)
+        guard actualLabel == networkMode.nodeNetworkLabelValue, taintsMatch else {
+            let foundLabel = actualLabel ?? "<missing>"
+            let foundTaints = taintListDescription(actualTaints)
+            let expectedTaintsDescription = taintListDescription(expectedTaints)
+            throw MacOSKubeadmError.preflightFailed(
+                "existing Node \(nodeName) does not match --network-mode \(networkMode.rawValue): found \(networkLabelKey)=\(foundLabel) and managed taints \(foundTaints), expected \(networkLabelKey)=\(networkMode.nodeNetworkLabelValue) and managed taints \(expectedTaintsDescription); before retrying, use the control plane to cordon and drain the Node, then delete it or explicitly converge its macOS network label and managed taints"
+            )
+        }
+    }
+
+    private static func taintListDescription(_ taints: [MacOSKubeadmNodeTaint]) -> String {
+        guard !taints.isEmpty else {
+            return "[]"
+        }
+        let values = taints.map { taint in
+            "\(taint.key)=\(taint.value ?? "<missing>"):\(taint.effect ?? "<missing>")"
+        }.sorted()
+        return "[\(values.joined(separator: ", "))]"
     }
 
     private func get<T: Decodable>(_ path: String, apiServer: URL, token: String? = nil, session: URLSession) throws -> T {
@@ -200,6 +320,11 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
     }
 
     private static func execute(_ request: URLRequest, session: URLSession) throws -> Data {
+        let (data, response) = try executeResponse(request, session: session)
+        return try successfulData(for: request, data: data, response: response)
+    }
+
+    private static func executeResponse(_ request: URLRequest, session: URLSession) throws -> (Data, HTTPURLResponse) {
         let semaphore = DispatchSemaphore(value: 0)
         final class Box: @unchecked Sendable {
             var result: Result<(Data, URLResponse), Error>?
@@ -223,16 +348,27 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MacOSKubeadmError.preflightFailed("Kubernetes API response was not HTTP")
         }
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        return (data, httpResponse)
+    }
+
+    private static func successfulData(
+        for request: URLRequest,
+        data: Data,
+        response: HTTPURLResponse
+    ) throws -> Data {
+        guard (200..<300).contains(response.statusCode) else {
             let body = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             throw MacOSKubeadmError.preflightFailed(
-                "Kubernetes API \(request.httpMethod ?? "GET") \(request.url?.path ?? "") returned \(httpResponse.statusCode): \(body)"
+                "Kubernetes API \(request.httpMethod ?? "GET") \(request.url?.path ?? "") returned \(response.statusCode): \(body)"
             )
         }
         return data
     }
 
     private static func url(apiServer: URL, path: String) throws -> URL {
+        guard apiServer.scheme?.lowercased() == "https", apiServer.host != nil else {
+            throw MacOSKubeadmError.invalidInput("Kubernetes API server endpoint must use HTTPS")
+        }
         guard var components = URLComponents(url: apiServer, resolvingAgainstBaseURL: false) else {
             throw MacOSKubeadmError.invalidInput("invalid Kubernetes API server URL")
         }
@@ -250,6 +386,9 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         else {
             throw MacOSKubeadmError.preflightFailed("cluster-info kubeconfig does not contain a valid cluster.server")
         }
+        guard server.scheme?.lowercased() == "https", server.host != nil else {
+            throw MacOSKubeadmError.preflightFailed("cluster-info kubeconfig cluster.server must use HTTPS")
+        }
         guard let caDataValue = firstKubeconfigValue(named: "certificate-authority-data", in: content),
             let caData = Data(base64Encoded: caDataValue)
         else {
@@ -259,7 +398,10 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
         return MacOSKubeadmParsedClusterInfo(apiServer: server, certificateAuthorityDER: caDER)
     }
 
-    private static func parseKubeletSettings(_ content: String) -> MacOSKubeadmKubeletSettings? {
+    private static func parseKubeletSettings(
+        _ content: String,
+        requireCompleteSettings: Bool = false
+    ) -> MacOSKubeadmKubeletSettings? {
         var clusterDNS: String?
         var clusterDomain: String?
         var expectingClusterDNSValue = false
@@ -269,10 +411,15 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
             guard !trimmed.isEmpty else {
                 continue
             }
-            if expectingClusterDNSValue, trimmed.hasPrefix("- ") {
-                clusterDNS = unquote(String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces))
+            if expectingClusterDNSValue {
+                if trimmed.hasPrefix("- ") {
+                    let candidate = unquote(String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces))
+                    if clusterDNS == nil, isIPv4Address(candidate) {
+                        clusterDNS = candidate
+                    }
+                    continue
+                }
                 expectingClusterDNSValue = false
-                continue
             }
             if trimmed == "clusterDNS:" {
                 expectingClusterDNSValue = true
@@ -283,6 +430,9 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
             }
         }
 
+        if requireCompleteSettings, clusterDNS == nil || clusterDomain == nil {
+            return nil
+        }
         guard clusterDNS != nil || clusterDomain != nil else {
             return nil
         }
@@ -290,6 +440,16 @@ public struct MacOSKubeadmDiscoveryClient: Sendable {
             clusterDNS: clusterDNS ?? MacOSKubeadmKubeletSettings.default.clusterDNS,
             clusterDomain: clusterDomain ?? MacOSKubeadmKubeletSettings.default.clusterDomain
         )
+    }
+
+    private static func isIPv4Address(_ value: String) -> Bool {
+        let octets = value.split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4
+            && octets.allSatisfy { octet in
+                !octet.isEmpty
+                    && octet.utf8.allSatisfy { (48...57).contains($0) }
+                    && Int(octet).map { (0...255).contains($0) } == true
+            }
     }
 
     private static func firstKubeconfigValue(named field: String, in content: String) -> String? {
@@ -468,6 +628,25 @@ private struct MacOSKubeadmTokenRequestResponse: Decodable {
     struct Status: Decodable {
         var token: String?
     }
+}
+
+private struct MacOSKubeadmNode: Decodable {
+    var metadata: Metadata?
+    var spec: Spec?
+
+    struct Metadata: Decodable {
+        var labels: [String: String]?
+    }
+
+    struct Spec: Decodable {
+        var taints: [MacOSKubeadmNodeTaint]?
+    }
+}
+
+private struct MacOSKubeadmNodeTaint: Decodable, Hashable {
+    var key: String
+    var value: String?
+    var effect: String?
 }
 
 private final class MacOSKubeadmInsecureURLSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {

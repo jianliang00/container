@@ -28,8 +28,8 @@ Required:
                               kubelet-darwin-arm64-*.tar.gz release artifact
 
 Options:
-  --node-name NAME            node name substituted into kubelet and kube-proxy
-                              templates. Default: macos-node-1
+  --node-name NAME            default node name recorded in the release
+                              manifest. Default: macos-node-1
   --build-configuration NAME  Swift build configuration. Default: release
   --output PATH               output pkg path. Default:
                               bin/<configuration>/container-macos-node-<version>-k8s-v1.27.2.pkg
@@ -42,6 +42,8 @@ Options:
 
 Environment:
   RELEASE_VERSION             default package version
+  KUBELET_ARTIFACT_SHA256     optional expected SHA-256 for a file artifact;
+                              verified and recorded in the release manifest
   CODESIGN_IDENTITY           executable signing identity. Default: ad-hoc '-'
   CODESIGN_TIMESTAMP_OPTS     codesign timestamp flags. Default: --timestamp=none
   CODESIGN_EXTRA_OPTS         additional codesign flags
@@ -68,6 +70,7 @@ K8S_BASELINE="v1.27.2"
 NODE_NAME="${NODE_NAME:-macos-node-1}"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
 PACKAGE_VERSION="${RELEASE_VERSION:-}"
+EXPECTED_KUBELET_ARTIFACT_SHA256="${KUBELET_ARTIFACT_SHA256:-}"
 KUBELET_ARTIFACT=""
 OUTPUT_PATH=""
 SKIP_BUILD=false
@@ -126,6 +129,10 @@ done
 [[ -n "$KUBELET_ARTIFACT" ]] || fail "--kubelet-artifact is required"
 [[ "$BUILD_CONFIGURATION" == "debug" || "$BUILD_CONFIGURATION" == "release" ]] || fail "--build-configuration must be debug or release"
 [[ "$NODE_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || fail "--node-name may only contain letters, numbers, '.', '_', and '-'"
+if [[ -n "$EXPECTED_KUBELET_ARTIFACT_SHA256" && ! "$EXPECTED_KUBELET_ARTIFACT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    fail "KUBELET_ARTIFACT_SHA256 must contain exactly 64 hexadecimal characters"
+fi
+EXPECTED_KUBELET_ARTIFACT_SHA256="$(printf '%s' "$EXPECTED_KUBELET_ARTIFACT_SHA256" | tr '[:upper:]' '[:lower:]')"
 
 if [[ -z "$PACKAGE_VERSION" ]]; then
     PACKAGE_VERSION="$(git -C "$ROOT_DIR" describe --tags --always 2>/dev/null || echo dev)"
@@ -180,16 +187,6 @@ resolve_kubelet() {
     printf '%s\n' "$candidate"
 }
 
-install_template() {
-    local source="$1"
-    local dest="$2"
-    local mode="$3"
-
-    mkdir -p "$(dirname "$dest")"
-    sed -e "s#__NODE_NAME__#${NODE_NAME}#g" "$source" > "$dest"
-    chmod "$mode" "$dest"
-}
-
 codesign_path() {
     local path="$1"
     shift
@@ -225,6 +222,16 @@ stage_file() {
     install -m "$mode" "$source" "$dest"
 }
 
+VERIFIED_KUBELET_ARTIFACT_SHA256=""
+if [[ -f "$KUBELET_ARTIFACT" ]]; then
+    VERIFIED_KUBELET_ARTIFACT_SHA256="$(shasum -a 256 "$KUBELET_ARTIFACT" | awk '{print $1}')"
+    if [[ -n "$EXPECTED_KUBELET_ARTIFACT_SHA256" && "$VERIFIED_KUBELET_ARTIFACT_SHA256" != "$EXPECTED_KUBELET_ARTIFACT_SHA256" ]]; then
+        fail "kubelet artifact SHA-256 mismatch: expected ${EXPECTED_KUBELET_ARTIFACT_SHA256}, got ${VERIFIED_KUBELET_ARTIFACT_SHA256}"
+    fi
+elif [[ -n "$EXPECTED_KUBELET_ARTIFACT_SHA256" ]]; then
+    fail "KUBELET_ARTIFACT_SHA256 can only verify a file artifact"
+fi
+
 KUBELET_BINARY="$(resolve_kubelet "$KUBELET_ARTIFACT")"
 BUILD_BIN_DIR="$("$SWIFT" build -c "$BUILD_CONFIGURATION" --show-bin-path)"
 PKGROOT="${ROOT_DIR}/bin/${BUILD_CONFIGURATION}/macos-node-pkgroot"
@@ -237,12 +244,15 @@ fi
 log "node name: ${NODE_NAME}"
 log "package version: ${PACKAGE_VERSION}"
 log "kubelet binary: ${KUBELET_BINARY}"
+if [[ -n "$VERIFIED_KUBELET_ARTIFACT_SHA256" ]]; then
+    log "kubelet artifact SHA-256: ${VERIFIED_KUBELET_ARTIFACT_SHA256}"
+fi
 log "Swift build output: ${BUILD_BIN_DIR}"
 log "package output: ${OUTPUT_PATH}"
 
 if [[ "$DRY_RUN" == true ]]; then
     log "dry run: package would stage into ${PKGROOT}"
-    log "dry run: package would install kubelet, container binaries, CRI/CNI/kube-proxy configs, and launchd plists"
+    log "dry run: package would install binaries, manifests, and inert configuration templates"
     exit 0
 fi
 
@@ -264,22 +274,16 @@ mkdir -p \
     "${PKGROOT}/usr/local/libexec/container/macos-image-prepare/bin" \
     "${PKGROOT}/usr/local/libexec/container/macos-vm-manager/bin" \
     "${PKGROOT}/usr/local/share/container-macos-node/manifests" \
-    "${PKGROOT}/etc/kubernetes/manifests" \
-    "${PKGROOT}/etc/kubernetes/pki" \
-    "${PKGROOT}/etc/cni/net.d" \
-    "${PKGROOT}/opt/cni/bin" \
-    "${PKGROOT}/Library/LaunchDaemons" \
-    "${PKGROOT}/var/lib/kubelet" \
-    "${PKGROOT}/var/lib/container/cri-shim-macos" \
-    "${PKGROOT}/var/lib/container/cni/macvmnet" \
-    "${PKGROOT}/var/log/pods" \
-    "${PKGROOT}/var/log/containers"
+    "${PKGROOT}/usr/local/share/container-macos-node/templates/config" \
+    "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd" \
+    "${PKGROOT}/opt/cni/bin"
 
 stage_file "${BUILD_BIN_DIR}/container" "${PKGROOT}/usr/local/bin/container" 0755
 stage_file "${BUILD_BIN_DIR}/container-apiserver" "${PKGROOT}/usr/local/bin/container-apiserver" 0755
 stage_file "${BUILD_BIN_DIR}/container-cri-shim-macos" "${PKGROOT}/usr/local/bin/container-cri-shim-macos" 0755
 stage_file "${BUILD_BIN_DIR}/container-cni-macvmnet" "${PKGROOT}/usr/local/bin/container-cni-macvmnet" 0755
 stage_file "${BUILD_BIN_DIR}/container-cni-macvmnet" "${PKGROOT}/opt/cni/bin/container-cni-macvmnet" 0755
+stage_file "${BUILD_BIN_DIR}/container-flannel-vxlan-macos" "${PKGROOT}/usr/local/bin/container-flannel-vxlan-macos" 0755
 stage_file "${BUILD_BIN_DIR}/container-kube-proxy-macos" "${PKGROOT}/usr/local/bin/container-kube-proxy-macos" 0755
 stage_file "${BUILD_BIN_DIR}/container-k8s-networkpolicy-macos" "${PKGROOT}/usr/local/bin/container-k8s-networkpolicy-macos" 0755
 stage_file "${BUILD_BIN_DIR}/container-macos-kubeadm" "${PKGROOT}/usr/local/bin/container-macos-kubeadm" 0755
@@ -303,17 +307,24 @@ stage_file "${ROOT_DIR}/scripts/macos-guest-agent/container-macos-guest-agent.pl
 stage_file "${BUILD_BIN_DIR}/container-macos-image-prepare" "${PKGROOT}/usr/local/libexec/container/macos-image-prepare/bin/container-macos-image-prepare" 0755
 stage_file "${BUILD_BIN_DIR}/container-macos-vm-manager" "${PKGROOT}/usr/local/libexec/container/macos-vm-manager/bin/container-macos-vm-manager" 0755
 
-stage_file "${PACKAGING_DIR}/config/container-cri-shim-macos-config.json" "${PKGROOT}/etc/kubernetes/container-cri-shim-macos-config.json" 0644
-stage_file "${PACKAGING_DIR}/config/container-cni-macvmnet.conflist" "${PKGROOT}/etc/cni/net.d/10-macvmnet.conflist" 0644
-install_template "${PACKAGING_DIR}/config/kube-proxy.conf" "${PKGROOT}/etc/kubernetes/kube-proxy.conf" 0644
-stage_file "${PACKAGING_DIR}/config/kubelet-config.yaml" "${PKGROOT}/etc/kubernetes/kubelet-config.yaml" 0644
+stage_file "${PACKAGING_DIR}/config/container-cri-shim-macos-config.json" "${PKGROOT}/usr/local/share/container-macos-node/templates/config/container-cri-shim-macos-config.json" 0644
+stage_file "${PACKAGING_DIR}/config/container-cni-macvmnet.conflist" "${PKGROOT}/usr/local/share/container-macos-node/templates/config/container-cni-macvmnet.conflist" 0644
+stage_file "${PACKAGING_DIR}/config/flannel-vxlan-macos.conf" "${PKGROOT}/usr/local/share/container-macos-node/templates/config/flannel-vxlan-macos.conf" 0644
+stage_file "${PACKAGING_DIR}/config/kube-proxy.conf" "${PKGROOT}/usr/local/share/container-macos-node/templates/config/kube-proxy.conf" 0644
+stage_file "${PACKAGING_DIR}/config/kubelet-config.yaml" "${PKGROOT}/usr/local/share/container-macos-node/templates/config/kubelet-config.yaml" 0644
 stage_file "${PACKAGING_DIR}/manifests/runtimeclass-macos.yaml" "${PKGROOT}/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml" 0644
 stage_file "${PACKAGING_DIR}/manifests/runtimeclass-macos-compat.yaml" "${PKGROOT}/usr/local/share/container-macos-node/manifests/runtimeclass-macos-compat.yaml" 0644
 stage_file "${PACKAGING_DIR}/manifests/macos-node-bootstrap-rbac.yaml" "${PKGROOT}/usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml" 0644
 
-install_template "${PACKAGING_DIR}/launchd/com.apple.container.cri-shim-macos.plist" "${PKGROOT}/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist" 0644
-install_template "${PACKAGING_DIR}/launchd/com.apple.container.kube-proxy-macos.plist" "${PKGROOT}/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist" 0644
-install_template "${PACKAGING_DIR}/launchd/com.apple.container.kubelet.plist" "${PKGROOT}/Library/LaunchDaemons/com.apple.container.kubelet.plist" 0644
+stage_file "${PACKAGING_DIR}/launchd/com.apple.container.cri-shim-macos.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.cri-shim-macos.plist" 0644
+stage_file "${PACKAGING_DIR}/launchd/com.apple.container.flannel-vxlan-macos.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.flannel-vxlan-macos.plist" 0644
+stage_file "${PACKAGING_DIR}/launchd/com.apple.container.kube-proxy-macos.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.kube-proxy-macos.plist" 0644
+stage_file "${PACKAGING_DIR}/launchd/com.apple.container.kubelet.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.kubelet.plist" 0644
+
+KUBELET_ARTIFACT_SHA256_JSON="null"
+if [[ -n "$VERIFIED_KUBELET_ARTIFACT_SHA256" ]]; then
+    KUBELET_ARTIFACT_SHA256_JSON="\"${VERIFIED_KUBELET_ARTIFACT_SHA256}\""
+fi
 
 cat > "${PKGROOT}/usr/local/share/container-macos-node/release-manifest.json" <<EOF
 {
@@ -322,7 +333,8 @@ cat > "${PKGROOT}/usr/local/share/container-macos-node/release-manifest.json" <<
     "kubernetesBaseline": "${K8S_BASELINE}",
     "nodeName": "${NODE_NAME}",
     "containerCommit": "$(git -C "$ROOT_DIR" rev-parse HEAD)",
-    "kubeletArtifact": "$(basename "$KUBELET_ARTIFACT")"
+    "kubeletArtifact": "$(basename "$KUBELET_ARTIFACT")",
+    "kubeletArtifactSHA256": ${KUBELET_ARTIFACT_SHA256_JSON}
 }
 EOF
 chmod 0644 "${PKGROOT}/usr/local/share/container-macos-node/release-manifest.json"
@@ -334,6 +346,7 @@ if [[ "$SKIP_CODESIGN" != true ]]; then
     codesign_path "${PKGROOT}/usr/local/bin/container-cri-shim-macos" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-cni-macvmnet" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/opt/cni/bin/container-cni-macvmnet" --prefix=com.apple.container.
+    codesign_path "${PKGROOT}/usr/local/bin/container-flannel-vxlan-macos" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-kube-proxy-macos" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-k8s-networkpolicy-macos" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-macos-kubeadm" --prefix=com.apple.container.

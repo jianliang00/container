@@ -54,10 +54,16 @@ public protocol CRIShimReadinessChecking: Sendable {
 public struct ContainerKitCRIShimReadinessChecker: CRIShimReadinessChecking {
     public var kit: ContainerKit
     public var timeout: Duration
+    public var podNetworkStateStore: PodNetworkStateStore
 
-    public init(kit: ContainerKit = ContainerKit(), timeout: Duration = .seconds(2)) {
+    public init(
+        kit: ContainerKit = ContainerKit(),
+        timeout: Duration = .seconds(2),
+        podNetworkStateStore: PodNetworkStateStore = PodNetworkStateStore()
+    ) {
         self.kit = kit
         self.timeout = timeout
+        self.podNetworkStateStore = podNetworkStateStore
     }
 
     public func snapshot(config: CRIShimConfig) async -> CRIShimReadinessSnapshot {
@@ -111,6 +117,10 @@ public struct ContainerKitCRIShimReadinessChecker: CRIShimReadinessChecking {
         config: CRIShimConfig,
         info: inout [String: String]
     ) async -> CRIShimRuntimeConditionSnapshot {
+        if let podNetwork = config.podNetwork, podNetwork.enabled == true {
+            return await podNetworkReadiness(config: podNetwork, info: &info)
+        }
+
         if !config.requiresCNI && config.defaults?.networkBackend?.trimmed == "virtualizationNAT" {
             info["network"] = jsonString([
                 "backend": "virtualizationNAT",
@@ -164,6 +174,153 @@ public struct ContainerKitCRIShimReadinessChecker: CRIShimReadinessChecking {
             )
         }
     }
+
+    private func podNetworkReadiness(
+        config: PodNetworkConfig,
+        info: inout [String: String]
+    ) async -> CRIShimRuntimeConditionSnapshot {
+        guard let runtimeStatePath = config.runtimeStatePath?.trimmed,
+            !runtimeStatePath.isEmpty,
+            let readyStatePath = config.readyStatePath?.trimmed,
+            !readyStatePath.isEmpty
+        else {
+            return podNetworkFailure(
+                reason: "PodNetworkNotConfigured",
+                message: "pod network state paths are not configured"
+            )
+        }
+
+        let runtimeState: PodNetworkRuntimeState
+        do {
+            guard let state = try await podNetworkStateStore.loadRuntimeState(path: runtimeStatePath) else {
+                return podNetworkFailure(
+                    reason: "PodNetworkRuntimeStateMissing",
+                    message: "pod network runtime state has not been published"
+                )
+            }
+            runtimeState = state
+        } catch {
+            return podNetworkFailure(
+                reason: "PodNetworkRuntimeStateInvalid",
+                message: "pod network runtime state could not be read"
+            )
+        }
+
+        let readyState: PodNetworkReadyState
+        do {
+            guard let state = try await podNetworkStateStore.loadReadyState(path: readyStatePath) else {
+                return podNetworkFailure(
+                    reason: "PodNetworkReadyStateMissing",
+                    message: "pod network ready state has not been published"
+                )
+            }
+            readyState = state
+        } catch {
+            return podNetworkFailure(
+                reason: "PodNetworkReadyStateInvalid",
+                message: "pod network ready state could not be read"
+            )
+        }
+
+        do {
+            let networks = try await kit.listNetworks()
+            let condition = evaluatePodNetworkReadiness(
+                config: config,
+                runtimeState: runtimeState,
+                readyState: readyState,
+                networks: networks
+            )
+            if condition.status {
+                info["network"] = jsonString([
+                    "backend": "hostOnly",
+                    "state": "ready",
+                ])
+            }
+            return condition
+        } catch {
+            return podNetworkFailure(
+                reason: "PodNetworkHealthCheckFailed",
+                message: "dedicated pod network health could not be inspected"
+            )
+        }
+    }
+}
+
+func evaluatePodNetworkReadiness(
+    config: PodNetworkConfig,
+    runtimeState: PodNetworkRuntimeState,
+    readyState: PodNetworkReadyState,
+    networks: [NetworkState],
+    now: Date = Date()
+) -> CRIShimRuntimeConditionSnapshot {
+    let readyLease: PodNetworkReadyLease
+    do {
+        readyLease = try validatePodNetworkReadyLease(
+            config: config,
+            runtimeState: runtimeState,
+            readyState: readyState,
+            now: now
+        )
+    } catch let error as PodNetworkReadyLeaseValidationError {
+        switch error {
+        case .statePathsNotConfigured, .runtimeStateMissing, .runtimeStateMismatch:
+            return podNetworkFailure(reason: "PodNetworkRuntimeStateMismatch", message: error.description)
+        case .readyStateMissing, .readyStateMismatch:
+            return podNetworkFailure(reason: "PodNetworkReadyStateMismatch", message: error.description)
+        case .readyStateExpired:
+            return podNetworkFailure(reason: "PodNetworkReadyStateExpired", message: error.description)
+        case .mtuOutOfRange:
+            return podNetworkFailure(reason: "PodNetworkReadyStateMTUInvalid", message: error.description)
+        }
+    } catch {
+        return podNetworkFailure(
+            reason: "PodNetworkReadyStateInvalid",
+            message: "pod network ready state could not be validated"
+        )
+    }
+
+    let networkName = runtimeState.networkName
+    guard let network = networks.first(where: { $0.id == networkName }) else {
+        return podNetworkFailure(
+            reason: "PodNetworkNotFound",
+            message: "dedicated pod network was not found"
+        )
+    }
+
+    guard case .hostOnly = network.configuration.mode else {
+        return podNetworkFailure(
+            reason: "PodNetworkModeMismatch",
+            message: "dedicated pod network is not host-only"
+        )
+    }
+
+    guard let configuredSubnet = network.configuration.ipv4Subnet,
+        let configuredPodCIDR = try? canonicalIPv4PodCIDR(configuredSubnet.description),
+        let runningPodCIDR = try? canonicalIPv4PodCIDR(network.status.ipv4Subnet.description),
+        configuredPodCIDR == readyLease.podCIDR,
+        runningPodCIDR == readyLease.podCIDR
+    else {
+        return podNetworkFailure(
+            reason: "PodNetworkSubnetMismatch",
+            message: "dedicated pod network subnet does not match the runtime pod CIDR"
+        )
+    }
+
+    return CRIShimRuntimeConditionSnapshot(
+        type: CRIShimRuntimeConditionType.networkReady,
+        status: true,
+        reason: "PodNetworkReady",
+        message: "dedicated pod network is ready"
+    )
+}
+
+private func podNetworkFailure(reason: String, message: String) -> CRIShimRuntimeConditionSnapshot {
+    CRIShimRuntimeConditionSnapshot(
+        type: CRIShimRuntimeConditionType.networkReady,
+        status: false,
+        reason: reason,
+        message: message
+    )
 }
 
 public enum CRIShimRuntimeConditionType {

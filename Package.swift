@@ -35,6 +35,7 @@ let package = Package(
         .library(name: "ContainerCNIMacvmnet", targets: ["ContainerCNIMacvmnet"]),
         .library(name: "ContainerK8sNetworkPolicyMacOS", targets: ["ContainerK8sNetworkPolicyMacOS"]),
         .library(name: "ContainerK8sKubeProxyMacOS", targets: ["ContainerK8sKubeProxyMacOS"]),
+        .library(name: "ContainerK8sFlannelVXLANMacOS", targets: ["ContainerK8sFlannelVXLANMacOS"]),
         .library(name: "ContainerBuild", targets: ["ContainerBuild"]),
         .library(name: "ContainerAPIService", targets: ["ContainerAPIService"]),
         .library(name: "ContainerAPIClient", targets: ["ContainerAPIClient"]),
@@ -65,6 +66,7 @@ let package = Package(
         .executable(name: "container-cni-macvmnet", targets: ["container-cni-macvmnet"]),
         .executable(name: "container-k8s-networkpolicy-macos", targets: ["container-k8s-networkpolicy-macos"]),
         .executable(name: "container-kube-proxy-macos", targets: ["container-kube-proxy-macos"]),
+        .executable(name: "container-flannel-vxlan-macos", targets: ["container-flannel-vxlan-macos"]),
         .executable(name: "container-macos-kubeadm", targets: ["container-macos-kubeadm"]),
         .library(name: "MachineAPIClient", targets: ["MachineAPIClient"]),
         .library(name: "MachineAPIService", targets: ["MachineAPIService"]),
@@ -317,6 +319,39 @@ let package = Package(
             name: "ContainerK8sKubeProxyMacOSTests",
             dependencies: [
                 "ContainerK8sKubeProxyMacOS"
+            ]
+        ),
+        .target(
+            name: "CContainerK8sFlannelVXLANMacOS",
+            dependencies: [],
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "ContainerK8sFlannelVXLANMacOS",
+            dependencies: [
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                "CContainerK8sFlannelVXLANMacOS",
+                "ContainerCRIShimMacOS",
+                "ContainerK8sKubeProxyMacOS",
+                "ContainerKit",
+            ]
+        ),
+        .executableTarget(
+            name: "container-flannel-vxlan-macos",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerK8sFlannelVXLANMacOS",
+            ],
+            path: "Sources/Helpers/FlannelVXLANMacOS"
+        ),
+        .testTarget(
+            name: "ContainerK8sFlannelVXLANMacOSTests",
+            dependencies: [
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                "ContainerCRIShimMacOS",
+                "ContainerK8sFlannelVXLANMacOS",
+                "ContainerKit",
+                "ContainerResource",
             ]
         ),
         .target(

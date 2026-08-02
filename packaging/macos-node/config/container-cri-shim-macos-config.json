@@ -16,14 +16,14 @@
             "os": "darwin",
             "architecture": "arm64"
         },
-        "network": "default",
+        "network": "kubernetes-pod",
         "networkBackend": "vmnetShared",
         "guiEnabled": false
     },
     "runtimeHandlers": {
         "macos": {
             "sandboxImage": "localhost/macos-sandbox:latest",
-            "network": "default",
+            "network": "kubernetes-pod",
             "networkBackend": "vmnetShared",
             "guiEnabled": false
         }
@@ -34,5 +34,11 @@
     "kubeProxy": {
         "enabled": true,
         "configPath": "/etc/kubernetes/kube-proxy.conf"
+    },
+    "podNetwork": {
+        "enabled": true,
+        "networkName": "kubernetes-pod",
+        "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
+        "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
     }
 }

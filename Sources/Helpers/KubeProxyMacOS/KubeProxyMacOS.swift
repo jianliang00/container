@@ -55,7 +55,10 @@ struct KubeProxyMacOS: AsyncParsableCommand {
         reader: Reader
     ) async throws {
         if dryRun {
-            let applier = KubeProxyDryRunRuleApplier(anchorName: config.pf.anchorName) { anchor in
+            let applier = KubeProxyDryRunRuleApplier(
+                anchorName: config.pf.anchorName,
+                egressInterface: config.pf.configuredEgressInterface
+            ) { anchor in
                 print(anchor, terminator: "")
             }
             try await runController(config: config, reader: reader, applier: applier)

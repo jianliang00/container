@@ -10,13 +10,13 @@
         <string>--config</string>
         <string>/etc/kubernetes/kubelet-config.yaml</string>
         <string>--kubeconfig</string>
-        <string>/etc/kubernetes/kubelet.kubeconfig</string>
+        <string>/etc/kubernetes/kubelet.conf</string>
         <string>--bootstrap-kubeconfig</string>
         <string>/etc/kubernetes/bootstrap-kubelet.kubeconfig</string>
         <string>--hostname-override</string>
         <string>__NODE_NAME__</string>
         <string>--node-labels</string>
-        <string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true</string>
+        <string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full</string>
         <string>--register-with-taints</string>
         <string>node.kubernetes.io/macos=true:NoSchedule</string>
         <string>--root-dir</string>

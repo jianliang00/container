@@ -36,6 +36,7 @@ struct MacOSGuestNetworkBootstrapTests {
         let lease = try makeLease(
             backend: .vmnetShared,
             hostname: "guest-1",
+            mtu: 1_450,
             dns: .init(
                 nameservers: ["9.9.9.9"],
                 domain: "cluster.local",
@@ -58,6 +59,7 @@ struct MacOSGuestNetworkBootstrapTests {
         #expect(request.interfaces[0].ipv4Address == "192.168.64.2")
         #expect(request.interfaces[0].ipv4PrefixLength == 24)
         #expect(request.interfaces[0].ipv4Gateway == "192.168.64.1")
+        #expect(request.interfaces[0].mtu == 1_450)
         #expect(request.dns?.nameservers == ["9.9.9.9"])
         #expect(request.dns?.domain == "cluster.local")
         #expect(request.dns?.searchDomains == ["svc.cluster.local"])
@@ -136,6 +138,7 @@ private func makeConfiguration(
 private func makeLease(
     backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend,
     hostname: String,
+    mtu: UInt32? = nil,
     dns: ContainerResource.Attachment.DNSConfiguration? = nil
 ) throws -> MacOSGuestNetworkLease {
     let attachment = ContainerResource.Attachment(
@@ -145,6 +148,7 @@ private func makeLease(
         ipv4Gateway: try IPv4Address("192.168.64.1"),
         ipv6Address: nil,
         macAddress: try MACAddress("02:42:ac:11:00:02"),
+        mtu: mtu,
         dns: dns
     )
     return MacOSGuestNetworkLease(

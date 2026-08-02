@@ -25,6 +25,45 @@ public enum MacOSKubeadmRenderer {
         certificateAuthorityPath: String,
         token: String
     ) -> String {
+        kubeconfig(
+            clusterName: clusterName,
+            contextName: contextName,
+            userName: userName,
+            server: server,
+            certificateAuthorityPath: certificateAuthorityPath,
+            credentialKey: "token",
+            credentialValue: token
+        )
+    }
+
+    public static func kubeconfig(
+        clusterName: String,
+        contextName: String,
+        userName: String,
+        server: URL,
+        certificateAuthorityPath: String,
+        tokenFile: String
+    ) -> String {
+        kubeconfig(
+            clusterName: clusterName,
+            contextName: contextName,
+            userName: userName,
+            server: server,
+            certificateAuthorityPath: certificateAuthorityPath,
+            credentialKey: "tokenFile",
+            credentialValue: tokenFile
+        )
+    }
+
+    private static func kubeconfig(
+        clusterName: String,
+        contextName: String,
+        userName: String,
+        server: URL,
+        certificateAuthorityPath: String,
+        credentialKey: String,
+        credentialValue: String
+    ) -> String {
         """
         apiVersion: v1
         kind: Config
@@ -36,7 +75,7 @@ public enum MacOSKubeadmRenderer {
         users:
         - name: \(userName)
           user:
-            token: \(token)
+            \(credentialKey): \(credentialValue)
         contexts:
         - name: \(contextName)
           context:
@@ -124,7 +163,7 @@ public enum MacOSKubeadmRenderer {
                             "os": "darwin",
                             "architecture": "arm64"
                         },
-                        "network": "default",
+                        "network": "kubernetes-pod",
                         "networkBackend": "vmnetShared",
                         "guiEnabled": false
                     },
@@ -137,6 +176,12 @@ public enum MacOSKubeadmRenderer {
                     "kubeProxy": {
                         "enabled": true,
                         "configPath": "/etc/kubernetes/kube-proxy.conf"
+                    },
+                    "podNetwork": {
+                        "enabled": true,
+                        "networkName": "kubernetes-pod",
+                        "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
+                        "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
                     }
                 }
 
@@ -179,7 +224,7 @@ public enum MacOSKubeadmRenderer {
         """
                         \(jsonString(profile.handler)): {
                             "sandboxImage": \(jsonString(profile.sandboxImage)),
-                            "network": "default",
+                            "network": \(jsonString(profile.networkMode.networkName)),
                             "networkBackend": \(jsonString(profile.networkMode.networkBackend)),
                             "guiEnabled": false
                         }
@@ -195,15 +240,41 @@ public enum MacOSKubeadmRenderer {
         """
         {
             "cniVersion": "1.1.0",
-            "name": "default",
+            "name": "kubernetes-pod",
             "plugins": [
                 {
                     "type": "macvmnet",
-                    "network": "default",
+                    "network": "kubernetes-pod",
                     "runtime": "container-runtime-macos",
                     "stateDir": "/var/lib/container/cni/macvmnet"
                 }
             ]
+        }
+
+        """
+    }
+
+    public static func flannelVXLANConfiguration(
+        nodeName: String,
+        containerServiceUserID: Int = 0
+    ) -> String {
+        """
+        {
+            "kubeconfig": "/etc/kubernetes/flannel-macos.kubeconfig",
+            "nodeKubeconfig": "/etc/kubernetes/kubelet.conf",
+            "nodeName": \(jsonString(nodeName)),
+            "containerServiceUserID": \(containerServiceUserID),
+            "configMapNamespace": "kube-flannel",
+            "configMapName": "kube-flannel-cfg",
+            "networkConfigKey": "net-conf.json",
+            "annotationPrefix": "flannel.alpha.coreos.com",
+            "vtepMACPath": "/var/lib/container/flannel-vxlan/vtep-mac",
+            "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
+            "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json",
+            "networkName": "kubernetes-pod",
+            "networkPlugin": "container-network-vmnet",
+            "networkVariant": "reserved",
+            "syncPeriodSeconds": 5
         }
 
         """
@@ -220,8 +291,9 @@ public enum MacOSKubeadmRenderer {
                 "configPath": "/etc/pf.conf",
                 "anchorsPath": "/etc/pf.anchors",
                 "pfctlPath": "/sbin/pfctl",
-                "egressInterface": "en0",
-                "vmnetCIDR": "192.168.64.0/24"
+                "vmnetCIDR": "192.168.64.0/24",
+                "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
+                "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
             }
         }
 
@@ -294,6 +366,21 @@ public enum MacOSKubeadmRenderer {
         )
     }
 
+    public static func flannelVXLANPlist(containerServiceUserID: Int = 0) -> String {
+        launchdPlist(
+            label: "com.apple.container.flannel-vxlan-macos",
+            programArguments: [
+                "/bin/launchctl",
+                "asuser",
+                "\(containerServiceUserID)",
+                "/usr/local/bin/container-flannel-vxlan-macos",
+                "--config",
+                "/etc/kubernetes/flannel-vxlan-macos.conf",
+            ],
+            logPath: "/var/log/container-flannel-vxlan-macos.log"
+        )
+    }
+
     public static func kubeletPlist(
         nodeName: String,
         sandboxImage: String,
@@ -322,7 +409,7 @@ public enum MacOSKubeadmRenderer {
                 "--config",
                 "/etc/kubernetes/kubelet-config.yaml",
                 "--kubeconfig",
-                "/etc/kubernetes/kubelet.kubeconfig",
+                "/etc/kubernetes/kubelet.conf",
                 "--bootstrap-kubeconfig",
                 "/etc/kubernetes/bootstrap-kubelet.kubeconfig",
                 "--hostname-override",

@@ -117,6 +117,17 @@ extension CRIShimConfig {
             issues.append("kubeProxy is required")
         }
 
+        if let podNetwork {
+            if podNetwork.enabled == nil {
+                issues.append("podNetwork.enabled is required")
+            }
+            if podNetwork.enabled == true {
+                validateNonEmpty(podNetwork.networkName, name: "podNetwork.networkName", issues: &issues)
+                validatePath(podNetwork.runtimeStatePath, name: "podNetwork.runtimeStatePath", issues: &issues)
+                validatePath(podNetwork.readyStatePath, name: "podNetwork.readyStatePath", issues: &issues)
+            }
+        }
+
         validateKubernetesIntegrationNetworkBackend(issues: &issues)
 
         return issues
@@ -154,6 +165,7 @@ private func validateRequiredRuntimeProfile(_ profile: RuntimeProfile, name: Str
     }
     validateNonEmpty(profile.network, name: "\(name).network", issues: &issues)
     validateNetworkBackend(profile.networkBackend, name: "\(name).networkBackend", required: true, issues: &issues)
+    validateNetworkMTU(profile.networkMTU, name: "\(name).networkMTU", issues: &issues)
     if profile.guiEnabled == nil {
         issues.append("\(name).guiEnabled is required")
     }
@@ -171,7 +183,17 @@ private func validateRuntimeHandlerOverride(_ profile: RuntimeProfile, name: Str
         }
     }
     validateNetworkBackend(profile.networkBackend, name: "\(name).networkBackend", required: false, issues: &issues)
+    validateNetworkMTU(profile.networkMTU, name: "\(name).networkMTU", issues: &issues)
     validateRuntimeResources(profile.resources, name: "\(name).resources", issues: &issues)
+}
+
+private func validateNetworkMTU(_ value: UInt32?, name: String, issues: inout [String]) {
+    guard let value else {
+        return
+    }
+    if !(576...9_000).contains(value) {
+        issues.append("\(name) must be between 576 and 9000")
+    }
 }
 
 private func validatePath(_ value: String?, name: String, allowUnixScheme: Bool = false, issues: inout [String]) {

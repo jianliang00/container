@@ -21,7 +21,7 @@ import Testing
 
 @Suite(.serialized)
 struct MacOSKubeadmDiscoveryTests {
-    @Test func clusterInfoDiscoveryUsesAnonymousRequest() throws {
+    @Test func nodeAbsentUsesFreshFlannelTokenAfterAnonymousPinnedDiscovery() throws {
         MockKubernetesAPIURLProtocol.reset()
         let client = MacOSKubeadmDiscoveryClient(sessionConfiguration: {
             let configuration = URLSessionConfiguration.ephemeral
@@ -31,6 +31,8 @@ struct MacOSKubeadmDiscoveryTests {
 
         let discovered = try client.discover(
             apiServer: #require(URL(string: "https://cluster.example:6443")),
+            nodeName: "macos-ci-1",
+            networkMode: .full,
             token: "abcdef.0123456789abcdef",
             expectedCACertHashes: [testCACertHash],
             log: MacOSKubeadmLog()
@@ -39,6 +41,7 @@ struct MacOSKubeadmDiscoveryTests {
         #expect(discovered.clusterDNS == "10.96.0.53")
         #expect(discovered.clusterDomain == "cluster.local")
         #expect(discovered.kubeProxyToken == "proxy-token")
+        #expect(discovered.flannelToken == "flannel-token")
 
         let requests = MockKubernetesAPIURLProtocol.recordedRequests()
         let clusterInfoRequest = try #require(
@@ -60,7 +63,339 @@ struct MacOSKubeadmDiscoveryTests {
         )
         let tokenRequestSpec = try #require(tokenRequest["spec"] as? [String: Any])
         #expect(tokenRequestSpec["audiences"] == nil)
-        #expect(tokenRequestSpec["expirationSeconds"] as? Int == 31_536_000)
+        #expect(tokenRequestSpec["expirationSeconds"] as? Int == 86_400)
+
+        let flannelTokenRequest = try #require(
+            requests.first { $0.path == "/api/v1/namespaces/kube-system/serviceaccounts/flannel-macos/token" })
+        #expect(flannelTokenRequest.method == "POST")
+        #expect(flannelTokenRequest.authorization == "Bearer abcdef.0123456789abcdef")
+
+        let nodeRequest = try #require(requests.first { $0.path == "/api/v1/nodes/macos-ci-1" })
+        #expect(nodeRequest.method == "GET")
+        #expect(nodeRequest.authorization == "Bearer flannel-token")
+    }
+
+    @Test func rejectsHTTPEntryEndpointBeforeAnyRequest() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        let client = MacOSKubeadmDiscoveryClient(sessionConfiguration: {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockKubernetesAPIURLProtocol.self]
+            return configuration
+        })
+
+        #expect(
+            throws: MacOSKubeadmError.invalidInput("Kubernetes API server endpoint must use HTTPS")
+        ) {
+            try client.discover(
+                apiServer: #require(URL(string: "http://cluster.example:6443")),
+                nodeName: "macos-ci-1",
+                networkMode: .full,
+                token: "abcdef.0123456789abcdef",
+                expectedCACertHashes: [testCACertHash],
+                log: MacOSKubeadmLog()
+            )
+        }
+        #expect(MockKubernetesAPIURLProtocol.recordedRequests().isEmpty)
+    }
+
+    @Test func rejectsInvalidNodeNameBeforeAnyRequest() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        let client = makeDiscoveryClient()
+
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--node-name may only contain letters, numbers, '.', '_', and '-'"
+            )
+        ) {
+            try client.discover(
+                apiServer: #require(URL(string: "https://cluster.example:6443")),
+                nodeName: "nodes/other",
+                networkMode: .full,
+                token: "abcdef.0123456789abcdef",
+                expectedCACertHashes: [testCACertHash],
+                log: MacOSKubeadmLog()
+            )
+        }
+        #expect(MockKubernetesAPIURLProtocol.recordedRequests().isEmpty)
+    }
+
+    @Test func rejectsHTTPDiscoveredServerBeforeAnyAuthorizedRequest() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setClusterServer("http://cluster.example:6443")
+        let client = MacOSKubeadmDiscoveryClient(sessionConfiguration: {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockKubernetesAPIURLProtocol.self]
+            return configuration
+        })
+
+        #expect(
+            throws: MacOSKubeadmError.preflightFailed(
+                "cluster-info kubeconfig cluster.server must use HTTPS"
+            )
+        ) {
+            try client.discover(
+                apiServer: #require(URL(string: "https://cluster.example:6443")),
+                nodeName: "macos-ci-1",
+                networkMode: .full,
+                token: "abcdef.0123456789abcdef",
+                expectedCACertHashes: [testCACertHash],
+                log: MacOSKubeadmLog()
+            )
+        }
+
+        let requests = MockKubernetesAPIURLProtocol.recordedRequests()
+        #expect(requests.count == 1)
+        #expect(requests[0].path == "/api/v1/namespaces/kube-public/configmaps/cluster-info")
+        #expect(requests[0].authorization == nil)
+    }
+
+    @Test func fullNetworkDiscoveryRequiresClusterProvidedDNSSettings() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setKubeletConfig(
+            """
+            clusterDNS:
+            - fd42:10:96::53
+            clusterDomain: cluster.local
+            """
+        )
+        let client = MacOSKubeadmDiscoveryClient(sessionConfiguration: {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockKubernetesAPIURLProtocol.self]
+            return configuration
+        })
+
+        #expect(
+            throws: MacOSKubeadmError.preflightFailed(
+                "kube-system/kubelet-config does not contain a usable IPv4 clusterDNS and clusterDomain"
+            )
+        ) {
+            try client.discover(
+                apiServer: #require(URL(string: "https://cluster.example:6443")),
+                nodeName: "macos-ci-1",
+                networkMode: .full,
+                token: "abcdef.0123456789abcdef",
+                expectedCACertHashes: [testCACertHash],
+                log: MacOSKubeadmLog()
+            )
+        }
+    }
+
+    @Test func fullNetworkDiscoverySelectsIPv4DNSFromDualStackList() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setKubeletConfig(
+            """
+            clusterDNS:
+            - fd42:10:96::53
+            - 10.96.0.53
+            clusterDomain: cluster.local
+            """
+        )
+        let client = MacOSKubeadmDiscoveryClient(sessionConfiguration: {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockKubernetesAPIURLProtocol.self]
+            return configuration
+        })
+
+        let discovered = try client.discover(
+            apiServer: #require(URL(string: "https://cluster.example:6443")),
+            nodeName: "macos-ci-1",
+            networkMode: .full,
+            token: "abcdef.0123456789abcdef",
+            expectedCACertHashes: [testCACertHash],
+            log: MacOSKubeadmLog()
+        )
+
+        #expect(discovered.clusterDNS == "10.96.0.53")
+    }
+
+    @Test func compatDiscoveryRetainsDefaultWhenClusterDNSIsUnavailable() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setKubeletConfig(nil)
+        let client = MacOSKubeadmDiscoveryClient(sessionConfiguration: {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockKubernetesAPIURLProtocol.self]
+            return configuration
+        })
+
+        let discovered = try client.discover(
+            apiServer: #require(URL(string: "https://cluster.example:6443")),
+            nodeName: "macos-ci-1",
+            networkMode: .compat,
+            token: "abcdef.0123456789abcdef",
+            expectedCACertHashes: [testCACertHash],
+            log: MacOSKubeadmLog()
+        )
+
+        #expect(discovered.clusterDNS == "10.96.0.10")
+        #expect(discovered.clusterDomain == "cluster.local")
+        #expect(discovered.kubeProxyToken.isEmpty)
+        #expect(discovered.flannelToken.isEmpty)
+    }
+
+    @Test func existingFullNodeWithMatchingMetadataIsAccepted() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: "full",
+            taints: [macOSTaint]
+        )
+
+        let discovered = try discover(networkMode: .full)
+
+        #expect(discovered.kubeProxyToken == "proxy-token")
+        #expect(discovered.flannelToken == "flannel-token")
+    }
+
+    @Test func existingCompatNodeWithMatchingMetadataIsAccepted() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: "compat",
+            taints: [macOSTaint, compatNetworkTaint]
+        )
+
+        let discovered = try discover(networkMode: .compat)
+
+        #expect(discovered.kubeProxyToken.isEmpty)
+        #expect(discovered.flannelToken.isEmpty)
+        let requests = MockKubernetesAPIURLProtocol.recordedRequests()
+        #expect(
+            requests.first { $0.path == "/api/v1/nodes/macos-ci-1" }?.authorization
+                == "Bearer flannel-token"
+        )
+        #expect(
+            !requests.contains {
+                $0.path == "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token"
+            }
+        )
+    }
+
+    @Test func fullToCompatModeSwitchIsRejectedBeforePodNetworkTokenRequest() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: "full",
+            taints: [macOSTaint]
+        )
+
+        try expectModeConflict(desiredMode: .compat)
+
+        #expect(
+            !MockKubernetesAPIURLProtocol.recordedRequests().contains {
+                $0.path == "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token"
+            }
+        )
+    }
+
+    @Test func compatToFullModeSwitchIsRejectedBeforePodNetworkTokenRequest() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: "compat",
+            taints: [macOSTaint, compatNetworkTaint]
+        )
+
+        try expectModeConflict(desiredMode: .full)
+
+        #expect(
+            !MockKubernetesAPIURLProtocol.recordedRequests().contains {
+                $0.path == "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token"
+            }
+        )
+    }
+
+    @Test func staleCompatTaintOnFullNodeIsRejected() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: "full",
+            taints: [macOSTaint, compatNetworkTaint]
+        )
+
+        try expectModeConflict(desiredMode: .full)
+    }
+
+    @Test func missingNetworkModeLabelIsRejected() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: nil,
+            taints: [macOSTaint]
+        )
+
+        try expectModeConflict(desiredMode: .full)
+    }
+
+    @Test func missingMacOSTaintIsRejected() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: "full",
+            taints: []
+        )
+
+        try expectModeConflict(desiredMode: .full)
+    }
+
+    @Test func unrelatedTaintDoesNotAffectMatchingMode() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        MockKubernetesAPIURLProtocol.setNode(
+            networkMode: "full",
+            taints: [
+                macOSTaint,
+                [
+                    "key": "node.kubernetes.io/unschedulable",
+                    "effect": "NoSchedule",
+                ],
+            ]
+        )
+
+        let discovered = try discover(networkMode: .full)
+
+        #expect(discovered.kubeProxyToken == "proxy-token")
+        #expect(discovered.flannelToken == "flannel-token")
+    }
+
+    @Test func dryRunDoesNotContactKubernetesAPI() throws {
+        MockKubernetesAPIURLProtocol.reset()
+        let runner = MacOSKubeadmJoinRunner(discoveryClient: makeDiscoveryClient())
+        let options = MacOSKubeadmJoinOptions(
+            apiServer: try #require(URL(string: "https://cluster.example:6443")),
+            nodeName: "macos-ci-1",
+            token: "abcdef.0123456789abcdef",
+            discoveryTokenCACertHashes: [testCACertHash],
+            networkMode: .compat,
+            installRoot: "/tmp/container-macos-kubeadm-dry-run",
+            startServices: false,
+            dryRun: true
+        )
+
+        try runner.run(options: options, log: MacOSKubeadmLog())
+
+        #expect(MockKubernetesAPIURLProtocol.recordedRequests().isEmpty)
+    }
+
+    private func discover(networkMode: MacOSKubeadmNetworkMode) throws -> MacOSKubeadmDiscoveredCluster {
+        try makeDiscoveryClient().discover(
+            apiServer: #require(URL(string: "https://cluster.example:6443")),
+            nodeName: "macos-ci-1",
+            networkMode: networkMode,
+            token: "abcdef.0123456789abcdef",
+            expectedCACertHashes: [testCACertHash],
+            log: MacOSKubeadmLog()
+        )
+    }
+
+    private func expectModeConflict(desiredMode: MacOSKubeadmNetworkMode) throws {
+        do {
+            _ = try discover(networkMode: desiredMode)
+            Issue.record("expected existing Node metadata to reject the requested network mode")
+        } catch MacOSKubeadmError.preflightFailed(let message) {
+            #expect(message.contains("does not match --network-mode \(desiredMode.rawValue)"))
+            #expect(message.contains("cordon and drain the Node"))
+            #expect(message.contains("delete it or explicitly converge"))
+        }
+    }
+
+    private func makeDiscoveryClient() -> MacOSKubeadmDiscoveryClient {
+        MacOSKubeadmDiscoveryClient(sessionConfiguration: {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockKubernetesAPIURLProtocol.self]
+            return configuration
+        })
     }
 }
 
@@ -74,11 +409,56 @@ private struct RecordedKubernetesRequest: Sendable {
 private final class KubernetesRequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var requests: [RecordedKubernetesRequest] = []
+    private var kubeletConfig: String? = KubernetesRequestRecorder.defaultKubeletConfig
+    private var clusterServer = "https://cluster.example:6443"
+    private var node: MockKubernetesNode?
+
+    private static let defaultKubeletConfig = """
+        clusterDNS:
+        - 10.96.0.53
+        clusterDomain: cluster.local
+        """
 
     func reset() {
         lock.withLock {
             requests = []
+            kubeletConfig = Self.defaultKubeletConfig
+            clusterServer = "https://cluster.example:6443"
+            node = nil
         }
+    }
+
+    func setKubeletConfig(_ value: String?) {
+        lock.withLock {
+            kubeletConfig = value
+        }
+    }
+
+    func setClusterServer(_ value: String) {
+        lock.withLock {
+            clusterServer = value
+        }
+    }
+
+    func setNode(networkMode: String?, taints: [[String: String]]) {
+        lock.withLock {
+            node = MockKubernetesNode(
+                labels: networkMode.map { ["node.kubernetes.io/macos-network": $0] } ?? [:],
+                taints: taints
+            )
+        }
+    }
+
+    func currentKubeletConfig() -> String? {
+        lock.withLock { kubeletConfig }
+    }
+
+    func currentClusterServer() -> String {
+        lock.withLock { clusterServer }
+    }
+
+    func currentNode() -> MockKubernetesNode? {
+        lock.withLock { node }
     }
 
     func append(_ request: RecordedKubernetesRequest) {
@@ -105,6 +485,18 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
         recorder.recordedRequests()
     }
 
+    static func setKubeletConfig(_ value: String?) {
+        recorder.setKubeletConfig(value)
+    }
+
+    static func setClusterServer(_ value: String) {
+        recorder.setClusterServer(value)
+    }
+
+    static func setNode(networkMode: String?, taints: [[String: String]]) {
+        recorder.setNode(networkMode: networkMode, taints: taints)
+    }
+
     override class func canInit(with request: URLRequest) -> Bool {
         true
     }
@@ -121,7 +513,7 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
                 path: path,
                 method: request.httpMethod ?? "GET",
                 authorization: request.value(forHTTPHeaderField: "Authorization"),
-                body: request.httpBody
+                body: Self.bodyData(for: request)
             ))
 
         let statusCode = Self.statusCode(for: path)
@@ -139,11 +531,41 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
 
     override func stopLoading() {}
 
+    private static func bodyData(for request: URLRequest) -> Data? {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return nil
+        }
+        stream.open()
+        defer { stream.close() }
+
+        let bufferSize = 4_096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        var body = Data()
+        while true {
+            let count = stream.read(buffer, maxLength: bufferSize)
+            guard count >= 0 else {
+                return nil
+            }
+            guard count > 0 else {
+                return body
+            }
+            body.append(buffer, count: count)
+        }
+    }
+
     private static func statusCode(for path: String) -> Int {
+        if path.hasPrefix("/api/v1/nodes/") {
+            return recorder.currentNode() == nil ? 404 : 200
+        }
         switch path {
         case "/api/v1/namespaces/kube-public/configmaps/cluster-info",
             "/api/v1/namespaces/kube-system/configmaps/kubelet-config",
-            "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token":
+            "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token",
+            "/api/v1/namespaces/kube-system/serviceaccounts/flannel-macos/token":
             return 200
         default:
             return 404
@@ -151,6 +573,20 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
     }
 
     private static func responseData(for path: String) -> Data {
+        if path.hasPrefix("/api/v1/nodes/") {
+            guard let node = recorder.currentNode() else {
+                return jsonData([
+                    "kind": "Status",
+                    "status": "Failure",
+                    "reason": "NotFound",
+                    "code": 404,
+                ])
+            }
+            return jsonData([
+                "metadata": ["labels": node.labels],
+                "spec": ["taints": node.taints],
+            ])
+        }
         switch path {
         case "/api/v1/namespaces/kube-public/configmaps/cluster-info":
             return jsonData([
@@ -161,7 +597,7 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
                     clusters:
                     - cluster:
                         certificate-authority-data: \(testCACertDERBase64)
-                        server: https://cluster.example:6443
+                        server: \(recorder.currentClusterServer())
                       name: cluster
                     contexts: []
                     current-context: ""
@@ -171,19 +607,20 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
                 ]
             ])
         case "/api/v1/namespaces/kube-system/configmaps/kubelet-config":
-            return jsonData([
-                "data": [
-                    "kubelet": """
-                    clusterDNS:
-                    - 10.96.0.53
-                    clusterDomain: cluster.local
-                    """
-                ]
-            ])
+            guard let kubeletConfig = recorder.currentKubeletConfig() else {
+                return jsonData(["data": [:]])
+            }
+            return jsonData(["data": ["kubelet": kubeletConfig]])
         case "/api/v1/namespaces/kube-system/serviceaccounts/kube-proxy-macos/token":
             return jsonData([
                 "status": [
                     "token": "proxy-token"
+                ]
+            ])
+        case "/api/v1/namespaces/kube-system/serviceaccounts/flannel-macos/token":
+            return jsonData([
+                "status": [
+                    "token": "flannel-token"
                 ]
             ])
         default:
@@ -198,6 +635,23 @@ private final class MockKubernetesAPIURLProtocol: URLProtocol, @unchecked Sendab
         try! JSONSerialization.data(withJSONObject: object)
     }
 }
+
+private struct MockKubernetesNode: Sendable {
+    var labels: [String: String]
+    var taints: [[String: String]]
+}
+
+private let macOSTaint = [
+    "key": "node.kubernetes.io/macos",
+    "value": "true",
+    "effect": "NoSchedule",
+]
+
+private let compatNetworkTaint = [
+    "key": "node.kubernetes.io/macos-network",
+    "value": "compat",
+    "effect": "NoSchedule",
+]
 
 private let testCACertHash = "25d73167746724376c17137b25cbe31bd9bfc043b7988bbc4ba0871e79eb3a32"
 private let testCACertDERBase64 = """

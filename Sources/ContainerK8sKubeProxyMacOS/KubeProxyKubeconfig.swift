@@ -19,18 +19,27 @@ import Foundation
 public struct KubeProxyKubeconfigClientConfig: Sendable, Equatable {
     public var server: URL
     public var bearerToken: String?
+    public var bearerTokenFile: URL?
     public var certificateAuthorityData: Data?
+    public var clientCertificateData: Data?
+    public var clientKeyData: Data?
     public var insecureSkipTLSVerify: Bool
 
     public init(
         server: URL,
         bearerToken: String? = nil,
+        bearerTokenFile: URL? = nil,
         certificateAuthorityData: Data? = nil,
+        clientCertificateData: Data? = nil,
+        clientKeyData: Data? = nil,
         insecureSkipTLSVerify: Bool = false
     ) {
         self.server = server
         self.bearerToken = bearerToken
+        self.bearerTokenFile = bearerTokenFile
         self.certificateAuthorityData = certificateAuthorityData
+        self.clientCertificateData = clientCertificateData
+        self.clientKeyData = clientKeyData
         self.insecureSkipTLSVerify = insecureSkipTLSVerify
     }
 }
@@ -64,23 +73,59 @@ public enum KubeProxyKubeconfig {
             raw.users.first { $0.name == userName }
         }
 
+        let credential = try resolveToken(user, baseURL: baseURL)
         return KubeProxyKubeconfigClientConfig(
             server: server,
-            bearerToken: try resolveToken(user, baseURL: baseURL),
+            bearerToken: credential.token,
+            bearerTokenFile: credential.file,
             certificateAuthorityData: try resolveCertificateAuthorityData(cluster, baseURL: baseURL),
+            clientCertificateData: try resolveCredentialData(
+                inlineData: user?.clientCertificateData,
+                path: user?.clientCertificate,
+                baseURL: baseURL,
+                name: "client-certificate-data"
+            ),
+            clientKeyData: try resolveCredentialData(
+                inlineData: user?.clientKeyData,
+                path: user?.clientKey,
+                baseURL: baseURL,
+                name: "client-key-data"
+            ),
             insecureSkipTLSVerify: cluster.insecureSkipTLSVerify ?? false
         )
     }
 
-    private static func resolveToken(_ user: RawUser?, baseURL: URL) throws -> String? {
-        if let token = user?.token, !token.isEmpty {
-            return token
+    private static func resolveCredentialData(
+        inlineData: String?,
+        path: String?,
+        baseURL: URL,
+        name: String
+    ) throws -> Data? {
+        if let inlineData, !inlineData.isEmpty {
+            guard let decoded = Data(base64Encoded: inlineData) else {
+                throw KubeProxyMacOSError.invalidKubeconfig("\(name) is not valid base64")
+            }
+            return decoded
         }
-        guard let tokenFile = user?.tokenFile, !tokenFile.isEmpty else {
+        guard let path, !path.isEmpty else {
             return nil
         }
+        let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : baseURL.appendingPathComponent(path)
+        return try Data(contentsOf: url)
+    }
+
+    private static func resolveToken(_ user: RawUser?, baseURL: URL) throws -> ResolvedToken {
+        if let token = user?.token, !token.isEmpty {
+            return ResolvedToken(token: token, file: nil)
+        }
+        guard let tokenFile = user?.tokenFile, !tokenFile.isEmpty else {
+            return ResolvedToken(token: nil, file: nil)
+        }
         let url = tokenFile.hasPrefix("/") ? URL(fileURLWithPath: tokenFile) : baseURL.appendingPathComponent(tokenFile)
-        return try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return ResolvedToken(
+            token: try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+            file: url
+        )
     }
 
     private static func resolveCertificateAuthorityData(_ cluster: RawCluster, baseURL: URL) throws -> Data? {
@@ -254,6 +299,14 @@ public enum KubeProxyKubeconfig {
                 user?.token = value
             } else if let value = value(after: "tokenFile:", in: line) ?? value(after: "token-file:", in: line) {
                 user?.tokenFile = value
+            } else if let value = value(after: "client-certificate-data:", in: line) {
+                user?.clientCertificateData = value
+            } else if let value = value(after: "client-certificate:", in: line) {
+                user?.clientCertificate = value
+            } else if let value = value(after: "client-key-data:", in: line) {
+                user?.clientKeyData = value
+            } else if let value = value(after: "client-key:", in: line) {
+                user?.clientKey = value
             }
         case (.contexts, .context):
             if let value = value(after: "cluster:", in: line) {
@@ -301,6 +354,11 @@ public enum KubeProxyKubeconfig {
     }
 }
 
+private struct ResolvedToken {
+    var token: String?
+    var file: URL?
+}
+
 private enum RawSection {
     case root
     case clusters
@@ -334,6 +392,10 @@ private struct RawUser {
     var name: String?
     var token: String?
     var tokenFile: String?
+    var clientCertificateData: String?
+    var clientCertificate: String?
+    var clientKeyData: String?
+    var clientKey: String?
 }
 
 private struct RawContext {

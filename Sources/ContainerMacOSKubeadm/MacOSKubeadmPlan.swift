@@ -86,6 +86,9 @@ public enum MacOSKubeadmPlanner {
         try validate(options)
 
         let caPath = "/etc/kubernetes/pki/ca.crt"
+        let credentialDirectory = "/var/lib/container/kubernetes-credentials"
+        let kubeProxyTokenPath = "\(credentialDirectory)/kube-proxy-macos.token"
+        let flannelTokenPath = "\(credentialDirectory)/flannel-macos.token"
         var directories = [
             "/etc/kubernetes",
             "/etc/kubernetes/manifests",
@@ -102,6 +105,7 @@ public enum MacOSKubeadmPlanner {
                 "/etc/cni/net.d",
                 "/opt/cni/bin",
                 "/var/lib/container/cni/macvmnet",
+                "/var/lib/container/flannel-vxlan",
             ])
         }
 
@@ -109,6 +113,14 @@ public enum MacOSKubeadmPlanner {
             MacOSKubeadmStep(
                 message: "ensure directory \(path)",
                 action: .createDirectory(path: options.rooted(path), mode: 0o755)
+            )
+        }
+        if options.networkMode.usesPodNetworking {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "ensure private Kubernetes credential directory",
+                    action: .createDirectory(path: options.rooted(credentialDirectory), mode: 0o700)
+                )
             )
         }
         if options.containerServiceUserID != 0 {
@@ -174,6 +186,15 @@ public enum MacOSKubeadmPlanner {
         if options.networkMode.usesPodNetworking {
             steps.append(contentsOf: [
                 MacOSKubeadmStep(
+                    message: "write kube-proxy ServiceAccount token",
+                    action: .writeFile(
+                        path: options.rooted(kubeProxyTokenPath),
+                        contents: options.kubeProxyToken ?? "",
+                        mode: 0o600,
+                        sensitive: true
+                    )
+                ),
+                MacOSKubeadmStep(
                     message: "write kube-proxy kubeconfig",
                     action: .writeFile(
                         path: options.rooted("/etc/kubernetes/kube-proxy.kubeconfig"),
@@ -183,7 +204,32 @@ public enum MacOSKubeadmPlanner {
                             userName: "kube-proxy",
                             server: options.apiServer,
                             certificateAuthorityPath: caPath,
-                            token: options.kubeProxyToken ?? ""
+                            tokenFile: kubeProxyTokenPath
+                        ),
+                        mode: 0o600,
+                        sensitive: true
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "write flannel-macos ServiceAccount token",
+                    action: .writeFile(
+                        path: options.rooted(flannelTokenPath),
+                        contents: options.flannelToken ?? "",
+                        mode: 0o600,
+                        sensitive: true
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "write flannel-macos kubeconfig",
+                    action: .writeFile(
+                        path: options.rooted("/etc/kubernetes/flannel-macos.kubeconfig"),
+                        contents: MacOSKubeadmRenderer.kubeconfig(
+                            clusterName: options.clusterName,
+                            contextName: "flannel-macos",
+                            userName: "flannel-macos",
+                            server: options.apiServer,
+                            certificateAuthorityPath: caPath,
+                            tokenFile: flannelTokenPath
                         ),
                         mode: 0o600,
                         sensitive: true
@@ -199,10 +245,33 @@ public enum MacOSKubeadmPlanner {
                     )
                 ),
                 MacOSKubeadmStep(
+                    message: "write flannel VXLAN configuration",
+                    action: .writeFile(
+                        path: options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+                        contents: MacOSKubeadmRenderer.flannelVXLANConfiguration(
+                            nodeName: options.nodeName,
+                            containerServiceUserID: options.containerServiceUserID
+                        ),
+                        mode: 0o644,
+                        sensitive: false
+                    )
+                ),
+                MacOSKubeadmStep(
                     message: "write kube-proxy configuration",
                     action: .writeFile(
                         path: options.rooted("/etc/kubernetes/kube-proxy.conf"),
                         contents: MacOSKubeadmRenderer.kubeProxyConfiguration(nodeName: options.nodeName),
+                        mode: 0o644,
+                        sensitive: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "write flannel VXLAN launchd plist",
+                    action: .writeFile(
+                        path: options.rooted("/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist"),
+                        contents: MacOSKubeadmRenderer.flannelVXLANPlist(
+                            containerServiceUserID: options.containerServiceUserID
+                        ),
                         mode: 0o644,
                         sensitive: false
                     )
@@ -259,11 +328,7 @@ public enum MacOSKubeadmPlanner {
         ])
 
         if options.startServices {
-            steps.append(
-                contentsOf: serviceStartSteps(
-                    networkMode: options.networkMode,
-                    containerServiceUserID: options.containerServiceUserID
-                ))
+            steps.append(contentsOf: serviceStartSteps(options: options))
         }
 
         return MacOSKubeadmPlan(steps: steps)
@@ -274,16 +339,56 @@ public enum MacOSKubeadmPlanner {
 
         var steps = [
             MacOSKubeadmStep(
+                message: "preflight owned pod network purge",
+                action: .runCommand(
+                    arguments: [
+                        "/usr/local/bin/container-flannel-vxlan-macos",
+                        "--config",
+                        options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+                        "--check-purge",
+                    ],
+                    bestEffort: false
+                )
+            ),
+            stopLaunchdJobStep(
                 message: "stop kubelet launchd job if present",
-                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kubelet"], bestEffort: true)
+                label: "com.apple.container.kubelet"
             ),
-            MacOSKubeadmStep(
+            stopLaunchdJobStep(
                 message: "stop kube-proxy launchd job if present",
-                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kube-proxy-macos"], bestEffort: true)
+                label: "com.apple.container.kube-proxy-macos"
             ),
             MacOSKubeadmStep(
+                message: "withdraw flannel VXLAN data plane",
+                action: .runCommand(
+                    arguments: [
+                        "/usr/local/bin/container-flannel-vxlan-macos",
+                        "--config",
+                        options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+                        "--withdraw",
+                    ],
+                    bestEffort: false
+                )
+            ),
+            stopLaunchdJobStep(
+                message: "stop flannel VXLAN launchd job if present",
+                label: "com.apple.container.flannel-vxlan-macos"
+            ),
+            stopLaunchdJobStep(
                 message: "stop CRI shim launchd job if present",
-                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.cri-shim-macos"], bestEffort: true)
+                label: "com.apple.container.cri-shim-macos"
+            ),
+            MacOSKubeadmStep(
+                message: "purge owned pod network",
+                action: .runCommand(
+                    arguments: [
+                        "/usr/local/bin/container-flannel-vxlan-macos",
+                        "--config",
+                        options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+                        "--purge-network",
+                    ],
+                    bestEffort: false
+                )
             ),
             MacOSKubeadmStep(
                 message: "flush kube-proxy PF anchor if present",
@@ -294,15 +399,21 @@ public enum MacOSKubeadmPlanner {
         let generatedPaths: [(path: String, recursive: Bool, sensitive: Bool)] = [
             ("/Library/LaunchDaemons/com.apple.container.kubelet.plist", false, false),
             ("/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist", false, false),
+            ("/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist", false, false),
             ("/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist", false, false),
             ("/etc/kubernetes/bootstrap-kubelet.kubeconfig", false, true),
+            ("/etc/kubernetes/kubelet.conf", false, true),
             ("/etc/kubernetes/kubelet.kubeconfig", false, true),
             ("/etc/kubernetes/kube-proxy.kubeconfig", false, true),
+            ("/etc/kubernetes/flannel-macos.kubeconfig", false, true),
             ("/etc/kubernetes/kubelet-config.yaml", false, false),
             ("/etc/kubernetes/container-cri-shim-macos-config.json", false, false),
+            ("/etc/kubernetes/flannel-vxlan-macos.conf", false, false),
             ("/etc/kubernetes/kube-proxy.conf", false, false),
             ("/etc/kubernetes/pki/ca.crt", false, false),
             ("/etc/cni/net.d/10-macvmnet.conflist", false, false),
+            ("/var/lib/container/flannel-vxlan/ready.json", false, false),
+            ("/var/lib/container/kubernetes-credentials", true, true),
             ("/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml", false, false),
             ("/usr/local/share/container-macos-node/manifests/runtimeclass-macos-compat.yaml", false, false),
         ]
@@ -326,10 +437,12 @@ public enum MacOSKubeadmPlanner {
                 "/var/lib/kubelet",
                 "/var/lib/container/cri-shim-macos",
                 "/var/lib/container/cni/macvmnet",
+                "/var/lib/container/flannel-vxlan",
                 "/var/log/pods",
                 "/var/log/containers",
                 "/var/log/kubelet.log",
                 "/var/log/container-cri-shim-macos.log",
+                "/var/log/container-flannel-vxlan-macos.log",
                 "/var/log/container-kube-proxy-macos.log",
             ]
             for path in statePaths {
@@ -351,8 +464,8 @@ public enum MacOSKubeadmPlanner {
     }
 
     private static func validate(_ options: MacOSKubeadmJoinOptions) throws {
-        guard ["https", "http"].contains(options.apiServer.scheme?.lowercased() ?? "") else {
-            throw MacOSKubeadmError.invalidInput("--apiserver must use http or https")
+        guard options.apiServer.scheme?.lowercased() == "https", options.apiServer.host != nil else {
+            throw MacOSKubeadmError.invalidInput("--apiserver must use HTTPS")
         }
         guard options.nodeName.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
             throw MacOSKubeadmError.invalidInput("--node-name may only contain letters, numbers, '.', '_', and '-'")
@@ -368,6 +481,9 @@ public enum MacOSKubeadmPlanner {
         }
         guard !options.networkMode.usesPodNetworking || !(options.kubeProxyToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("discovered kube-proxy token is required")
+        }
+        guard !options.networkMode.usesPodNetworking || !(options.flannelToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MacOSKubeadmError.invalidInput("discovered flannel-macos token is required")
         }
         guard options.containerServiceUserID >= 0 else {
             throw MacOSKubeadmError.invalidInput("--container-service-user must be a non-negative uid")
@@ -419,11 +535,39 @@ public enum MacOSKubeadmPlanner {
         }
     }
 
-    private static func serviceStartSteps(
-        networkMode: MacOSKubeadmNetworkMode,
-        containerServiceUserID: Int
-    ) -> [MacOSKubeadmStep] {
+    private static func serviceStartSteps(options: MacOSKubeadmJoinOptions) -> [MacOSKubeadmStep] {
+        let networkMode = options.networkMode
+        let containerServiceUserID = options.containerServiceUserID
         var steps: [MacOSKubeadmStep] = []
+        if !networkMode.usesPodNetworking {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "preflight owned pod network purge",
+                    action: .runCommand(
+                        arguments: [
+                            "/usr/local/bin/container-flannel-vxlan-macos",
+                            "--config",
+                            options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+                            "--check-purge",
+                        ],
+                        bestEffort: false
+                    )
+                ))
+        }
+        steps.append(
+            stopLaunchdJobStep(
+                message: "stop previous kubelet launchd job if present",
+                label: "com.apple.container.kubelet"
+            ))
+        steps.append(contentsOf: podNetworkingShutdownSteps(options: options, disableJobs: !networkMode.usesPodNetworking))
+        steps.append(
+            stopLaunchdJobStep(
+                message: "stop previous CRI shim launchd job if present",
+                label: "com.apple.container.cri-shim-macos"
+            ))
+        if !networkMode.usesPodNetworking {
+            steps.append(contentsOf: podNetworkingPurgeSteps(options: options))
+        }
         if containerServiceUserID != 0 {
             steps.append(
                 MacOSKubeadmStep(
@@ -448,10 +592,6 @@ public enum MacOSKubeadmPlanner {
                     arguments: containerSystemCommand(userID: containerServiceUserID, subcommand: "start"),
                     bestEffort: false
                 )
-            ),
-            MacOSKubeadmStep(
-                message: "stop previous CRI shim launchd job if present",
-                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.cri-shim-macos"], bestEffort: true)
             ),
             MacOSKubeadmStep(
                 message: "start CRI shim launchd job",
@@ -481,36 +621,31 @@ public enum MacOSKubeadmPlanner {
         if networkMode.usesPodNetworking {
             steps.append(contentsOf: [
                 MacOSKubeadmStep(
-                    message: "stop previous kube-proxy launchd job if present",
-                    action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kube-proxy-macos"], bestEffort: true)
+                    message: "enable flannel VXLAN launchd job",
+                    action: .runCommand(
+                        arguments: ["/bin/launchctl", "enable", "system/com.apple.container.flannel-vxlan-macos"],
+                        bestEffort: false
+                    )
                 ),
                 MacOSKubeadmStep(
-                    message: "start kube-proxy launchd job",
+                    message: "start flannel VXLAN launchd job",
                     action: .runCommand(
                         arguments: [
                             "/bin/launchctl",
                             "bootstrap",
                             "system",
-                            "/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
+                            "/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist",
                         ],
                         bestEffort: false
                     )
                 ),
                 MacOSKubeadmStep(
-                    message: "enable kube-proxy launchd job",
-                    action: .runCommand(arguments: ["/bin/launchctl", "enable", "system/com.apple.container.kube-proxy-macos"], bestEffort: false)
-                ),
-                MacOSKubeadmStep(
-                    message: "kickstart kube-proxy launchd job",
-                    action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.kube-proxy-macos"], bestEffort: false)
+                    message: "kickstart flannel VXLAN launchd job",
+                    action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.flannel-vxlan-macos"], bestEffort: false)
                 ),
             ])
         }
         steps.append(contentsOf: [
-            MacOSKubeadmStep(
-                message: "stop previous kubelet launchd job if present",
-                action: .runCommand(arguments: ["/bin/launchctl", "bootout", "system/com.apple.container.kubelet"], bestEffort: true)
-            ),
             MacOSKubeadmStep(
                 message: "start kubelet launchd job",
                 action: .runCommand(
@@ -532,6 +667,151 @@ public enum MacOSKubeadmPlanner {
                 action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.kubelet"], bestEffort: false)
             ),
         ])
+        if networkMode.usesPodNetworking {
+            steps.append(contentsOf: [
+                MacOSKubeadmStep(
+                    message: "enable kube-proxy launchd job",
+                    action: .runCommand(
+                        arguments: ["/bin/launchctl", "enable", "system/com.apple.container.kube-proxy-macos"],
+                        bestEffort: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "start kube-proxy launchd job",
+                    action: .runCommand(
+                        arguments: [
+                            "/bin/launchctl",
+                            "bootstrap",
+                            "system",
+                            "/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
+                        ],
+                        bestEffort: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "kickstart kube-proxy launchd job",
+                    action: .runCommand(arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.kube-proxy-macos"], bestEffort: false)
+                ),
+            ])
+        }
+        return steps
+    }
+
+    private static func podNetworkingShutdownSteps(
+        options: MacOSKubeadmJoinOptions,
+        disableJobs: Bool
+    ) -> [MacOSKubeadmStep] {
+        var steps = [
+            stopLaunchdJobStep(
+                message: "stop previous kube-proxy launchd job if present",
+                label: "com.apple.container.kube-proxy-macos"
+            )
+        ]
+        if disableJobs {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "disable previous kube-proxy launchd job",
+                    action: .runCommand(
+                        arguments: ["/bin/launchctl", "disable", "system/com.apple.container.kube-proxy-macos"],
+                        bestEffort: true
+                    )
+                ))
+        }
+        steps.append(contentsOf: [
+            MacOSKubeadmStep(
+                message: "withdraw previous flannel VXLAN data plane",
+                action: .runCommand(
+                    arguments: [
+                        "/usr/local/bin/container-flannel-vxlan-macos",
+                        "--config",
+                        options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+                        "--withdraw",
+                    ],
+                    bestEffort: false
+                )
+            ),
+            stopLaunchdJobStep(
+                message: "stop previous flannel VXLAN launchd job if present",
+                label: "com.apple.container.flannel-vxlan-macos"
+            ),
+        ])
+        if disableJobs {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "disable previous flannel VXLAN launchd job",
+                    action: .runCommand(
+                        arguments: ["/bin/launchctl", "disable", "system/com.apple.container.flannel-vxlan-macos"],
+                        bestEffort: true
+                    )
+                ))
+        }
+        steps.append(contentsOf: [
+            MacOSKubeadmStep(
+                message: "flush previous kube-proxy PF anchor",
+                action: .runCommand(
+                    arguments: ["/sbin/pfctl", "-a", "com.apple.container.kube-proxy", "-F", "all"],
+                    bestEffort: true
+                )
+            ),
+            MacOSKubeadmStep(
+                message: "remove stale pod network ready state",
+                action: .removePath(
+                    path: options.rooted("/var/lib/container/flannel-vxlan/ready.json"),
+                    recursive: false,
+                    bestEffort: true,
+                    sensitive: false
+                )
+            ),
+        ])
+        return steps
+    }
+
+    private static func podNetworkingPurgeSteps(options: MacOSKubeadmJoinOptions) -> [MacOSKubeadmStep] {
+        var steps = [
+            MacOSKubeadmStep(
+                message: "purge owned pod network",
+                action: .runCommand(
+                    arguments: [
+                        "/usr/local/bin/container-flannel-vxlan-macos",
+                        "--config",
+                        options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+                        "--purge-network",
+                    ],
+                    bestEffort: false
+                )
+            )
+        ]
+        for path in [
+            "/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist",
+            "/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
+            "/etc/kubernetes/flannel-macos.kubeconfig",
+            "/etc/kubernetes/kube-proxy.kubeconfig",
+            "/etc/kubernetes/flannel-vxlan-macos.conf",
+            "/etc/kubernetes/kube-proxy.conf",
+            "/etc/cni/net.d/10-macvmnet.conflist",
+        ] {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "remove full-mode artifact \(path)",
+                    action: .removePath(
+                        path: options.rooted(path),
+                        recursive: false,
+                        bestEffort: true,
+                        sensitive: path.hasSuffix(".kubeconfig")
+                    )
+                ))
+        }
+        steps.append(
+            MacOSKubeadmStep(
+                message: "remove full-mode Kubernetes credentials",
+                action: .removePath(
+                    path: options.rooted("/var/lib/container/kubernetes-credentials"),
+                    recursive: true,
+                    bestEffort: true,
+                    sensitive: true
+                )
+            )
+        )
         return steps
     }
 
@@ -573,5 +853,35 @@ public enum MacOSKubeadmPlanner {
             return ["/bin/launchctl", "asuser", "0", "/usr/local/bin/container", "system", subcommand]
         }
         return ["/usr/bin/sudo", "-u", "#\(userID)", "/usr/local/bin/container", "system", subcommand]
+    }
+
+    private static func stopLaunchdJobStep(message: String, label: String) -> MacOSKubeadmStep {
+        let script = """
+            set -eu
+            domain_label=$1
+            if /bin/launchctl print "$domain_label" >/dev/null 2>&1; then
+                if ! /bin/launchctl bootout "$domain_label"; then
+                    if /bin/launchctl print "$domain_label" >/dev/null 2>&1; then
+                        exit 1
+                    fi
+                fi
+            fi
+            if /bin/launchctl print "$domain_label" >/dev/null 2>&1; then
+                exit 1
+            fi
+            """
+        return MacOSKubeadmStep(
+            message: message,
+            action: .runCommand(
+                arguments: [
+                    "/bin/sh",
+                    "-c",
+                    script,
+                    "container-macos-kubeadm-launchd-stop",
+                    "system/\(label)",
+                ],
+                bestEffort: false
+            )
+        )
     }
 }

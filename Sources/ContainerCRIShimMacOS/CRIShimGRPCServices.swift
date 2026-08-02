@@ -53,6 +53,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let imageManager: any CRIShimImageManaging
     private let cniManager: any CRIShimCNIManaging
     private let logManager: any CRIShimLogManaging
+    private let podNetworkStateStore: PodNetworkStateStore
     private let streamingServer: CRIShimStreamingServer?
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
@@ -65,6 +66,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager(),
         logManager: (any CRIShimLogManaging)? = nil,
+        podNetworkStateStore: PodNetworkStateStore = PodNetworkStateStore(),
         streamingServer: CRIShimStreamingServer? = nil,
         handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
@@ -75,6 +77,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         self.runtimeManager = runtimeManager
         self.imageManager = imageManager
         self.cniManager = cniManager
+        self.podNetworkStateStore = podNetworkStateStore
         self.logManager =
             logManager
             ?? CRIShimLogManager(
@@ -135,7 +138,42 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_UpdateRuntimeConfigResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.updateRuntimeConfig.rawValue) {
-            Runtime_V1_UpdateRuntimeConfigResponse()
+            guard let podNetwork = config.podNetwork, podNetwork.enabled == true else {
+                return Runtime_V1_UpdateRuntimeConfigResponse()
+            }
+
+            let configuredPodCIDRs = request.runtimeConfig.networkConfig.podCidr.trimmed
+            guard !configuredPodCIDRs.isEmpty else {
+                return Runtime_V1_UpdateRuntimeConfigResponse()
+            }
+
+            let podCIDR: String
+            do {
+                podCIDR = try canonicalIPv4PodCIDRList(configuredPodCIDRs)
+            } catch {
+                throw CRIShimError.invalidArgument("pod CIDRs must contain exactly one valid IPv4 CIDR")
+            }
+
+            guard let networkName = podNetwork.networkName?.trimmed,
+                !networkName.isEmpty,
+                let runtimeStatePath = podNetwork.runtimeStatePath?.trimmed,
+                !runtimeStatePath.isEmpty
+            else {
+                throw CRIShimError.internalError("pod network runtime state is not configured")
+            }
+
+            do {
+                try await podNetworkStateStore.updateRuntimeState(
+                    networkName: networkName,
+                    podCIDR: podCIDR,
+                    path: runtimeStatePath
+                )
+            } catch PodNetworkStateError.invalidIPv4PodCIDR {
+                throw CRIShimError.invalidArgument("pod CIDRs must contain exactly one valid IPv4 CIDR")
+            } catch {
+                throw CRIShimError.internalError("failed to persist pod network runtime state")
+            }
+            return Runtime_V1_UpdateRuntimeConfigResponse()
         }
     }
 
@@ -155,6 +193,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 expectedRole: .sandbox,
                 requestedReference: handler.sandboxImage
             )
+            let networkMTUOverride = try await resolvePodNetworkMTUOverride(handler: handler)
             var metadata = try makeCRIShimSandboxMetadata(
                 id: sandboxID,
                 request: request,
@@ -165,7 +204,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 request: request,
                 handler: handler,
                 sandboxImage: sandboxImage,
-                metadata: metadata
+                metadata: metadata,
+                networkMTUOverride: networkMTUOverride
             )
 
             do {
@@ -195,6 +235,21 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             var response = Runtime_V1_RunPodSandboxResponse()
             response.podSandboxID = sandboxID
             return response
+        }
+    }
+
+    private func resolvePodNetworkMTUOverride(handler: ResolvedRuntimeHandler) async throws -> UInt32? {
+        guard handler.usesPodNetworking,
+            let podNetwork = config.podNetwork,
+            podNetwork.enabled == true
+        else {
+            return nil
+        }
+
+        do {
+            return try await podNetworkStateStore.resolveReadyLease(config: podNetwork).mtu
+        } catch {
+            throw CRIShimError.internalError("pod network MTU is unavailable: \(error)")
         }
     }
 

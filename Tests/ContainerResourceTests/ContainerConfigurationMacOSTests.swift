@@ -187,7 +187,7 @@ struct ContainerConfigurationMacOSTests {
         config.networks = [
             AttachmentConfiguration(
                 network: "sandbox-net",
-                options: AttachmentOptions(hostname: "sandbox-host", macAddress: macAddress)
+                options: AttachmentOptions(hostname: "sandbox-host", macAddress: macAddress, mtu: 1_450)
             )
         ]
 
@@ -198,9 +198,20 @@ struct ContainerConfigurationMacOSTests {
                 MacOSGuestNetworkRequest(
                     network: "sandbox-net",
                     hostname: "sandbox-host",
-                    macAddress: macAddress
+                    macAddress: macAddress,
+                    mtu: 1_450
                 )
             ])
+
+        let reported = config.macOSGuestReportedNetworkAttachments([
+            try makeAttachment(
+                network: "sandbox-net",
+                hostname: "sandbox-host",
+                address: "192.168.64.2",
+                gateway: "192.168.64.1"
+            )
+        ])
+        #expect(reported.first?.mtu == 1_450)
     }
 
     @Test
@@ -272,10 +283,11 @@ struct ContainerConfigurationMacOSTests {
         )
 
         let reported = config.macOSGuestReportedNetworkAttachments([
-            try makeAttachment(address: "192.168.64.2", gateway: "192.168.64.1")
+            try makeAttachment(address: "192.168.64.2", gateway: "192.168.64.1", mtu: 1_500)
         ])
 
         let dns = try #require(reported.first?.dns)
+        #expect(reported.first?.mtu == 1_500)
         #expect(
             dns
                 == .init(
@@ -326,16 +338,23 @@ struct ContainerConfigurationMacOSTests {
     }
 }
 
-private func makeAttachment(address: String, gateway: String) throws -> ContainerResource.Attachment {
+private func makeAttachment(
+    network: String = "default",
+    hostname: String = "macos-test",
+    address: String,
+    gateway: String,
+    mtu: UInt32? = nil
+) throws -> ContainerResource.Attachment {
     ContainerResource.Attachment(
-        network: "default",
-        hostname: "macos-test",
+        network: network,
+        hostname: hostname,
         ipv4Address: try CIDRv4(
             IPv4Address(address),
             prefix: Prefix(length: 24)!
         ),
         ipv4Gateway: try IPv4Address(gateway),
         ipv6Address: nil,
-        macAddress: nil
+        macAddress: nil,
+        mtu: mtu
     )
 }

@@ -4,17 +4,132 @@ metadata:
   name: kube-proxy-macos
   namespace: kube-system
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+apiVersion: v1
+kind: ServiceAccount
 metadata:
-  name: container:kube-proxy-macos
+  name: flannel-macos
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: container:kube-proxy-macos-token-renewal
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["kube-proxy-macos"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: container:kube-proxy-macos-token-renewal
+  namespace: kube-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: system:node-proxier
+  kind: Role
+  name: container:kube-proxy-macos-token-renewal
 subjects:
   - kind: ServiceAccount
     name: kube-proxy-macos
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: container:flannel-macos-token-renewal
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["flannel-macos"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: container:flannel-macos-token-renewal
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: container:flannel-macos-token-renewal
+subjects:
+  - kind: ServiceAccount
+    name: flannel-macos
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: container:kube-proxy-macos
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: container:kube-proxy-macos-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: container:kube-proxy-macos
+subjects:
+  - kind: ServiceAccount
+    name: kube-proxy-macos
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: container:flannel-macos
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: container:flannel-macos
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: container:flannel-macos
+subjects:
+  - kind: ServiceAccount
+    name: flannel-macos
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: container:flannel-macos-config
+  namespace: kube-flannel
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kube-flannel-cfg"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: container:flannel-macos-config
+  namespace: kube-flannel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: container:flannel-macos-config
+subjects:
+  - kind: ServiceAccount
+    name: flannel-macos
     namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -29,7 +144,7 @@ rules:
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
-    resourceNames: ["kube-proxy-macos"]
+    resourceNames: ["kube-proxy-macos", "flannel-macos"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

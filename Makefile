@@ -37,6 +37,7 @@ PKG_PATH ?= bin/$(BUILD_CONFIGURATION)/container-installer-unsigned.pkg
 PKG_UNSIGNED_PATH := $(if $(strip $(PKG_SIGN_IDENTITY)),$(basename $(PKG_PATH))-unsigned.pkg,$(PKG_PATH))
 MACOS_NODE_KUBELET_ARTIFACT ?=
 MACOS_NODE_NAME ?= macos-node-1
+MACOS_NODE_SKIP_BUILD ?= false
 MACOS_NODE_PKG_PATH ?= bin/$(BUILD_CONFIGURATION)/container-macos-node-$(RELEASE_VERSION)-k8s-v1.27.2.pkg
 DSYM_DIR := bin/$(BUILD_CONFIGURATION)/bundle/container-dSYM
 DSYM_PATH := bin/$(BUILD_CONFIGURATION)/bundle/container-dSYM.zip
@@ -206,6 +207,7 @@ macos-node-installer-pkg:
 		PKG_SIGN_KEYCHAIN="$(PKG_SIGN_KEYCHAIN)" scripts/macos-node-installer/build.sh \
 		--kubelet-artifact "$(MACOS_NODE_KUBELET_ARTIFACT)" \
 		--node-name "$(MACOS_NODE_NAME)" \
+		$(if $(filter 1 true TRUE yes YES,$(MACOS_NODE_SKIP_BUILD)),--skip-build) \
 		--output "$(MACOS_NODE_PKG_PATH)"
 
 .PHONY: dsym

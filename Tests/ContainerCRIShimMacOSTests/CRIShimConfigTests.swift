@@ -36,13 +36,19 @@ struct CRIShimConfigTests {
         #expect(config.defaults?.workloadPlatform?.os == "darwin")
         #expect(config.defaults?.workloadPlatform?.architecture == "arm64")
         #expect(config.defaults?.networkBackend == "vmnetShared")
+        #expect(config.defaults?.networkMTU == 1_450)
         #expect(config.defaults?.resources?.cpus == 4)
         #expect(config.defaults?.resources?.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
         #expect(config.runtimeHandlers["macos"]?.network == "default")
         #expect(config.runtimeHandlers["macos"]?.networkBackend == "vmnetShared")
+        #expect(config.runtimeHandlers["macos"]?.networkMTU == nil)
         #expect(config.runtimeHandlers["macos"]?.resources?.memoryInBytes == 17_179_869_184)
         #expect(config.networkPolicy?.enabled == true)
         #expect(config.kubeProxy?.enabled == true)
+        #expect(config.podNetwork?.enabled == true)
+        #expect(config.podNetwork?.networkName == "kubernetes-pods")
+        #expect(config.podNetwork?.runtimeStatePath == "/var/lib/container/pod-network/runtime.json")
+        #expect(config.podNetwork?.readyStatePath == "/var/lib/container/pod-network/ready.json")
     }
 
     @Test
@@ -64,14 +70,21 @@ struct CRIShimConfigTests {
                 workloadPlatform: WorkloadPlatform(os: "linux", architecture: ""),
                 network: nil,
                 networkBackend: "invalid",
+                networkMTU: 575,
                 guiEnabled: nil,
                 resources: RuntimeResources(cpus: 0, memoryInBytes: 0)
             ),
             runtimeHandlers: [
-                " ": RuntimeProfile(network: "", networkBackend: "", resources: RuntimeResources(cpus: -1))
+                " ": RuntimeProfile(network: "", networkBackend: "", networkMTU: 9_001, resources: RuntimeResources(cpus: -1))
             ],
             networkPolicy: NetworkPolicyConfig(enabled: true, kubeconfig: "kubelet.conf", nodeName: "", resyncSeconds: 0),
-            kubeProxy: KubeProxyConfig(enabled: true, configPath: "kube-proxy.conf")
+            kubeProxy: KubeProxyConfig(enabled: true, configPath: "kube-proxy.conf"),
+            podNetwork: PodNetworkConfig(
+                enabled: true,
+                networkName: " ",
+                runtimeStatePath: "runtime.json",
+                readyStatePath: "ready.json"
+            )
         )
 
         let issues = config.validationIssues
@@ -87,16 +100,21 @@ struct CRIShimConfigTests {
         #expect(issues.contains("defaults.workloadPlatform.architecture is required"))
         #expect(issues.contains("defaults.network is required"))
         #expect(issues.contains("defaults.networkBackend must be virtualizationNAT or vmnetShared"))
+        #expect(issues.contains("defaults.networkMTU must be between 576 and 9000"))
         #expect(issues.contains("defaults.guiEnabled is required"))
         #expect(issues.contains("defaults.resources.cpus must be greater than zero"))
         #expect(issues.contains("defaults.resources.memoryInBytes must be greater than zero"))
         #expect(issues.contains("runtimeHandlers contains an empty handler name"))
         #expect(issues.contains("runtimeHandlers. .network cannot be empty"))
+        #expect(issues.contains("runtimeHandlers. .networkMTU must be between 576 and 9000"))
         #expect(issues.contains("runtimeHandlers. .resources.cpus must be greater than zero"))
         #expect(issues.contains("networkPolicy.kubeconfig must be an absolute path"))
         #expect(issues.contains("networkPolicy.nodeName is required"))
         #expect(issues.contains("networkPolicy.resyncSeconds must be greater than zero"))
         #expect(issues.contains("kubeProxy.configPath must be an absolute path"))
+        #expect(issues.contains("podNetwork.networkName is required"))
+        #expect(issues.contains("podNetwork.runtimeStatePath must be an absolute path"))
+        #expect(issues.contains("podNetwork.readyStatePath must be an absolute path"))
     }
 
     @Test
@@ -110,6 +128,7 @@ struct CRIShimConfigTests {
         #expect(resolved.workloadPlatform == WorkloadPlatform(os: "darwin", architecture: "arm64"))
         #expect(resolved.network == "default")
         #expect(resolved.networkBackend == "vmnetShared")
+        #expect(resolved.networkMTU == 1_450)
         #expect(resolved.guiEnabled == false)
         #expect(resolved.resources == RuntimeResources(cpus: 4, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes))
     }
@@ -125,6 +144,7 @@ struct CRIShimConfigTests {
         #expect(resolved.workloadPlatform == WorkloadPlatform(os: "darwin", architecture: "arm64"))
         #expect(resolved.network == "gui")
         #expect(resolved.networkBackend == "vmnetShared")
+        #expect(resolved.networkMTU == 1_400)
         #expect(resolved.guiEnabled == true)
         #expect(resolved.resources == RuntimeResources(cpus: 8, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes))
     }
@@ -136,6 +156,16 @@ struct CRIShimConfigTests {
         #expect(throws: RuntimeHandlerResolutionError.unknownRuntimeHandler("linux")) {
             try config.resolveRuntimeHandler("linux")
         }
+    }
+
+    @Test
+    func decodesLegacyRuntimeProfileWithoutNetworkMTU() throws {
+        let profile = try JSONDecoder().decode(
+            RuntimeProfile.self,
+            from: Data(#"{"network":"default","networkBackend":"vmnetShared"}"#.utf8)
+        )
+
+        #expect(profile.networkMTU == nil)
     }
 
     @Test
@@ -267,6 +297,7 @@ private let validConfigJSON = """
         },
         "network": "default",
         "networkBackend": "vmnetShared",
+        "networkMTU": 1450,
         "guiEnabled": false,
         "resources": {
           "cpus": 4,
@@ -293,6 +324,12 @@ private let validConfigJSON = """
       "kubeProxy": {
         "enabled": true,
         "configPath": "/etc/kubernetes/kube-proxy.conf"
+      },
+      "podNetwork": {
+        "enabled": true,
+        "networkName": "kubernetes-pods",
+        "runtimeStatePath": "/var/lib/container/pod-network/runtime.json",
+        "readyStatePath": "/var/lib/container/pod-network/ready.json"
       }
     }
     """
@@ -317,6 +354,7 @@ private let validConfigWithOverrideJSON = """
         },
         "network": "default",
         "networkBackend": "vmnetShared",
+        "networkMTU": 1450,
         "guiEnabled": false,
         "resources": {
           "cpus": 4,
@@ -328,6 +366,7 @@ private let validConfigWithOverrideJSON = """
           "sandboxImage": "localhost/macos-gui-sandbox:latest",
           "network": "gui",
           "networkBackend": "vmnetShared",
+          "networkMTU": 1400,
           "guiEnabled": true,
           "resources": {
             "cpus": 8

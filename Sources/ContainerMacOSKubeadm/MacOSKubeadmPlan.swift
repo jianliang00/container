@@ -859,16 +859,29 @@ public enum MacOSKubeadmPlanner {
         let script = """
             set -eu
             domain_label=$1
-            if /bin/launchctl print "$domain_label" >/dev/null 2>&1; then
-                if ! /bin/launchctl bootout "$domain_label"; then
-                    if /bin/launchctl print "$domain_label" >/dev/null 2>&1; then
-                        exit 1
-                    fi
+            launchctl_path=$2
+            sleep_path=$3
+            remaining=$4
+            sleep_interval=$5
+            job_present() {
+                status=0
+                "$launchctl_path" print "$domain_label" >/dev/null 2>&1 || status=$?
+                case "$status" in
+                    0) return 0 ;;
+                    113) return 1 ;;
+                    *) exit "$status" ;;
+                esac
+            }
+            if job_present; then
+                "$launchctl_path" bootout "$domain_label" || true
+            fi
+            while job_present; do
+                if [ "$remaining" -le 0 ]; then
+                    exit 1
                 fi
-            fi
-            if /bin/launchctl print "$domain_label" >/dev/null 2>&1; then
-                exit 1
-            fi
+                remaining=$((remaining - 1))
+                "$sleep_path" "$sleep_interval"
+            done
             """
         return MacOSKubeadmStep(
             message: message,
@@ -879,6 +892,10 @@ public enum MacOSKubeadmPlanner {
                     script,
                     "container-macos-kubeadm-launchd-stop",
                     "system/\(label)",
+                    "/bin/launchctl",
+                    "/bin/sleep",
+                    "50",
+                    "0.1",
                 ],
                 bestEffort: false
             )

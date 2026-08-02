@@ -478,11 +478,48 @@ struct MacOSKubeadmPlanTests {
             #expect(!bestEffort)
             #expect(arguments.first == "/bin/sh")
             #expect(arguments.dropFirst().first == "-c")
-            #expect(arguments.count == 5)
-            #expect(arguments[2].contains("/bin/launchctl print"))
-            #expect(arguments[2].contains("/bin/launchctl bootout"))
+            #expect(arguments.count == 9)
+            #expect(arguments[2].contains("job_present"))
+            #expect(arguments[2].contains("bootout"))
             #expect(arguments[4] == label)
+            #expect(arguments[5] == "/bin/launchctl")
+            #expect(arguments[6] == "/bin/sleep")
+            #expect(arguments[7] == "50")
+            #expect(arguments[8] == "0.1")
         }
+    }
+
+    @Test func launchdStopAcceptsAnInitiallyMissingJob() throws {
+        let result = try runLaunchdStopScenario("absent")
+
+        #expect(result.status == 0)
+        #expect(!result.calls.contains("bootout"))
+        #expect(!result.calls.contains("sleep"))
+    }
+
+    @Test func launchdStopWaitsForAnAsynchronousBootout() throws {
+        let result = try runLaunchdStopScenario("async-failure")
+
+        #expect(result.status == 0)
+        #expect(result.calls.filter { $0 == "bootout" }.count == 1)
+        #expect(result.calls.filter { $0 == "sleep" }.count == 2)
+    }
+
+    @Test(arguments: ["persistent-failure", "persistent-success"])
+    func launchdStopFailsWhenTheJobNeverDisappears(_ scenario: String) throws {
+        let result = try runLaunchdStopScenario(scenario)
+
+        #expect(result.status == 1)
+        #expect(result.calls.filter { $0 == "bootout" }.count == 1)
+        #expect(result.calls.filter { $0 == "sleep" }.count == 3)
+    }
+
+    @Test func launchdStopFailsClosedOnAnUnexpectedQueryError() throws {
+        let result = try runLaunchdStopScenario("query-error")
+
+        #expect(result.status == 77)
+        #expect(!result.calls.contains("bootout"))
+        #expect(!result.calls.contains("sleep"))
     }
 
     @Test func serviceStartPlanUsesRootUserBootstrapForContainerRuntime() throws {
@@ -820,6 +857,103 @@ struct MacOSKubeadmPlanTests {
                 }
                 return path == "/tmp/macos-node/var/lib/container/kubernetes-credentials"
             })
+    }
+
+    private struct LaunchdStopResult {
+        let status: Int32
+        let calls: [String]
+    }
+
+    private func runLaunchdStopScenario(_ scenario: String) throws -> LaunchdStopResult {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("container-macos-kubeadm-launchd-stop-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let modePath = directory.appendingPathComponent("mode")
+        let callsPath = directory.appendingPathComponent("calls")
+        let launchctlPath = directory.appendingPathComponent("launchctl")
+        let sleepPath = directory.appendingPathComponent("sleep")
+        try scenario.write(to: modePath, atomically: true, encoding: .utf8)
+        try "".write(to: callsPath, atomically: true, encoding: .utf8)
+        try """
+        #!/bin/sh
+        set -eu
+        state_dir=${FAKE_LAUNCHD_STATE:?}
+        mode=$(/bin/cat "$state_dir/mode")
+        command=$1
+        echo "$command" >> "$state_dir/calls"
+        case "$command" in
+            print)
+                case "$mode" in
+                    absent) exit 113 ;;
+                    query-error) exit 77 ;;
+                    async-failure)
+                        if [ ! -e "$state_dir/bootout-seen" ]; then
+                            exit 0
+                        fi
+                        count=0
+                        if [ -e "$state_dir/post-bootout-print-count" ]; then
+                            count=$(/bin/cat "$state_dir/post-bootout-print-count")
+                        fi
+                        count=$((count + 1))
+                        echo "$count" > "$state_dir/post-bootout-print-count"
+                        if [ "$count" -ge 3 ]; then
+                            exit 113
+                        fi
+                        exit 0
+                        ;;
+                    persistent-failure|persistent-success) exit 0 ;;
+                    *) exit 78 ;;
+                esac
+                ;;
+            bootout)
+                : > "$state_dir/bootout-seen"
+                case "$mode" in
+                    async-failure|persistent-failure) exit 1 ;;
+                    persistent-success) exit 0 ;;
+                    *) exit 79 ;;
+                esac
+                ;;
+            *) exit 80 ;;
+        esac
+        """.write(to: launchctlPath, atomically: true, encoding: .utf8)
+        try """
+        #!/bin/sh
+        set -eu
+        echo sleep >> "${FAKE_LAUNCHD_STATE:?}/calls"
+        """.write(to: sleepPath, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctlPath.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sleepPath.path)
+
+        let options = try makeOptions(startServices: true)
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let step = try #require(plan.steps.first { $0.message == "stop previous kubelet launchd job if present" })
+        guard case .runCommand(var arguments, false) = step.action else {
+            Issue.record("expected a strict launchd stop command")
+            return LaunchdStopResult(status: -1, calls: [])
+        }
+        arguments[5] = launchctlPath.path
+        arguments[6] = sleepPath.path
+        arguments[7] = "3"
+        arguments[8] = "0"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: arguments[0])
+        process.arguments = Array(arguments.dropFirst())
+        var environment = ProcessInfo.processInfo.environment
+        environment["FAKE_LAUNCHD_STATE"] = directory.path
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+
+        let calls = try String(contentsOf: callsPath, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+        return LaunchdStopResult(status: process.terminationStatus, calls: calls)
     }
 
     private func makeOptions(startServices: Bool) throws -> MacOSKubeadmJoinOptions {

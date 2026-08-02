@@ -292,6 +292,7 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
 public protocol FlannelSystemManaging: Sendable {
     func inspectUnderlayInterface(_ name: String) throws -> FlannelUnderlayInterface
     func resolveUnderlayInterface(nodeInternalIP: String?) throws -> FlannelUnderlayInterface
+    func validateUnderlayRoute(destination: String, interface: String) throws
     func interfaceExists(_ name: String) throws -> Bool
     func enableIPv4Forwarding() throws
     func configureTunnelInterface(_ name: String, localAddress: String, mtu: Int) throws
@@ -336,17 +337,33 @@ public struct FlannelSystemManager: FlannelSystemManaging {
         }
 
         let output = try run("/sbin/route", ["-n", "get", "default"])
-        let interfaces = output.split(separator: "\n").compactMap { line -> String? in
-            let fields = line.split(whereSeparator: \.isWhitespace)
-            guard fields.count == 2, fields[0] == "interface:" else {
-                return nil
-            }
-            return String(fields[1])
-        }
+        let interfaces = Self.routeInterfaces(in: output)
         guard interfaces.count == 1, let interface = interfaces.first else {
             throw FlannelVXLANError.runtime("default IPv4 route did not identify exactly one egress interface")
         }
         return try inspectUnderlayInterface(interface)
+    }
+
+    public func validateUnderlayRoute(destination: String, interface: String) throws {
+        guard FlannelIPv4.parseAddress(destination) != nil else {
+            throw FlannelVXLANError.runtime("underlay route destination is not a valid IPv4 address")
+        }
+        guard interface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+            throw FlannelVXLANError.runtime("underlay route interface is invalid")
+        }
+
+        let output = try run("/sbin/route", ["-n", "get", destination])
+        let interfaces = Self.routeInterfaces(in: output)
+        guard interfaces.count == 1, let resolvedInterface = interfaces.first else {
+            throw FlannelVXLANError.runtime(
+                "underlay route to \(destination) did not identify exactly one egress interface"
+            )
+        }
+        guard resolvedInterface == interface else {
+            throw FlannelVXLANError.runtime(
+                "underlay route to \(destination) uses \(resolvedInterface), expected \(interface)"
+            )
+        }
     }
 
     private func inspectUnderlayInterface(
@@ -443,13 +460,17 @@ public struct FlannelSystemManager: FlannelSystemManaging {
         guard let output = try? run("/sbin/route", ["-n", "get", "-net", podCIDR]) else {
             return nil
         }
-        return output.split(separator: "\n").lazy.compactMap { line -> String? in
-            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        return Self.routeInterfaces(in: output).first
+    }
+
+    private static func routeInterfaces(in output: String) -> [String] {
+        output.split(separator: "\n").compactMap { line -> String? in
+            let fields = line.split(whereSeparator: \.isWhitespace)
             guard fields.count == 2, fields[0] == "interface:" else {
                 return nil
             }
             return String(fields[1])
-        }.first
+        }
     }
 
     @discardableResult

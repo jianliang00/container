@@ -53,7 +53,8 @@ func makeCRIShimSandboxConfiguration(
     request: Runtime_V1_RunPodSandboxRequest,
     handler: ResolvedRuntimeHandler,
     sandboxImage: CRIShimImageRecord,
-    metadata: CRIShimSandboxMetadata? = nil
+    metadata: CRIShimSandboxMetadata? = nil,
+    networkMTUOverride: UInt32? = nil
 ) throws -> ContainerConfiguration {
     let sandboxID = id.trimmed
     guard !sandboxID.isEmpty else {
@@ -90,7 +91,10 @@ func makeCRIShimSandboxConfiguration(
         configuration.networks = [
             AttachmentConfiguration(
                 network: handler.network,
-                options: AttachmentOptions(hostname: sandboxID)
+                options: AttachmentOptions(
+                    hostname: sandboxID,
+                    mtu: networkMTUOverride ?? handler.networkMTU
+                )
             )
         ]
     }

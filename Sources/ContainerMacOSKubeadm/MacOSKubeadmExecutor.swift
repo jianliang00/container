@@ -86,6 +86,7 @@ public struct MacOSKubeadmJoinRunner {
         var requiredExecutables = [
             "/usr/local/bin/container",
             "/usr/local/bin/container-cri-shim-macos",
+            "/usr/local/bin/container-flannel-vxlan-macos",
             "/usr/local/bin/kubelet",
         ]
         if options.networkMode.usesPodNetworking {
@@ -110,6 +111,7 @@ public struct MacOSKubeadmJoinRunner {
             resolved.certificateAuthorityPEM = MacOSKubeadmDiscoveryClient.dryRunCertificateAuthorityPEM
             if options.networkMode.usesPodNetworking {
                 resolved.kubeProxyToken = "dry-run-kube-proxy-token"
+                resolved.flannelToken = "dry-run-flannel-token"
             }
             return resolved
         }
@@ -117,9 +119,10 @@ public struct MacOSKubeadmJoinRunner {
         log.info("discovering cluster CA and kubelet settings")
         let discovered = try discoveryClient.discover(
             apiServer: options.apiServer,
+            nodeName: options.nodeName,
+            networkMode: options.networkMode,
             token: options.token,
             expectedCACertHashes: options.discoveryTokenCACertHashes,
-            requestKubeProxyToken: options.networkMode.usesPodNetworking,
             log: log
         )
 
@@ -130,6 +133,7 @@ public struct MacOSKubeadmJoinRunner {
         resolved.clusterDomain = discovered.clusterDomain
         if options.networkMode.usesPodNetworking {
             resolved.kubeProxyToken = discovered.kubeProxyToken
+            resolved.flannelToken = discovered.flannelToken
         }
         return resolved
     }
@@ -159,8 +163,19 @@ public struct MacOSKubeadmJoinRunner {
             try runCommand(arguments, bestEffort: bestEffort, log: log)
         case .waitForPath(let path, let timeoutSeconds):
             try waitForPath(path, timeoutSeconds: timeoutSeconds)
-        case .removePath:
-            throw MacOSKubeadmError.invalidInput("join plan cannot remove paths")
+        case .removePath(let path, _, let bestEffort, _):
+            do {
+                guard fileManager.fileExists(atPath: path) else {
+                    return
+                }
+                try fileManager.removeItem(atPath: path)
+            } catch {
+                if bestEffort {
+                    log.debug("best-effort remove failed for \(path): \(error)")
+                    return
+                }
+                throw error
+            }
         }
     }
 
@@ -261,6 +276,14 @@ public struct MacOSKubeadmResetRunner {
         if !options.dryRun && geteuid() != 0 {
             throw MacOSKubeadmError.preflightFailed("reset must run as root; rerun with sudo or pass --dry-run")
         }
+        if !options.dryRun {
+            let flannelExecutable = "/usr/local/bin/container-flannel-vxlan-macos"
+            guard fileManager.isExecutableFile(atPath: flannelExecutable) else {
+                throw MacOSKubeadmError.preflightFailed(
+                    "container-flannel-vxlan-macos is not executable at \(flannelExecutable)"
+                )
+            }
+        }
     }
 
     private func execute(_ action: MacOSKubeadmAction, dryRun: Bool, log: MacOSKubeadmLog) throws {
@@ -336,17 +359,24 @@ public struct MacOSKubeadmStatusRunner {
         let files = [
             "/usr/local/bin/container-macos-kubeadm",
             "/usr/local/bin/container-cri-shim-macos",
+            "/usr/local/bin/container-flannel-vxlan-macos",
             "/usr/local/bin/container-kube-proxy-macos",
             "/usr/local/bin/kubelet",
             "/opt/cni/bin/container-cni-macvmnet",
             "/etc/kubernetes/pki/ca.crt",
             "/etc/kubernetes/bootstrap-kubelet.kubeconfig",
+            "/etc/kubernetes/kubelet.conf",
             "/etc/kubernetes/kubelet.kubeconfig",
             "/etc/kubernetes/kube-proxy.kubeconfig",
+            "/etc/kubernetes/flannel-macos.kubeconfig",
             "/etc/kubernetes/kubelet-config.yaml",
             "/etc/kubernetes/container-cri-shim-macos-config.json",
+            "/etc/kubernetes/flannel-vxlan-macos.conf",
             "/etc/kubernetes/kube-proxy.conf",
             "/etc/cni/net.d/10-macvmnet.conflist",
+            "/var/lib/container/kubernetes-credentials/kube-proxy-macos.token",
+            "/var/lib/container/kubernetes-credentials/flannel-macos.token",
+            "/var/lib/container/flannel-vxlan/ready.json",
         ]
 
         for file in files {
@@ -360,6 +390,7 @@ public struct MacOSKubeadmStatusRunner {
         if options.rootPrefix.isEmpty {
             for label in [
                 "com.apple.container.cri-shim-macos",
+                "com.apple.container.flannel-vxlan-macos",
                 "com.apple.container.kube-proxy-macos",
                 "com.apple.container.kubelet",
             ] {

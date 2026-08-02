@@ -75,6 +75,29 @@ struct DirectoryWatcherTest {
         }
     }
 
+    @Test func testStoredSourceObservesRepeatedChanges() async throws {
+        try await withTempDir { tempPath in
+            let watcher = DirectoryWatcher(directoryPath: tempPath, log: nil)
+            let createdPaths = CreatedPaths()
+            let expectedNames = ["first", "second"]
+
+            await watcher.startWatching { [createdPaths] paths in
+                for path in paths where expectedNames.contains(path.lastComponent?.string ?? "") {
+                    createdPaths.paths.append(path)
+                }
+            }
+
+            try await Task.sleep(for: .milliseconds(100))
+            for name in expectedNames {
+                FileManager.default.createFile(atPath: tempPath.appending(name).string, contents: nil)
+                try await Task.sleep(for: .milliseconds(250))
+            }
+
+            let observedNames = Set(createdPaths.paths.compactMap { $0.lastComponent?.string })
+            #expect(observedNames == Set(expectedNames))
+        }
+    }
+
     @Test func testWatchingNonExistingDirectory() async throws {
         try await withTempDir { tempPath in
             let uuid = UUID().uuidString

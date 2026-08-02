@@ -66,7 +66,8 @@ struct GuestNetworkConfiguratorTests {
                     macAddress: "02:42:ac:11:00:02",
                     ipv4Address: "192.168.64.2",
                     ipv4PrefixLength: 24,
-                    ipv4Gateway: "192.168.64.1"
+                    ipv4Gateway: "192.168.64.1",
+                    mtu: 1_450
                 )
             ],
             dns: .init(
@@ -109,6 +110,11 @@ struct GuestNetworkConfiguratorTests {
         #expect(result.dnsApplied)
         #expect(result.warnings == ["dns options are not yet applied inside the macOS guest"])
         let commands = recorder.commands()
+        #expect(
+            commands.contains {
+                $0.executable == "/sbin/ifconfig"
+                    && $0.arguments == ["en0", "inet", "192.168.64.2", "netmask", "255.255.255.0", "mtu", "1450", "up"]
+            })
         #expect(commands.contains { $0.executable == "/usr/sbin/networksetup" && $0.arguments == ["-setsearchdomains", "Ethernet", "cluster.local", "svc.cluster.local"] })
     }
 }

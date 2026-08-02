@@ -65,6 +65,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
     public var runtimeHandlers: [String: RuntimeProfile]
     public var networkPolicy: NetworkPolicyConfig?
     public var kubeProxy: KubeProxyConfig?
+    public var podNetwork: PodNetworkConfig?
 
     public init(
         runtimeEndpoint: String? = nil,
@@ -74,7 +75,8 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         defaults: RuntimeProfile? = nil,
         runtimeHandlers: [String: RuntimeProfile] = [:],
         networkPolicy: NetworkPolicyConfig? = nil,
-        kubeProxy: KubeProxyConfig? = nil
+        kubeProxy: KubeProxyConfig? = nil,
+        podNetwork: PodNetworkConfig? = nil
     ) {
         self.runtimeEndpoint = runtimeEndpoint
         self.stateDirectory = stateDirectory
@@ -84,6 +86,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         self.runtimeHandlers = runtimeHandlers
         self.networkPolicy = networkPolicy
         self.kubeProxy = kubeProxy
+        self.podNetwork = podNetwork
     }
 
     enum CodingKeys: String, CodingKey {
@@ -95,6 +98,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         case runtimeHandlers
         case networkPolicy
         case kubeProxy
+        case podNetwork
     }
 
     public init(from decoder: any Decoder) throws {
@@ -107,6 +111,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         runtimeHandlers = try container.decodeIfPresent([String: RuntimeProfile].self, forKey: .runtimeHandlers) ?? [:]
         networkPolicy = try container.decodeIfPresent(NetworkPolicyConfig.self, forKey: .networkPolicy)
         kubeProxy = try container.decodeIfPresent(KubeProxyConfig.self, forKey: .kubeProxy)
+        podNetwork = try container.decodeIfPresent(PodNetworkConfig.self, forKey: .podNetwork)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -119,6 +124,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         try container.encode(runtimeHandlers, forKey: .runtimeHandlers)
         try container.encodeIfPresent(networkPolicy, forKey: .networkPolicy)
         try container.encodeIfPresent(kubeProxy, forKey: .kubeProxy)
+        try container.encodeIfPresent(podNetwork, forKey: .podNetwork)
     }
 
     public static func load(from url: URL, decoder: JSONDecoder = JSONDecoder()) throws -> CRIShimConfig {
@@ -183,6 +189,7 @@ public struct RuntimeProfile: Codable, Equatable, Sendable {
     public var workloadPlatform: WorkloadPlatform?
     public var network: String?
     public var networkBackend: String?
+    public var networkMTU: UInt32?
     public var guiEnabled: Bool?
     public var resources: RuntimeResources?
 
@@ -191,6 +198,7 @@ public struct RuntimeProfile: Codable, Equatable, Sendable {
         workloadPlatform: WorkloadPlatform? = nil,
         network: String? = nil,
         networkBackend: String? = nil,
+        networkMTU: UInt32? = nil,
         guiEnabled: Bool? = nil,
         resources: RuntimeResources? = nil
     ) {
@@ -198,6 +206,7 @@ public struct RuntimeProfile: Codable, Equatable, Sendable {
         self.workloadPlatform = workloadPlatform
         self.network = network
         self.networkBackend = networkBackend
+        self.networkMTU = networkMTU
         self.guiEnabled = guiEnabled
         self.resources = resources
     }
@@ -255,5 +264,24 @@ public struct KubeProxyConfig: Codable, Equatable, Sendable {
     public init(enabled: Bool? = nil, configPath: String? = nil) {
         self.enabled = enabled
         self.configPath = configPath
+    }
+}
+
+public struct PodNetworkConfig: Codable, Equatable, Sendable {
+    public var enabled: Bool?
+    public var networkName: String?
+    public var runtimeStatePath: String?
+    public var readyStatePath: String?
+
+    public init(
+        enabled: Bool? = nil,
+        networkName: String? = nil,
+        runtimeStatePath: String? = nil,
+        readyStatePath: String? = nil
+    ) {
+        self.enabled = enabled
+        self.networkName = networkName
+        self.runtimeStatePath = runtimeStatePath
+        self.readyStatePath = readyStatePath
     }
 }

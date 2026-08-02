@@ -22,11 +22,13 @@ public struct MacOSGuestNetworkRequest: Sendable, Equatable {
     public let network: String
     public let hostname: String
     public let macAddress: MACAddress?
+    public let mtu: UInt32?
 
-    public init(network: String, hostname: String, macAddress: MACAddress?) {
+    public init(network: String, hostname: String, macAddress: MACAddress?, mtu: UInt32? = nil) {
         self.network = network
         self.hostname = hostname
         self.macAddress = macAddress
+        self.mtu = mtu
     }
 }
 
@@ -39,7 +41,8 @@ extension ContainerConfiguration {
                 MacOSGuestNetworkRequest(
                     network: $0.network,
                     hostname: $0.options.hostname,
-                    macAddress: $0.options.macAddress
+                    macAddress: $0.options.macAddress,
+                    mtu: $0.options.mtu
                 )
             }
         }
@@ -48,16 +51,24 @@ extension ContainerConfiguration {
             MacOSGuestNetworkRequest(
                 network: defaultNetworkID,
                 hostname: id,
-                macAddress: nil
+                macAddress: nil,
+                mtu: nil
             )
         ]
     }
 
     public func macOSGuestReportedNetworkAttachments(_ attachments: [Attachment]) -> [Attachment] {
-        guard let dns = macOSGuestReportedDNS(attachments: attachments) else {
-            return attachments
+        let requests = macOSGuestNetworkRequests()
+        let dns = macOSGuestReportedDNS(attachments: attachments)
+        return attachments.map { attachment in
+            let configuredMTU = requests.first {
+                $0.network == attachment.network && $0.hostname == attachment.hostname
+            }?.mtu
+            let projected =
+                attachment
+                .withMTU(configuredMTU ?? attachment.mtu)
+            return projected.withDNS(dns ?? attachment.dns)
         }
-        return attachments.map { $0.withDNS(dns) }
     }
 
     public func macOSGuestReportedDNS(attachments: [Attachment]) -> Attachment.DNSConfiguration? {

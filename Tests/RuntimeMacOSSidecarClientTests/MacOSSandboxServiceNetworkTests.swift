@@ -46,6 +46,7 @@ struct MacOSSandboxServiceNetworkTests {
         #expect(attachment.hostname == "sandbox-host")
         #expect(attachment.ipv4Address.address.description == "192.168.64.2")
         #expect(attachment.ipv4Gateway.description == "192.168.64.1")
+        #expect(attachment.mtu == 1_450)
         #expect(attachment.dns?.nameservers == ["9.9.9.9"])
         #expect(attachment.dns?.domain == "example.internal")
         #expect(attachment.dns?.searchDomains == ["svc.example.internal"])
@@ -110,7 +111,7 @@ struct MacOSSandboxServiceNetworkTests {
 
         let prepared = try await service.prepareSandboxNetworkState(containerConfig: config)
 
-        #expect(prepared.attachments == [persistedAttachment])
+        #expect(prepared.attachments == [persistedAttachment.withMTU(1_450)])
         #expect(await recorder.allocateCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
         #expect(await recorder.lookupCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
         #expect(await recorder.deallocateCalls().isEmpty)
@@ -574,7 +575,8 @@ private func makeConfiguration(
             network: "default",
             options: .init(
                 hostname: "sandbox-host",
-                macAddress: nil
+                macAddress: nil,
+                mtu: 1_450
             )
         )
     ]

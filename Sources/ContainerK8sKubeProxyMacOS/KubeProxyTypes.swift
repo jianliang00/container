@@ -62,14 +62,18 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
     public var pfctlPath: String
     public var egressInterface: String?
     public var vmnetCIDR: String?
+    public var runtimeStatePath: String?
+    public var readyStatePath: String?
 
     public init(
         anchorName: String = "com.apple.container.kube-proxy",
         configPath: String = "/etc/pf.conf",
         anchorsPath: String = "/etc/pf.anchors",
         pfctlPath: String = "/sbin/pfctl",
-        egressInterface: String? = "en0",
-        vmnetCIDR: String? = "192.168.64.0/24"
+        egressInterface: String? = nil,
+        vmnetCIDR: String? = "192.168.64.0/24",
+        runtimeStatePath: String? = nil,
+        readyStatePath: String? = nil
     ) {
         self.anchorName = anchorName
         self.configPath = configPath
@@ -77,9 +81,16 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         self.pfctlPath = pfctlPath
         self.egressInterface = egressInterface
         self.vmnetCIDR = vmnetCIDR
+        self.runtimeStatePath = runtimeStatePath
+        self.readyStatePath = readyStatePath
     }
 
-    public var resolvedEgressInterface: String { egressInterface ?? "en0" }
+    public var configuredEgressInterface: String? {
+        guard let value = egressInterface?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
     public var resolvedVmnetCIDR: String { vmnetCIDR ?? "192.168.64.0/24" }
 
     public func validate() throws {
@@ -95,27 +106,25 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
                 throw KubeProxyMacOSError.invalidConfiguration("\(name) must be an absolute path")
             }
         }
-        guard resolvedEgressInterface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
-            throw KubeProxyMacOSError.invalidConfiguration("pf.egressInterface is not a valid interface name")
+        if let configuredEgressInterface {
+            guard configuredEgressInterface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+                throw KubeProxyMacOSError.invalidConfiguration("pf.egressInterface is not a valid interface name")
+            }
         }
-        guard Self.isValidIPv4CIDR(resolvedVmnetCIDR) else {
+        guard KubeProxyIPv4CIDR.canonicalize(resolvedVmnetCIDR) != nil else {
             throw KubeProxyMacOSError.invalidConfiguration("pf.vmnetCIDR is not a valid IPv4 CIDR")
         }
-    }
 
-    private static func isValidIPv4CIDR(_ value: String) -> Bool {
-        let components = value.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.count == 2, let prefixLength = Int(components[1]), (0...32).contains(prefixLength) else {
-            return false
-        }
-        let octets = components[0].split(separator: ".", omittingEmptySubsequences: false)
-        return octets.count == 4
-            && octets.allSatisfy { octet in
-                guard let number = Int(octet), (0...255).contains(number) else {
-                    return false
-                }
-                return String(number) == String(octet)
+        let runtimeStatePath = runtimeStatePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let readyStatePath = readyStatePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if runtimeStatePath != nil || readyStatePath != nil {
+            guard let runtimeStatePath, runtimeStatePath.hasPrefix("/") else {
+                throw KubeProxyMacOSError.invalidConfiguration("pf.runtimeStatePath must be an absolute path")
             }
+            guard let readyStatePath, readyStatePath.hasPrefix("/") else {
+                throw KubeProxyMacOSError.invalidConfiguration("pf.readyStatePath must be an absolute path")
+            }
+        }
     }
 }
 
@@ -216,6 +225,7 @@ public struct KubeProxyServiceSpec: Codable, Sendable, Hashable {
     public var clusterIP: String?
     public var clusterIPs: [String]?
     public var ipFamilies: [String]?
+    public var internalTrafficPolicy: KubeProxyInternalTrafficPolicy?
     public var ports: [KubeProxyServicePort]
 
     public init(
@@ -223,14 +233,21 @@ public struct KubeProxyServiceSpec: Codable, Sendable, Hashable {
         clusterIP: String? = nil,
         clusterIPs: [String]? = nil,
         ipFamilies: [String]? = nil,
+        internalTrafficPolicy: KubeProxyInternalTrafficPolicy? = nil,
         ports: [KubeProxyServicePort] = []
     ) {
         self.type = type
         self.clusterIP = clusterIP
         self.clusterIPs = clusterIPs
         self.ipFamilies = ipFamilies
+        self.internalTrafficPolicy = internalTrafficPolicy
         self.ports = ports
     }
+}
+
+public enum KubeProxyInternalTrafficPolicy: String, Codable, Sendable, Hashable {
+    case cluster = "Cluster"
+    case local = "Local"
 }
 
 public struct KubeProxyServicePort: Codable, Sendable, Hashable {
@@ -310,16 +327,7 @@ public struct KubeProxyEndpointConditions: Codable, Sendable, Hashable {
     }
 
     public var isUsable: Bool {
-        if terminating == true {
-            return false
-        }
-        if let ready {
-            return ready
-        }
-        if let serving {
-            return serving
-        }
-        return true
+        terminating != true && ready != false && serving != false
     }
 }
 

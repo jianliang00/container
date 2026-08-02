@@ -23,6 +23,7 @@ public struct MacOSGuestNetworkInterfaceConfiguration: Codable, Sendable, Equata
     public let ipv4Address: String
     public let ipv4PrefixLength: UInt8
     public let ipv4Gateway: String
+    public let mtu: UInt32?
 
     public init(
         networkID: String,
@@ -30,7 +31,8 @@ public struct MacOSGuestNetworkInterfaceConfiguration: Codable, Sendable, Equata
         macAddress: String,
         ipv4Address: String,
         ipv4PrefixLength: UInt8,
-        ipv4Gateway: String
+        ipv4Gateway: String,
+        mtu: UInt32? = nil
     ) {
         self.networkID = networkID
         self.hostname = hostname
@@ -38,6 +40,7 @@ public struct MacOSGuestNetworkInterfaceConfiguration: Codable, Sendable, Equata
         self.ipv4Address = ipv4Address
         self.ipv4PrefixLength = ipv4PrefixLength
         self.ipv4Gateway = ipv4Gateway
+        self.mtu = mtu
     }
 }
 

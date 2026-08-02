@@ -74,16 +74,21 @@ struct GuestNetworkConfigurator {
         interfaceName: String,
         interface: MacOSGuestNetworkInterfaceConfiguration
     ) throws {
+        var arguments = [
+            interfaceName,
+            "inet",
+            interface.ipv4Address,
+            "netmask",
+            Self.ipv4NetmaskString(prefixLength: interface.ipv4PrefixLength),
+        ]
+        if let mtu = interface.mtu {
+            arguments.append(contentsOf: ["mtu", String(mtu)])
+        }
+        arguments.append("up")
         _ = try run(
             "/sbin/ifconfig",
-            [
-                interfaceName,
-                "inet",
-                interface.ipv4Address,
-                "netmask",
-                Self.ipv4NetmaskString(prefixLength: interface.ipv4PrefixLength),
-                "up",
-            ])
+            arguments
+        )
     }
 
     private func configureDefaultRoute(gateway: String) throws {

@@ -46,6 +46,15 @@ public enum MacOSKubeadmNetworkMode: String, CaseIterable, Sendable, Equatable {
         }
     }
 
+    public var networkName: String {
+        switch self {
+        case .full:
+            return "kubernetes-pod"
+        case .compat:
+            return "default"
+        }
+    }
+
     public var nodeNetworkLabelValue: String {
         rawValue
     }
@@ -81,6 +90,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var discoveryTokenCACertHashes: [String]
     public var certificateAuthorityPEM: String?
     public var kubeProxyToken: String?
+    public var flannelToken: String?
     public var clusterName: String
     public var clusterDNS: String
     public var clusterDomain: String
@@ -100,6 +110,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         discoveryTokenCACertHashes: [String],
         certificateAuthorityPEM: String? = nil,
         kubeProxyToken: String? = nil,
+        flannelToken: String? = nil,
         clusterName: String = "kubernetes",
         clusterDNS: String = "10.96.0.10",
         clusterDomain: String = "cluster.local",
@@ -118,6 +129,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.discoveryTokenCACertHashes = discoveryTokenCACertHashes
         self.certificateAuthorityPEM = certificateAuthorityPEM
         self.kubeProxyToken = kubeProxyToken
+        self.flannelToken = flannelToken
         self.clusterName = clusterName
         self.clusterDNS = clusterDNS
         self.clusterDomain = clusterDomain

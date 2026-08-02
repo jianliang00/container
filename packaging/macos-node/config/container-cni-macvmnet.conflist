@@ -1,10 +1,10 @@
 {
     "cniVersion": "1.1.0",
-    "name": "default",
+    "name": "kubernetes-pod",
     "plugins": [
         {
             "type": "macvmnet",
-            "network": "default",
+            "network": "kubernetes-pod",
             "runtime": "container-runtime-macos",
             "stateDir": "/var/lib/container/cni/macvmnet"
         }

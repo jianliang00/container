@@ -24,12 +24,18 @@ public protocol KubeProxyKubernetesReading: Sendable {
 public final class KubeProxyKubernetesClient: KubeProxyKubernetesReading, @unchecked Sendable {
     private let config: KubeProxyKubeconfigClientConfig
     private let session: URLSession
+    private let tokenProvider: KubernetesServiceAccountTokenProvider
     private let decoder = JSONDecoder()
 
-    public init(config: KubeProxyKubeconfigClientConfig) {
+    public init(config: KubeProxyKubeconfigClientConfig) throws {
+        guard config.server.scheme?.lowercased() == "https", config.server.host != nil else {
+            throw KubeProxyMacOSError.invalidKubeconfig("Kubernetes API server must use HTTPS")
+        }
         self.config = config
         let delegate = KubeProxyURLSessionDelegate(config: config)
-        self.session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        self.session = session
+        self.tokenProvider = KubernetesServiceAccountTokenProvider(config: config, session: session)
     }
 
     public convenience init(kubeconfigPath: String) throws {
@@ -47,7 +53,7 @@ public final class KubeProxyKubernetesClient: KubeProxyKubernetesReading, @unche
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.addValue("application/json", forHTTPHeaderField: "Accept")
-        if let token = config.bearerToken, !token.isEmpty {
+        if let token = try await tokenProvider.authorizationToken(), !token.isEmpty {
             request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 

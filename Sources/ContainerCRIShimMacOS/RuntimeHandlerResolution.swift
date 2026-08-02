@@ -20,6 +20,7 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
     public var workloadPlatform: WorkloadPlatform
     public var network: String
     public var networkBackend: String
+    public var networkMTU: UInt32?
     public var guiEnabled: Bool
     public var resources: RuntimeResources
 
@@ -29,6 +30,7 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
         workloadPlatform: WorkloadPlatform,
         network: String,
         networkBackend: String,
+        networkMTU: UInt32? = nil,
         guiEnabled: Bool,
         resources: RuntimeResources
     ) {
@@ -37,6 +39,7 @@ public struct ResolvedRuntimeHandler: Equatable, Sendable {
         self.workloadPlatform = workloadPlatform
         self.network = network
         self.networkBackend = networkBackend
+        self.networkMTU = networkMTU
         self.guiEnabled = guiEnabled
         self.resources = resources
     }
@@ -111,6 +114,7 @@ extension CRIShimConfig {
             workloadPlatform: workloadPlatform,
             network: network,
             networkBackend: networkBackend,
+            networkMTU: override?.networkMTU ?? defaults.networkMTU,
             guiEnabled: guiEnabled,
             resources: resources
         )

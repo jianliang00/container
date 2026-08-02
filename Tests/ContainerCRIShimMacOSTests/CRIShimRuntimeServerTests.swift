@@ -47,13 +47,65 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func updateRuntimeConfigIgnoresPodCIDRsWhenPodNetworkingIsDisabled() async throws {
+        for podNetwork in [nil, PodNetworkConfig(enabled: false)] {
+            let socketPath = "/tmp/cri-shim-update-config-\(UUID().uuidString.prefix(8)).sock"
+            let stateDirectory = makeTemporaryDirectory()
+            defer {
+                try? FileManager.default.removeItem(at: stateDirectory)
+                try? FileManager.default.removeItem(atPath: socketPath)
+            }
+
+            var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+            config.stateDirectory = stateDirectory.path
+            config.podNetwork = podNetwork
+            let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+            let server = try CRIShimGRPCServer(
+                socketPath: socketPath,
+                config: config,
+                versionInfo: CRIShimRuntimeVersionInfo(),
+                eventLoopGroup: group,
+                runtimeManager: RecordingRuntimeManager(
+                    execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+                ),
+                imageManager: RecordingImageManager(images: []),
+                cniManager: RecordingCNIManager()
+            )
+            let serverTask = Task {
+                try await server.run()
+            }
+            defer {
+                serverTask.cancel()
+            }
+
+            try await waitForSocket(at: socketPath)
+            let channel = ClientConnection.insecure(group: group)
+                .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+            let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+            var request = Runtime_V1_UpdateRuntimeConfigRequest()
+            request.runtimeConfig.networkConfig.podCidr = "fd00:42::/64"
+
+            _ = try await client.updateRuntimeConfig(request)
+            try await channel.close().get()
+        }
+    }
+
+    @Test
     func grpcServerServesVersionOnUnixDomainSocket() async throws {
         let socketPath = "/tmp/cri-shim-grpc-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: stateDirectory) }
         let criLogDirectory = stateDirectory.appendingPathComponent("cri-logs", isDirectory: true)
+        let podNetworkRuntimeStateURL = stateDirectory.appendingPathComponent("pod-network/runtime.json")
+        let podNetworkReadyStateURL = stateDirectory.appendingPathComponent("pod-network/ready.json")
         var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
         config.stateDirectory = stateDirectory.path
+        config.podNetwork = PodNetworkConfig(
+            enabled: true,
+            networkName: "kubernetes-pods",
+            runtimeStatePath: podNetworkRuntimeStateURL.path,
+            readyStatePath: podNetworkReadyStateURL.path
+        )
         let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
         try metadataStore.upsertSandbox(
             CRIShimSandboxMetadata(
@@ -352,6 +404,53 @@ struct CRIShimRuntimeServerTests {
         #expect(!runtimeConfig.hasLinux)
 
         _ = try await client.updateRuntimeConfig(Runtime_V1_UpdateRuntimeConfigRequest())
+        let podNetworkStateStore = PodNetworkStateStore()
+        #expect(try await podNetworkStateStore.loadRuntimeState(path: podNetworkRuntimeStateURL.path) == nil)
+
+        var updateRuntimeConfigRequest = Runtime_V1_UpdateRuntimeConfigRequest()
+        updateRuntimeConfigRequest.runtimeConfig.networkConfig.podCidr = "fd00:10:244:16::/64,10.42.1.0/24"
+        _ = try await client.updateRuntimeConfig(updateRuntimeConfigRequest)
+        let firstPodNetworkState = try #require(
+            try await podNetworkStateStore.loadRuntimeState(path: podNetworkRuntimeStateURL.path)
+        )
+        #expect(firstPodNetworkState.networkName == "kubernetes-pods")
+        #expect(firstPodNetworkState.podCIDR == "10.42.1.0/24")
+        #expect(firstPodNetworkState.generation == 1)
+
+        updateRuntimeConfigRequest.runtimeConfig.networkConfig.podCidr = "10.42.1.0/24,fd00:10:244:16::/64"
+        _ = try await client.updateRuntimeConfig(updateRuntimeConfigRequest)
+        #expect(
+            try await podNetworkStateStore.loadRuntimeState(path: podNetworkRuntimeStateURL.path)
+                == firstPodNetworkState
+        )
+
+        updateRuntimeConfigRequest.runtimeConfig.networkConfig.podCidr = "10.42.2.0/24,fd00:10:244:17::/64"
+        _ = try await client.updateRuntimeConfig(updateRuntimeConfigRequest)
+        let secondPodNetworkState = try #require(
+            try await podNetworkStateStore.loadRuntimeState(path: podNetworkRuntimeStateURL.path)
+        )
+        #expect(secondPodNetworkState.podCIDR == "10.42.2.0/24")
+        #expect(secondPodNetworkState.generation == 2)
+        try await podNetworkStateStore.writeReadyState(
+            PodNetworkReadyState(
+                networkName: "kubernetes-pods",
+                podCIDR: "10.42.2.0/24",
+                runtimeGeneration: secondPodNetworkState.generation,
+                mtu: 1_420,
+                expiresAtUnixSeconds: Int64(Date().timeIntervalSince1970.rounded(.down)) + 300
+            ),
+            path: podNetworkReadyStateURL.path
+        )
+
+        let invalidPodCIDR = "fd00:42::/64"
+        updateRuntimeConfigRequest.runtimeConfig.networkConfig.podCidr = invalidPodCIDR
+        do {
+            _ = try await client.updateRuntimeConfig(updateRuntimeConfigRequest)
+            Issue.record("expected UpdateRuntimeConfig to reject a non-IPv4 pod CIDR")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .invalidArgument)
+            #expect(!(status.message ?? "").contains(invalidPodCIDR))
+        }
 
         var runSandboxRequest = Runtime_V1_RunPodSandboxRequest()
         runSandboxRequest.runtimeHandler = "macos"
@@ -378,6 +477,7 @@ struct CRIShimRuntimeServerTests {
         #expect(createSandboxCall.macosGuest?.networkBackend == .vmnetShared)
         #expect(createSandboxCall.networks.map(\.network) == ["default"])
         #expect(createSandboxCall.networks.map(\.options.hostname) == [runSandbox.podSandboxID])
+        #expect(createSandboxCall.networks.map(\.options.mtu) == [1_420])
         #expect(cniManager.addCalls.count == 1)
         let cniAddCall = try #require(cniManager.addCalls.first)
         #expect(cniAddCall.sandboxID == runSandbox.podSandboxID)

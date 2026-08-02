@@ -134,6 +134,20 @@ public struct Attachment: Codable, Sendable, Equatable {
 }
 
 extension Attachment {
+    public func withMTU(_ mtu: UInt32?) -> Attachment {
+        Attachment(
+            network: network,
+            hostname: hostname,
+            ipv4Address: ipv4Address,
+            ipv4Gateway: ipv4Gateway,
+            ipv6Address: ipv6Address,
+            macAddress: macAddress,
+            mtu: mtu,
+            variant: variant,
+            dns: dns
+        )
+    }
+
     public func withDNS(_ dns: DNSConfiguration?) -> Attachment {
         Attachment(
             network: network,

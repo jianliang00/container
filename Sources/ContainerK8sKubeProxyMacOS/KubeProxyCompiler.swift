@@ -41,7 +41,7 @@ public enum KubeProxyCompiler {
                 continue
             }
 
-            guard isClusterIPService(spec) else {
+            guard supportsClusterIP(spec) else {
                 continue
             }
 
@@ -64,6 +64,7 @@ public enum KubeProxyCompiler {
                     protocolName: protocolName,
                     endpointSlices: serviceSlices,
                     nodeName: nodeName,
+                    internalTrafficPolicy: spec.internalTrafficPolicy ?? .cluster,
                     serviceID: serviceID
                 )
                 issues.append(contentsOf: backendResult.issues)
@@ -101,9 +102,13 @@ public enum KubeProxyCompiler {
         return KubeProxyRuleSet(generation: generation, rules: rules.sorted(), issues: issues.sorted())
     }
 
-    private static func isClusterIPService(_ spec: KubeProxyServiceSpec) -> Bool {
-        let type = spec.type ?? "ClusterIP"
-        return type == "ClusterIP"
+    private static func supportsClusterIP(_ spec: KubeProxyServiceSpec) -> Bool {
+        switch spec.type ?? "ClusterIP" {
+        case "ClusterIP", "NodePort", "LoadBalancer":
+            true
+        default:
+            false
+        }
     }
 
     private static func ipv4ClusterIP(_ spec: KubeProxyServiceSpec) -> String? {
@@ -118,6 +123,7 @@ public enum KubeProxyCompiler {
         protocolName: KubeProxyProtocol,
         endpointSlices: [KubeProxyEndpointSlice],
         nodeName: String,
+        internalTrafficPolicy: KubeProxyInternalTrafficPolicy,
         serviceID: String
     ) -> (backends: [KubeProxyBackend], issues: [KubeProxyCompileIssue]) {
         var backends: [KubeProxyBackend] = []
@@ -153,7 +159,7 @@ public enum KubeProxyCompiler {
                 guard endpoint.conditions?.isUsable ?? true else {
                     continue
                 }
-                if let endpointNode = endpoint.nodeName, endpointNode != nodeName {
+                if internalTrafficPolicy == .local, endpoint.nodeName != nodeName {
                     continue
                 }
                 for address in endpoint.addresses where isIPv4Literal(address) {

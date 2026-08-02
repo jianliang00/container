@@ -195,7 +195,7 @@ extension MacOSSandboxService {
                         guard let liveAttachment else {
                             return false
                         }
-                        return liveAttachment.withDNS(nil) == persisted.withDNS(nil)
+                        return liveAttachment.withMTU(nil).withDNS(nil) == persisted.withMTU(nil).withDNS(nil)
                             && request.macAddress.map { liveAttachment.macAddress == $0 } != false
                     } ?? false
                 if persistedAttachment != nil, !persistedLeaseIsLive {

@@ -39,13 +39,18 @@ public struct KubeProxyController<Reader: KubeProxyKubernetesReading, Applier: K
 
     @discardableResult
     public func runOnce(generation: Int = 0) async throws -> KubeProxyRunResult {
+        let podNetwork = try KubeProxyPodNetworkStateResolver.resolve(config: config.pf)
         let snapshot = try await reader.snapshot()
         let ruleSet = KubeProxyCompiler.compile(
             snapshot: snapshot,
             nodeName: config.nodeName,
             generation: generation
         )
-        try applier.apply(ruleSet)
+        try applier.apply(
+            ruleSet,
+            localPodCIDR: podNetwork.podCIDR,
+            masqueradePodTraffic: podNetwork.masqueradePodTraffic
+        )
         return KubeProxyRunResult(ruleSet: ruleSet, applied: true)
     }
 

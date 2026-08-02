@@ -19,6 +19,7 @@ import ContainerResource
 import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
+import RuntimeMacOSSidecarShared
 import Testing
 
 @testable import container_runtime_macos_sidecar

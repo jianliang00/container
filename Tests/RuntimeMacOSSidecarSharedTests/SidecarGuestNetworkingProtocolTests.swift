@@ -51,4 +51,34 @@ struct SidecarGuestNetworkingProtocolTests {
 
         #expect(decoded.mtu == nil)
     }
+
+    @Test
+    func appliedInterfaceRoundTripPreservesEffectiveMTU() throws {
+        let interface = MacOSGuestAppliedNetworkInterface(
+            networkID: "default",
+            interfaceName: "en0",
+            macAddress: "02:42:ac:11:00:02",
+            ipv4Address: "192.168.64.2/24",
+            effectiveMTU: 1_450
+        )
+
+        let decoded = try JSONDecoder().decode(
+            MacOSGuestAppliedNetworkInterface.self,
+            from: JSONEncoder().encode(interface)
+        )
+
+        #expect(decoded == interface)
+        #expect(decoded.effectiveMTU == 1_450)
+    }
+
+    @Test
+    func decodesLegacyAppliedInterfaceWithoutEffectiveMTU() throws {
+        let data = Data(
+            #"{"networkID":"default","interfaceName":"en0","macAddress":"02:42:ac:11:00:02","ipv4Address":"192.168.64.2/24"}"#.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(MacOSGuestAppliedNetworkInterface.self, from: data)
+
+        #expect(decoded.effectiveMTU == nil)
+    }
 }

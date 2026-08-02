@@ -40,6 +40,18 @@ struct GuestNetworkConfiguratorTests {
     }
 
     @Test
+    func parsesEffectiveInterfaceMTU() throws {
+        let output = """
+            en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1450
+            \tether 02:42:ac:11:00:02
+            """
+
+        let mtu = try GuestNetworkConfigurator.parseInterfaceMTU(from: output, interfaceName: "en0")
+
+        #expect(mtu == 1_450)
+    }
+
+    @Test
     func parsesNetworkServiceOrderByDevice() throws {
         let output = """
             An asterisk (*) denotes that a network service is disabled.
@@ -91,6 +103,12 @@ struct GuestNetworkConfiguratorTests {
                     stderr: "",
                     exitCode: 0
                 )
+            case ("/sbin/ifconfig", ["en0"]):
+                return .init(
+                    stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1450\n",
+                    stderr: "",
+                    exitCode: 0
+                )
             case ("/usr/sbin/networksetup", ["-listnetworkserviceorder"]):
                 return .init(
                     stdout: """
@@ -109,6 +127,7 @@ struct GuestNetworkConfiguratorTests {
 
         #expect(result.dnsApplied)
         #expect(result.warnings == ["dns options are not yet applied inside the macOS guest"])
+        #expect(result.interfaces[0].effectiveMTU == 1_450)
         let commands = recorder.commands()
         #expect(
             commands.contains {
@@ -116,6 +135,46 @@ struct GuestNetworkConfiguratorTests {
                     && $0.arguments == ["en0", "inet", "192.168.64.2", "netmask", "255.255.255.0", "mtu", "1450", "up"]
             })
         #expect(commands.contains { $0.executable == "/usr/sbin/networksetup" && $0.arguments == ["-setsearchdomains", "Ethernet", "cluster.local", "svc.cluster.local"] })
+    }
+
+    @Test
+    func rejectsEffectiveMTUThatDoesNotMatchRequest() throws {
+        let request = MacOSGuestNetworkConfigurationRequest(
+            interfaces: [
+                .init(
+                    networkID: "default",
+                    hostname: "guest-1",
+                    macAddress: "02:42:ac:11:00:02",
+                    ipv4Address: "192.168.64.2",
+                    ipv4PrefixLength: 24,
+                    ipv4Gateway: "192.168.64.1",
+                    mtu: 1_450
+                )
+            ],
+            dns: nil
+        )
+        let configurator = GuestNetworkConfigurator { executable, arguments in
+            switch (executable, arguments) {
+            case ("/sbin/ifconfig", ["-a"]):
+                return .init(
+                    stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n\tether 02:42:ac:11:00:02\n",
+                    stderr: "",
+                    exitCode: 0
+                )
+            case ("/sbin/ifconfig", ["en0"]):
+                return .init(
+                    stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n",
+                    stderr: "",
+                    exitCode: 0
+                )
+            default:
+                return .init(stdout: "", stderr: "", exitCode: 0)
+            }
+        }
+
+        #expect(throws: (any Error).self) {
+            try configurator.apply(request)
+        }
     }
 }
 

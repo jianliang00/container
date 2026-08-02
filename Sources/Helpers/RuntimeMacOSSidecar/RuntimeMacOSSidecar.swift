@@ -656,6 +656,7 @@ actor MacOSSidecarService {
             switch frame.type {
             case .networkResult:
                 let result = try decodeGuestNetworkConfigurationResult(frame)
+                try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
                 log.info(
                     "guest network configuration applied",
                     metadata: [

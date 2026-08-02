@@ -84,17 +84,20 @@ public struct MacOSGuestAppliedNetworkInterface: Codable, Sendable, Equatable {
     public let interfaceName: String
     public let macAddress: String
     public let ipv4Address: String
+    public let effectiveMTU: UInt32?
 
     public init(
         networkID: String,
         interfaceName: String,
         macAddress: String,
-        ipv4Address: String
+        ipv4Address: String,
+        effectiveMTU: UInt32? = nil
     ) {
         self.networkID = networkID
         self.interfaceName = interfaceName
         self.macAddress = macAddress
         self.ipv4Address = ipv4Address
+        self.effectiveMTU = effectiveMTU
     }
 }
 

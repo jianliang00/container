@@ -137,37 +137,12 @@ actor FlannelCurlNodeAnnotationTransport: FlannelNodeAnnotationTransport {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.curlPath)
-        process.arguments = [
-            "--silent",
-            "--show-error",
-            "--proto",
-            "=https",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "30",
-            "--request",
-            "PATCH",
-            "--header",
-            "Accept: application/json",
-            "--header",
-            "Content-Type: application/merge-patch+json",
-            "--cacert",
-            caURL.path,
-            "--cert",
-            identityURL.path,
-            "--cert-type",
-            "P12",
-            "--pass",
-            "",
-            "--data-binary",
-            "@-",
-            "--output",
-            responseURL.path,
-            "--write-out",
-            "%{http_code}",
-            request.url.absoluteString,
-        ]
+        process.arguments = Self.curlArguments(
+            requestURL: request.url,
+            caURL: caURL,
+            identityURL: identityURL,
+            responseURL: responseURL
+        )
 
         let input = Pipe()
         let status = Pipe()
@@ -220,6 +195,43 @@ actor FlannelCurlNodeAnnotationTransport: FlannelNodeAnnotationTransport {
             )
         }
         return response
+    }
+
+    static func curlArguments(
+        requestURL: URL,
+        caURL: URL,
+        identityURL: URL,
+        responseURL: URL
+    ) -> [String] {
+        [
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "--request",
+            "PATCH",
+            "--header",
+            "Accept: application/json",
+            "--header",
+            "Content-Type: application/merge-patch+json",
+            "--cacert",
+            caURL.path,
+            "--cert",
+            "\(identityURL.path):",
+            "--cert-type",
+            "P12",
+            "--data-binary",
+            "@-",
+            "--output",
+            responseURL.path,
+            "--write-out",
+            "%{http_code}",
+            requestURL.absoluteString,
+        ]
     }
 
     private func identityData(clientCertificate: Data, clientKey: Data, directory: URL) throws -> Data {

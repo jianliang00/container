@@ -76,6 +76,30 @@ struct FlannelKubernetesClientTests {
     }
 
     @Test
+    func passesEmptyPKCS12PasswordThroughCertificateArgument() throws {
+        let requestURL = try #require(URL(string: "https://cluster.example:6443/api/v1/nodes/mac-a/status"))
+        let caURL = URL(fileURLWithPath: "/private/node-client/ca.crt")
+        let identityURL = URL(fileURLWithPath: "/private/node-client/client.p12")
+        let responseURL = URL(fileURLWithPath: "/private/node-client/response.json")
+
+        let arguments = FlannelCurlNodeAnnotationTransport.curlArguments(
+            requestURL: requestURL,
+            caURL: caURL,
+            identityURL: identityURL,
+            responseURL: responseURL
+        )
+        let certificateIndex = try #require(arguments.firstIndex(of: "--cert"))
+        let certificateTypeIndex = try #require(arguments.firstIndex(of: "--cert-type"))
+
+        #expect(arguments[certificateIndex + 1] == "\(identityURL.path):")
+        #expect(arguments[certificateTypeIndex + 1] == "P12")
+        #expect(!arguments.contains("--pass"))
+        #expect(arguments.contains(caURL.path))
+        #expect(arguments.contains(responseURL.path))
+        #expect(arguments.last == requestURL.absoluteString)
+    }
+
+    @Test
     func rejectsHTTPReadKubeconfigBeforeUsingServiceAccountToken() throws {
         #expect(
             throws: FlannelVXLANError.invalidConfiguration(

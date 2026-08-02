@@ -79,6 +79,43 @@ struct FlannelUnderlayResolutionTests {
         }
     }
 
+    @Test
+    func validatesPeerRouteOnSelectedUnderlayInterface() throws {
+        let manager = FlannelSystemManager { executable, arguments in
+            #expect(executable == "/sbin/route")
+            #expect(arguments == ["-n", "get", "10.185.55.8"])
+            return "route to: 10.185.55.8\n  gateway: 10.31.252.1\n  interface: en7\n"
+        }
+
+        try manager.validateUnderlayRoute(destination: "10.185.55.8", interface: "en7")
+    }
+
+    @Test
+    func rejectsPeerRouteWithoutAnEgressInterface() {
+        let manager = FlannelSystemManager { executable, arguments in
+            #expect(executable == "/sbin/route")
+            #expect(arguments == ["-n", "get", "10.185.55.8"])
+            // macOS route(8) can exit successfully while reporting a missing
+            // route only on stderr, leaving stdout empty.
+            return ""
+        }
+
+        #expect(throws: FlannelVXLANError.self) {
+            try manager.validateUnderlayRoute(destination: "10.185.55.8", interface: "en7")
+        }
+    }
+
+    @Test
+    func rejectsPeerRouteOnAnotherInterface() {
+        let manager = FlannelSystemManager { _, _ in
+            "route to: 10.185.55.8\n  interface: utun0\n"
+        }
+
+        #expect(throws: FlannelVXLANError.self) {
+            try manager.validateUnderlayRoute(destination: "10.185.55.8", interface: "en7")
+        }
+    }
+
     private static func ifconfig(name: String, address: String, mtu: Int) -> String {
         """
         \(name): flags=8863<UP,BROADCAST,RUNNING> mtu \(mtu)

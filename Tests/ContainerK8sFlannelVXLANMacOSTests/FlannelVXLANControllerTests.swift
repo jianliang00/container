@@ -39,6 +39,13 @@ struct FlannelVXLANControllerTests {
         #expect(fixture.tunnelBox.tunnel.peerUpdates.count == 2)
         #expect(Set(fixture.system.addedRoutes.map(\.podCIDR)) == ["10.244.2.0/24", "10.244.5.0/24"])
         #expect(fixture.system.ensuredRoutes.count == 4)
+        #expect(
+            fixture.system.validatedUnderlayRoutes.map { "\($0.destination)|\($0.interface)" } == [
+                "10.185.55.8|en7",
+                "10.19.121.140|en7",
+                "10.185.55.8|en7",
+                "10.19.121.140|en7",
+            ])
         #expect(fixture.system.tunnelLocalAddress == "10.244.22.0")
 
         let networkCalls = await fixture.networkManager.calls
@@ -104,6 +111,31 @@ struct FlannelVXLANControllerTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.config.readyStatePath))
         #expect(fixture.tunnelBox.createdConfigurations.isEmpty)
         #expect(await fixture.networkManager.calls.isEmpty)
+    }
+
+    @Test
+    func clearsReadyStateWithoutMutatingDataplaneWhenPeerUnderlayRouteIsLost() async throws {
+        let fixture = try ControllerFixture()
+        try await fixture.writeRuntimeState(podCIDR: "10.244.22.0/24")
+        let controller = try fixture.makeController()
+        _ = try await controller.runOnce()
+        let networkCallsBeforeFailure = await fixture.networkManager.calls.count
+        let patchesBeforeFailure = await fixture.kubernetes.patches.count
+        let routeWritesBeforeFailure = fixture.system.ensuredRoutes.count
+        let peerUpdatesBeforeFailure = fixture.tunnelBox.tunnel.peerUpdates.count
+        fixture.system.failUnderlayRouteValidation()
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await controller.runOnce()
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.config.readyStatePath))
+        #expect(fixture.tunnelBox.createdConfigurations.count == 1)
+        #expect(fixture.tunnelBox.tunnel.isRunning)
+        #expect(fixture.tunnelBox.tunnel.peerUpdates.count == peerUpdatesBeforeFailure)
+        #expect(fixture.system.ensuredRoutes.count == routeWritesBeforeFailure)
+        #expect(await fixture.networkManager.calls.count == networkCallsBeforeFailure)
+        #expect(await fixture.kubernetes.patches.count == patchesBeforeFailure)
     }
 
     @Test
@@ -493,9 +525,11 @@ private final class MockFlannelSystemManager: FlannelSystemManaging, @unchecked 
     private let lock = NSLock()
     private var ensuredRouteValues: [(podCIDR: String, interface: String)] = []
     private var removedRouteValues: [(podCIDR: String, interface: String)] = []
+    private var validatedUnderlayRouteValues: [(destination: String, interface: String)] = []
     private var tunnelLocalAddressValue: String?
     private var existingInterfaces: Set<String> = []
     private var routeRemovalFailuresRemaining = 0
+    private var underlayRouteValidationFails = false
 
     var addedRoutes: [(podCIDR: String, interface: String)] {
         lock.withLock { ensuredRouteValues }
@@ -513,12 +547,31 @@ private final class MockFlannelSystemManager: FlannelSystemManaging, @unchecked 
         lock.withLock { tunnelLocalAddressValue }
     }
 
+    var validatedUnderlayRoutes: [(destination: String, interface: String)] {
+        lock.withLock { validatedUnderlayRouteValues }
+    }
+
     func inspectUnderlayInterface(_ name: String) throws -> FlannelUnderlayInterface {
         FlannelUnderlayInterface(name: name, ipv4Address: "10.31.252.24", mtu: 1500)
     }
 
     func resolveUnderlayInterface(nodeInternalIP: String?) throws -> FlannelUnderlayInterface {
         FlannelUnderlayInterface(name: "en7", ipv4Address: nodeInternalIP ?? "10.31.252.24", mtu: 1500)
+    }
+
+    func validateUnderlayRoute(destination: String, interface: String) throws {
+        try lock.withLock {
+            if underlayRouteValidationFails {
+                throw FlannelVXLANError.runtime("injected underlay route validation failure")
+            }
+            validatedUnderlayRouteValues.append((destination, interface))
+        }
+    }
+
+    func failUnderlayRouteValidation() {
+        lock.withLock {
+            underlayRouteValidationFails = true
+        }
     }
 
     func interfaceExists(_ name: String) throws -> Bool {

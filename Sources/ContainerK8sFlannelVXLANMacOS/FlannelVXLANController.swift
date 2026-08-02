@@ -117,8 +117,15 @@ public actor FlannelVXLANController {
         do {
             return try await reconcile()
         } catch {
-            try? clearReadyState()
-            throw error
+            let reconcileError = error
+            do {
+                try clearReadyState()
+            } catch {
+                throw FlannelVXLANError.runtime(
+                    "reconcile failed: \(reconcileError); failed to clear ready lease: \(error)"
+                )
+            }
+            throw reconcileError
         }
     }
 
@@ -294,6 +301,9 @@ public actor FlannelVXLANController {
             throw FlannelVXLANError.runtime(
                 "Node InternalIP \(nodeIP) does not match \(underlay.name) address \(underlay.ipv4Address)"
             )
+        }
+        for publicIP in Set(compilation.peers.map(\.publicIP)).sorted() {
+            try system.validateUnderlayRoute(destination: publicIP, interface: underlay.name)
         }
         let mtu = try networkConfig.backend.innerMTU(underlayMTU: underlay.mtu)
         guard (576...9_000).contains(mtu) else {

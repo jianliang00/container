@@ -428,39 +428,151 @@ public struct FlannelSystemManager: FlannelSystemManaging {
     }
 
     public func ensureRoute(podCIDR: String, interface: String) throws {
-        if routeInterface(for: podCIDR) == interface {
+        let canonicalCIDR = try Self.validateManagedRoute(podCIDR: podCIDR, interface: interface)
+        if case .present(let existingInterface) = try exactRouteState(for: canonicalCIDR) {
+            guard existingInterface == interface else {
+                throw FlannelVXLANError.runtime(
+                    "route \(canonicalCIDR.string) already exists on \(existingInterface), expected \(interface)"
+                )
+            }
             return
         }
-        if (try? run("/sbin/route", ["-n", "change", "-net", podCIDR, "-interface", interface])) != nil,
-            routeInterface(for: podCIDR) == interface
-        {
-            return
+
+        do {
+            _ = try run("/sbin/route", ["-n", "add", "-net", canonicalCIDR.string, "-interface", interface])
+        } catch {
+            let state = try exactRouteState(for: canonicalCIDR)
+            if state == .present(interface: interface) {
+                return
+            }
+            if case .present(let existingInterface) = state {
+                throw FlannelVXLANError.runtime(
+                    "route \(canonicalCIDR.string) appeared on \(existingInterface) while adding it to \(interface)"
+                )
+            }
+            throw error
         }
-        _ = try run("/sbin/route", ["-n", "add", "-net", podCIDR, "-interface", interface])
-        guard routeInterface(for: podCIDR) == interface else {
-            throw FlannelVXLANError.runtime("route \(podCIDR) was not installed on \(interface)")
+        let state = try exactRouteState(for: canonicalCIDR)
+        guard state == .present(interface: interface) else {
+            throw FlannelVXLANError.runtime(
+                "route \(canonicalCIDR.string) was not installed on \(interface); found \(state.description)"
+            )
         }
     }
 
     public func removeRoute(podCIDR: String, interface: String) throws {
-        guard routeInterface(for: podCIDR) == interface else {
+        let canonicalCIDR = try Self.validateManagedRoute(podCIDR: podCIDR, interface: interface)
+        let initialState = try exactRouteState(for: canonicalCIDR)
+        guard case .present(let existingInterface) = initialState else {
             return
         }
+        guard existingInterface == interface else {
+            throw FlannelVXLANError.runtime(
+                "refusing to remove route \(canonicalCIDR.string) from \(interface) because it exists on \(existingInterface)"
+            )
+        }
         do {
-            _ = try run("/sbin/route", ["-n", "delete", "-net", podCIDR, "-interface", interface])
+            _ = try run("/sbin/route", ["-n", "delete", "-net", canonicalCIDR.string, "-interface", interface])
         } catch {
-            guard routeInterface(for: podCIDR) == interface else {
+            let state = try exactRouteState(for: canonicalCIDR)
+            if state == .absent {
                 return
+            }
+            if case .present(let currentInterface) = state, currentInterface != interface {
+                throw FlannelVXLANError.runtime(
+                    "route \(canonicalCIDR.string) moved to \(currentInterface) while removing it from \(interface)"
+                )
             }
             throw error
         }
+        let finalState = try exactRouteState(for: canonicalCIDR)
+        guard finalState == .absent else {
+            throw FlannelVXLANError.runtime(
+                "route \(canonicalCIDR.string) remains after removal: \(finalState.description)"
+            )
+        }
     }
 
-    private func routeInterface(for podCIDR: String) -> String? {
-        guard let output = try? run("/sbin/route", ["-n", "get", "-net", podCIDR]) else {
+    private static func validateManagedRoute(podCIDR: String, interface: String) throws -> FlannelIPv4.CIDR {
+        guard let canonicalCIDR = FlannelIPv4.parseCIDR(podCIDR), canonicalCIDR.prefixLength > 0 else {
+            throw FlannelVXLANError.runtime("managed route PodCIDR must be valid IPv4 and must not be default")
+        }
+        guard interface.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
+            throw FlannelVXLANError.runtime("managed route interface is invalid")
+        }
+        return canonicalCIDR
+    }
+
+    private func exactRouteState(for podCIDR: FlannelIPv4.CIDR) throws -> ManagedRouteState {
+        // route(8) reports the best match, which may be the default route. The
+        // destination and mask must match before its interface is actionable.
+        let output = try run("/sbin/route", ["-n", "get", "-net", podCIDR.string])
+        guard let routeCIDR = Self.routeCIDR(in: output) else {
+            throw FlannelVXLANError.runtime("route query for \(podCIDR.string) returned an invalid destination or mask")
+        }
+        let interfaces = Self.routeInterfaces(in: output)
+        guard interfaces.count == 1, let interface = interfaces.first else {
+            throw FlannelVXLANError.runtime(
+                "route query for \(podCIDR.string) did not identify exactly one interface"
+            )
+        }
+        guard routeCIDR == podCIDR else {
+            return .absent
+        }
+        return .present(interface: interface)
+    }
+
+    private enum ManagedRouteState: Equatable {
+        case absent
+        case present(interface: String)
+
+        var description: String {
+            switch self {
+            case .absent:
+                "absent"
+            case .present(let interface):
+                "interface \(interface)"
+            }
+        }
+    }
+
+    private static func routeCIDR(in output: String) -> FlannelIPv4.CIDR? {
+        guard let destination = routeField("destination", in: output),
+            let netmask = routeField("mask", in: output)
+        else {
             return nil
         }
-        return Self.routeInterfaces(in: output).first
+        if destination == "default" || netmask == "default" {
+            guard destination == "default", netmask == "default" else {
+                return nil
+            }
+            return FlannelIPv4.parseCIDR("0.0.0.0/0")
+        }
+        guard let address = FlannelIPv4.parseAddress(destination),
+            let mask = FlannelIPv4.parseAddress(netmask)
+        else {
+            return nil
+        }
+        let prefixLength = mask.nonzeroBitCount
+        let expectedMask = prefixLength == 0 ? UInt32(0) : UInt32.max << UInt32(32 - prefixLength)
+        guard mask == expectedMask else {
+            return nil
+        }
+        return FlannelIPv4.CIDR(network: address & mask, prefixLength: prefixLength)
+    }
+
+    private static func routeField(_ name: String, in output: String) -> String? {
+        let values = output.split(separator: "\n").compactMap { line -> String? in
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count == 2, fields[0] == "\(name):" else {
+                return nil
+            }
+            return String(fields[1])
+        }
+        guard values.count == 1 else {
+            return nil
+        }
+        return values[0]
     }
 
     private static func routeInterfaces(in output: String) -> [String] {

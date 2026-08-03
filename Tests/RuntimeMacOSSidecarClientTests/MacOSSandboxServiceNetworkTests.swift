@@ -118,6 +118,45 @@ struct MacOSSandboxServiceNetworkTests {
     }
 
     @Test
+    func mountedWorkloadBeforeBootPreservesPreparedNetworkAttachment() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-mounted-workload")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let hostDirectory = root.appendingPathComponent("host-data", isDirectory: true)
+        try FileManager.default.createDirectory(at: hostDirectory, withIntermediateDirectories: true)
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration()
+        try await service.testingPrepareSandbox(config, state: "created")
+
+        let before = try await service.prepareSandboxNetworkState(containerConfig: config)
+        try await service.testingCreateWorkload(
+            WorkloadConfiguration(
+                id: "mounted-workload",
+                processConfiguration: ProcessConfiguration(
+                    executable: "/usr/bin/true",
+                    arguments: [],
+                    environment: []
+                ),
+                mounts: [
+                    .virtiofs(
+                        source: hostDirectory.path,
+                        destination: "/Users/demo/data",
+                        options: ["ro"]
+                    )
+                ]
+            )
+        )
+        let after = await service.inspectSandboxNetworkState(containerConfig: config)
+
+        let key = RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")
+        #expect(after.attachments == before.attachments)
+        #expect(await recorder.allocateCalls() == [key])
+        #expect(await recorder.deallocateCalls().isEmpty)
+    }
+
+    @Test
     func prepareRefreshesPersistedLeaseAfterSessionDisconnect() async throws {
         let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-session-recovery")
         defer { try? FileManager.default.removeItem(at: root) }

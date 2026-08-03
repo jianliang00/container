@@ -249,7 +249,11 @@ jobs:
         run: |
           mkdir -p pr-coverage
           jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/unit/coverage-summary.json > pr-coverage/unit-line-coverage.txt
-          jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/integration/coverage-summary.json > pr-coverage/integration-line-coverage.txt
+          if [ -f coverage-reports/integration/coverage-summary.json ]; then
+            jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/integration/coverage-summary.json > pr-coverage/integration-line-coverage.txt
+          else
+            echo skipped > pr-coverage/integration-line-coverage.txt
+          fi
           jq -r '.data[0].totals.lines.percent | . * 100 | round | . / 100' coverage-reports/combined/coverage-summary.json > pr-coverage/combined-line-coverage.txt
           echo "${PR_NUMBER}" > pr-coverage/pr-number.txt
           echo "Coverage data:"

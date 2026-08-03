@@ -720,32 +720,12 @@ public actor ContainersService {
                 id: id,
                 workloadConfiguration: configuration
             )
-        let shouldReplacePreparedClient =
-            state.client != nil
-            && state.snapshot.status != .running
-            && !configuration.mounts.isEmpty
-        if shouldReplacePreparedClient {
-            if let existingClient = state.client {
-                // The macOS runtime owns the network allocation sessions. Release
-                // them before replacing the helper so a persisted lease never
-                // outlives the XPC session that owns the allocation.
-                try await existingClient.releaseSandboxNetwork()
-            }
-            try? self.deregisterSandboxService(
-                id: id,
-                runtimeName: stagedContainerConfiguration?.runtimeHandler ?? state.snapshot.configuration.runtimeHandler
-            )
-            try await self.lock.withLock { context in
-                var updated = try await self.getContainerState(id: id, context: context)
-                updated.client = nil
-                updated.snapshot.networks = []
-                await self.setContainerState(id, updated, context: context)
-            }
-        }
         let client: RuntimeClient
         if let task = state.bootstrapTask ?? state.sandboxStartTask {
             client = try await task.value
-        } else if let existingClient = shouldReplacePreparedClient ? nil : state.client {
+        } else if let existingClient = state.client {
+            // The prepared helper merges persisted workload mounts into its boot
+            // configuration, so it can retain ownership of the sandbox network.
             client = existingClient
         } else {
             let containerConfiguration: ContainerConfiguration

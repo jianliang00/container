@@ -64,7 +64,7 @@ struct MacOSGuestNetworkBootstrapTests {
         #expect(request.dns?.nameservers == ["9.9.9.9"])
         #expect(request.dns?.domain == "cluster.local")
         #expect(request.dns?.searchDomains == ["svc.cluster.local"])
-        #expect(request.dns?.options == [])
+        #expect(request.dns?.options == ["ndots:5"])
     }
 
     @Test
@@ -73,6 +73,43 @@ struct MacOSGuestNetworkBootstrapTests {
         let result = makeGuestNetworkResult(effectiveMTU: 1_450)
 
         try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+    }
+
+    @Test
+    func acceptsGuestResultWithMatchingEffectiveDNS() throws {
+        let request = makeGuestNetworkRequestWithDNS()
+        let result = makeGuestNetworkResultWithDNS(
+            nameservers: ["10.96.0.10"],
+            options: ["ndots:5"]
+        )
+
+        try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+    }
+
+    @Test
+    func rejectsLegacyDNSResultWithoutEffectiveResolverDetails() throws {
+        let request = makeGuestNetworkRequestWithDNS()
+        let result = MacOSGuestNetworkConfigurationResult(
+            interfaces: makeGuestNetworkResult(effectiveMTU: 1_450).interfaces,
+            dnsApplied: true
+        )
+
+        #expect(throws: (any Error).self) {
+            try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+        }
+    }
+
+    @Test
+    func rejectsGuestResultWithDifferentEffectiveDNSOptions() throws {
+        let request = makeGuestNetworkRequestWithDNS()
+        let result = makeGuestNetworkResultWithDNS(
+            nameservers: ["10.96.0.10"],
+            options: []
+        )
+
+        #expect(throws: (any Error).self) {
+            try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+        }
     }
 
     @Test
@@ -215,6 +252,24 @@ private func makeGuestNetworkRequest(mtu: UInt32?) -> MacOSGuestNetworkConfigura
     )
 }
 
+private func makeGuestNetworkRequestWithDNS() -> MacOSGuestNetworkConfigurationRequest {
+    MacOSGuestNetworkConfigurationRequest(
+        interfaces: [
+            makeGuestNetworkInterface(
+                networkID: "default",
+                macAddress: "02:42:ac:11:00:02",
+                mtu: 1_450
+            )
+        ],
+        dns: .init(
+            nameservers: ["10.96.0.10"],
+            domain: nil,
+            searchDomains: ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"],
+            options: ["ndots:5"]
+        )
+    )
+}
+
 private func makeGuestNetworkInterface(
     networkID: String,
     macAddress: String,
@@ -241,6 +296,24 @@ private func makeGuestNetworkResult(effectiveMTU: UInt32?) -> MacOSGuestNetworkC
             )
         ],
         dnsApplied: false
+    )
+}
+
+private func makeGuestNetworkResultWithDNS(
+    nameservers: [String],
+    options: [String]
+) -> MacOSGuestNetworkConfigurationResult {
+    .init(
+        interfaces: makeGuestNetworkResult(effectiveMTU: 1_450).interfaces,
+        dnsApplied: true,
+        effectiveDNS: .init(
+            serviceID: "service-1",
+            interfaceName: "en0",
+            nameservers: nameservers,
+            domain: nil,
+            searchDomains: ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"],
+            options: options
+        )
     )
 }
 

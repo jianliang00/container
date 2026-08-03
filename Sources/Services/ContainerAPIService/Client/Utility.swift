@@ -410,7 +410,6 @@ public struct Utility {
                 return (override.networks, sanitizeMacOSGuestDNS(dns))
             }
 
-            try validateMacOSGuestDNSOptions(management.dns.options)
             let domain = management.dns.domain ?? dnsDomain
             return (
                 override.networks,
@@ -418,7 +417,7 @@ public struct Utility {
                     nameservers: management.dns.nameservers,
                     domain: domain,
                     searchDomains: management.dns.searchDomains,
-                    options: []
+                    options: management.dns.options
                 )
             )
         }
@@ -460,7 +459,6 @@ public struct Utility {
             return (attachments, nil)
         }
 
-        try validateMacOSGuestDNSOptions(management.dns.options)
         let domain = management.dns.domain ?? dnsDomain
         return (
             attachments,
@@ -468,18 +466,9 @@ public struct Utility {
                 nameservers: management.dns.nameservers,
                 domain: domain,
                 searchDomains: management.dns.searchDomains,
-                options: []
+                options: management.dns.options
             )
         )
-    }
-
-    private static func validateMacOSGuestDNSOptions(_ options: [String]) throws {
-        guard options.isEmpty else {
-            throw ContainerizationError(
-                .unsupported,
-                message: "--dns-option is not supported for --os darwin"
-            )
-        }
     }
 
     private static func sanitizeMacOSGuestDNS(
@@ -489,7 +478,7 @@ public struct Utility {
             nameservers: dns.nameservers,
             domain: dns.domain,
             searchDomains: dns.searchDomains,
-            options: []
+            options: dns.options
         )
     }
 

@@ -221,7 +221,7 @@ struct UtilityTests {
         #expect(resolvedDNS.nameservers == ["8.8.8.8"])
         #expect(resolvedDNS.domain == "example.com")
         #expect(resolvedDNS.searchDomains == ["svc.example.com"])
-        #expect(resolvedDNS.options.isEmpty)
+        #expect(resolvedDNS.options == ["debug"])
     }
 
     @Test("macOS guest networking override falls back to supported management DNS flags")
@@ -346,18 +346,20 @@ struct UtilityTests {
         }
     }
 
-    @Test("macOS guest networking rejects unsupported DNS options")
-    func testResolveMacOSGuestNetworkingRejectsDNSOptions() throws {
+    @Test("macOS guest networking preserves DNS options")
+    func testResolveMacOSGuestNetworkingPreservesDNSOptions() throws {
         var management = try Flags.Management.parse([])
         management.dns.options = ["ndots:2"]
 
-        #expect(throws: ContainerizationError.self) {
-            _ = try Utility.resolveMacOSGuestNetworking(
+        let resolved = try #require(
+            try Utility.resolveMacOSGuestNetworking(
                 containerID: "macos-guest",
                 management: management,
                 override: nil
             )
-        }
+        )
+
+        #expect(resolved.dns?.options == ["ndots:2"])
     }
 
     @Test("macOS guest networking rejects multiple CLI network attachments")

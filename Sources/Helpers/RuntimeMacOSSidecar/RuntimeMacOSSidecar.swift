@@ -662,6 +662,9 @@ actor MacOSSidecarService {
                     metadata: [
                         "interfaces": "\(result.interfaces.count)",
                         "dns_applied": "\(result.dnsApplied)",
+                        "dns_service_id": "\(result.effectiveDNS?.serviceID ?? "none")",
+                        "dns_interface": "\(result.effectiveDNS?.interfaceName ?? "none")",
+                        "dns_nameservers": "\(result.effectiveDNS?.nameservers.joined(separator: ",") ?? "none")",
                     ]
                 )
                 for warning in result.warnings {

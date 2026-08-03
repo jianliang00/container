@@ -81,4 +81,37 @@ struct SidecarGuestNetworkingProtocolTests {
 
         #expect(decoded.effectiveMTU == nil)
     }
+
+    @Test
+    func networkResultRoundTripPreservesEffectiveDNS() throws {
+        let result = MacOSGuestNetworkConfigurationResult(
+            interfaces: [],
+            dnsApplied: true,
+            effectiveDNS: .init(
+                serviceID: "service-1",
+                interfaceName: "en0",
+                nameservers: ["10.96.0.10"],
+                domain: nil,
+                searchDomains: ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"],
+                options: ["ndots:5"]
+            )
+        )
+
+        let decoded = try JSONDecoder().decode(
+            MacOSGuestNetworkConfigurationResult.self,
+            from: JSONEncoder().encode(result)
+        )
+
+        #expect(decoded == result)
+    }
+
+    @Test
+    func decodesLegacyNetworkResultWithoutEffectiveDNS() throws {
+        let data = Data(#"{"interfaces":[],"dnsApplied":true,"warnings":[]}"#.utf8)
+
+        let decoded = try JSONDecoder().decode(MacOSGuestNetworkConfigurationResult.self, from: data)
+
+        #expect(decoded.dnsApplied)
+        #expect(decoded.effectiveDNS == nil)
+    }
 }

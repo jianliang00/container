@@ -101,18 +101,47 @@ public struct MacOSGuestAppliedNetworkInterface: Codable, Sendable, Equatable {
     }
 }
 
+public struct MacOSGuestEffectiveDNSConfiguration: Codable, Sendable, Equatable {
+    public let serviceID: String
+    public let interfaceName: String
+    public let nameservers: [String]
+    public let domain: String?
+    public let searchDomains: [String]
+    public let options: [String]
+
+    public init(
+        serviceID: String,
+        interfaceName: String,
+        nameservers: [String],
+        domain: String?,
+        searchDomains: [String],
+        options: [String]
+    ) {
+        self.serviceID = serviceID
+        self.interfaceName = interfaceName
+        self.nameservers = nameservers
+        self.domain = domain
+        self.searchDomains = searchDomains
+        self.options = options
+    }
+}
+
 public struct MacOSGuestNetworkConfigurationResult: Codable, Sendable, Equatable {
     public let interfaces: [MacOSGuestAppliedNetworkInterface]
+    /// Retained for compatibility with sidecars that predate effective DNS reporting.
     public let dnsApplied: Bool
+    public let effectiveDNS: MacOSGuestEffectiveDNSConfiguration?
     public let warnings: [String]
 
     public init(
         interfaces: [MacOSGuestAppliedNetworkInterface],
         dnsApplied: Bool,
+        effectiveDNS: MacOSGuestEffectiveDNSConfiguration? = nil,
         warnings: [String] = []
     ) {
         self.interfaces = interfaces
         self.dnsApplied = dnsApplied
+        self.effectiveDNS = effectiveDNS
         self.warnings = warnings
     }
 }

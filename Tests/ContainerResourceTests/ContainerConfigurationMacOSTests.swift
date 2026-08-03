@@ -294,7 +294,7 @@ struct ContainerConfigurationMacOSTests {
                     nameservers: ["9.9.9.9"],
                     domain: "example.internal",
                     searchDomains: ["svc.example.internal"],
-                    options: []
+                    options: ["ndots:2"]
                 ))
     }
 

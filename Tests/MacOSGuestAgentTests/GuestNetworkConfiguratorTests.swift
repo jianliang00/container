@@ -52,24 +52,7 @@ struct GuestNetworkConfiguratorTests {
     }
 
     @Test
-    func parsesNetworkServiceOrderByDevice() throws {
-        let output = """
-            An asterisk (*) denotes that a network service is disabled.
-            (1) Wi-Fi
-            (Hardware Port: Wi-Fi, Device: en0)
-
-            (2) USB LAN
-            (Hardware Port: USB 10/100/1000 LAN, Device: en7)
-            """
-
-        let mapping = try GuestNetworkConfigurator.parseNetworkServicesByDevice(from: output)
-
-        #expect(mapping["en0"] == "Wi-Fi")
-        #expect(mapping["en7"] == "USB LAN")
-    }
-
-    @Test
-    func appliesDomainAsFirstSearchDomainAndWarnsAboutUnsupportedOptions() throws {
+    func appliesNetworkThroughSystemConfigurationAndReportsEffectiveDNS() throws {
         let request = MacOSGuestNetworkConfigurationRequest(
             interfaces: [
                 .init(
@@ -91,50 +74,148 @@ struct GuestNetworkConfiguratorTests {
         )
 
         let recorder = CommandRecorder()
-        let configurator = GuestNetworkConfigurator { executable, arguments in
-            recorder.record(executable: executable, arguments: arguments)
-            switch (executable, arguments) {
-            case ("/sbin/ifconfig", ["-a"]):
-                return .init(
-                    stdout: """
-                        en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
-                        \tether 02:42:ac:11:00:02
-                        """,
-                    stderr: "",
-                    exitCode: 0
-                )
-            case ("/sbin/ifconfig", ["en0"]):
-                return .init(
-                    stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1450\n",
-                    stderr: "",
-                    exitCode: 0
-                )
-            case ("/usr/sbin/networksetup", ["-listnetworkserviceorder"]):
-                return .init(
-                    stdout: """
-                        (1) Ethernet
-                        (Hardware Port: Ethernet, Device: en0)
-                        """,
-                    stderr: "",
-                    exitCode: 0
-                )
-            default:
-                return .init(stdout: "", stderr: "", exitCode: 0)
+        let systemRecorder = SystemConfigurationRecorder()
+        let configurator = GuestNetworkConfigurator(
+            runCommand: { executable, arguments in
+                recorder.record(executable: executable, arguments: arguments)
+                switch (executable, arguments) {
+                case ("/sbin/ifconfig", ["-a"]):
+                    return .init(
+                        stdout: """
+                            en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500
+                            \tether 02:42:ac:11:00:02
+                            """,
+                        stderr: "",
+                        exitCode: 0
+                    )
+                case ("/sbin/ifconfig", ["en0"]):
+                    return .init(
+                        stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1450\n",
+                        stderr: "",
+                        exitCode: 0
+                    )
+                default:
+                    return .init(stdout: "", stderr: "", exitCode: 0)
+                }
+            },
+            applySystemConfiguration: { interfaces, primaryIndex, dns in
+                systemRecorder.record(interfaces: interfaces, primaryIndex: primaryIndex, dns: dns)
+                return Self.makeSystemConfigurationResult(interfaces: interfaces, dns: dns)
             }
-        }
+        )
 
         let result = try configurator.apply(request)
 
         #expect(result.dnsApplied)
-        #expect(result.warnings == ["dns options are not yet applied inside the macOS guest"])
+        #expect(result.warnings.isEmpty)
+        #expect(result.effectiveDNS?.serviceID == "service-en0")
+        #expect(result.effectiveDNS?.interfaceName == "en0")
+        #expect(result.effectiveDNS?.domain == "cluster.local")
+        #expect(result.effectiveDNS?.searchDomains == ["svc.cluster.local"])
+        #expect(result.effectiveDNS?.options == ["ndots:5"])
         #expect(result.interfaces[0].effectiveMTU == 1_450)
+
+        let invocation = try #require(systemRecorder.invocation())
+        #expect(invocation.primaryIndex == 0)
+        #expect(invocation.interfaces[0].interfaceName == "en0")
+        #expect(invocation.interfaces[0].ipv4Address == "192.168.64.2")
+        #expect(invocation.dns?.options == ["ndots:5"])
+
         let commands = recorder.commands()
         #expect(
             commands.contains {
                 $0.executable == "/sbin/ifconfig"
-                    && $0.arguments == ["en0", "inet", "192.168.64.2", "netmask", "255.255.255.0", "mtu", "1450", "up"]
+                    && $0.arguments == ["en0", "mtu", "1450", "up"]
             })
-        #expect(commands.contains { $0.executable == "/usr/sbin/networksetup" && $0.arguments == ["-setsearchdomains", "Ethernet", "cluster.local", "svc.cluster.local"] })
+        #expect(!commands.contains { $0.executable == "/usr/sbin/networksetup" })
+        #expect(!commands.contains { $0.executable == "/sbin/route" })
+    }
+
+    @Test
+    func buildsManualIPv4AndDNSProtocolConfiguration() throws {
+        let interface = GuestSystemNetworkConfigurator.InterfaceConfiguration(
+            networkID: "default",
+            interfaceName: "en0",
+            macAddress: "02:42:ac:11:00:02",
+            ipv4Address: "192.168.64.2",
+            ipv4PrefixLength: 24,
+            ipv4Gateway: "192.168.64.1"
+        )
+        let ipv4 = GuestSystemNetworkConfigurator.ipv4ConfigurationDictionary(for: interface)
+        let dns = GuestSystemNetworkConfigurator.dnsConfigurationDictionary(
+            for: .init(
+                nameservers: ["10.96.0.10"],
+                domain: "cluster.local",
+                searchDomains: ["default.svc.cluster.local", "svc.cluster.local"],
+                options: ["ndots:5", "timeout:2"]
+            )
+        )
+
+        #expect(ipv4["ConfigMethod"] as? String == "Manual")
+        #expect(ipv4["Addresses"] as? [String] == ["192.168.64.2"])
+        #expect(ipv4["SubnetMasks"] as? [String] == ["255.255.255.0"])
+        #expect(ipv4["Router"] as? String == "192.168.64.1")
+        #expect(
+            GuestSystemNetworkConfigurator.ipv4ConfigurationDictionary(
+                for: interface,
+                includeDefaultRoute: false
+            )["Router"] == nil
+        )
+        #expect(dns["ServerAddresses"] as? [String] == ["10.96.0.10"])
+        #expect(dns["DomainName"] as? String == "cluster.local")
+        #expect(dns["SearchDomains"] as? [String] == ["default.svc.cluster.local", "svc.cluster.local"])
+        #expect(dns["Options"] as? String == "ndots:5 timeout:2")
+    }
+
+    @Test
+    func validatesDNSFromActiveSystemConfigurationState() throws {
+        let requested = MacOSGuestDNSConfiguration(
+            nameservers: ["10.96.0.10"],
+            domain: nil,
+            searchDomains: ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"],
+            options: ["ndots:5"]
+        )
+        let properties: NSDictionary = [
+            "ServerAddresses": ["10.96.0.10"],
+            "SearchDomains": ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"],
+            "Options": "ndots:5",
+        ]
+
+        let effective = try GuestSystemNetworkConfigurator.effectiveDNSConfiguration(
+            serviceID: "service-1",
+            interfaceName: "en0",
+            requested: requested,
+            properties: properties
+        )
+
+        #expect(effective.serviceID == "service-1")
+        #expect(effective.interfaceName == "en0")
+        #expect(effective.nameservers == ["10.96.0.10"])
+        #expect(effective.options == ["ndots:5"])
+    }
+
+    @Test
+    func rejectsDNSThatIsNotActiveInSystemConfiguration() throws {
+        let requested = MacOSGuestDNSConfiguration(
+            nameservers: ["10.96.0.10"],
+            domain: nil,
+            searchDomains: ["cluster.local"],
+            options: ["ndots:5"]
+        )
+        let properties: NSDictionary = [
+            "ServerAddresses": ["192.168.64.1"],
+            "SearchDomains": ["cluster.local"],
+            "Options": "ndots:5",
+        ]
+
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.effectiveDNSConfiguration(
+                serviceID: "service-1",
+                interfaceName: "en0",
+                requested: requested,
+                properties: properties
+            )
+        }
     }
 
     @Test
@@ -153,24 +234,29 @@ struct GuestNetworkConfiguratorTests {
             ],
             dns: nil
         )
-        let configurator = GuestNetworkConfigurator { executable, arguments in
-            switch (executable, arguments) {
-            case ("/sbin/ifconfig", ["-a"]):
-                return .init(
-                    stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n\tether 02:42:ac:11:00:02\n",
-                    stderr: "",
-                    exitCode: 0
-                )
-            case ("/sbin/ifconfig", ["en0"]):
-                return .init(
-                    stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n",
-                    stderr: "",
-                    exitCode: 0
-                )
-            default:
-                return .init(stdout: "", stderr: "", exitCode: 0)
+        let configurator = GuestNetworkConfigurator(
+            runCommand: { executable, arguments in
+                switch (executable, arguments) {
+                case ("/sbin/ifconfig", ["-a"]):
+                    return .init(
+                        stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n\tether 02:42:ac:11:00:02\n",
+                        stderr: "",
+                        exitCode: 0
+                    )
+                case ("/sbin/ifconfig", ["en0"]):
+                    return .init(
+                        stdout: "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n",
+                        stderr: "",
+                        exitCode: 0
+                    )
+                default:
+                    return .init(stdout: "", stderr: "", exitCode: 0)
+                }
+            },
+            applySystemConfiguration: { interfaces, _, dns in
+                Self.makeSystemConfigurationResult(interfaces: interfaces, dns: dns)
             }
-        }
+        )
 
         #expect(throws: (any Error).self) {
             try configurator.apply(request)
@@ -179,6 +265,58 @@ struct GuestNetworkConfiguratorTests {
 }
 
 extension GuestNetworkConfiguratorTests {
+    private static func makeSystemConfigurationResult(
+        interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration],
+        dns: MacOSGuestDNSConfiguration?
+    ) -> GuestSystemNetworkConfigurator.Result {
+        let applied = interfaces.map {
+            GuestSystemNetworkConfigurator.AppliedInterface(
+                networkID: $0.networkID,
+                interfaceName: $0.interfaceName,
+                macAddress: $0.macAddress,
+                ipv4Address: "\($0.ipv4Address)/\($0.ipv4PrefixLength)"
+            )
+        }
+        let effectiveDNS = dns.map {
+            MacOSGuestEffectiveDNSConfiguration(
+                serviceID: "service-\(interfaces[0].interfaceName)",
+                interfaceName: interfaces[0].interfaceName,
+                nameservers: $0.nameservers,
+                domain: $0.domain,
+                searchDomains: $0.searchDomains,
+                options: $0.options
+            )
+        }
+        return .init(interfaces: applied, effectiveDNS: effectiveDNS)
+    }
+
+    private final class SystemConfigurationRecorder: @unchecked Sendable {
+        struct Invocation: Sendable {
+            let interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration]
+            let primaryIndex: Int
+            let dns: MacOSGuestDNSConfiguration?
+        }
+
+        private let lock = NSLock()
+        private var stored: Invocation?
+
+        func record(
+            interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration],
+            primaryIndex: Int,
+            dns: MacOSGuestDNSConfiguration?
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+            stored = .init(interfaces: interfaces, primaryIndex: primaryIndex, dns: dns)
+        }
+
+        func invocation() -> Invocation? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+    }
+
     private final class CommandRecorder: @unchecked Sendable {
         struct Command: Equatable {
             let executable: String

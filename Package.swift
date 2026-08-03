@@ -686,7 +686,10 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 "RuntimeMacOSSidecarShared",
             ],
-            path: "Sources/Helpers/MacOSGuestAgent"
+            path: "Sources/Helpers/MacOSGuestAgent",
+            linkerSettings: [
+                .linkedFramework("SystemConfiguration")
+            ]
         ),
         .executableTarget(
             name: "container-macos-image-prepare",

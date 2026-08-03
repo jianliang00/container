@@ -377,6 +377,7 @@ else
 endif
 
 .PHONY: coverage-integration
+ifeq ($(SKIP_VIRTUALIZATION_TESTS),)
 coverage-integration: INTEGRATION_SWIFT_EXTRA = --skip-build --enable-code-coverage
 coverage-integration: INTEGRATION_POST_TEST = cp $(COV_DATA_DIR)/*.profraw $(COVERAGE_OUTPUT_DIR)/integration/ || true ;
 # Continuous mode (%c) mmaps the profraw and syncs counters live. The XPC helper
@@ -392,6 +393,11 @@ coverage-integration: coverage-all
 	@echo Merging integration coverage profdata...
 	@xcrun llvm-profdata merge -sparse $(COVERAGE_OUTPUT_DIR)/integration/*.profraw -o $(COVERAGE_OUTPUT_DIR)/integration/default.profdata
 	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/integration/default.profdata,integration,$(COV_OBJECT_FLAGS))
+else
+coverage-integration:
+	@rm -rf $(COVERAGE_OUTPUT_DIR)/integration
+	@echo Skipping integration coverage because CONTAINER_SKIP_VIRTUALIZATION_TESTS=$(CONTAINER_SKIP_VIRTUALIZATION_TESTS)
+endif
 
 empty :=
 space := $(empty) $(empty)
@@ -401,8 +407,16 @@ space := $(empty) $(empty)
 coverage coverage-all coverage-unit coverage-integration: COVERAGE_FLAG = --enable-code-coverage -Xswiftc -DCONTAINER_COVERAGE
 
 .PHONY: coverage
-# Merge the per-tier profdata from coverage-unit and coverage-integration into a
-# combined report. Each prerequisite target produces its own tier report first.
+# Merge the available tier profdata into a combined report. Hosted runners that
+# cannot run nested virtualization use the unit profile as the combined profile
+# and report the integration tier as skipped.
+ifneq ($(SKIP_VIRTUALIZATION_TESTS),)
+coverage: coverage-unit coverage-integration
+	@echo Generating unit-only combined coverage because integration coverage is skipped...
+	@mkdir -p $(COVERAGE_OUTPUT_DIR)/combined
+	@cp $(COVERAGE_OUTPUT_DIR)/unit/default.profdata $(COVERAGE_OUTPUT_DIR)/combined/default.profdata
+	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/combined/default.profdata,combined)
+else
 coverage: coverage-unit coverage-integration
 	@echo Merging combined coverage profdata...
 	@mkdir -p $(COVERAGE_OUTPUT_DIR)/combined
@@ -411,6 +425,7 @@ coverage: coverage-unit coverage-integration
 		$(COVERAGE_OUTPUT_DIR)/integration/default.profdata \
 		-o $(COVERAGE_OUTPUT_DIR)/combined/default.profdata
 	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/combined/default.profdata,combined,$(COV_OBJECT_FLAGS))
+endif
 
 .PHONY: coverage-unit
 coverage-unit: build-tests

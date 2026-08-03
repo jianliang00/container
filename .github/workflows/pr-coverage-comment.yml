@@ -55,7 +55,14 @@ jobs:
           grep -qxE '[0-9]+(\.[0-9]+)?' <<< "$UNIT" || { echo "Invalid unit coverage: ${UNIT}"; exit 1; }
 
           INTEGRATION=$(cat pr-coverage-data/integration-line-coverage.txt)
-          grep -qxE '[0-9]+(\.[0-9]+)?' <<< "$INTEGRATION" || { echo "Invalid integration coverage: ${INTEGRATION}"; exit 1; }
+          if [ "$INTEGRATION" = "skipped" ]; then
+            INTEGRATION_DISPLAY="Skipped"
+            COMBINED_LABEL="Combined (unit only)"
+          else
+            grep -qxE '[0-9]+(\.[0-9]+)?' <<< "$INTEGRATION" || { echo "Invalid integration coverage: ${INTEGRATION}"; exit 1; }
+            INTEGRATION_DISPLAY="${INTEGRATION}%"
+            COMBINED_LABEL="Combined"
+          fi
 
           COMBINED=$(cat pr-coverage-data/combined-line-coverage.txt)
           grep -qxE '[0-9]+(\.[0-9]+)?' <<< "$COMBINED" || { echo "Invalid combined coverage: ${COMBINED}"; exit 1; }
@@ -68,8 +75,8 @@ jobs:
           | Tier | Line Coverage |
           |------|--------------|
           | Unit | ${UNIT}% |
-          | Integration | ${INTEGRATION}% |
-          | Combined | ${COMBINED}% |
+          | Integration | ${INTEGRATION_DISPLAY} |
+          | ${COMBINED_LABEL} | ${COMBINED}% |
           EOF
           )
 

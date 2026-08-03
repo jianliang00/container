@@ -50,7 +50,7 @@ struct MacOSSandboxServiceNetworkTests {
         #expect(attachment.dns?.nameservers == ["9.9.9.9"])
         #expect(attachment.dns?.domain == "example.internal")
         #expect(attachment.dns?.searchDomains == ["svc.example.internal"])
-        #expect(attachment.dns?.options.isEmpty == true)
+        #expect(attachment.dns?.options == ["ndots:5"])
 
         let maybeLease = try MacOSGuestNetworkLeaseStore.load(from: root)
         let lease = try #require(maybeLease)
@@ -90,7 +90,7 @@ struct MacOSSandboxServiceNetworkTests {
                 nameservers: ["9.9.9.9"],
                 domain: "example.internal",
                 searchDomains: ["svc.example.internal"],
-                options: []
+                options: ["ndots:5"]
             )
         )
         let recorder = RecordingSandboxNetworkControl(
@@ -213,7 +213,7 @@ struct MacOSSandboxServiceNetworkTests {
         #expect(attachment.hostname == "sandbox-host")
         #expect(attachment.ipv4Address.address.description == "192.168.64.7")
         #expect(attachment.dns?.nameservers == ["9.9.9.9"])
-        #expect(attachment.dns?.options.isEmpty == true)
+        #expect(attachment.dns?.options == ["ndots:5"])
         #expect(await recorder.lookupCalls() == [RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")])
     }
 

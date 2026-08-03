@@ -94,6 +94,73 @@ enum MacOSGuestNetworkBootstrap {
                 )
             }
         }
+
+        guard let requestedDNS = request.dns else {
+            return
+        }
+        guard !request.interfaces.isEmpty else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "guest DNS configuration requires a primary network interface"
+            )
+        }
+        guard result.dnsApplied, let effectiveDNS = result.effectiveDNS else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "guest did not report an effective DNS resolver"
+            )
+        }
+        guard !effectiveDNS.serviceID.isEmpty else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "guest effective DNS resolver is missing its SystemConfiguration service identifier"
+            )
+        }
+
+        let primaryIndex = min(max(request.primaryInterfaceIndex, 0), request.interfaces.count - 1)
+        let primary = request.interfaces[primaryIndex]
+        guard
+            let appliedPrimary = result.interfaces.first(where: {
+                $0.networkID == primary.networkID
+                    && $0.macAddress.caseInsensitiveCompare(primary.macAddress) == .orderedSame
+            }),
+            effectiveDNS.interfaceName == appliedPrimary.interfaceName
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "guest effective DNS resolver is not attached to the primary interface"
+            )
+        }
+
+        guard effectiveDNS.nameservers == requestedDNS.nameservers else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "guest DNS nameserver mismatch: requested \(requestedDNS.nameservers), effective \(effectiveDNS.nameservers)"
+            )
+        }
+        let requestedDomain = normalizedDNSDomain(requestedDNS.domain)
+        guard effectiveDNS.domain == requestedDomain else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "guest DNS domain mismatch: requested \(requestedDomain ?? "none"), effective \(effectiveDNS.domain ?? "none")"
+            )
+        }
+        guard effectiveDNS.searchDomains == requestedDNS.searchDomains else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "guest DNS search domain mismatch: requested \(requestedDNS.searchDomains), effective \(effectiveDNS.searchDomains)"
+            )
+        }
+        guard effectiveDNS.options == requestedDNS.options else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "guest DNS option mismatch: requested \(requestedDNS.options), effective \(effectiveDNS.options)"
+            )
+        }
     }
 
     private static func makeDNSConfiguration(
@@ -107,7 +174,14 @@ enum MacOSGuestNetworkBootstrap {
             nameservers: dns.nameservers,
             domain: dns.domain,
             searchDomains: dns.searchDomains,
-            options: []
+            options: dns.options
         )
+    }
+
+    private static func normalizedDNSDomain(_ domain: String?) -> String? {
+        guard let domain, !domain.isEmpty else {
+            return nil
+        }
+        return domain
     }
 }

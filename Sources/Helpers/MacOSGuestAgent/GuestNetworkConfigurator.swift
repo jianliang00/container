@@ -25,116 +25,107 @@ struct GuestNetworkConfigurator {
     }
 
     let runCommand: @Sendable (_ executable: String, _ arguments: [String]) throws -> CommandResult
+    let applySystemConfiguration:
+        @Sendable (
+            _ interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration],
+            _ primaryInterfaceIndex: Int,
+            _ dns: MacOSGuestDNSConfiguration?
+        ) throws -> GuestSystemNetworkConfigurator.Result
 
     init(
-        runCommand: @escaping @Sendable (_ executable: String, _ arguments: [String]) throws -> CommandResult = GuestNetworkConfigurator.runSystemCommand
+        runCommand: @escaping @Sendable (_ executable: String, _ arguments: [String]) throws -> CommandResult = GuestNetworkConfigurator.runSystemCommand,
+        applySystemConfiguration:
+            @escaping @Sendable (
+                _ interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration],
+                _ primaryInterfaceIndex: Int,
+                _ dns: MacOSGuestDNSConfiguration?
+            ) throws -> GuestSystemNetworkConfigurator.Result = GuestSystemNetworkConfigurator.apply
     ) {
         self.runCommand = runCommand
+        self.applySystemConfiguration = applySystemConfiguration
     }
 
     func apply(_ request: MacOSGuestNetworkConfigurationRequest) throws -> MacOSGuestNetworkConfigurationResult {
         guard !request.interfaces.isEmpty else {
-            return .init(interfaces: [], dnsApplied: false)
+            return .init(interfaces: [], dnsApplied: false, effectiveDNS: nil)
         }
 
         let interfaceLookup = try Self.parseInterfaceNamesByMAC(
             from: runCommand("/sbin/ifconfig", ["-a"]).stdout
         )
 
-        var appliedInterfaces: [MacOSGuestAppliedNetworkInterface] = []
+        var resolvedInterfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration] = []
+        var effectiveMTUs: [String: UInt32] = [:]
         for interface in request.interfaces {
             let normalizedMAC = Self.normalizeMACAddress(interface.macAddress)
             guard let interfaceName = interfaceLookup[normalizedMAC] else {
                 throw Self.makeError("guest network interface not found for MAC \(interface.macAddress)")
             }
-            let effectiveMTU = try configureInterface(interfaceName: interfaceName, interface: interface)
-            appliedInterfaces.append(
+            effectiveMTUs[interfaceName] = try prepareInterface(
+                interfaceName: interfaceName,
+                requestedMTU: interface.mtu
+            )
+            resolvedInterfaces.append(
                 .init(
                     networkID: interface.networkID,
                     interfaceName: interfaceName,
                     macAddress: interface.macAddress,
-                    ipv4Address: "\(interface.ipv4Address)/\(interface.ipv4PrefixLength)",
+                    ipv4Address: interface.ipv4Address,
+                    ipv4PrefixLength: interface.ipv4PrefixLength,
+                    ipv4Gateway: interface.ipv4Gateway
+                )
+            )
+        }
+
+        let primaryIndex = min(max(request.primaryInterfaceIndex, 0), resolvedInterfaces.count - 1)
+        let effectiveConfiguration = try applySystemConfiguration(resolvedInterfaces, primaryIndex, request.dns)
+        guard effectiveConfiguration.interfaces.count == resolvedInterfaces.count else {
+            throw Self.makeError(
+                "SystemConfiguration returned \(effectiveConfiguration.interfaces.count) interfaces; expected \(resolvedInterfaces.count)"
+            )
+        }
+
+        var appliedInterfaces: [MacOSGuestAppliedNetworkInterface] = []
+        for effective in effectiveConfiguration.interfaces {
+            guard let effectiveMTU = effectiveMTUs[effective.interfaceName] else {
+                throw Self.makeError(
+                    "SystemConfiguration returned unexpected interface \(effective.interfaceName)"
+                )
+            }
+            appliedInterfaces.append(
+                .init(
+                    networkID: effective.networkID,
+                    interfaceName: effective.interfaceName,
+                    macAddress: effective.macAddress,
+                    ipv4Address: effective.ipv4Address,
                     effectiveMTU: effectiveMTU
                 )
             )
         }
 
-        let primaryIndex = min(max(request.primaryInterfaceIndex, 0), appliedInterfaces.count - 1)
-        try configureDefaultRoute(gateway: request.interfaces[primaryIndex].ipv4Gateway)
-
-        var warnings: [String] = []
-        let dnsApplied = try configureDNSIfNeeded(
-            request.dns,
-            primaryInterfaceName: appliedInterfaces[primaryIndex].interfaceName,
-            warnings: &warnings
+        return .init(
+            interfaces: appliedInterfaces,
+            dnsApplied: effectiveConfiguration.effectiveDNS != nil,
+            effectiveDNS: effectiveConfiguration.effectiveDNS
         )
-        return .init(interfaces: appliedInterfaces, dnsApplied: dnsApplied, warnings: warnings)
     }
 
-    private func configureInterface(
-        interfaceName: String,
-        interface: MacOSGuestNetworkInterfaceConfiguration
-    ) throws -> UInt32 {
-        var arguments = [
-            interfaceName,
-            "inet",
-            interface.ipv4Address,
-            "netmask",
-            Self.ipv4NetmaskString(prefixLength: interface.ipv4PrefixLength),
-        ]
-        if let mtu = interface.mtu {
-            arguments.append(contentsOf: ["mtu", String(mtu)])
+    private func prepareInterface(interfaceName: String, requestedMTU: UInt32?) throws -> UInt32 {
+        var arguments = [interfaceName]
+        if let requestedMTU {
+            arguments.append(contentsOf: ["mtu", String(requestedMTU)])
         }
         arguments.append("up")
-        _ = try run(
-            "/sbin/ifconfig",
-            arguments
-        )
+        _ = try run("/sbin/ifconfig", arguments)
+
         let output = try run("/sbin/ifconfig", [interfaceName]).stdout
         let effectiveMTU = try Self.parseInterfaceMTU(from: output, interfaceName: interfaceName)
-        if let requestedMTU = interface.mtu, effectiveMTU != requestedMTU {
+        if let requestedMTU, effectiveMTU != requestedMTU {
             throw Self.makeError(
                 "guest network interface \(interfaceName) MTU mismatch: requested \(requestedMTU), effective \(effectiveMTU)"
             )
         }
         return effectiveMTU
-    }
-
-    private func configureDefaultRoute(gateway: String) throws {
-        _ = try? runCommand("/sbin/route", ["-n", "delete", "default"])
-        _ = try run("/sbin/route", ["-n", "add", "default", gateway])
-    }
-
-    private func configureDNSIfNeeded(
-        _ dns: MacOSGuestDNSConfiguration?,
-        primaryInterfaceName: String,
-        warnings: inout [String]
-    ) throws -> Bool {
-        guard let dns else {
-            return false
-        }
-
-        if !dns.options.isEmpty {
-            warnings.append("dns options are not yet applied inside the macOS guest")
-        }
-
-        let servicesByInterface = try Self.parseNetworkServicesByDevice(
-            from: runCommand("/usr/sbin/networksetup", ["-listnetworkserviceorder"]).stdout
-        )
-        guard let serviceName = servicesByInterface[primaryInterfaceName] else {
-            throw Self.makeError("guest network service not found for interface \(primaryInterfaceName)")
-        }
-
-        let nameservers = dns.nameservers.isEmpty ? ["Empty"] : dns.nameservers
-        _ = try run("/usr/sbin/networksetup", ["-setdnsservers", serviceName] + nameservers)
-
-        var searchDomains = dns.searchDomains
-        if let domain = dns.domain, !domain.isEmpty, !searchDomains.contains(domain) {
-            searchDomains.insert(domain, at: 0)
-        }
-        let searchArgs = searchDomains.isEmpty ? ["Empty"] : searchDomains
-        _ = try run("/usr/sbin/networksetup", ["-setsearchdomains", serviceName] + searchArgs)
-        return true
     }
 
     private func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
@@ -192,58 +183,8 @@ struct GuestNetworkConfigurator {
         return mtu
     }
 
-    static func parseNetworkServicesByDevice(from serviceOrderOutput: String) throws -> [String: String] {
-        var result: [String: String] = [:]
-        var currentService: String?
-
-        for rawLine in serviceOrderOutput.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else {
-                continue
-            }
-
-            if line.hasPrefix("("), let closing = line.firstIndex(of: ")") {
-                let service = line[line.index(after: closing)...].trimmingCharacters(in: .whitespaces)
-                if !service.isEmpty, !service.hasPrefix("(Hardware Port:") {
-                    currentService = service
-                    continue
-                }
-            }
-
-            guard
-                line.hasPrefix("(Hardware Port:"),
-                let deviceRange = line.range(of: "Device: ")
-            else {
-                continue
-            }
-
-            let deviceSuffix = line[deviceRange.upperBound...]
-            let device =
-                deviceSuffix
-                .replacingOccurrences(of: ")", with: "")
-                .trimmingCharacters(in: .whitespaces)
-            guard let currentService, !device.isEmpty else {
-                continue
-            }
-            result[device] = currentService
-        }
-
-        return result
-    }
-
     static func normalizeMACAddress(_ macAddress: String) -> String {
         macAddress.lowercased().replacingOccurrences(of: "-", with: ":")
-    }
-
-    static func ipv4NetmaskString(prefixLength: UInt8) -> String {
-        let bits = Int(prefixLength)
-        let value: UInt32 = bits == 0 ? 0 : ~UInt32(0) << (32 - bits)
-        return [
-            String((value >> 24) & 0xff),
-            String((value >> 16) & 0xff),
-            String((value >> 8) & 0xff),
-            String(value & 0xff),
-        ].joined(separator: ".")
     }
 
     private static func runSystemCommand(_ executable: String, _ arguments: [String]) throws -> CommandResult {

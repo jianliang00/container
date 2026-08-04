@@ -324,6 +324,7 @@ jobs:
           test_filter+='|ContainerMacOSKubeadmTests\.'
           test_filter+='|ContainerOSTests\.DirectoryWatcherTest'
           test_filter+='|ContainerResourceTests\.ContainerConfigurationMacOSTests'
+          test_filter+='|MacOSGuestAgentTests\.GuestDNSProxyTests'
           test_filter+='|MacOSGuestAgentTests\.GuestNetworkConfiguratorTests'
           test_filter+='|RuntimeMacOSSidecarClientTests\.MacOSSandboxServiceNetworkTests'
           test_filter+='|RuntimeMacOSSidecarSharedTests\.SidecarGuestNetworkingProtocolTests'

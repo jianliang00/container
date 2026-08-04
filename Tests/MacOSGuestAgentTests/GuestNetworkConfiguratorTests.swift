@@ -185,7 +185,8 @@ struct GuestNetworkConfiguratorTests {
             serviceID: "service-1",
             interfaceName: "en0",
             requested: requested,
-            properties: properties
+            configuredProperties: properties,
+            effectiveProperties: properties
         )
 
         #expect(effective.serviceID == "service-1")
@@ -195,14 +196,19 @@ struct GuestNetworkConfiguratorTests {
     }
 
     @Test
-    func rejectsDNSThatIsNotActiveInSystemConfiguration() throws {
+    func rejectsDNSThatIsNotEffectiveInSystemConfiguration() throws {
         let requested = MacOSGuestDNSConfiguration(
             nameservers: ["10.96.0.10"],
             domain: nil,
             searchDomains: ["cluster.local"],
             options: ["ndots:5"]
         )
-        let properties: NSDictionary = [
+        let configuredProperties: NSDictionary = [
+            "ServerAddresses": ["10.96.0.10"],
+            "SearchDomains": ["cluster.local"],
+            "Options": "ndots:5",
+        ]
+        let effectiveProperties: NSDictionary = [
             "ServerAddresses": ["192.168.64.1"],
             "SearchDomains": ["cluster.local"],
             "Options": "ndots:5",
@@ -213,7 +219,38 @@ struct GuestNetworkConfiguratorTests {
                 serviceID: "service-1",
                 interfaceName: "en0",
                 requested: requested,
-                properties: properties
+                configuredProperties: configuredProperties,
+                effectiveProperties: effectiveProperties
+            )
+        }
+    }
+
+    @Test
+    func rejectsDNSThatWasNotPersistedInSystemConfiguration() throws {
+        let requested = MacOSGuestDNSConfiguration(
+            nameservers: ["10.96.0.10"],
+            domain: nil,
+            searchDomains: ["cluster.local"],
+            options: ["ndots:5"]
+        )
+        let configuredProperties: NSDictionary = [
+            "ServerAddresses": ["192.168.64.1"],
+            "SearchDomains": ["cluster.local"],
+            "Options": "ndots:5",
+        ]
+        let effectiveProperties: NSDictionary = [
+            "ServerAddresses": ["10.96.0.10"],
+            "SearchDomains": ["cluster.local"],
+            "Options": "ndots:5",
+        ]
+
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.effectiveDNSConfiguration(
+                serviceID: "service-1",
+                interfaceName: "en0",
+                requested: requested,
+                configuredProperties: configuredProperties,
+                effectiveProperties: effectiveProperties
             )
         }
     }

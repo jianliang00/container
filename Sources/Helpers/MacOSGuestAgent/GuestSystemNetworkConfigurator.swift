@@ -210,8 +210,40 @@ struct GuestSystemNetworkConfigurator {
         serviceID: String,
         interfaceName: String,
         requested: MacOSGuestDNSConfiguration,
-        properties: NSDictionary
+        configuredProperties: NSDictionary,
+        effectiveProperties: NSDictionary
     ) throws -> MacOSGuestEffectiveDNSConfiguration {
+        _ = try validatedDNSProperties(
+            requested: requested,
+            properties: configuredProperties,
+            stateDescription: "configured"
+        )
+        let effective = try validatedDNSProperties(
+            requested: requested,
+            properties: effectiveProperties,
+            stateDescription: "effective"
+        )
+
+        return MacOSGuestEffectiveDNSConfiguration(
+            serviceID: serviceID,
+            interfaceName: interfaceName,
+            nameservers: effective.nameservers,
+            domain: effective.domain,
+            searchDomains: effective.searchDomains,
+            options: effective.options
+        )
+    }
+
+    private static func validatedDNSProperties(
+        requested: MacOSGuestDNSConfiguration,
+        properties: NSDictionary,
+        stateDescription: String
+    ) throws -> (
+        nameservers: [String],
+        domain: String?,
+        searchDomains: [String],
+        options: [String]
+    ) {
         let nameservers = stringArray(properties[kSCPropNetDNSServerAddresses as String])
         let searchDomains = stringArray(properties[kSCPropNetDNSSearchDomains as String])
         let domain = nonEmptyString(properties[kSCPropNetDNSDomainName as String])
@@ -221,26 +253,19 @@ struct GuestSystemNetworkConfigurator {
             .map(String.init) ?? []
 
         guard nameservers == requested.nameservers else {
-            throw makeError("active DNS nameserver mismatch: requested \(requested.nameservers), effective \(nameservers)")
+            throw makeError("\(stateDescription) DNS nameserver mismatch: requested \(requested.nameservers), found \(nameservers)")
         }
         guard searchDomains == requested.searchDomains else {
-            throw makeError("active DNS search domain mismatch: requested \(requested.searchDomains), effective \(searchDomains)")
+            throw makeError("\(stateDescription) DNS search domain mismatch: requested \(requested.searchDomains), found \(searchDomains)")
         }
         guard domain == nonEmptyString(requested.domain) else {
-            throw makeError("active DNS domain mismatch: requested \(requested.domain ?? "none"), effective \(domain ?? "none")")
+            throw makeError("\(stateDescription) DNS domain mismatch: requested \(requested.domain ?? "none"), found \(domain ?? "none")")
         }
         guard options == requested.options else {
-            throw makeError("active DNS option mismatch: requested \(requested.options), effective \(options)")
+            throw makeError("\(stateDescription) DNS option mismatch: requested \(requested.options), found \(options)")
         }
 
-        return MacOSGuestEffectiveDNSConfiguration(
-            serviceID: serviceID,
-            interfaceName: interfaceName,
-            nameservers: nameservers,
-            domain: domain,
-            searchDomains: searchDomains,
-            options: options
-        )
+        return (nameservers, domain, searchDomains, options)
     }
 
     private static func lockPreferences(_ preferences: SCPreferences) -> Bool {
@@ -518,16 +543,35 @@ struct GuestSystemNetworkConfigurator {
         requested: MacOSGuestDNSConfiguration,
         store: SCDynamicStore
     ) throws -> MacOSGuestEffectiveDNSConfiguration {
-        let key = "State:/Network/Service/\(configured.serviceID)/DNS"
-        guard let dictionary = dynamicStoreDictionary(store: store, key: key) else {
-            throw makeError("active DNS state is missing for service \(configured.serviceID)")
+        // Static service DNS is published in Setup:. IPMonitor folds that configuration into
+        // State:/Network/Global/DNS; per-service State: DNS is reserved for dynamic sources.
+        let configuredKey =
+            SCDynamicStoreKeyCreateNetworkServiceEntity(
+                nil,
+                kSCDynamicStoreDomainSetup,
+                configured.serviceID as CFString,
+                kSCEntNetDNS
+            ) as String
+        guard let configuredDictionary = dynamicStoreDictionary(store: store, key: configuredKey) else {
+            throw makeError("configured DNS state is missing for service \(configured.serviceID)")
+        }
+
+        let effectiveKey =
+            SCDynamicStoreKeyCreateNetworkGlobalEntity(
+                nil,
+                kSCDynamicStoreDomainState,
+                kSCEntNetDNS
+            ) as String
+        guard let effectiveDictionary = dynamicStoreDictionary(store: store, key: effectiveKey) else {
+            throw makeError("effective global DNS state is missing")
         }
 
         return try effectiveDNSConfiguration(
             serviceID: configured.serviceID,
             interfaceName: configured.request.interfaceName,
             requested: requested,
-            properties: dictionary
+            configuredProperties: configuredDictionary,
+            effectiveProperties: effectiveDictionary
         )
     }
 

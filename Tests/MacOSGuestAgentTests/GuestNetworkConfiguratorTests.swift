@@ -75,6 +75,7 @@ struct GuestNetworkConfiguratorTests {
 
         let recorder = CommandRecorder()
         let systemRecorder = SystemConfigurationRecorder()
+        let proxyRecorder = DNSProxyRecorder()
         let configurator = GuestNetworkConfigurator(
             runCommand: { executable, arguments in
                 recorder.record(executable: executable, arguments: arguments)
@@ -101,6 +102,15 @@ struct GuestNetworkConfiguratorTests {
             applySystemConfiguration: { interfaces, primaryIndex, dns in
                 systemRecorder.record(interfaces: interfaces, primaryIndex: primaryIndex, dns: dns)
                 return Self.makeSystemConfigurationResult(interfaces: interfaces, dns: dns)
+            },
+            configureDNSProxy: { dns in
+                proxyRecorder.record(dns)
+                return MacOSGuestDNSConfiguration(
+                    nameservers: ["127.0.0.1"],
+                    domain: dns.domain,
+                    searchDomains: dns.searchDomains,
+                    options: dns.options
+                )
             }
         )
 
@@ -110,6 +120,7 @@ struct GuestNetworkConfiguratorTests {
         #expect(result.warnings.isEmpty)
         #expect(result.effectiveDNS?.serviceID == "service-en0")
         #expect(result.effectiveDNS?.interfaceName == "en0")
+        #expect(result.effectiveDNS?.nameservers == ["192.168.64.1"])
         #expect(result.effectiveDNS?.domain == "cluster.local")
         #expect(result.effectiveDNS?.searchDomains == ["svc.cluster.local"])
         #expect(result.effectiveDNS?.options == ["ndots:5"])
@@ -119,7 +130,9 @@ struct GuestNetworkConfiguratorTests {
         #expect(invocation.primaryIndex == 0)
         #expect(invocation.interfaces[0].interfaceName == "en0")
         #expect(invocation.interfaces[0].ipv4Address == "192.168.64.2")
+        #expect(invocation.dns?.nameservers == ["127.0.0.1"])
         #expect(invocation.dns?.options == ["ndots:5"])
+        #expect(proxyRecorder.configuration()?.nameservers == ["192.168.64.1"])
 
         let commands = recorder.commands()
         #expect(
@@ -370,6 +383,23 @@ extension GuestNetworkConfiguratorTests {
         }
 
         func commands() -> [Command] {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+    }
+
+    private final class DNSProxyRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: MacOSGuestDNSConfiguration?
+
+        func record(_ dns: MacOSGuestDNSConfiguration) {
+            lock.lock()
+            defer { lock.unlock() }
+            stored = dns
+        }
+
+        func configuration() -> MacOSGuestDNSConfiguration? {
             lock.lock()
             defer { lock.unlock() }
             return stored

@@ -31,6 +31,7 @@ struct GuestNetworkConfigurator {
             _ primaryInterfaceIndex: Int,
             _ dns: MacOSGuestDNSConfiguration?
         ) throws -> GuestSystemNetworkConfigurator.Result
+    let configureDNSProxy: @Sendable (_ dns: MacOSGuestDNSConfiguration) throws -> MacOSGuestDNSConfiguration
 
     init(
         runCommand: @escaping @Sendable (_ executable: String, _ arguments: [String]) throws -> CommandResult = GuestNetworkConfigurator.runSystemCommand,
@@ -39,10 +40,14 @@ struct GuestNetworkConfigurator {
                 _ interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration],
                 _ primaryInterfaceIndex: Int,
                 _ dns: MacOSGuestDNSConfiguration?
-            ) throws -> GuestSystemNetworkConfigurator.Result = GuestSystemNetworkConfigurator.apply
+            ) throws -> GuestSystemNetworkConfigurator.Result = GuestSystemNetworkConfigurator.apply,
+        configureDNSProxy:
+            @escaping @Sendable (_ dns: MacOSGuestDNSConfiguration) throws -> MacOSGuestDNSConfiguration =
+            GuestDNSProxy.shared.configure
     ) {
         self.runCommand = runCommand
         self.applySystemConfiguration = applySystemConfiguration
+        self.configureDNSProxy = configureDNSProxy
     }
 
     func apply(_ request: MacOSGuestNetworkConfigurationRequest) throws -> MacOSGuestNetworkConfigurationResult {
@@ -78,7 +83,8 @@ struct GuestNetworkConfigurator {
         }
 
         let primaryIndex = min(max(request.primaryInterfaceIndex, 0), resolvedInterfaces.count - 1)
-        let effectiveConfiguration = try applySystemConfiguration(resolvedInterfaces, primaryIndex, request.dns)
+        let systemDNS = try request.dns.map(configureDNSProxy)
+        let effectiveConfiguration = try applySystemConfiguration(resolvedInterfaces, primaryIndex, systemDNS)
         guard effectiveConfiguration.interfaces.count == resolvedInterfaces.count else {
             throw Self.makeError(
                 "SystemConfiguration returned \(effectiveConfiguration.interfaces.count) interfaces; expected \(resolvedInterfaces.count)"
@@ -103,10 +109,26 @@ struct GuestNetworkConfigurator {
             )
         }
 
+        // The loopback resolver is an implementation detail. Report the logical kubelet DNS
+        // configuration so the sidecar can validate that the requested Pod policy is active.
+        let reportedDNS = effectiveConfiguration.effectiveDNS.map { effective in
+            guard let requested = request.dns else {
+                return effective
+            }
+            return MacOSGuestEffectiveDNSConfiguration(
+                serviceID: effective.serviceID,
+                interfaceName: effective.interfaceName,
+                nameservers: requested.nameservers,
+                domain: requested.domain,
+                searchDomains: requested.searchDomains,
+                options: requested.options
+            )
+        }
+
         return .init(
             interfaces: appliedInterfaces,
-            dnsApplied: effectiveConfiguration.effectiveDNS != nil,
-            effectiveDNS: effectiveConfiguration.effectiveDNS
+            dnsApplied: reportedDNS != nil,
+            effectiveDNS: reportedDNS
         )
     }
 

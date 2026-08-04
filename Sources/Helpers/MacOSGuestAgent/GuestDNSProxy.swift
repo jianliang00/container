@@ -104,7 +104,8 @@ final class GuestDNSProxy: @unchecked Sendable {
     static let listenPort: UInt16 = 53
 
     private let lock = NSLock()
-    private let querySlots = DispatchSemaphore(value: 64)
+    private let udpQuerySlots = DispatchSemaphore(value: 64)
+    private let tcpClientSlots = DispatchSemaphore(value: 32)
     private var configuration: ResolutionConfiguration?
     private var udpFD: Int32 = -1
     private var tcpFD: Int32 = -1
@@ -195,9 +196,9 @@ final class GuestDNSProxy: @unchecked Sendable {
 
             let query = Array(buffer[..<count])
             let client = ClientAddress(storage: storage, length: addressLength)
-            querySlots.wait()
+            udpQuerySlots.wait()
             Thread.detachNewThread { [self] in
-                defer { self.querySlots.signal() }
+                defer { self.udpQuerySlots.signal() }
                 let response = self.resolve(query: query, transport: .udp)
                 guard !response.isEmpty else {
                     return
@@ -229,10 +230,19 @@ final class GuestDNSProxy: @unchecked Sendable {
             }
             var on: Int32 = 1
             _ = setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-            querySlots.wait()
+            do {
+                try Self.configureTimeouts(
+                    fd: clientFD,
+                    seconds: currentConfiguration()?.timeoutSeconds ?? 5
+                )
+            } catch {
+                Self.closeSocket(clientFD)
+                continue
+            }
+            tcpClientSlots.wait()
             Thread.detachNewThread { [self] in
                 defer { Self.closeSocket(clientFD) }
-                defer { self.querySlots.signal() }
+                defer { self.tcpClientSlots.signal() }
                 self.handleTCPClient(fd: clientFD)
             }
         }

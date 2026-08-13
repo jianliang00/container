@@ -19,6 +19,7 @@ eventRecordQPS: 5
 enableServer: true
 localStorageCapacityIsolation: true
 makeIPTablesUtilChains: false
+maxPods: 2
 clusterDNS:
   - "10.96.0.10"
 clusterDomain: "cluster.local"

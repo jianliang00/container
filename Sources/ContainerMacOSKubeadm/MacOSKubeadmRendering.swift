@@ -109,6 +109,7 @@ public enum MacOSKubeadmRenderer {
         enableServer: true
         localStorageCapacityIsolation: true
         makeIPTablesUtilChains: false
+        maxPods: 2
         clusterDNS:
           - "\(clusterDNS)"
         clusterDomain: "\(clusterDomain)"

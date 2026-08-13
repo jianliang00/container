@@ -67,6 +67,7 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""10.96.0.53""#)
                     && contents.contains("enforceNodeAllocatable: []")
                     && contents.contains("localStorageCapacityIsolation: true")
+                    && contents.contains("maxPods: 2")
                     && contents.contains(#"memory.available: "0%""#)
                     && !contents.contains("podLogsDir:")
                     && !contents.contains("failCgroupV1:")

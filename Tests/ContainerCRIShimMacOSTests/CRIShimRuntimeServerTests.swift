@@ -1501,12 +1501,25 @@ struct CRIShimRuntimeServerTests {
                 startedAt: Date(timeIntervalSince1970: 1_700_000_020)
             ))
 
+        let workloadSnapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: "container-1",
+                processConfiguration: ProcessConfiguration(
+                    executable: "/bin/cat",
+                    arguments: [],
+                    environment: []
+                )
+            ),
+            status: .running,
+            startedDate: Date(timeIntervalSince1970: 1_700_000_020)
+        )
         let runtimeManager = RecordingRuntimeManager(
             execSyncResult: ExecSyncResult(
                 exitCode: 0,
                 stdout: Data(),
                 stderr: Data()
-            )
+            ),
+            workloadSnapshots: ["container-1": workloadSnapshot]
         )
         let imageManager = RecordingImageManager(images: [])
         let cniManager = RecordingCNIManager()

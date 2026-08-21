@@ -214,6 +214,7 @@ public actor MacOSSandboxService {
 
         let processID: String
         var config: ProcessConfiguration
+        let targetWorkloadID: String?
         let includeInSnapshots: Bool
         let stdoutLogURL: URL
         let stderrLogURL: URL
@@ -458,8 +459,14 @@ extension MacOSSandboxService {
     public func createProcess(_ message: XPCMessage) async throws -> XPCMessage {
         let processID = try message.id()
         let config = try message.processConfig()
+        let workloadID = message.string(key: RuntimeKeys.workloadIdentifier.rawValue)
         let stdio = message.stdio()
-        try await createExecProcessIfNeeded(processID: processID, config: config, stdio: stdio)
+        try await createExecProcessIfNeeded(
+            processID: processID,
+            config: config,
+            targetWorkloadID: workloadID,
+            stdio: stdio
+        )
         return message.reply()
     }
 
@@ -1096,6 +1103,7 @@ extension MacOSSandboxService {
     private func createExecProcessIfNeeded(
         processID: String,
         config: ProcessConfiguration,
+        targetWorkloadID: String? = nil,
         stdio: [FileHandle?]
     ) async throws {
         guard let _ = configuration else {
@@ -1110,12 +1118,21 @@ extension MacOSSandboxService {
         guard sessions[processID] == nil else {
             throw ContainerizationError(.exists, message: "process \(processID) already exists")
         }
+        if let targetWorkloadID {
+            guard let workload = workloads[targetWorkloadID] else {
+                throw ContainerizationError(.notFound, message: "workload \(targetWorkloadID) not found")
+            }
+            guard isWorkloadRunning(workload) else {
+                throw ContainerizationError(.invalidState, message: "workload \(targetWorkloadID) is not running")
+            }
+        }
 
         let session = try makeSession(
             processID: processID,
             config: config,
             stdio: stdio,
-            includeInSnapshots: false
+            includeInSnapshots: false,
+            targetWorkloadID: targetWorkloadID
         )
         sessions[processID] = session
         externalProcessIDs.insert(processID)
@@ -1815,7 +1832,7 @@ extension MacOSSandboxService {
         for processID: String,
         sessionConfiguration: ProcessConfiguration
     ) async throws -> ProcessConfiguration {
-        guard let workloadID = workloadID(forSession: processID),
+        guard let workloadID = sessions[processID]?.targetWorkloadID,
             let record = workloads[workloadID],
             record.configuration.isImageBacked,
             let guestPayloadPath = record.configuration.guestPayloadPath
@@ -2876,6 +2893,7 @@ extension MacOSSandboxService {
         stdio: [FileHandle?],
         includeInSnapshots: Bool = true,
         workloadID: String? = nil,
+        targetWorkloadID: String? = nil,
         logFiles: WorkloadLogFiles? = nil
     ) throws -> Session {
         let logs: WorkloadLogFiles
@@ -2889,6 +2907,7 @@ extension MacOSSandboxService {
         var session = Session(
             processID: processID,
             config: config,
+            targetWorkloadID: targetWorkloadID ?? workloadID,
             includeInSnapshots: includeInSnapshots,
             stdoutLogURL: logs.stdoutURL,
             stderrLogURL: logs.stderrURL,
@@ -4024,8 +4043,17 @@ extension MacOSSandboxService {
         try await createWorkloadIfNeeded(workloadConfiguration: configuration, stdio: [nil, nil, nil])
     }
 
-    func testingCreateProcess(_ id: String, config: ProcessConfiguration) async throws {
-        try await createExecProcessIfNeeded(processID: id, config: config, stdio: [nil, nil, nil])
+    func testingCreateProcess(
+        _ id: String,
+        config: ProcessConfiguration,
+        targetWorkloadID: String? = nil
+    ) async throws {
+        try await createExecProcessIfNeeded(
+            processID: id,
+            config: config,
+            targetWorkloadID: targetWorkloadID,
+            stdio: [nil, nil, nil]
+        )
     }
 
     func testingStartProcess(_ id: String) async throws {

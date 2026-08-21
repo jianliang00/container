@@ -177,7 +177,19 @@ struct CRIShimRuntimeServerTests {
         let sandboxWorkloadSnapshot = WorkloadSnapshot(
             configuration: WorkloadConfiguration(
                 id: "container-1",
-                processConfiguration: ProcessConfiguration(executable: "/bin/echo", arguments: [], environment: [])
+                processConfiguration: ProcessConfiguration(
+                    executable: "/bin/echo",
+                    arguments: [],
+                    environment: ["USER=admin", "HOME=/Users/admin"],
+                    workingDirectory: "/workspace",
+                    user: .raw(userString: "admin"),
+                    supplementalGroups: [20]
+                ),
+                workloadImageReference: "example.com/macos/workload:latest",
+                workloadImageDigest: "sha256:abc123",
+                guestPayloadPath: "/var/lib/container/workloads/container-1/rootfs",
+                guestMetadataPath: "/var/lib/container/workloads/container-1/meta.json",
+                injectionState: .injected
             ),
             status: .running,
             startedDate: Date(timeIntervalSince1970: 1_700_000_030)
@@ -211,7 +223,9 @@ struct CRIShimRuntimeServerTests {
                     containers: [],
                     workloads: [sandboxWorkloadSnapshot]
                 )
-            ])
+            ],
+            workloadSnapshots: ["container-1": sandboxWorkloadSnapshot]
+        )
         let cniManager = RecordingCNIManager()
         let server = try CRIShimGRPCServer(
             socketPath: socketPath,
@@ -288,8 +302,13 @@ struct CRIShimRuntimeServerTests {
         #expect(execSync.stderr == Data("exec stderr".utf8))
         #expect(runtimeManager.execSyncCalls.count == 1)
         #expect(runtimeManager.execSyncCalls[0].containerID == "sandbox-1")
+        #expect(runtimeManager.execSyncCalls[0].workloadID == "container-1")
         #expect(runtimeManager.execSyncCalls[0].configuration.executable == "/bin/echo")
         #expect(runtimeManager.execSyncCalls[0].configuration.arguments == ["hello"])
+        #expect(runtimeManager.execSyncCalls[0].configuration.environment == ["USER=admin", "HOME=/Users/admin"])
+        #expect(runtimeManager.execSyncCalls[0].configuration.workingDirectory == "/workspace")
+        #expect(runtimeManager.execSyncCalls[0].configuration.user == .raw(userString: "admin"))
+        #expect(runtimeManager.execSyncCalls[0].configuration.supplementalGroups == [20])
         #expect(runtimeManager.execSyncCalls[0].timeout == .seconds(3))
 
         var execRequest = Runtime_V1_ExecRequest()
@@ -324,6 +343,12 @@ struct CRIShimRuntimeServerTests {
 
         let recordedProcess = try #require(runtimeManager.streamExecProcesses["sandbox-1"])
         #expect(recordedProcess.started)
+        let streamExecCall = try #require(runtimeManager.streamExecCalls.last)
+        #expect(streamExecCall.containerID == "sandbox-1")
+        #expect(streamExecCall.workloadID == "container-1")
+        #expect(streamExecCall.configuration.environment == ["USER=admin", "HOME=/Users/admin"])
+        #expect(streamExecCall.configuration.workingDirectory == "/workspace")
+        #expect(streamExecCall.configuration.user == .raw(userString: "admin"))
         #expect(recordedProcess.resizeCalls == [CRIShimTerminalSize(width: 120, height: 42)])
 
         var portForwardRequest = Runtime_V1_PortForwardRequest()
@@ -1610,12 +1635,14 @@ private struct StaticReadinessChecker: CRIShimReadinessChecking {
 
 private struct RecordingExecSyncCall {
     var containerID: String
+    var workloadID: String?
     var configuration: ProcessConfiguration
     var timeout: Duration?
 }
 
 private struct RecordingStreamExecCall {
     var containerID: String
+    var workloadID: String?
     var configuration: ProcessConfiguration
 }
 
@@ -1963,12 +1990,14 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
 
     func execSync(
         containerID: String,
+        workloadID: String?,
         configuration: ProcessConfiguration,
         timeout: Duration?
     ) async throws -> ExecSyncResult {
         execSyncCalls.append(
             RecordingExecSyncCall(
                 containerID: containerID,
+                workloadID: workloadID,
                 configuration: configuration,
                 timeout: timeout
             ))
@@ -1977,6 +2006,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
 
     func streamExec(
         containerID: String,
+        workloadID: String?,
         configuration: ProcessConfiguration,
         stdio: [FileHandle?]
     ) async throws -> any CRIShimStreamingProcess {
@@ -1988,6 +2018,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         streamExecCalls.append(
             RecordingStreamExecCall(
                 containerID: containerID,
+                workloadID: workloadID,
                 configuration: configuration
             )
         )

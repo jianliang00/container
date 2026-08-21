@@ -38,6 +38,7 @@ public enum RuntimeKeys: String {
     case runtimeServiceEndpoint
 
     /// Process request keys.
+    case workloadIdentifier
     case signal
     case snapshot
     case stdin

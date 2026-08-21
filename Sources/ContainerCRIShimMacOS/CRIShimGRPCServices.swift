@@ -306,9 +306,18 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         try await handlerLogger.handle(operation: CRIRuntimeOperation.execSync.rawValue) {
             var invocation = try makeCRIShimExecSyncInvocation(request)
             let metadata = try containerMetadata(id: invocation.containerID, operation: "ExecSync")
+            let workload = try await runtimeManager.inspectWorkload(
+                sandboxID: metadata.sandboxID,
+                workloadID: metadata.id
+            )
             invocation.containerID = metadata.sandboxID
+            invocation.configuration = makeCRIShimExecProcessConfiguration(
+                requested: invocation.configuration,
+                workload: workload
+            )
             let result = try await runtimeManager.execSync(
                 containerID: invocation.containerID,
+                workloadID: metadata.id,
                 configuration: invocation.configuration,
                 timeout: invocation.timeout
             )
@@ -326,7 +335,16 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             }
             var invocation = try makeCRIShimExecStreamingInvocation(request)
             let metadata = try containerMetadata(id: invocation.containerID, operation: "Exec")
+            let workload = try await runtimeManager.inspectWorkload(
+                sandboxID: metadata.sandboxID,
+                workloadID: metadata.id
+            )
             invocation.containerID = metadata.sandboxID
+            invocation.workloadID = metadata.id
+            invocation.configuration = makeCRIShimExecProcessConfiguration(
+                requested: invocation.configuration,
+                workload: workload
+            )
             var response = Runtime_V1_ExecResponse()
             response.url = try await streamingServer.registerExecURL(invocation)
             return response

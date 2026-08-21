@@ -47,6 +47,49 @@ struct CRIShimRuntimeOperationsTests {
     }
 
     @Test
+    func execProcessConfigurationInheritsWorkloadDefaults() {
+        let requested = ProcessConfiguration(
+            executable: "/bin/bash",
+            arguments: ["-l"],
+            environment: [],
+            workingDirectory: "/",
+            terminal: true,
+            user: .id(uid: 0, gid: 0)
+        )
+        let workload = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: "workload-1",
+                processConfiguration: ProcessConfiguration(
+                    executable: "/opt/kross/bootstrap/entry.sh",
+                    arguments: [],
+                    environment: ["USER=admin", "HOME=/Users/admin"],
+                    workingDirectory: "/app",
+                    terminal: false,
+                    user: .raw(userString: "admin"),
+                    supplementalGroups: [20],
+                    rlimits: [.init(limit: "RLIMIT_NOFILE", soft: 1024, hard: 2048)]
+                )
+            ),
+            status: .running
+        )
+
+        let configuration = makeCRIShimExecProcessConfiguration(
+            requested: requested,
+            workload: workload
+        )
+
+        #expect(configuration.executable == "/bin/bash")
+        #expect(configuration.arguments == ["-l"])
+        #expect(configuration.environment == ["USER=admin", "HOME=/Users/admin"])
+        #expect(configuration.workingDirectory == "/app")
+        #expect(configuration.terminal)
+        #expect(configuration.user == .raw(userString: "admin"))
+        #expect(configuration.supplementalGroups == [20])
+        #expect(configuration.rlimits.count == 1)
+        #expect(configuration.rlimits[0].limit == "RLIMIT_NOFILE")
+    }
+
+    @Test
     func rejectsInvalidExecSyncRequests() {
         var missingContainer = Runtime_V1_ExecSyncRequest()
         missingContainer.cmd = ["/bin/true"]

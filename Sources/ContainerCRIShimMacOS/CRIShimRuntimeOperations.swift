@@ -85,12 +85,14 @@ public protocol CRIShimRuntimeManaging: Sendable {
 
     func execSync(
         containerID: String,
+        workloadID: String?,
         configuration: ProcessConfiguration,
         timeout: Duration?
     ) async throws -> ExecSyncResult
 
     func streamExec(
         containerID: String,
+        workloadID: String?,
         configuration: ProcessConfiguration,
         stdio: [FileHandle?]
     ) async throws -> any CRIShimStreamingProcess
@@ -247,20 +249,28 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
 
     public func execSync(
         containerID: String,
+        workloadID: String?,
         configuration: ProcessConfiguration,
         timeout: Duration?
     ) async throws -> ExecSyncResult {
-        try await kit.execSync(id: containerID, configuration: configuration, timeout: timeout)
+        try await kit.execSync(
+            id: containerID,
+            configuration: configuration,
+            workloadID: workloadID,
+            timeout: timeout
+        )
     }
 
     public func streamExec(
         containerID: String,
+        workloadID: String?,
         configuration: ProcessConfiguration,
         stdio: [FileHandle?]
     ) async throws -> any CRIShimStreamingProcess {
         let process = try await kit.streamExec(
             id: containerID,
             configuration: configuration,
+            workloadID: workloadID,
             stdio: stdio
         )
         return ContainerKitCRIShimStreamingProcess(process: process)
@@ -282,6 +292,7 @@ struct CRIShimExecSyncInvocation {
 
 struct CRIShimExecStreamingInvocation {
     var containerID: String
+    var workloadID: String?
     var configuration: ProcessConfiguration
     var stdin: Bool
     var stdout: Bool
@@ -354,6 +365,7 @@ func makeCRIShimExecStreamingInvocation(
 
     return CRIShimExecStreamingInvocation(
         containerID: containerID,
+        workloadID: nil,
         configuration: ProcessConfiguration(
             executable: executable,
             arguments: Array(request.cmd.dropFirst()),
@@ -366,6 +378,23 @@ func makeCRIShimExecStreamingInvocation(
         stdout: request.stdout,
         stderr: request.stderr,
         tty: request.tty
+    )
+}
+
+func makeCRIShimExecProcessConfiguration(
+    requested: ProcessConfiguration,
+    workload: WorkloadSnapshot
+) -> ProcessConfiguration {
+    let defaults = workload.configuration.processConfiguration
+    return ProcessConfiguration(
+        executable: requested.executable,
+        arguments: requested.arguments,
+        environment: defaults.environment,
+        workingDirectory: defaults.workingDirectory,
+        terminal: requested.terminal,
+        user: defaults.user,
+        supplementalGroups: defaults.supplementalGroups,
+        rlimits: defaults.rlimits
     )
 }
 

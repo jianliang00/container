@@ -976,6 +976,7 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
             }
             let process = try await runtimeManager.streamExec(
                 containerID: invocation.containerID,
+                workloadID: invocation.workloadID,
                 configuration: invocation.configuration,
                 stdio: stdio
             )
@@ -1925,6 +1926,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         let stderrPipe = invocation.stderr && !invocation.tty ? Pipe() : nil
         let process = try await runtimeManager.streamExec(
             containerID: invocation.containerID,
+            workloadID: invocation.workloadID,
             configuration: invocation.configuration,
             stdio: [
                 stdinPipe?.fileHandleForReading,

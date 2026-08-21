@@ -1098,6 +1098,7 @@ public actor ContainersService {
         id: String,
         processID: String,
         config: ProcessConfiguration,
+        workloadID: String? = nil,
         stdio: [FileHandle?]
     ) async throws {
         log.debug(
@@ -1124,6 +1125,7 @@ public actor ContainersService {
         try await client.createProcess(
             processID,
             config: config,
+            workloadID: workloadID,
             stdio: stdio
         )
     }

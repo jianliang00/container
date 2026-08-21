@@ -215,6 +215,76 @@ struct MacOSImageBackedWorkloadTests {
     }
 
     @Test
+    func execTargetingImageBackedWorkloadUsesWorkloadPathContext() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-exec-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory)
+        let socketPath = "/tmp/sidecar-workload-exec-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        try await service.testingPrepareSandbox(Self.baseContainerConfiguration(indexDigest: image.indexDigest))
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let workloadID = "image-backed-exec"
+        try await service.testingCreateWorkload(
+            WorkloadConfiguration(
+                id: workloadID,
+                processConfiguration: ProcessConfiguration(
+                    executable: "",
+                    arguments: [],
+                    environment: ["EXEC_TEST=1"],
+                    workingDirectory: "/",
+                    user: .id(uid: 0, gid: 0)
+                ),
+                workloadImageReference: "registry.local/example/workload:exec@\(image.indexDigest)",
+                workloadImageDigest: image.indexDigest
+            )
+        )
+        try await service.testingStartWorkload(workloadID)
+
+        let workload = try await service.testingInspectWorkload(workloadID)
+        let defaults = workload.configuration.processConfiguration
+        let processID = "workload-exec"
+        try await service.testingCreateProcess(
+            processID,
+            config: ProcessConfiguration(
+                executable: "/bin/hello",
+                arguments: ["/etc/config.txt"],
+                environment: defaults.environment,
+                workingDirectory: defaults.workingDirectory,
+                terminal: true,
+                user: defaults.user,
+                supplementalGroups: defaults.supplementalGroups,
+                rlimits: defaults.rlimits
+            ),
+            targetWorkloadID: workloadID
+        )
+        try await service.testingStartProcess(processID)
+
+        server.stop()
+        try server.waitForCompletion()
+
+        let request = try #require(
+            server.recordedRequests().first(where: { $0.method == .processStart && $0.processID == processID })
+        )
+        let guestRoot = "/var/lib/container/workloads/\(workloadID)/rootfs"
+        #expect(request.exec?.executable == "\(guestRoot)/bin/hello")
+        #expect(request.exec?.arguments == ["\(guestRoot)/etc/config.txt"])
+        #expect(request.exec?.workingDirectory == "\(guestRoot)/workspace")
+        #expect(request.exec?.environment?.contains("EXEC_TEST=1") == true)
+        #expect(request.exec?.user == "nobody")
+    }
+
+    @Test
     func startImageBackedWorkloadAcceptsEmptyNoOpLayer() async throws {
         let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-empty-layer-tests")
         defer { try? FileManager.default.removeItem(at: tempDirectory) }

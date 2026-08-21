@@ -291,9 +291,17 @@ extension RuntimeClient {
         }
     }
 
-    public func createProcess(_ id: String, config: ProcessConfiguration, stdio: [FileHandle?]) async throws {
+    public func createProcess(
+        _ id: String,
+        config: ProcessConfiguration,
+        workloadID: String? = nil,
+        stdio: [FileHandle?]
+    ) async throws {
         let request = XPCMessage(route: RuntimeRoutes.createProcess.rawValue)
         request.set(key: RuntimeKeys.id.rawValue, value: id)
+        if let workloadID {
+            request.set(key: RuntimeKeys.workloadIdentifier.rawValue, value: workloadID)
+        }
         let data = try JSONEncoder().encode(config)
         request.set(key: RuntimeKeys.processConfig.rawValue, value: data)
 

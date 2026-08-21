@@ -40,12 +40,14 @@ extension ContainerKit {
     public func execSync(
         id: String,
         configuration: ProcessConfiguration,
+        workloadID: String? = nil,
         timeout: Duration? = nil,
         standardInput: Data? = nil
     ) async throws -> ExecSyncResult {
         try await containerClient.execSync(
             containerId: id,
             configuration: configuration,
+            workloadId: workloadID,
             timeout: timeout,
             standardInput: standardInput
         )
@@ -54,6 +56,7 @@ extension ContainerKit {
     public func streamExec(
         id: String,
         configuration: ProcessConfiguration,
+        workloadID: String? = nil,
         processId: String = UUID().uuidString.lowercased(),
         stdio: [FileHandle?]
     ) async throws -> any ClientProcess {
@@ -61,6 +64,7 @@ extension ContainerKit {
             containerId: id,
             processId: processId,
             configuration: configuration,
+            workloadId: workloadID,
             stdio: stdio
         )
     }

@@ -280,6 +280,7 @@ public struct ContainersHarness: Sendable {
                 message: "process ID cannot be empty"
             )
         }
+        let workloadID = message.string(key: .workloadIdentifier)
         let config = try message.processConfig()
         let stdio = message.stdio()
 
@@ -287,6 +288,7 @@ public struct ContainersHarness: Sendable {
             id: id,
             processID: processID,
             config: config,
+            workloadID: workloadID,
             stdio: stdio
         )
 

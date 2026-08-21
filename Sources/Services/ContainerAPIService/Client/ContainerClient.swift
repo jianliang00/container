@@ -313,12 +313,16 @@ public struct ContainerClient: Sendable {
         containerId: String,
         processId: String,
         configuration: ProcessConfiguration,
+        workloadId: String? = nil,
         stdio: [FileHandle?]
     ) async throws -> ClientProcess {
         do {
             let request = XPCMessage(route: .containerCreateProcess)
             request.set(key: .id, value: containerId)
             request.set(key: .processIdentifier, value: processId)
+            if let workloadId {
+                request.set(key: .workloadIdentifier, value: workloadId)
+            }
 
             let data = try JSONEncoder().encode(configuration)
             request.set(key: .processConfig, value: data)
@@ -355,12 +359,14 @@ public struct ContainerClient: Sendable {
         containerId: String,
         processId: String = UUID().uuidString.lowercased(),
         configuration: ProcessConfiguration,
+        workloadId: String? = nil,
         stdio: [FileHandle?]
     ) async throws -> ClientProcess {
         try await createProcess(
             containerId: containerId,
             processId: processId,
             configuration: configuration,
+            workloadId: workloadId,
             stdio: stdio
         )
     }
@@ -369,6 +375,7 @@ public struct ContainerClient: Sendable {
     public func execSync(
         containerId: String,
         configuration: ProcessConfiguration,
+        workloadId: String? = nil,
         timeout: Duration? = nil,
         standardInput: Data? = nil
     ) async throws -> ExecSyncResult {
@@ -380,6 +387,7 @@ public struct ContainerClient: Sendable {
                 containerId: containerId,
                 processId: UUID().uuidString.lowercased(),
                 configuration: configuration,
+                workloadId: workloadId,
                 stdio: stdio
             )
         }

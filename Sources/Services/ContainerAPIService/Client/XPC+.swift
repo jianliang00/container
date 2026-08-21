@@ -28,6 +28,8 @@ public enum XPCKeys: String {
     case id
     // ID for a process.
     case processIdentifier
+    // ID for the workload targeted by an exec process.
+    case workloadIdentifier
     case attachmentIdentifier
     /// Container configuration key.
     case containerConfig

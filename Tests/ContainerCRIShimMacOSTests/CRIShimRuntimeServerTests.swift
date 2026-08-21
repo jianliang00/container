@@ -47,6 +47,144 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func listContainersFiltersUsingReconciledRuntimeState() async throws {
+        let socketPath = "/tmp/cri-shim-list-reconcile-\(UUID().uuidString.prefix(8)).sock"
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.stateDirectory = stateDirectory.path
+        let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1",
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                state: .running,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ))
+
+        let oldContainerID = "old-attempt"
+        let newContainerID = "new-attempt"
+        for (id, attempt, createdAt) in [
+            (oldContainerID, UInt32(0), Date(timeIntervalSince1970: 1_700_000_010)),
+            (newContainerID, UInt32(1), Date(timeIntervalSince1970: 1_700_000_020)),
+        ] {
+            try metadataStore.upsertContainer(
+                CRIShimContainerMetadata(
+                    id: id,
+                    sandboxID: "sandbox-1",
+                    name: "workload",
+                    attempt: attempt,
+                    image: "example.com/macos/workload:latest",
+                    runtimeHandler: "macos",
+                    logPath: stateDirectory.appendingPathComponent("\(id)/0.log").path,
+                    state: .running,
+                    createdAt: createdAt,
+                    startedAt: createdAt
+                ))
+        }
+
+        let oldExitDate = Date(timeIntervalSince1970: 1_700_000_030)
+        let oldSnapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: oldContainerID,
+                processConfiguration: ProcessConfiguration(
+                    executable: "/bin/true",
+                    arguments: [],
+                    environment: []
+                )
+            ),
+            status: .stopped,
+            exitCode: 42,
+            startedDate: Date(timeIntervalSince1970: 1_700_000_010),
+            exitedAt: oldExitDate
+        )
+        let newSnapshot = WorkloadSnapshot(
+            configuration: WorkloadConfiguration(
+                id: newContainerID,
+                processConfiguration: ProcessConfiguration(
+                    executable: "/bin/sleep",
+                    arguments: ["infinity"],
+                    environment: []
+                )
+            ),
+            status: .running,
+            startedDate: Date(timeIntervalSince1970: 1_700_000_020)
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            workloadSnapshots: [
+                oldContainerID: oldSnapshot,
+                newContainerID: newSnapshot,
+            ]
+        )
+        let logManager = RecordingLogManager()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    metadataStore: metadataStore,
+                    runtimeManager: runtimeManager,
+                    imageManager: RecordingImageManager(images: []),
+                    cniManager: RecordingCNIManager(),
+                    logManager: logManager
+                )
+            ],
+            eventLoopGroup: group,
+            startupTasks: []
+        )
+        let serverTask = Task {
+            try await server.run()
+        }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
+
+        try await waitForSocket(at: socketPath)
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+
+        var runningState = Runtime_V1_ContainerStateValue()
+        runningState.state = .containerRunning
+        var filter = Runtime_V1_ContainerFilter()
+        filter.podSandboxID = "sandbox-1"
+        filter.state = runningState
+        var listRequest = Runtime_V1_ListContainersRequest()
+        listRequest.filter = filter
+        let response = try await client.listContainers(listRequest)
+
+        #expect(response.containers.map(\.id) == [newContainerID])
+        let oldMetadata = try #require(try metadataStore.container(id: oldContainerID))
+        #expect(oldMetadata.state == .exited)
+        #expect(oldMetadata.exitedAt == oldExitDate)
+        let newMetadata = try #require(try metadataStore.container(id: newContainerID))
+        #expect(newMetadata.state == .running)
+        #expect(await logManager.stopCalls() == [RecordingLogStopCall(containerID: oldContainerID, removeState: false)])
+
+        var statusRequest = Runtime_V1_ContainerStatusRequest()
+        statusRequest.containerID = oldContainerID
+        let status = try await client.containerStatus(statusRequest)
+        #expect(status.status.state == .containerExited)
+        #expect(status.status.exitCode == 42)
+
+        var removeRequest = Runtime_V1_RemoveContainerRequest()
+        removeRequest.containerID = oldContainerID
+        _ = try await client.removeContainer(removeRequest)
+        #expect(try metadataStore.container(id: oldContainerID) == nil)
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        await shutdown(group)
+    }
+
+    @Test
     func updateRuntimeConfigIgnoresPodCIDRsWhenPodNetworkingIsDisabled() async throws {
         for podNetwork in [nil, PodNetworkConfig(enabled: false)] {
             let socketPath = "/tmp/cri-shim-update-config-\(UUID().uuidString.prefix(8)).sock"
@@ -1691,6 +1829,34 @@ private struct RecordingStopWorkloadCall {
     var sandboxID: String
     var workloadID: String
     var options: ContainerStopOptions
+}
+
+private struct RecordingLogStopCall: Equatable, Sendable {
+    var containerID: String
+    var removeState: Bool
+}
+
+private actor RecordingLogManager: CRIShimLogManaging {
+    private var recordedStopCalls: [RecordingLogStopCall] = []
+
+    func start(
+        container: CRIShimContainerMetadata,
+        workloadSnapshot: WorkloadSnapshot?
+    ) async throws {}
+
+    func reopen(container: CRIShimContainerMetadata) async throws {}
+
+    func stop(containerID: String, removeState: Bool) async {
+        recordedStopCalls.append(
+            RecordingLogStopCall(
+                containerID: containerID,
+                removeState: removeState
+            ))
+    }
+
+    func stopCalls() -> [RecordingLogStopCall] {
+        recordedStopCalls
+    }
 }
 
 private final class RecordingStreamingProcess: CRIShimStreamingProcess, @unchecked Sendable {

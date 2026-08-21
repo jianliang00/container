@@ -343,9 +343,13 @@ extension CRIShimContainerMetadata {
         var metadata = self
         switch workloadSnapshot.status {
         case .running, .stopping:
-            metadata.state = .running
+            if metadata.state != .exited, metadata.state != .removed {
+                metadata.state = .running
+            }
         case .stopped:
-            metadata.state = .exited
+            if metadata.state != .removed {
+                metadata.state = .exited
+            }
         case .unknown:
             break
         }

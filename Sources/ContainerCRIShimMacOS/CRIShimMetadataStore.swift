@@ -315,6 +315,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
 
 public final class CRIShimMetadataStore {
     public let rootURL: URL
+    private let lock = NSLock()
     private let sandboxStore: CRIShimEntityStore<CRIShimSandboxMetadata>
     private let containerStore: CRIShimEntityStore<CRIShimContainerMetadata>
 
@@ -344,42 +345,83 @@ public final class CRIShimMetadataStore {
     }
 
     public func snapshot() throws -> CRIShimMetadataSnapshot {
-        CRIShimMetadataSnapshot(
-            sandboxes: try sandboxStore.list(),
-            containers: try containerStore.list()
-        )
+        try withLock {
+            CRIShimMetadataSnapshot(
+                sandboxes: try sandboxStore.list(),
+                containers: try containerStore.list()
+            )
+        }
     }
 
     public func listSandboxes() throws -> [CRIShimSandboxMetadata] {
-        try sandboxStore.list()
+        try withLock {
+            try sandboxStore.list()
+        }
     }
 
     public func listContainers() throws -> [CRIShimContainerMetadata] {
-        try containerStore.list()
+        try withLock {
+            try containerStore.list()
+        }
     }
 
     public func sandbox(id: String) throws -> CRIShimSandboxMetadata? {
-        try sandboxStore.retrieve(id: id)
+        try withLock {
+            try sandboxStore.retrieve(id: id)
+        }
     }
 
     public func container(id: String) throws -> CRIShimContainerMetadata? {
-        try containerStore.retrieve(id: id)
+        try withLock {
+            try containerStore.retrieve(id: id)
+        }
     }
 
     public func upsertSandbox(_ metadata: CRIShimSandboxMetadata) throws {
-        try sandboxStore.upsert(metadata)
+        try withLock {
+            try sandboxStore.upsert(metadata)
+        }
     }
 
     public func upsertContainer(_ metadata: CRIShimContainerMetadata) throws {
-        try containerStore.upsert(metadata)
+        try withLock {
+            try containerStore.upsert(metadata)
+        }
     }
 
     public func deleteSandbox(id: String) throws {
-        try sandboxStore.delete(id: id)
+        try withLock {
+            try sandboxStore.delete(id: id)
+        }
     }
 
     public func deleteContainer(id: String) throws {
-        try containerStore.delete(id: id)
+        try withLock {
+            try containerStore.delete(id: id)
+        }
+    }
+
+    func updateContainer(
+        id: String,
+        _ update: (inout CRIShimContainerMetadata) -> Void
+    ) throws -> CRIShimContainerMetadata? {
+        try withLock {
+            guard var metadata = try containerStore.retrieve(id: id) else {
+                return nil
+            }
+            let previousMetadata = metadata
+            update(&metadata)
+            if metadata != previousMetadata {
+                try containerStore.upsert(metadata)
+            }
+            return metadata
+        }
+    }
+
+    private func withLock<Result>(_ operation: () throws -> Result) rethrows -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
     }
 }
 

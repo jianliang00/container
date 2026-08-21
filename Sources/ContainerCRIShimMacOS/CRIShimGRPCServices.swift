@@ -426,14 +426,25 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_ListContainersResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.listContainers.rawValue) {
             var response = Runtime_V1_ListContainersResponse()
-            let containers = try filterCRIContainers(metadataStore.listContainers(), request: request)
-            var items: [Runtime_V1_Container] = []
-            items.reserveCapacity(containers.count)
-            for metadata in containers {
-                let snapshot = await workloadSnapshot(for: metadata)
-                items.append(makeCRIContainer(metadata, workloadSnapshot: snapshot))
+            var candidateRequest = request
+            if candidateRequest.hasFilter {
+                var candidateFilter = candidateRequest.filter
+                candidateFilter.clearState()
+                candidateRequest.filter = candidateFilter
             }
-            response.containers = items
+            let storedContainers = try filterCRIContainers(
+                metadataStore.listContainers(),
+                request: candidateRequest
+            )
+            var containers: [CRIShimContainerMetadata] = []
+            containers.reserveCapacity(storedContainers.count)
+            for metadata in storedContainers {
+                if let reconciled = try await reconciledContainerMetadata(metadata) {
+                    containers.append(reconciled.metadata)
+                }
+            }
+            response.containers = filterCRIContainers(containers, request: request)
+                .map(makeCRIContainer)
             return response
         }
     }
@@ -601,10 +612,14 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemoveContainerResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.removeContainer.rawValue) {
-            let metadata = try containerMetadata(
+            let storedMetadata = try containerMetadata(
                 id: request.containerID,
                 operation: "RemoveContainer"
             )
+            guard let reconciled = try await reconciledContainerMetadata(storedMetadata) else {
+                throw CRIShimMetadataStoreError.notFound(kind: .container, id: storedMetadata.id)
+            }
+            let metadata = reconciled.metadata
             guard metadata.state != .running else {
                 throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
             }
@@ -637,15 +652,25 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 throw CRIShimError.invalidArgument("ContainerStatus container_id is required")
             }
 
-            guard let metadata = try metadataStore.container(id: containerID) else {
+            guard let storedMetadata = try metadataStore.container(id: containerID) else {
+                throw CRIShimMetadataStoreError.notFound(kind: .container, id: containerID)
+            }
+            guard
+                let reconciled = try await reconciledContainerMetadata(
+                    storedMetadata,
+                    includeRuntimeDetailsForExitedContainer: true
+                )
+            else {
                 throw CRIShimMetadataStoreError.notFound(kind: .container, id: containerID)
             }
 
             var response = Runtime_V1_ContainerStatusResponse()
-            let snapshot = await workloadSnapshot(for: metadata)
-            response.status = makeCRIContainerStatus(metadata, workloadSnapshot: snapshot)
+            response.status = makeCRIContainerStatus(
+                reconciled.metadata,
+                workloadSnapshot: reconciled.workloadSnapshot
+            )
             if request.verbose {
-                response.info = makeCRIStatusInfo(metadata)
+                response.info = makeCRIStatusInfo(reconciled.metadata)
             }
             return response
         }
@@ -730,11 +755,49 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         return metadata
     }
 
-    private func workloadSnapshot(for metadata: CRIShimContainerMetadata) async -> WorkloadSnapshot? {
-        try? await runtimeManager.inspectWorkload(
-            sandboxID: metadata.sandboxID,
-            workloadID: metadata.id
-        )
+    private func reconciledContainerMetadata(
+        _ metadata: CRIShimContainerMetadata,
+        includeRuntimeDetailsForExitedContainer: Bool = false
+    ) async throws -> (metadata: CRIShimContainerMetadata, workloadSnapshot: WorkloadSnapshot?)? {
+        if !includeRuntimeDetailsForExitedContainer,
+            metadata.state == .exited || metadata.state == .removed
+        {
+            return (metadata, nil)
+        }
+
+        let workloadSnapshot: WorkloadSnapshot?
+        do {
+            workloadSnapshot = try await runtimeManager.inspectWorkload(
+                sandboxID: metadata.sandboxID,
+                workloadID: metadata.id
+            )
+        } catch {
+            guard isNotFound(error) else {
+                throw error
+            }
+            workloadSnapshot = nil
+        }
+
+        let missingWorkloadExitDate = Date()
+        guard
+            let reconciledMetadata = try metadataStore.updateContainer(
+                id: metadata.id,
+                { currentMetadata in
+                    if let workloadSnapshot {
+                        currentMetadata = currentMetadata.applying(workloadSnapshot: workloadSnapshot)
+                    } else if currentMetadata.state == .created || currentMetadata.state == .running {
+                        currentMetadata.state = .exited
+                        currentMetadata.exitedAt = currentMetadata.exitedAt ?? missingWorkloadExitDate
+                    }
+                })
+        else {
+            return nil
+        }
+
+        if metadata.state == .running, reconciledMetadata.state == .exited {
+            await logManager.stop(containerID: metadata.id, removeState: false)
+        }
+        return (reconciledMetadata, workloadSnapshot)
     }
 
     private func waitForStoppedWorkload(

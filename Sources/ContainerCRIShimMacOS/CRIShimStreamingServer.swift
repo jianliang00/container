@@ -154,6 +154,68 @@ private actor CRIShimStreamingSessionStore {
     }
 }
 
+private actor CRIShimStartSynchronizedStreamingProcess: CRIShimStreamingProcess {
+    private enum State {
+        case created
+        case starting
+        case started
+        case failed
+    }
+
+    private let process: any CRIShimStreamingProcess
+    private var state = State.created
+    private var pendingResizes: [CRIShimTerminalSize]
+
+    init(
+        process: any CRIShimStreamingProcess,
+        pendingResizes: [CRIShimTerminalSize] = []
+    ) {
+        self.process = process
+        self.pendingResizes = pendingResizes
+    }
+
+    func start() async throws {
+        guard case .created = state else {
+            throw CRIShimError.internalError("streaming process start was requested more than once")
+        }
+        state = .starting
+
+        do {
+            try await process.start()
+            while !pendingResizes.isEmpty {
+                let resizes = pendingResizes
+                pendingResizes.removeAll(keepingCapacity: true)
+                for size in resizes {
+                    try await process.resize(size)
+                }
+            }
+            state = .started
+        } catch {
+            state = .failed
+            throw error
+        }
+    }
+
+    func resize(_ size: CRIShimTerminalSize) async throws {
+        switch state {
+        case .created, .starting:
+            pendingResizes.append(size)
+        case .started:
+            try await process.resize(size)
+        case .failed:
+            throw CRIShimError.internalError("streaming process did not start")
+        }
+    }
+
+    func kill(_ signal: Int32) async throws {
+        try await process.kill(signal)
+    }
+
+    func wait() async throws -> Int32 {
+        try await process.wait()
+    }
+}
+
 public final class CRIShimStreamingServer: @unchecked Sendable {
     private let config: CRIShimConfig
     private let runtimeManager: any CRIShimRuntimeManaging
@@ -902,11 +964,14 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
         }
         do {
             let size = try decodeTerminalSize(data)
-            let process = lock.withLock { self.process }
-            guard let process else {
-                lock.withLock {
+            let process = lock.withLock { () -> (any CRIShimStreamingProcess)? in
+                guard let process = self.process else {
                     pendingResizes.append(size)
+                    return nil
                 }
+                return process
+            }
+            guard let process else {
                 return
             }
             let task = Task {
@@ -974,7 +1039,7 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
                     stderrPipe?.fileHandleForWriting,
                 ]
             }
-            let process = try await runtimeManager.streamExec(
+            let rawProcess = try await runtimeManager.streamExec(
                 containerID: invocation.containerID,
                 workloadID: invocation.workloadID,
                 configuration: invocation.configuration,
@@ -982,13 +1047,18 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
             )
 
             let startupState = lock.withLock {
+                let process = CRIShimStartSynchronizedStreamingProcess(
+                    process: rawProcess,
+                    pendingResizes: pendingResizes
+                )
                 self.process = process
+                pendingResizes.removeAll()
                 return (
+                    process: process,
                     stdinWriter: stdinPipe?.fileHandleForWriting,
                     stdoutReader: stdoutPipe?.fileHandleForReading,
                     stderrReader: stderrPipe?.fileHandleForReading,
                     pendingStdin: pendingStdin,
-                    pendingResizes: pendingResizes,
                     stdinClosed: stdinClosed
                 )
             }
@@ -1019,12 +1089,9 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
                 appendTask(task)
             }
 
-            try await process.start()
-            for size in startupState.pendingResizes {
-                try await process.resize(size)
-            }
+            try await startupState.process.start()
 
-            let exitCode = try await process.wait()
+            let exitCode = try await startupState.process.wait()
             try? stdoutPipe?.fileHandleForWriting.close()
             try? stderrPipe?.fileHandleForWriting.close()
             for task in outputTasks {
@@ -1924,7 +1991,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         let stdinPipe = invocation.stdin ? Pipe() : nil
         let stdoutPipe = invocation.stdout ? Pipe() : nil
         let stderrPipe = invocation.stderr && !invocation.tty ? Pipe() : nil
-        let process = try await runtimeManager.streamExec(
+        let rawProcess = try await runtimeManager.streamExec(
             containerID: invocation.containerID,
             workloadID: invocation.workloadID,
             configuration: invocation.configuration,
@@ -1934,6 +2001,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 stderrPipe?.fileHandleForWriting,
             ]
         )
+        let process = CRIShimStartSynchronizedStreamingProcess(process: rawProcess)
         sessionState = .exec(
             CRIShimExecSessionState(
                 protocolVersion: protocolVersion,

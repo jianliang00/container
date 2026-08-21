@@ -47,7 +47,7 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
-    func listContainersFiltersUsingReconciledRuntimeState() async throws {
+    func restartedContainerUsesReconciledStateAndQueuesTTYResizeUntilExecStarts() async throws {
         let socketPath = "/tmp/cri-shim-list-reconcile-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: stateDirectory) }
@@ -120,7 +120,14 @@ struct CRIShimRuntimeServerTests {
                 newContainerID: newSnapshot,
             ]
         )
+        runtimeManager.streamExecWaitsForStartPermission = true
+        runtimeManager.streamExecRejectsResizeBeforeStart = true
+        defer { runtimeManager.permitStreamExecStarts() }
         let logManager = RecordingLogManager()
+        let streamingServer = CRIShimStreamingServer(
+            config: config,
+            runtimeManager: runtimeManager
+        )
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let server = CRIShimGRPCServer(
             socketPath: socketPath,
@@ -131,11 +138,13 @@ struct CRIShimRuntimeServerTests {
                     runtimeManager: runtimeManager,
                     imageManager: RecordingImageManager(images: []),
                     cniManager: RecordingCNIManager(),
-                    logManager: logManager
+                    logManager: logManager,
+                    streamingServer: streamingServer
                 )
             ],
             eventLoopGroup: group,
-            startupTasks: []
+            startupTasks: [],
+            streamingServer: streamingServer
         )
         let serverTask = Task {
             try await server.run()
@@ -166,6 +175,51 @@ struct CRIShimRuntimeServerTests {
         let newMetadata = try #require(try metadataStore.container(id: newContainerID))
         #expect(newMetadata.state == .running)
         #expect(await logManager.stopCalls() == [RecordingLogStopCall(containerID: oldContainerID, removeState: false)])
+
+        var execRequest = Runtime_V1_ExecRequest()
+        execRequest.containerID = newContainerID
+        execRequest.cmd = ["/bin/cat"]
+        execRequest.stdin = true
+        execRequest.stdout = true
+        execRequest.tty = true
+        let exec = try await client.exec(execRequest)
+        let execTask = try makeWebSocketTask(
+            from: exec.url,
+            protocols: ["v5.channel.k8s.io"]
+        )
+        try await resumeWebSocketTask(execTask)
+
+        let process = try await waitForValue(description: "restarted workload exec process") {
+            runtimeManager.streamExecProcesses["sandbox-1"]
+        }
+        try await waitForCondition(description: "restarted workload exec start") {
+            process.startCalled
+        }
+        let terminalSize = CRIShimTerminalSize(width: 120, height: 42)
+        try await execTask.send(
+            .data(Data([4]) + Data(#"{"Width":120,"Height":42}"#.utf8))
+        )
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(process.resizeAttemptsBeforeStart == 0)
+
+        process.permitStart()
+        try await waitForCondition(description: "restarted workload exec resize") {
+            process.resizeCalls == [terminalSize]
+        }
+        try await execTask.send(
+            .data(Data([0]) + Data("hello after restart\n".utf8))
+        )
+        let execOutput = try await receiveBinaryMessage(from: execTask)
+        #expect(execOutput.first == 1)
+        #expect(String(decoding: execOutput.dropFirst(), as: UTF8.self) == "stdout:hello after restart\n")
+
+        try await execTask.send(.data(Data([255])))
+        let execStatus = try await receiveBinaryMessage(from: execTask)
+        #expect(execStatus.first == 3)
+        #expect(String(decoding: execStatus.dropFirst(), as: UTF8.self).contains(#""status":"Success""#))
+        let streamExecCall = try #require(runtimeManager.streamExecCalls.last)
+        #expect(streamExecCall.containerID == "sandbox-1")
+        #expect(streamExecCall.workloadID == newContainerID)
 
         var statusRequest = Runtime_V1_ContainerStatusRequest()
         statusRequest.containerID = oldContainerID
@@ -1863,25 +1917,59 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
     let stdin: FileHandle?
     let stdout: FileHandle?
     let stderr: FileHandle?
-    private(set) var started = false
-    private(set) var resizeCalls: [CRIShimTerminalSize] = []
-    private(set) var killSignals: [Int32] = []
     private let stateLock = NSLock()
+    private let rejectsResizeBeforeStart: Bool
+    private var hasStarted = false
+    private var hasReceivedStart = false
+    private var startPermitted: Bool
+    private var recordedResizeCalls: [CRIShimTerminalSize] = []
+    private var recordedResizeAttemptsBeforeStart = 0
+    private var recordedKillSignals: [Int32] = []
     private var waitTask: Task<Int32, Never>?
+
+    var started: Bool {
+        stateLock.withLock { hasStarted }
+    }
+
+    var startCalled: Bool {
+        stateLock.withLock { hasReceivedStart }
+    }
+
+    var resizeCalls: [CRIShimTerminalSize] {
+        stateLock.withLock { recordedResizeCalls }
+    }
+
+    var resizeAttemptsBeforeStart: Int {
+        stateLock.withLock { recordedResizeAttemptsBeforeStart }
+    }
+
+    var killSignals: [Int32] {
+        stateLock.withLock { recordedKillSignals }
+    }
 
     init(
         stdin: FileHandle?,
         stdout: FileHandle?,
-        stderr: FileHandle?
+        stderr: FileHandle?,
+        waitsForStartPermission: Bool = false,
+        rejectsResizeBeforeStart: Bool = false
     ) {
         self.stdin = stdin
         self.stdout = stdout
         self.stderr = stderr
+        self.rejectsResizeBeforeStart = rejectsResizeBeforeStart
+        self.startPermitted = !waitsForStartPermission
     }
 
     func start() async throws {
-        started = true
-        waitTask = Task {
+        stateLock.withLock {
+            hasReceivedStart = true
+        }
+        while !stateLock.withLock({ startPermitted }) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        let task = Task {
             if let stderr {
                 try? stderr.close()
             }
@@ -1896,28 +1984,45 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
             try? stdin?.close()
             return 0
         }
+        stateLock.withLock {
+            hasStarted = true
+            waitTask = task
+        }
+    }
+
+    func permitStart() {
+        stateLock.withLock {
+            startPermitted = true
+        }
     }
 
     func resize(_ size: CRIShimTerminalSize) async throws {
-        stateLock.withLock {
-            resizeCalls.append(size)
+        try stateLock.withLock {
+            if rejectsResizeBeforeStart && !hasStarted {
+                recordedResizeAttemptsBeforeStart += 1
+                throw CRIShimError.notFound("streaming process is not registered")
+            }
+            recordedResizeCalls.append(size)
         }
     }
 
     func kill(_ signal: Int32) async throws {
         stateLock.withLock {
-            killSignals.append(signal)
+            recordedKillSignals.append(signal)
         }
         try? stdin?.close()
         try? stdout?.close()
         try? stderr?.close()
-        if waitTask == nil {
-            waitTask = Task { 128 + signal }
+        stateLock.withLock {
+            if waitTask == nil {
+                waitTask = Task { 128 + signal }
+            }
         }
     }
 
     func wait() async throws -> Int32 {
-        await waitTask?.value ?? 0
+        let task = stateLock.withLock { waitTask }
+        return await task?.value ?? 0
     }
 }
 
@@ -1967,6 +2072,8 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var removeWorkloadError: (any Error)?
     var inspectSandboxError: (any Error)?
     var inspectWorkloadError: (any Error)?
+    var streamExecWaitsForStartPermission = false
+    var streamExecRejectsResizeBeforeStart = false
 
     init(
         execSyncResult: ExecSyncResult,
@@ -2192,7 +2299,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         let process = RecordingStreamingProcess(
             stdin: stdio[0],
             stdout: stdio[1],
-            stderr: stdio[2]
+            stderr: stdio[2],
+            waitsForStartPermission: streamExecWaitsForStartPermission,
+            rejectsResizeBeforeStart: streamExecRejectsResizeBeforeStart
         )
         streamExecCalls.append(
             RecordingStreamExecCall(
@@ -2203,6 +2312,12 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         )
         streamExecProcesses[containerID] = process
         return process
+    }
+
+    func permitStreamExecStarts() {
+        for process in streamExecProcesses.values {
+            process.permitStart()
+        }
     }
 
     func streamPortForward(

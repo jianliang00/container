@@ -1969,7 +1969,7 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
             try await Task.sleep(for: .milliseconds(5))
         }
 
-        let task = Task {
+        let task = Task<Int32, Never> {
             if let stderr {
                 try? stderr.close()
             }
@@ -1982,7 +1982,7 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
 
             try? stdout?.close()
             try? stdin?.close()
-            return 0
+            return Int32(0)
         }
         stateLock.withLock {
             hasStarted = true
@@ -2015,7 +2015,7 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
         try? stderr?.close()
         stateLock.withLock {
             if waitTask == nil {
-                waitTask = Task { 128 + signal }
+                waitTask = Task<Int32, Never> { 128 + signal }
             }
         }
     }

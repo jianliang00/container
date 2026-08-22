@@ -592,9 +592,21 @@ struct GuestSystemNetworkConfigurator {
         var lastMismatch = "active network state was not published"
         for attempt in 0..<50 {
             do {
+                let globalIPv6Properties = dynamicStoreDictionary(
+                    store: store,
+                    key: SCDynamicStoreKeyCreateNetworkGlobalEntity(
+                        nil,
+                        kSCDynamicStoreDomainState,
+                        kSCEntNetIPv6
+                    ) as String
+                )
                 let appliedInterfaces = try configured.map {
                     let ipv4 = try readEffectiveIPv4($0, store: store)
-                    let ipv6 = try readEffectiveIPv6($0, store: store)
+                    let ipv6 = try readEffectiveIPv6(
+                        $0,
+                        store: store,
+                        globalProperties: globalIPv6Properties
+                    )
                     return AppliedInterface(
                         networkID: ipv4.networkID,
                         interfaceName: ipv4.interfaceName,
@@ -669,23 +681,38 @@ struct GuestSystemNetworkConfigurator {
 
     private static func readEffectiveIPv6(
         _ configured: ConfiguredInterface,
-        store: SCDynamicStore
+        store: SCDynamicStore,
+        globalProperties: NSDictionary?
     ) throws -> String? {
-        guard let expected = try requestedIPv6Configuration(configured.request) else {
-            let networkProtocol = SCNetworkServiceCopyProtocol(
-                configured.service,
-                kSCNetworkProtocolTypeIPv6
-            )
+        let networkProtocol = SCNetworkServiceCopyProtocol(
+            configured.service,
+            kSCNetworkProtocolTypeIPv6
+        )
+        let configuredProperties = networkProtocol.flatMap {
+            SCNetworkProtocolGetConfiguration($0).map { $0 as NSDictionary }
+        }
+        let setupProperties = dynamicStoreDictionary(
+            store: store,
+            key: SCDynamicStoreKeyCreateNetworkServiceEntity(
+                nil,
+                kSCDynamicStoreDomainSetup,
+                configured.serviceID as CFString,
+                kSCEntNetIPv6
+            ) as String
+        )
+
+        guard try requestedIPv6Configuration(configured.request) != nil else {
             try validateDisabledIPv6State(
                 protocolEnabled: networkProtocol.map { SCNetworkProtocolGetEnabled($0) },
-                configuredProperties: networkProtocol.flatMap {
-                    SCNetworkProtocolGetConfiguration($0).map { $0 as NSDictionary }
-                },
+                configuredProperties: configuredProperties,
+                setupProperties: setupProperties,
                 effectiveProperties: dynamicStoreDictionary(
                     store: store,
                     key: "State:/Network/Service/\(configured.serviceID)/IPv6"
                 ),
-                interfaceName: configured.request.interfaceName
+                serviceID: configured.serviceID,
+                interfaceName: configured.request.interfaceName,
+                globalProperties: globalProperties
             )
             return nil
         }
@@ -694,37 +721,151 @@ struct GuestSystemNetworkConfigurator {
             throw makeError("active IPv6 state is missing for service \(configured.serviceID)")
         }
 
-        let request = configured.request
-        let addresses = stringArray(dictionary[kSCPropNetIPv6Addresses as String])
-        let prefixLengths = integerArray(dictionary[kSCPropNetIPv6PrefixLength as String])
-        let router = dictionary[kSCPropNetIPv6Router as String] as? String
-        let interfaceName = dictionary[kSCPropInterfaceName as String] as? String ?? request.interfaceName
+        return try validateEnabledIPv6State(
+            request: configured.request,
+            serviceID: configured.serviceID,
+            isPrimary: configured.isPrimary,
+            protocolEnabled: networkProtocol.map { SCNetworkProtocolGetEnabled($0) },
+            configuredProperties: configuredProperties,
+            setupProperties: setupProperties,
+            effectiveProperties: dictionary,
+            globalProperties: globalProperties
+        )
+    }
 
-        guard addresses.contains(where: { ipv6AddressesEqual($0, expected.address) }) else {
-            throw makeError("active IPv6 address mismatch for \(request.interfaceName): \(addresses)")
+    static func validateEnabledIPv6State(
+        request: InterfaceConfiguration,
+        serviceID: String,
+        isPrimary: Bool,
+        protocolEnabled: Bool?,
+        configuredProperties: NSDictionary?,
+        setupProperties: NSDictionary?,
+        effectiveProperties: NSDictionary,
+        globalProperties: NSDictionary?
+    ) throws -> String {
+        guard let expected = try requestedIPv6Configuration(request) else {
+            throw makeError("IPv6 configuration is not present for \(request.interfaceName)")
         }
-        guard prefixLengths.contains(Int(expected.prefixLength)) else {
-            throw makeError("active IPv6 prefix mismatch for \(request.interfaceName): \(prefixLengths)")
+        guard protocolEnabled == true else {
+            throw makeError("IPv6 protocol is not enabled for \(request.interfaceName)")
         }
-        if configured.isPrimary {
-            guard let router, ipv6AddressesEqual(router, expected.gateway) else {
-                throw makeError("active IPv6 router mismatch for \(request.interfaceName): \(router ?? "missing")")
+        try validateConfiguredIPv6State(
+            configuredProperties,
+            stateDescription: "preferences",
+            request: request,
+            expected: expected,
+            isPrimary: isPrimary
+        )
+        try validateConfiguredIPv6State(
+            setupProperties,
+            stateDescription: "Setup",
+            request: request,
+            expected: expected,
+            isPrimary: isPrimary
+        )
+
+        let addresses = stringArray(effectiveProperties[kSCPropNetIPv6Addresses as String])
+        let prefixLengths = integerArray(effectiveProperties[kSCPropNetIPv6PrefixLength as String])
+        let interfaceName = nonEmptyString(effectiveProperties[kSCPropInterfaceName as String])
+        let effectiveRouter = nonEmptyString(effectiveProperties[kSCPropNetIPv6Router as String])
+
+        guard addresses.count == prefixLengths.count,
+            zip(addresses, prefixLengths).contains(where: {
+                ipv6AddressesEqual($0.0, expected.address) && $0.1 == Int(expected.prefixLength)
+            })
+        else {
+            throw makeError(
+                "active IPv6 address/prefix mismatch for \(request.interfaceName): \(addresses), \(prefixLengths)"
+            )
+        }
+        guard let interfaceName, interfaceName == request.interfaceName else {
+            throw makeError(
+                "active IPv6 interface mismatch for service \(serviceID): \(interfaceName ?? "missing")"
+            )
+        }
+        if isPrimary {
+            if let effectiveRouter, !ipv6AddressesEqual(effectiveRouter, expected.gateway) {
+                throw makeError(
+                    "active IPv6 router mismatch for \(request.interfaceName): \(effectiveRouter)"
+                )
             }
-        } else if let router {
-            throw makeError("secondary interface \(request.interfaceName) unexpectedly installed IPv6 router \(router)")
+        } else if let effectiveRouter {
+            throw makeError(
+                "secondary interface \(request.interfaceName) unexpectedly published IPv6 router \(effectiveRouter)"
+            )
         }
-        guard interfaceName == request.interfaceName else {
-            throw makeError("active IPv6 interface mismatch for service \(configured.serviceID): \(interfaceName)")
+
+        if isPrimary {
+            try validatePrimaryIPv6Route(
+                serviceID: serviceID,
+                interfaceName: request.interfaceName,
+                gateway: expected.gateway,
+                globalProperties: globalProperties
+            )
+        } else {
+            try validateNoPrimaryIPv6Route(
+                serviceID: serviceID,
+                interfaceName: request.interfaceName,
+                globalProperties: globalProperties
+            )
         }
 
         return "\(expected.address)/\(expected.prefixLength)"
     }
 
+    private static func validateConfiguredIPv6State(
+        _ properties: NSDictionary?,
+        stateDescription: String,
+        request: InterfaceConfiguration,
+        expected: (address: String, prefixLength: UInt8, gateway: String),
+        isPrimary: Bool
+    ) throws {
+        guard let properties else {
+            throw makeError("\(stateDescription) IPv6 state is missing for \(request.interfaceName)")
+        }
+
+        let method = nonEmptyString(properties[kSCPropNetIPv6ConfigMethod as String])
+        guard method == kSCValNetIPv6ConfigMethodManual as String else {
+            throw makeError(
+                "\(stateDescription) IPv6 method mismatch for \(request.interfaceName): \(method ?? "missing")"
+            )
+        }
+        let addresses = stringArray(properties[kSCPropNetIPv6Addresses as String])
+        guard addresses.count == 1,
+            addresses.contains(where: { ipv6AddressesEqual($0, expected.address) })
+        else {
+            throw makeError(
+                "\(stateDescription) IPv6 address mismatch for \(request.interfaceName): \(addresses)"
+            )
+        }
+        let prefixLengths = integerArray(properties[kSCPropNetIPv6PrefixLength as String])
+        guard prefixLengths == [Int(expected.prefixLength)] else {
+            throw makeError(
+                "\(stateDescription) IPv6 prefix mismatch for \(request.interfaceName): \(prefixLengths)"
+            )
+        }
+        let router = nonEmptyString(properties[kSCPropNetIPv6Router as String])
+        if isPrimary {
+            guard let router, ipv6AddressesEqual(router, expected.gateway) else {
+                throw makeError(
+                    "\(stateDescription) IPv6 router mismatch for \(request.interfaceName): \(router ?? "missing")"
+                )
+            }
+        } else if let router {
+            throw makeError(
+                "secondary interface \(request.interfaceName) unexpectedly has \(stateDescription) IPv6 router \(router)"
+            )
+        }
+    }
+
     static func validateDisabledIPv6State(
         protocolEnabled: Bool?,
         configuredProperties: NSDictionary?,
+        setupProperties: NSDictionary? = nil,
         effectiveProperties: NSDictionary?,
-        interfaceName: String
+        serviceID: String? = nil,
+        interfaceName: String,
+        globalProperties: NSDictionary? = nil
     ) throws {
         if protocolEnabled == true {
             throw makeError("IPv6 protocol remained enabled for \(interfaceName)")
@@ -732,18 +873,90 @@ struct GuestSystemNetworkConfigurator {
         if configuredProperties != nil {
             throw makeError("static IPv6 configuration remained for \(interfaceName)")
         }
-        guard let effectiveProperties else {
+        if let setupProperties {
+            let method = nonEmptyString(setupProperties[kSCPropNetIPv6ConfigMethod as String])
+            if method == kSCValNetIPv6ConfigMethodManual as String {
+                throw makeError("manual Setup IPv6 configuration remained for \(interfaceName)")
+            }
+
+            let addresses = stringArray(setupProperties[kSCPropNetIPv6Addresses as String])
+            let unexpectedAddresses = addresses.filter { !isLinkLocalIPv6Address($0) }
+            guard unexpectedAddresses.isEmpty else {
+                throw makeError("Setup IPv6 address remained for \(interfaceName): \(unexpectedAddresses)")
+            }
+
+            if let router = nonEmptyString(setupProperties[kSCPropNetIPv6Router as String]) {
+                throw makeError("Setup IPv6 router remained for \(interfaceName): \(router)")
+            }
+        }
+        if let effectiveProperties {
+            let addresses = stringArray(effectiveProperties[kSCPropNetIPv6Addresses as String])
+            let unexpectedAddresses = addresses.filter { !isLinkLocalIPv6Address($0) }
+            guard unexpectedAddresses.isEmpty else {
+                throw makeError("active IPv6 address remained for \(interfaceName): \(unexpectedAddresses)")
+            }
+
+            if let router = nonEmptyString(effectiveProperties[kSCPropNetIPv6Router as String]) {
+                throw makeError("active IPv6 router remained for \(interfaceName): \(router)")
+            }
+        }
+
+        if let serviceID {
+            try validateNoPrimaryIPv6Route(
+                serviceID: serviceID,
+                interfaceName: interfaceName,
+                globalProperties: globalProperties
+            )
+        }
+    }
+
+    private static func validatePrimaryIPv6Route(
+        serviceID: String,
+        interfaceName: String,
+        gateway: String,
+        globalProperties: NSDictionary?
+    ) throws {
+        guard let globalProperties else {
+            throw makeError("active global IPv6 state is missing")
+        }
+        let primaryService = nonEmptyString(
+            globalProperties[kSCDynamicStorePropNetPrimaryService as String]
+        )
+        let primaryInterface = nonEmptyString(
+            globalProperties[kSCDynamicStorePropNetPrimaryInterface as String]
+        )
+        let router = nonEmptyString(globalProperties[kSCPropNetIPv6Router as String])
+
+        guard primaryService == serviceID else {
+            throw makeError("active primary IPv6 service mismatch: \(primaryService ?? "missing")")
+        }
+        guard primaryInterface == interfaceName else {
+            throw makeError("active primary IPv6 interface mismatch: \(primaryInterface ?? "missing")")
+        }
+        guard let router, ipv6AddressesEqual(router, gateway) else {
+            throw makeError("active primary IPv6 router mismatch: \(router ?? "missing")")
+        }
+    }
+
+    private static func validateNoPrimaryIPv6Route(
+        serviceID: String,
+        interfaceName: String,
+        globalProperties: NSDictionary?
+    ) throws {
+        guard let globalProperties else {
             return
         }
-
-        let addresses = stringArray(effectiveProperties[kSCPropNetIPv6Addresses as String])
-        let unexpectedAddresses = addresses.filter { !isLinkLocalIPv6Address($0) }
-        guard unexpectedAddresses.isEmpty else {
-            throw makeError("active IPv6 address remained for \(interfaceName): \(unexpectedAddresses)")
-        }
-
-        if let router = nonEmptyString(effectiveProperties[kSCPropNetIPv6Router as String]) {
-            throw makeError("active IPv6 router remained for \(interfaceName): \(router)")
+        let primaryService = nonEmptyString(
+            globalProperties[kSCDynamicStorePropNetPrimaryService as String]
+        )
+        let primaryInterface = nonEmptyString(
+            globalProperties[kSCDynamicStorePropNetPrimaryInterface as String]
+        )
+        guard primaryService != serviceID, primaryInterface != interfaceName else {
+            let router = nonEmptyString(globalProperties[kSCPropNetIPv6Router as String]) ?? "missing"
+            throw makeError(
+                "unexpected primary IPv6 route for \(interfaceName): service \(primaryService ?? "missing"), router \(router)"
+            )
         }
     }
 

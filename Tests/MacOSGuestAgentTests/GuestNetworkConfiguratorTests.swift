@@ -215,6 +215,253 @@ struct GuestNetworkConfiguratorTests {
     }
 
     @Test
+    func validatesIPv6RouterFromConfiguredAndGlobalState() throws {
+        let interface = Self.makeIPv6Interface()
+
+        for effectiveProperties in [
+            Self.makeEffectiveIPv6Properties(),
+            Self.makeEffectiveIPv6Properties(router: "fd42:10:244:22::1"),
+        ] {
+            let address = try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                request: interface,
+                serviceID: "service-en0",
+                isPrimary: true,
+                protocolEnabled: true,
+                configuredProperties: Self.makeConfiguredIPv6Properties(),
+                setupProperties: Self.makeConfiguredIPv6Properties(),
+                effectiveProperties: effectiveProperties,
+                globalProperties: Self.makeGlobalIPv6Properties()
+            )
+
+            #expect(address == "fd42:10:244:22::2/64")
+        }
+    }
+
+    @Test
+    func rejectsInvalidActiveIPv6AddressPrefixOrInterface() {
+        let interface = Self.makeIPv6Interface()
+        let invalidStates: [NSDictionary] = [
+            [
+                "Addresses": ["fd42:10:244:22::3"],
+                "PrefixLength": [64],
+                "InterfaceName": "en0",
+            ],
+            [
+                "Addresses": ["fd42:10:244:22::2"],
+                "PrefixLength": [63],
+                "InterfaceName": "en0",
+            ],
+            [
+                "Addresses": ["fd42:10:244:22::2"],
+                "PrefixLength": [64],
+            ],
+            [
+                "Addresses": ["fd42:10:244:22::2"],
+                "PrefixLength": [64],
+                "InterfaceName": "en1",
+            ],
+            [
+                "Addresses": ["fd42:10:244:22::2"],
+                "PrefixLength": [64],
+                "InterfaceName": "en0",
+                "Router": "fd42:10:244:22::9",
+            ],
+            [
+                "Addresses": ["fd42:10:244:22::2", "fd42:10:244:22::3"],
+                "PrefixLength": [63, 64],
+                "InterfaceName": "en0",
+            ],
+        ]
+
+        for state in invalidStates {
+            #expect(throws: (any Error).self) {
+                try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                    request: interface,
+                    serviceID: "service-en0",
+                    isPrimary: true,
+                    protocolEnabled: true,
+                    configuredProperties: Self.makeConfiguredIPv6Properties(),
+                    setupProperties: Self.makeConfiguredIPv6Properties(),
+                    effectiveProperties: state,
+                    globalProperties: Self.makeGlobalIPv6Properties()
+                )
+            }
+        }
+    }
+
+    @Test
+    func rejectsInvalidConfiguredIPv6State() {
+        let interface = Self.makeIPv6Interface()
+
+        for configuredProperties: NSDictionary? in [
+            nil,
+            Self.makeConfiguredIPv6Properties(configMethod: "Automatic"),
+            Self.makeConfiguredIPv6Properties(addresses: ["fd42:10:244:22::3"]),
+            Self.makeConfiguredIPv6Properties(
+                addresses: ["fd42:10:244:22::2", "fd42:10:244:22::3"]
+            ),
+            Self.makeConfiguredIPv6Properties(prefixLengths: [63]),
+            Self.makeConfiguredIPv6Properties(router: nil),
+            Self.makeConfiguredIPv6Properties(router: "fd42:10:244:22::9"),
+        ] {
+            #expect(throws: (any Error).self) {
+                try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                    request: interface,
+                    serviceID: "service-en0",
+                    isPrimary: true,
+                    protocolEnabled: true,
+                    configuredProperties: configuredProperties,
+                    setupProperties: Self.makeConfiguredIPv6Properties(),
+                    effectiveProperties: Self.makeEffectiveIPv6Properties(),
+                    globalProperties: Self.makeGlobalIPv6Properties()
+                )
+            }
+        }
+
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                request: interface,
+                serviceID: "service-en0",
+                isPrimary: true,
+                protocolEnabled: false,
+                configuredProperties: Self.makeConfiguredIPv6Properties(),
+                setupProperties: Self.makeConfiguredIPv6Properties(),
+                effectiveProperties: Self.makeEffectiveIPv6Properties(),
+                globalProperties: Self.makeGlobalIPv6Properties()
+            )
+        }
+    }
+
+    @Test
+    func rejectsInvalidSetupIPv6State() {
+        let interface = Self.makeIPv6Interface()
+
+        for setupProperties: NSDictionary? in [
+            nil,
+            Self.makeConfiguredIPv6Properties(configMethod: "Automatic"),
+            Self.makeConfiguredIPv6Properties(addresses: ["fd42:10:244:22::3"]),
+            Self.makeConfiguredIPv6Properties(prefixLengths: [63]),
+            Self.makeConfiguredIPv6Properties(router: nil),
+            Self.makeConfiguredIPv6Properties(router: "fd42:10:244:22::9"),
+        ] {
+            #expect(throws: (any Error).self) {
+                try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                    request: interface,
+                    serviceID: "service-en0",
+                    isPrimary: true,
+                    protocolEnabled: true,
+                    configuredProperties: Self.makeConfiguredIPv6Properties(),
+                    setupProperties: setupProperties,
+                    effectiveProperties: Self.makeEffectiveIPv6Properties(),
+                    globalProperties: Self.makeGlobalIPv6Properties()
+                )
+            }
+        }
+    }
+
+    @Test
+    func rejectsInvalidActivePrimaryIPv6Route() {
+        let interface = Self.makeIPv6Interface()
+        let invalidGlobalStates: [NSDictionary?] = [
+            nil,
+            Self.makeGlobalIPv6Properties(serviceID: "service-en1"),
+            Self.makeGlobalIPv6Properties(interfaceName: "en1"),
+            Self.makeGlobalIPv6Properties(router: "fd42:10:244:22::9"),
+        ]
+
+        for globalState in invalidGlobalStates {
+            #expect(throws: (any Error).self) {
+                try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                    request: interface,
+                    serviceID: "service-en0",
+                    isPrimary: true,
+                    protocolEnabled: true,
+                    configuredProperties: Self.makeConfiguredIPv6Properties(),
+                    setupProperties: Self.makeConfiguredIPv6Properties(),
+                    effectiveProperties: Self.makeEffectiveIPv6Properties(),
+                    globalProperties: globalState
+                )
+            }
+        }
+    }
+
+    @Test
+    func secondaryIPv6InterfaceMustNotOwnOrConfigureDefaultRoute() throws {
+        let interface = Self.makeIPv6Interface(interfaceName: "en1")
+        let unrelatedGlobalState = Self.makeGlobalIPv6Properties(
+            serviceID: "service-en0",
+            interfaceName: "en0"
+        )
+
+        let address = try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+            request: interface,
+            serviceID: "service-en1",
+            isPrimary: false,
+            protocolEnabled: true,
+            configuredProperties: Self.makeConfiguredIPv6Properties(router: nil),
+            setupProperties: Self.makeConfiguredIPv6Properties(router: nil),
+            effectiveProperties: Self.makeEffectiveIPv6Properties(interfaceName: "en1"),
+            globalProperties: unrelatedGlobalState
+        )
+        #expect(address == "fd42:10:244:22::2/64")
+
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                request: interface,
+                serviceID: "service-en1",
+                isPrimary: false,
+                protocolEnabled: true,
+                configuredProperties: Self.makeConfiguredIPv6Properties(),
+                setupProperties: Self.makeConfiguredIPv6Properties(router: nil),
+                effectiveProperties: Self.makeEffectiveIPv6Properties(interfaceName: "en1"),
+                globalProperties: unrelatedGlobalState
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                request: interface,
+                serviceID: "service-en1",
+                isPrimary: false,
+                protocolEnabled: true,
+                configuredProperties: Self.makeConfiguredIPv6Properties(router: nil),
+                setupProperties: Self.makeConfiguredIPv6Properties(),
+                effectiveProperties: Self.makeEffectiveIPv6Properties(interfaceName: "en1"),
+                globalProperties: unrelatedGlobalState
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                request: interface,
+                serviceID: "service-en1",
+                isPrimary: false,
+                protocolEnabled: true,
+                configuredProperties: Self.makeConfiguredIPv6Properties(router: nil),
+                setupProperties: Self.makeConfiguredIPv6Properties(router: nil),
+                effectiveProperties: Self.makeEffectiveIPv6Properties(
+                    interfaceName: "en1",
+                    router: "fd42:10:244:22::1"
+                ),
+                globalProperties: unrelatedGlobalState
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.validateEnabledIPv6State(
+                request: interface,
+                serviceID: "service-en1",
+                isPrimary: false,
+                protocolEnabled: true,
+                configuredProperties: Self.makeConfiguredIPv6Properties(router: nil),
+                setupProperties: Self.makeConfiguredIPv6Properties(router: nil),
+                effectiveProperties: Self.makeEffectiveIPv6Properties(interfaceName: "en1"),
+                globalProperties: Self.makeGlobalIPv6Properties(
+                    serviceID: "service-en1",
+                    interfaceName: "en1"
+                )
+            )
+        }
+    }
+
+    @Test
     func rejectsPartialIPv6ProtocolConfiguration() throws {
         let interface = GuestSystemNetworkConfigurator.InterfaceConfiguration(
             networkID: "default",
@@ -274,6 +521,10 @@ struct GuestNetworkConfiguratorTests {
         try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
             protocolEnabled: false,
             configuredProperties: nil,
+            setupProperties: [
+                "ConfigMethod": "LinkLocal",
+                "Addresses": ["fe80::1%en0"],
+            ],
             effectiveProperties: [
                 "Addresses": ["fe80::1%en0"],
                 "PrefixLength": [64],
@@ -306,6 +557,59 @@ struct GuestNetworkConfiguratorTests {
                     configuredProperties: nil,
                     effectiveProperties: residualState,
                     interfaceName: "en0"
+                )
+            }
+        }
+    }
+
+    @Test
+    func rejectsDisabledIPv6StateWithStaleSetup() {
+        let residualSetupStates: [NSDictionary] = [
+            ["ConfigMethod": "Manual"],
+            ["Addresses": ["fd42:10:244:22::2"]],
+            ["Router": "fd42:10:244:22::1"],
+        ]
+
+        for setupState in residualSetupStates {
+            #expect(throws: (any Error).self) {
+                try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+                    protocolEnabled: false,
+                    configuredProperties: nil,
+                    setupProperties: setupState,
+                    effectiveProperties: nil,
+                    interfaceName: "en0"
+                )
+            }
+        }
+    }
+
+    @Test
+    func rejectsDisabledIPv6StateWithDefaultRouteOnInterface() throws {
+        let unrelatedGlobalState = Self.makeGlobalIPv6Properties(
+            serviceID: "service-en1",
+            interfaceName: "en1"
+        )
+        try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+            protocolEnabled: false,
+            configuredProperties: nil,
+            effectiveProperties: nil,
+            serviceID: "service-en0",
+            interfaceName: "en0",
+            globalProperties: unrelatedGlobalState
+        )
+
+        for globalState in [
+            Self.makeGlobalIPv6Properties(serviceID: "service-en0", interfaceName: "en1"),
+            Self.makeGlobalIPv6Properties(serviceID: "service-en1", interfaceName: "en0"),
+        ] {
+            #expect(throws: (any Error).self) {
+                try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+                    protocolEnabled: false,
+                    configuredProperties: nil,
+                    effectiveProperties: nil,
+                    serviceID: "service-en0",
+                    interfaceName: "en0",
+                    globalProperties: globalState
                 )
             }
         }
@@ -466,6 +770,62 @@ struct GuestNetworkConfiguratorTests {
 }
 
 extension GuestNetworkConfiguratorTests {
+    private static func makeIPv6Interface(
+        interfaceName: String = "en0"
+    ) -> GuestSystemNetworkConfigurator.InterfaceConfiguration {
+        GuestSystemNetworkConfigurator.InterfaceConfiguration(
+            networkID: "default",
+            interfaceName: interfaceName,
+            macAddress: "02:42:ac:11:00:02",
+            ipv4Address: "192.168.64.2",
+            ipv4PrefixLength: 24,
+            ipv4Gateway: "192.168.64.1",
+            ipv6Address: "fd42:10:244:22::2",
+            ipv6PrefixLength: 64,
+            ipv6Gateway: "fd42:10:244:22::1"
+        )
+    }
+
+    private static func makeConfiguredIPv6Properties(
+        configMethod: String = "Manual",
+        addresses: [String] = ["fd42:10:244:22::2"],
+        prefixLengths: [Int] = [64],
+        router: String? = "fd42:10:244:22::1"
+    ) -> NSDictionary {
+        var properties: [String: Any] = [
+            "ConfigMethod": configMethod,
+            "Addresses": addresses,
+            "PrefixLength": prefixLengths,
+        ]
+        properties["Router"] = router
+        return properties as NSDictionary
+    }
+
+    private static func makeEffectiveIPv6Properties(
+        interfaceName: String = "en0",
+        router: String? = nil
+    ) -> NSDictionary {
+        var properties: [String: Any] = [
+            "Addresses": ["fd42:10:244:22::2"],
+            "PrefixLength": [64],
+            "InterfaceName": interfaceName,
+        ]
+        properties["Router"] = router
+        return properties as NSDictionary
+    }
+
+    private static func makeGlobalIPv6Properties(
+        serviceID: String = "service-en0",
+        interfaceName: String = "en0",
+        router: String = "fd42:10:244:22::1"
+    ) -> NSDictionary {
+        [
+            "PrimaryService": serviceID,
+            "PrimaryInterface": interfaceName,
+            "Router": router,
+        ]
+    }
+
     private static func makeSystemConfigurationResult(
         interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration],
         dns: MacOSGuestDNSConfiguration?

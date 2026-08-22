@@ -278,11 +278,18 @@ static const container_vxlan_peer_t *peer_for_source(
     const container_vxlan_peer_t *peers,
     size_t peer_count,
     uint32_t public_ip,
-    const uint8_t vtep_mac[6]
+    const uint8_t source_mac[6]
 ) {
     for (size_t index = 0; index < peer_count; ++index) {
-        if (peers[index].public_ip == public_ip && memcmp(peers[index].vtep_mac, vtep_mac, 6) == 0)
-        {
+        if (peers[index].public_ip == public_ip && memcmp(peers[index].vtep_mac, source_mac, 6) == 0) {
+            return &peers[index];
+        }
+    }
+    if (!mac_is_unicast(source_mac)) {
+        return NULL;
+    }
+    for (size_t index = 0; index < peer_count; ++index) {
+        if (peers[index].public_ip == public_ip && peers[index].allow_endpoint_source_mac) {
             return &peers[index];
         }
     }

@@ -18,6 +18,8 @@ import CContainerK8sFlannelVXLANMacOS
 import Darwin
 import Testing
 
+@testable import ContainerK8sFlannelVXLANMacOS
+
 struct FlannelWireProtocolTests {
     @Test
     func encodesLinuxAndWindowsCompatibleVXLANEthernetFrame() {
@@ -166,6 +168,128 @@ struct FlannelWireProtocolTests {
         #expect(result.innerPacket == innerPacket)
         #expect(!result.decoded.source_cidr_mismatch)
     }
+
+    @Test
+    func decodesWindowsHCNEndpointSourceMACUsingCapturedCanaryParameters() {
+        let datagram: [UInt8] =
+            [
+                // VXLAN VNI 4096.
+                0x08, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+                // Destination is the macOS VTEP; source is the Windows endpoint MAC.
+                0xea, 0x11, 0x77, 0x69, 0x73, 0x80,
+                0x00, 0x15, 0x5d, 0xdf, 0xf5, 0x68,
+                0x08, 0x00,
+            ] + windowsHCNSYNACKFixture
+        let config = makeWindowsCanaryConfiguration()
+        var windowsPeer = makeWindowsCanaryPeer()
+
+        // The addresses, ports, and MACs come from a Windows HCN canary capture.
+        // Sequence and checksum fields are synthetic because the raw capture was not retained.
+        let result = decode(
+            datagram,
+            outerSourceIP: "198.51.100.121",
+            config: config,
+            peers: [windowsPeer]
+        )
+        #expect(result.status == CONTAINER_VXLAN_WIRE_SUCCESS)
+        #expect(result.innerPacket == windowsHCNSYNACKFixture)
+
+        windowsPeer.allow_endpoint_source_mac = false
+        #expect(
+            decode(
+                datagram,
+                outerSourceIP: "198.51.100.121",
+                config: config,
+                peers: [windowsPeer]
+            ).status == CONTAINER_VXLAN_WIRE_UNKNOWN_PEER
+        )
+
+        windowsPeer.allow_endpoint_source_mac = true
+        #expect(
+            decode(
+                datagram,
+                outerSourceIP: "198.51.100.122",
+                config: config,
+                peers: [windowsPeer]
+            ).status == CONTAINER_VXLAN_WIRE_UNKNOWN_PEER
+        )
+
+        var spoofedInnerSource = datagram
+        spoofedInnerSource.replaceSubrange(34..<38, with: [10, 250, 9, 39])
+        #expect(
+            decode(
+                spoofedInnerSource,
+                outerSourceIP: "198.51.100.121",
+                config: config,
+                peers: [windowsPeer]
+            ).status == CONTAINER_VXLAN_WIRE_SOURCE_CIDR_MISMATCH
+        )
+
+        var multicastEndpointSourceMAC = datagram
+        multicastEndpointSourceMAC[14] = 0x01
+        #expect(
+            decode(
+                multicastEndpointSourceMAC,
+                outerSourceIP: "198.51.100.121",
+                config: config,
+                peers: [windowsPeer]
+            ).status == CONTAINER_VXLAN_WIRE_UNKNOWN_PEER
+        )
+
+        var zeroEndpointSourceMAC = datagram
+        zeroEndpointSourceMAC.replaceSubrange(14..<20, with: repeatElement(UInt8(0), count: 6))
+        #expect(
+            decode(
+                zeroEndpointSourceMAC,
+                outerSourceIP: "198.51.100.121",
+                config: config,
+                peers: [windowsPeer]
+            ).status == CONTAINER_VXLAN_WIRE_UNKNOWN_PEER
+        )
+
+        var annotatedVTEPSourceMAC = datagram
+        annotatedVTEPSourceMAC.replaceSubrange(
+            14..<20,
+            with: [0x00, 0x15, 0x5d, 0x21, 0x68, 0xda]
+        )
+        #expect(
+            decode(
+                annotatedVTEPSourceMAC,
+                outerSourceIP: "198.51.100.121",
+                config: config,
+                peers: [windowsPeer]
+            ).status == CONTAINER_VXLAN_WIRE_SUCCESS
+        )
+
+        var fallbackPeer = windowsPeer
+        fallbackPeer.pod_network = networkIPv4("10.250.9.0")
+        setMAC([0x00, 0x15, 0x5d, 0x09, 0x00, 0x01], on: &fallbackPeer.vtep_mac)
+        #expect(
+            decode(
+                annotatedVTEPSourceMAC,
+                outerSourceIP: "198.51.100.121",
+                config: config,
+                peers: [fallbackPeer, windowsPeer]
+            ).status == CONTAINER_VXLAN_WIRE_SUCCESS
+        )
+    }
+
+    @Test
+    func enablesEndpointSourceMACCompatibilityOnlyForWindowsPeers() throws {
+        var windows = try FlannelVXLANTunnel.makePeer(makeFlannelPeer(operatingSystem: "windows"))
+        var mixedCaseWindows = try FlannelVXLANTunnel.makePeer(makeFlannelPeer(operatingSystem: "Windows"))
+        var linux = try FlannelVXLANTunnel.makePeer(makeFlannelPeer(operatingSystem: "linux"))
+        var unlabeled = try FlannelVXLANTunnel.makePeer(makeFlannelPeer(operatingSystem: nil))
+
+        #expect(windows.allow_endpoint_source_mac)
+        #expect(mixedCaseWindows.allow_endpoint_source_mac)
+        #expect(!linux.allow_endpoint_source_mac)
+        #expect(!unlabeled.allow_endpoint_source_mac)
+        #expect(bytes(of: &windows.vtep_mac) == [0x00, 0x15, 0x5d, 0x21, 0x68, 0xda])
+        #expect(bytes(of: &mixedCaseWindows.vtep_mac) == bytes(of: &windows.vtep_mac))
+        #expect(bytes(of: &linux.vtep_mac) == bytes(of: &windows.vtep_mac))
+        #expect(bytes(of: &unlabeled.vtep_mac) == bytes(of: &windows.vtep_mac))
+    }
 }
 
 private let outboundIPv4Fixture: [UInt8] = [
@@ -189,6 +313,15 @@ private let inboundEthernetPrefix: [UInt8] = [
 
 private let inboundDatagramFixture = inboundEthernetPrefix + inboundIPv4Fixture
 
+private let windowsHCNSYNACKFixture: [UInt8] = [
+    0x45, 0x00, 0x00, 0x28, 0x12, 0x34, 0x40, 0x00,
+    0x80, 0x06, 0xac, 0x7e, 0x0a, 0xfa, 0x04, 0x27,
+    0x0a, 0xfa, 0x22, 0x03,
+    0x46, 0xa0, 0xc8, 0x2f, 0x11, 0x22, 0x33, 0x44,
+    0x55, 0x66, 0x77, 0x88, 0x50, 0x12, 0x20, 0x00,
+    0x33, 0x90, 0x00, 0x00,
+]
+
 private func makeConfiguration() -> container_vxlan_tunnel_config_t {
     var config = container_vxlan_tunnel_config_t()
     config.vni = 4_096
@@ -208,6 +341,40 @@ private func makePeer() -> container_vxlan_peer_t {
     peer.public_ip = networkIPv4("192.0.2.2")
     setMAC([0x02, 0x00, 0x00, 0x00, 0x00, 0x02], on: &peer.vtep_mac)
     return peer
+}
+
+private func makeWindowsCanaryConfiguration() -> container_vxlan_tunnel_config_t {
+    var config = container_vxlan_tunnel_config_t()
+    config.vni = 4_096
+    config.port = 4_789
+    config.mtu = 1_430
+    config.bind_ip = networkIPv4("203.0.113.208")
+    config.local_network = networkIPv4("10.250.34.0")
+    config.local_netmask = networkIPv4("255.255.255.0")
+    setMAC([0xea, 0x11, 0x77, 0x69, 0x73, 0x80], on: &config.local_vtep_mac)
+    return config
+}
+
+private func makeWindowsCanaryPeer() -> container_vxlan_peer_t {
+    var peer = container_vxlan_peer_t()
+    peer.pod_network = networkIPv4("10.250.4.0")
+    peer.pod_netmask = networkIPv4("255.255.255.0")
+    peer.public_ip = networkIPv4("198.51.100.121")
+    peer.allow_endpoint_source_mac = true
+    setMAC([0x00, 0x15, 0x5d, 0x21, 0x68, 0xda], on: &peer.vtep_mac)
+    return peer
+}
+
+private func makeFlannelPeer(operatingSystem: String?) -> FlannelPeer {
+    FlannelPeer(
+        nodeName: "remote-a",
+        operatingSystem: operatingSystem,
+        podCIDR: "10.250.4.0/24",
+        subnetBase: "10.250.4.0",
+        publicIP: "198.51.100.121",
+        vni: 4_096,
+        vtepMAC: "00:15:5d:21:68:da"
+    )
 }
 
 private func encode(
@@ -307,4 +474,8 @@ private func setMAC<T>(_ bytes: [UInt8], on value: inout T) {
     withUnsafeMutableBytes(of: &value) { destination in
         destination.copyBytes(from: bytes)
     }
+}
+
+private func bytes<T>(of value: inout T) -> [UInt8] {
+    withUnsafeBytes(of: &value) { Array($0) }
 }

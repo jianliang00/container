@@ -45,6 +45,9 @@ typedef struct container_vxlan_peer {
     uint32_t pod_netmask;
     uint32_t public_ip;
     uint8_t vtep_mac[6];
+    // Windows HCN uses the container endpoint MAC, rather than the Node's
+    // published VTEP MAC, as the inner Ethernet source for routed VXLAN frames.
+    bool allow_endpoint_source_mac;
 } container_vxlan_peer_t;
 
 // All IPv6 address fields contain 16 bytes in network byte order. The prefix
@@ -139,8 +142,10 @@ container_vxlan_wire_status_t container_vxlan_encode_ipv4(
 
 // Pure wire codec used by the live tunnel data path. outer_source_ip is in
 // network byte order. The decoder authenticates the outer source IP together
-// with the Ethernet source VTEP MAC and only accepts an inner source from that
-// peer's PodCIDR or the peer's public IP before returning the IPv4 packet.
+// with the Ethernet source VTEP MAC, except that a peer explicitly marked for
+// Windows HCN may use a unicast endpoint source MAC. It only accepts an inner
+// source from that peer's PodCIDR or the peer's public IP before returning the
+// IPv4 packet.
 container_vxlan_wire_status_t container_vxlan_decode_ipv4(
     const container_vxlan_tunnel_config_t *config,
     const container_vxlan_peer_t *peers,

@@ -246,7 +246,7 @@ public final class FlannelVXLANTunnel: FlannelTunnelControlling, @unchecked Send
         return value
     }
 
-    private static func makePeer(_ peer: FlannelPeer) throws -> container_vxlan_peer_t {
+    static func makePeer(_ peer: FlannelPeer) throws -> container_vxlan_peer_t {
         guard let podCIDR = FlannelIPv4.parseCIDR(peer.podCIDR),
             let vtepMAC = macBytes(peer.vtepMAC)
         else {
@@ -256,6 +256,7 @@ public final class FlannelVXLANTunnel: FlannelTunnelControlling, @unchecked Send
         value.pod_network = podCIDR.network.bigEndian
         value.pod_netmask = prefixMask(podCIDR.prefixLength).bigEndian
         value.public_ip = try networkOrderIPv4(peer.publicIP)
+        value.allow_endpoint_source_mac = peer.operatingSystem?.lowercased() == "windows"
         withUnsafeMutableBytes(of: &value.vtep_mac) { destination in
             destination.copyBytes(from: vtepMAC)
         }

@@ -15,7 +15,7 @@ needed by the first rollout:
 - `container-macos-kubeadm`
 - forked `kubelet`
 - kubelet, CRI, CNI, Flannel VXLAN, and kube-proxy config templates
-- launchd plists for kubelet, CRI shim, Flannel VXLAN, and kube-proxy
+- launchd plists for container-system bootstrap, kubelet, CRI shim, Flannel VXLAN, and kube-proxy
 
 The package does not include cluster credentials, write active Kubernetes
 configuration under `/etc`, install launchd jobs, or enable PF. Its inert
@@ -24,9 +24,23 @@ configuration examples are stored under
 `container-macos-kubeadm join` after installing the package to install
 kubeconfigs, render node-specific configuration, and start the local services.
 Core container services are still started through the normal `container system
-start` path. `container-macos-kubeadm join` starts the core services and CRI
-shim first, then starts the Flannel VXLAN daemon so it can wait for kubelet to
-publish the assigned PodCIDR without creating a startup dependency cycle.
+start` path. Join also installs a one-shot system launchd job that re-enters the
+configured container service user's launchd domain and runs that command after
+each host boot. The job exits after a successful start and retries only after a
+failure. `container-macos-kubeadm join` starts the core services and CRI shim
+first, then starts the Flannel VXLAN daemon so it can wait for kubelet to publish
+the assigned PodCIDR without creating a startup dependency cycle.
+
+Installing a newer package does not rewrite active files under
+`/Library/LaunchDaemons`; rerun the node's current join command during the
+drained maintenance window to render and load the bootstrap job, explicitly
+passing the original `--container-service-user`. Join rejects a different UID
+while existing node configuration remains, preventing a second container core
+from being started in another user domain. Before
+downgrading to a package that predates the bootstrap job, use the current
+version's `container-macos-kubeadm reset --force` or explicitly boot out
+`system/com.apple.container.macos-node-bootstrap` and remove its plist. An older
+binary does not provide the private bootstrap entry point.
 
 Before joining the first macOS node, apply
 `packaging/macos-node/manifests/macos-node-bootstrap-rbac.yaml` to the Linux
@@ -220,6 +234,7 @@ when kubelet, CRI/CNI state, and node logs should also be removed.
 
 Runtime logs are written to stable host paths:
 
+- container system boot bootstrap: `/var/log/container-macos-node-bootstrap.log`
 - `kubelet`: `/var/log/kubelet.log`
 - `container-cri-shim-macos`: `/var/log/container-cri-shim-macos.log`
 - `container-flannel-vxlan-macos`: `/var/log/container-flannel-vxlan-macos.log`
@@ -231,6 +246,7 @@ For process state, inspect the matching launchd labels:
 
 ```sh
 sudo launchctl print system/com.apple.container.kubelet
+sudo launchctl print system/com.apple.container.macos-node-bootstrap
 sudo launchctl print system/com.apple.container.cri-shim-macos
 sudo launchctl print system/com.apple.container.flannel-vxlan-macos
 sudo launchctl print system/com.apple.container.kube-proxy-macos

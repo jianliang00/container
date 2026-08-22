@@ -64,6 +64,16 @@ struct MacOSKubeadmPlanTests {
                 guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
                     return false
                 }
+                return path == "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.macos-node-bootstrap.plist"
+                    && contents.contains("<string>start-container-system</string>")
+                    && contents.contains("<string>0</string>")
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
+                    return false
+                }
                 return path == "/tmp/macos-node/etc/kubernetes/kubelet-config.yaml"
                     && contents.contains("clusterDNS:")
                     && contents.contains(#""10.96.0.53""#)
@@ -634,6 +644,13 @@ struct MacOSKubeadmPlanTests {
         let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
         let descriptions = plan.steps.map(\.message)
 
+        let containerSystemIndex = try #require(descriptions.firstIndex(of: "start container core services"))
+        let bootstrapEnableIndex = try #require(
+            descriptions.firstIndex(of: "enable container system bootstrap launchd job")
+        )
+        let bootstrapStartIndex = try #require(
+            descriptions.firstIndex(of: "start container system bootstrap launchd job")
+        )
         let criIndex = try #require(descriptions.firstIndex(of: "start CRI shim launchd job"))
         let waitIndex = try #require(descriptions.firstIndex(of: "wait for CRI socket"))
         let flannelEnableIndex = try #require(descriptions.firstIndex(of: "enable flannel VXLAN launchd job"))
@@ -642,6 +659,9 @@ struct MacOSKubeadmPlanTests {
         let kubeProxyEnableIndex = try #require(descriptions.firstIndex(of: "enable kube-proxy launchd job"))
         let kubeProxyIndex = try #require(descriptions.firstIndex(of: "start kube-proxy launchd job"))
 
+        #expect(containerSystemIndex < bootstrapEnableIndex)
+        #expect(bootstrapEnableIndex < bootstrapStartIndex)
+        #expect(bootstrapStartIndex < criIndex)
         #expect(criIndex < waitIndex)
         #expect(waitIndex < flannelEnableIndex)
         #expect(flannelEnableIndex < flannelIndex)
@@ -657,6 +677,10 @@ struct MacOSKubeadmPlanTests {
         let options = try makeOptions(startServices: true)
         let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
         let expectedStops = [
+            (
+                "stop previous container system bootstrap launchd job if present",
+                "system/com.apple.container.macos-node-bootstrap"
+            ),
             ("stop previous kubelet launchd job if present", "system/com.apple.container.kubelet"),
             ("stop previous kube-proxy launchd job if present", "system/com.apple.container.kube-proxy-macos"),
             ("stop previous flannel VXLAN launchd job if present", "system/com.apple.container.flannel-vxlan-macos"),
@@ -681,6 +705,18 @@ struct MacOSKubeadmPlanTests {
             #expect(arguments[7] == "50")
             #expect(arguments[8] == "0.1")
         }
+
+        let bootstrapStopIndex = try #require(
+            plan.steps.firstIndex { $0.message == "stop previous container system bootstrap launchd job if present" }
+        )
+        let containerStopIndex = try #require(
+            plan.steps.firstIndex { $0.message == "stop container core services if present" }
+        )
+        let containerStartIndex = try #require(
+            plan.steps.firstIndex { $0.message == "start container core services" }
+        )
+        #expect(bootstrapStopIndex < containerStopIndex)
+        #expect(containerStopIndex < containerStartIndex)
     }
 
     @Test func launchdStopAcceptsAnInitiallyMissingJob() throws {
@@ -720,6 +756,8 @@ struct MacOSKubeadmPlanTests {
         let options = try makeOptions(startServices: true)
         let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
 
+        #expect(!plan.steps.contains { $0.message == "ensure container service user launchd domain" })
+
         #expect(
             plan.steps.contains { step in
                 guard step.message == "start container core services",
@@ -734,6 +772,35 @@ struct MacOSKubeadmPlanTests {
                     "/usr/local/bin/container",
                     "system",
                     "start",
+                ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "enable container system bootstrap launchd job",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/launchctl",
+                    "enable",
+                    "system/com.apple.container.macos-node-bootstrap",
+                ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "start container system bootstrap launchd job",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/launchctl",
+                    "bootstrap",
+                    "system",
+                    "/Library/LaunchDaemons/com.apple.container.macos-node-bootstrap.plist",
                 ]
             })
 
@@ -837,13 +904,79 @@ struct MacOSKubeadmPlanTests {
                     return false
                 }
                 return arguments == [
+                    "/bin/launchctl",
+                    "asuser",
+                    "501",
                     "/usr/bin/sudo",
+                    "-H",
                     "-u",
                     "#501",
                     "/usr/local/bin/container",
                     "system",
                     "start",
                 ]
+            })
+
+        let ensureDomainIndex = try #require(
+            plan.steps.firstIndex { $0.message == "ensure container service user launchd domain" }
+        )
+        let stopContainerIndex = try #require(
+            plan.steps.firstIndex { $0.message == "stop container core services if present" }
+        )
+        let startContainerIndex = try #require(
+            plan.steps.firstIndex { $0.message == "start container core services" }
+        )
+        #expect(ensureDomainIndex < stopContainerIndex)
+        #expect(stopContainerIndex < startContainerIndex)
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "ensure container service user launchd domain",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments.count == 7
+                    && arguments[0] == "/bin/sh"
+                    && arguments[1] == "-c"
+                    && arguments[2].contains("bootstrap")
+                    && arguments[2].contains("asuser")
+                    && arguments[4] == "/bin/launchctl"
+                    && arguments[5] == "user/501"
+                    && arguments[6] == "501"
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "stop container core services if present",
+                    case .runCommand(let arguments, true) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/launchctl",
+                    "asuser",
+                    "501",
+                    "/usr/bin/sudo",
+                    "-H",
+                    "-u",
+                    "#501",
+                    "/usr/local/bin/container",
+                    "system",
+                    "stop",
+                ]
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "write container system bootstrap launchd plist",
+                    case .writeFile(let path, let contents, 0o644, false) = step.action
+                else {
+                    return false
+                }
+                return path == "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.macos-node-bootstrap.plist"
+                    && contents.contains("<string>--container-service-user</string>")
+                    && contents.contains("<string>501</string>")
             })
 
         #expect(
@@ -933,6 +1066,12 @@ struct MacOSKubeadmPlanTests {
         let descriptions = plan.steps.map(\.message)
 
         let preflightIndex = try #require(descriptions.firstIndex(of: "preflight owned pod network purge"))
+        let stopBootstrapIndex = try #require(
+            descriptions.firstIndex(of: "stop container system bootstrap launchd job if present")
+        )
+        let removeBootstrapIndex = try #require(
+            descriptions.firstIndex(of: "remove container system bootstrap launchd plist")
+        )
         let stopKubeletIndex = try #require(descriptions.firstIndex(of: "stop kubelet launchd job if present"))
         let stopProxyIndex = try #require(descriptions.firstIndex(of: "stop kube-proxy launchd job if present"))
         let withdrawFlannelIndex = try #require(descriptions.firstIndex(of: "withdraw flannel VXLAN data plane"))
@@ -940,16 +1079,30 @@ struct MacOSKubeadmPlanTests {
         let stopCRIIndex = try #require(descriptions.firstIndex(of: "stop CRI shim launchd job if present"))
         let purgeIndex = try #require(descriptions.firstIndex(of: "purge owned pod network"))
         let removeFlannelConfigIndex = try #require(descriptions.firstIndex(of: "remove /etc/kubernetes/flannel-vxlan-macos.conf"))
-        let firstRemoveIndex = try #require(descriptions.firstIndex { $0.hasPrefix("remove ") })
+        let firstGeneratedRemoveIndex = try #require(
+            descriptions.firstIndex(of: "remove /Library/LaunchDaemons/com.apple.container.kubelet.plist")
+        )
 
-        #expect(preflightIndex < stopKubeletIndex)
-        #expect(stopKubeletIndex < firstRemoveIndex)
+        #expect(preflightIndex < stopBootstrapIndex)
+        #expect(stopBootstrapIndex < removeBootstrapIndex)
+        #expect(removeBootstrapIndex < stopKubeletIndex)
+        #expect(stopKubeletIndex < firstGeneratedRemoveIndex)
         #expect(stopKubeletIndex < stopProxyIndex)
         #expect(stopProxyIndex < withdrawFlannelIndex)
         #expect(withdrawFlannelIndex < stopFlannelIndex)
         #expect(stopFlannelIndex < stopCRIIndex)
         #expect(stopCRIIndex < purgeIndex)
         #expect(purgeIndex < removeFlannelConfigIndex)
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "remove container system bootstrap launchd plist",
+                    case .removePath(let path, false, false, false) = step.action
+                else {
+                    return false
+                }
+                return path == "/Library/LaunchDaemons/com.apple.container.macos-node-bootstrap.plist"
+            }
+        )
         #expect(
             plan.steps.contains { step in
                 guard step.message == "preflight owned pod network purge",
@@ -1045,6 +1198,13 @@ struct MacOSKubeadmPlanTests {
                     && recursive
                     && bestEffort
                     && !sensitive
+            })
+        #expect(
+            plan.steps.contains { step in
+                guard case .removePath(let path, true, true, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/log/container-macos-node-bootstrap.log"
             })
     }
 

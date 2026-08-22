@@ -358,6 +358,7 @@ struct MacOSKubeadmDiscoveryTests {
             token: "abcdef.0123456789abcdef",
             discoveryTokenCACertHashes: [testCACertHash],
             networkMode: .compat,
+            containerServiceUserID: 4_000_000_000,
             installRoot: "/tmp/container-macos-kubeadm-dry-run",
             startServices: false,
             dryRun: true

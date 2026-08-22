@@ -310,6 +310,17 @@ public enum MacOSKubeadmPlanner {
             })
         steps.append(contentsOf: [
             MacOSKubeadmStep(
+                message: "write container system bootstrap launchd plist",
+                action: .writeFile(
+                    path: options.rooted(MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath),
+                    contents: MacOSKubeadmRenderer.containerSystemBootstrapPlist(
+                        containerServiceUserID: options.containerServiceUserID
+                    ),
+                    mode: 0o644,
+                    sensitive: false
+                )
+            ),
+            MacOSKubeadmStep(
                 message: "write CRI shim launchd plist",
                 action: .writeFile(
                     path: options.rooted("/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist"),
@@ -336,7 +347,7 @@ public enum MacOSKubeadmPlanner {
         ])
 
         if options.startServices {
-            steps.append(contentsOf: serviceStartSteps(options: options))
+            steps.append(contentsOf: try serviceStartSteps(options: options))
         }
 
         return MacOSKubeadmPlan(steps: steps)
@@ -356,6 +367,19 @@ public enum MacOSKubeadmPlanner {
                         "--check-purge",
                     ],
                     bestEffort: false
+                )
+            ),
+            stopLaunchdJobStep(
+                message: "stop container system bootstrap launchd job if present",
+                label: MacOSKubeadmContainerSystem.bootstrapLaunchdLabel
+            ),
+            MacOSKubeadmStep(
+                message: "remove container system bootstrap launchd plist",
+                action: .removePath(
+                    path: options.rooted(MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath),
+                    recursive: false,
+                    bestEffort: false,
+                    sensitive: false
                 )
             ),
             stopLaunchdJobStep(
@@ -469,6 +493,7 @@ public enum MacOSKubeadmPlanner {
                 "/var/log/containers",
                 "/var/log/kubelet.log",
                 "/var/log/container-cri-shim-macos.log",
+                "/var/log/container-macos-node-bootstrap.log",
                 "/var/log/container-flannel-vxlan-macos.log",
                 "/var/log/container-kube-proxy-macos.log",
             ]
@@ -566,10 +591,15 @@ public enum MacOSKubeadmPlanner {
         }
     }
 
-    private static func serviceStartSteps(options: MacOSKubeadmJoinOptions) -> [MacOSKubeadmStep] {
+    private static func serviceStartSteps(options: MacOSKubeadmJoinOptions) throws -> [MacOSKubeadmStep] {
         let networkMode = options.networkMode
         let containerServiceUserID = options.containerServiceUserID
-        var steps: [MacOSKubeadmStep] = []
+        var steps = [
+            stopLaunchdJobStep(
+                message: "stop previous container system bootstrap launchd job if present",
+                label: MacOSKubeadmContainerSystem.bootstrapLaunchdLabel
+            )
+        ]
         if !networkMode.usesPodNetworking {
             steps.append(
                 MacOSKubeadmStep(
@@ -604,23 +634,61 @@ public enum MacOSKubeadmPlanner {
                 MacOSKubeadmStep(
                     message: "stop root container core services if present",
                     action: .runCommand(
-                        arguments: containerSystemCommand(userID: 0, subcommand: "stop"),
+                        arguments: try MacOSKubeadmContainerSystem.command(userID: 0, subcommand: "stop"),
                         bestEffort: true
                     )
+                ))
+        }
+        if let bootstrapUserDomain = try MacOSKubeadmContainerSystem.userDomainBootstrapCommand(
+            userID: containerServiceUserID
+        ) {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "ensure container service user launchd domain",
+                    action: .runCommand(arguments: bootstrapUserDomain, bestEffort: false)
                 ))
         }
         steps.append(contentsOf: [
             MacOSKubeadmStep(
                 message: "stop container core services if present",
                 action: .runCommand(
-                    arguments: containerSystemCommand(userID: containerServiceUserID, subcommand: "stop"),
+                    arguments: try MacOSKubeadmContainerSystem.command(
+                        userID: containerServiceUserID,
+                        subcommand: "stop"
+                    ),
                     bestEffort: true
                 )
             ),
             MacOSKubeadmStep(
                 message: "start container core services",
                 action: .runCommand(
-                    arguments: containerSystemCommand(userID: containerServiceUserID, subcommand: "start"),
+                    arguments: try MacOSKubeadmContainerSystem.command(
+                        userID: containerServiceUserID,
+                        subcommand: "start"
+                    ),
+                    bestEffort: false
+                )
+            ),
+            MacOSKubeadmStep(
+                message: "enable container system bootstrap launchd job",
+                action: .runCommand(
+                    arguments: [
+                        "/bin/launchctl",
+                        "enable",
+                        "system/\(MacOSKubeadmContainerSystem.bootstrapLaunchdLabel)",
+                    ],
+                    bestEffort: false
+                )
+            ),
+            MacOSKubeadmStep(
+                message: "start container system bootstrap launchd job",
+                action: .runCommand(
+                    arguments: [
+                        "/bin/launchctl",
+                        "bootstrap",
+                        "system",
+                        MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath,
+                    ],
                     bestEffort: false
                 )
             ),
@@ -896,13 +964,6 @@ public enum MacOSKubeadmPlanner {
                 )
             ),
         ]
-    }
-
-    private static func containerSystemCommand(userID: Int, subcommand: String) -> [String] {
-        if userID == 0 {
-            return ["/bin/launchctl", "asuser", "0", "/usr/local/bin/container", "system", subcommand]
-        }
-        return ["/usr/bin/sudo", "-u", "#\(userID)", "/usr/local/bin/container", "system", subcommand]
     }
 
     private static func stopLaunchdJobStep(message: String, label: String) -> MacOSKubeadmStep {

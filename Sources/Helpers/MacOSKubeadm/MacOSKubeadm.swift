@@ -27,6 +27,7 @@ struct MacOSKubeadm: AsyncParsableCommand {
             Join.self,
             Reset.self,
             Status.self,
+            StartContainerSystem.self,
         ]
     )
 }
@@ -248,6 +249,30 @@ extension MacOSKubeadm {
             let log = MacOSKubeadmLog(debugEnabled: debug)
             let runner = MacOSKubeadmStatusRunner()
             try runner.run(options: options, log: log)
+        }
+    }
+
+    struct StartContainerSystem: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "start-container-system",
+            abstract: "Start container core services in the configured user context.",
+            shouldDisplay: false
+        )
+
+        @Option(help: "UID whose bootstrap domain runs container core services.")
+        var containerServiceUser: Int
+
+        @Flag(help: "Enable debug logs, including command output.")
+        var debug: Bool = false
+
+        func run() throws {
+            guard containerServiceUser >= 0 else {
+                throw ValidationError("--container-service-user must be a non-negative uid")
+            }
+
+            let log = MacOSKubeadmLog(debugEnabled: debug)
+            let runner = MacOSKubeadmContainerSystemBootstrapRunner()
+            try runner.run(userID: containerServiceUser, log: log)
         }
     }
 }

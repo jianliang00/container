@@ -17,6 +17,11 @@
 import Foundation
 
 public enum MacOSKubeadmRenderer {
+    private enum LaunchdKeepAlive {
+        case always
+        case unsuccessfulExit
+    }
+
     public static func kubeconfig(
         clusterName: String,
         contextName: String,
@@ -383,6 +388,21 @@ public enum MacOSKubeadmRenderer {
         )
     }
 
+    public static func containerSystemBootstrapPlist(containerServiceUserID: Int) -> String {
+        launchdPlist(
+            label: MacOSKubeadmContainerSystem.bootstrapLaunchdLabel,
+            programArguments: [
+                "/usr/local/bin/container-macos-kubeadm",
+                "start-container-system",
+                "--container-service-user",
+                "\(containerServiceUserID)",
+            ],
+            logPath: "/var/log/container-macos-node-bootstrap.log",
+            keepAlive: .unsuccessfulExit,
+            throttleInterval: 10
+        )
+    }
+
     public static func kubeProxyPlist() -> String {
         launchdPlist(
             label: "com.apple.container.kube-proxy-macos",
@@ -456,10 +476,39 @@ public enum MacOSKubeadmRenderer {
         )
     }
 
-    private static func launchdPlist(label: String, programArguments: [String], logPath: String) -> String {
+    private static func launchdPlist(
+        label: String,
+        programArguments: [String],
+        logPath: String,
+        keepAlive: LaunchdKeepAlive = .always,
+        throttleInterval: Int? = nil
+    ) -> String {
         let arguments = programArguments.map { argument in
             "        <string>\(xmlEscape(argument))</string>"
         }.joined(separator: "\n")
+
+        let keepAliveValue: String
+        switch keepAlive {
+        case .always:
+            keepAliveValue = "    <true/>"
+        case .unsuccessfulExit:
+            keepAliveValue = """
+                    <dict>
+                        <key>SuccessfulExit</key>
+                        <false/>
+                    </dict>
+                """
+        }
+
+        let throttleIntervalValue: String
+        if let throttleInterval {
+            throttleIntervalValue = """
+                    <key>ThrottleInterval</key>
+                    <integer>\(throttleInterval)</integer>
+                """
+        } else {
+            throttleIntervalValue = ""
+        }
 
         return """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -475,7 +524,8 @@ public enum MacOSKubeadmRenderer {
                 <key>RunAtLoad</key>
                 <true/>
                 <key>KeepAlive</key>
-                <true/>
+            \(keepAliveValue)
+            \(throttleIntervalValue)
                 <key>StandardOutPath</key>
                 <string>\(xmlEscape(logPath))</string>
                 <key>StandardErrorPath</key>

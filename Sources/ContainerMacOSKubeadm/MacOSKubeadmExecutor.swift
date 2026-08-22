@@ -56,6 +56,14 @@ public struct MacOSKubeadmJoinRunner {
     private func runPreflight(options: MacOSKubeadmJoinOptions, log: MacOSKubeadmLog) throws {
         log.info("running preflight checks")
         try options.validateIPv6EgressConfiguration()
+        try MacOSKubeadmContainerSystem.validateExistingConfiguration(
+            requestedUserID: options.containerServiceUserID,
+            bootstrapPlistPath: options.rooted(MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath),
+            criShimPlistPath: options.rooted("/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist"),
+            flannelConfigurationPath: options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
+            fileManager: fileManager,
+            requireLocalUser: options.rootPrefix.isEmpty
+        )
 
         if !options.dryRun && geteuid() != 0 {
             throw MacOSKubeadmError.preflightFailed("join must run as root; rerun with sudo or pass --dry-run")
@@ -344,6 +352,38 @@ extension MacOSKubeadmStatusOptions {
 }
 
 public struct MacOSKubeadmStatusRunner {
+    static let inspectedFiles = [
+        "/usr/local/bin/container-macos-kubeadm",
+        "/usr/local/bin/container-cri-shim-macos",
+        "/usr/local/bin/container-flannel-vxlan-macos",
+        "/usr/local/bin/container-kube-proxy-macos",
+        "/usr/local/bin/kubelet",
+        "/opt/cni/bin/container-cni-macvmnet",
+        "/etc/kubernetes/pki/ca.crt",
+        "/etc/kubernetes/bootstrap-kubelet.kubeconfig",
+        "/etc/kubernetes/kubelet.conf",
+        "/etc/kubernetes/kubelet.kubeconfig",
+        "/etc/kubernetes/kube-proxy.kubeconfig",
+        "/etc/kubernetes/flannel-macos.kubeconfig",
+        "/etc/kubernetes/kubelet-config.yaml",
+        "/etc/kubernetes/container-cri-shim-macos-config.json",
+        "/etc/kubernetes/flannel-vxlan-macos.conf",
+        "/etc/kubernetes/kube-proxy.conf",
+        "/etc/cni/net.d/10-macvmnet.conflist",
+        "/var/lib/container/kubernetes-credentials/kube-proxy-macos.token",
+        "/var/lib/container/kubernetes-credentials/flannel-macos.token",
+        "/var/lib/container/flannel-vxlan/ready.json",
+        MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath,
+    ]
+
+    static let launchdLabels = [
+        MacOSKubeadmContainerSystem.bootstrapLaunchdLabel,
+        "com.apple.container.cri-shim-macos",
+        "com.apple.container.flannel-vxlan-macos",
+        "com.apple.container.kube-proxy-macos",
+        "com.apple.container.kubelet",
+    ]
+
     private let fileManager: FileManager
 
     public init(fileManager: FileManager = .default) {
@@ -357,30 +397,7 @@ public struct MacOSKubeadmStatusRunner {
 
         log.info("checking macOS Kubernetes node status")
 
-        let files = [
-            "/usr/local/bin/container-macos-kubeadm",
-            "/usr/local/bin/container-cri-shim-macos",
-            "/usr/local/bin/container-flannel-vxlan-macos",
-            "/usr/local/bin/container-kube-proxy-macos",
-            "/usr/local/bin/kubelet",
-            "/opt/cni/bin/container-cni-macvmnet",
-            "/etc/kubernetes/pki/ca.crt",
-            "/etc/kubernetes/bootstrap-kubelet.kubeconfig",
-            "/etc/kubernetes/kubelet.conf",
-            "/etc/kubernetes/kubelet.kubeconfig",
-            "/etc/kubernetes/kube-proxy.kubeconfig",
-            "/etc/kubernetes/flannel-macos.kubeconfig",
-            "/etc/kubernetes/kubelet-config.yaml",
-            "/etc/kubernetes/container-cri-shim-macos-config.json",
-            "/etc/kubernetes/flannel-vxlan-macos.conf",
-            "/etc/kubernetes/kube-proxy.conf",
-            "/etc/cni/net.d/10-macvmnet.conflist",
-            "/var/lib/container/kubernetes-credentials/kube-proxy-macos.token",
-            "/var/lib/container/kubernetes-credentials/flannel-macos.token",
-            "/var/lib/container/flannel-vxlan/ready.json",
-        ]
-
-        for file in files {
+        for file in Self.inspectedFiles {
             let rooted = options.rooted(file)
             log.info("\(file): \(fileManager.fileExists(atPath: rooted) ? "present" : "missing")")
         }
@@ -389,12 +406,7 @@ public struct MacOSKubeadmStatusRunner {
         log.info("\(socket): \(fileManager.fileExists(atPath: options.rooted(socket)) ? "present" : "missing")")
 
         if options.rootPrefix.isEmpty {
-            for label in [
-                "com.apple.container.cri-shim-macos",
-                "com.apple.container.flannel-vxlan-macos",
-                "com.apple.container.kube-proxy-macos",
-                "com.apple.container.kubelet",
-            ] {
+            for label in Self.launchdLabels {
                 log.info("\(label): \(serviceStatus(label: label, log: log))")
             }
         } else {
@@ -405,6 +417,9 @@ public struct MacOSKubeadmStatusRunner {
     private func serviceStatus(label: String, log: MacOSKubeadmLog) -> String {
         do {
             let output = try MacOSKubeadmProcess.runCapturing(arguments: ["/bin/launchctl", "print", "system/\(label)"])
+            if label == MacOSKubeadmContainerSystem.bootstrapLaunchdLabel {
+                return Self.bootstrapServiceStatus(output: output)
+            }
             if output.contains("state = running") {
                 return "running"
             }
@@ -413,6 +428,24 @@ public struct MacOSKubeadmStatusRunner {
             log.debug("launchctl status failed for \(label): \(error)")
             return "not loaded"
         }
+    }
+
+    static func bootstrapServiceStatus(output: String) -> String {
+        if output.contains("state = running") {
+            return "running"
+        }
+        let pattern = #"last exit code = (-?[0-9]+)"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+            let match = expression.firstMatch(
+                in: output,
+                range: NSRange(output.startIndex..<output.endIndex, in: output)
+            ),
+            let range = Range(match.range(at: 1), in: output),
+            let exitCode = Int(output[range])
+        else {
+            return "loaded"
+        }
+        return exitCode == 0 ? "succeeded" : "failed (last exit code \(exitCode))"
     }
 }
 

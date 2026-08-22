@@ -20,6 +20,57 @@ import Testing
 @testable import ContainerMacOSKubeadm
 
 struct MacOSKubeadmRenderingTests {
+    @Test func containerSystemBootstrapPlistRetriesOnlyAfterFailure() throws {
+        let rendered = MacOSKubeadmRenderer.containerSystemBootstrapPlist(
+            containerServiceUserID: 501
+        )
+        let object = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(rendered.utf8),
+                format: nil
+            ) as? [String: Any]
+        )
+        let keepAlive = try #require(object["KeepAlive"] as? [String: Any])
+
+        #expect(object["Label"] as? String == MacOSKubeadmContainerSystem.bootstrapLaunchdLabel)
+        #expect(
+            object["ProgramArguments"] as? [String] == [
+                "/usr/local/bin/container-macos-kubeadm",
+                "start-container-system",
+                "--container-service-user",
+                "501",
+            ])
+        #expect(object["RunAtLoad"] as? Bool == true)
+        #expect(keepAlive["SuccessfulExit"] as? Bool == false)
+        #expect(object["ThrottleInterval"] as? Int == 10)
+        #expect(object["StandardOutPath"] as? String == "/var/log/container-macos-node-bootstrap.log")
+        #expect(object["StandardErrorPath"] as? String == "/var/log/container-macos-node-bootstrap.log")
+    }
+
+    @Test func longRunningLaunchdServicesRemainAlwaysAlive() throws {
+        let rendered = MacOSKubeadmRenderer.criShimPlist(containerServiceUserID: 501)
+        let object = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(rendered.utf8),
+                format: nil
+            ) as? [String: Any]
+        )
+
+        #expect(object["KeepAlive"] as? Bool == true)
+        #expect(object["ThrottleInterval"] == nil)
+    }
+
+    @Test func statusIncludesContainerSystemBootstrapArtifacts() {
+        #expect(
+            MacOSKubeadmStatusRunner.inspectedFiles.contains(
+                MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath
+            ))
+        #expect(
+            MacOSKubeadmStatusRunner.launchdLabels.contains(
+                MacOSKubeadmContainerSystem.bootstrapLaunchdLabel
+            ))
+    }
+
     @Test func flannelConfigurationPersistsContainerServiceUserID() throws {
         let rendered = MacOSKubeadmRenderer.flannelVXLANConfiguration(
             nodeName: "macos-ci-1",

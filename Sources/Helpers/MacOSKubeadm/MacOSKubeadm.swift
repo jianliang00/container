@@ -28,6 +28,8 @@ struct MacOSKubeadm: AsyncParsableCommand {
             Reset.self,
             Status.self,
             StartContainerSystem.self,
+            StopContainerSystem.self,
+            ExecuteContainerSystem.self,
         ]
     )
 }
@@ -308,8 +310,93 @@ extension MacOSKubeadm {
             }
 
             let log = MacOSKubeadmLog(debugEnabled: debug)
-            let runner = MacOSKubeadmContainerSystemBootstrapRunner()
-            try runner.run(userID: containerServiceUser, log: log)
+            let runner = MacOSKubeadmContainerSystemOperationRunner()
+            try runner.run(userID: containerServiceUser, operation: .start, log: log)
+        }
+    }
+
+    struct StopContainerSystem: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "stop-container-system",
+            abstract: "Stop container core services in the configured user context.",
+            shouldDisplay: false
+        )
+
+        @Option(help: "UID whose bootstrap domain runs container core services.")
+        var containerServiceUser: Int
+
+        @Flag(help: "Enable debug logs, including command output.")
+        var debug: Bool = false
+
+        func run() throws {
+            guard containerServiceUser >= 0 else {
+                throw ValidationError("--container-service-user must be a non-negative uid")
+            }
+
+            let log = MacOSKubeadmLog(debugEnabled: debug)
+            let runner = MacOSKubeadmContainerSystemOperationRunner()
+            try runner.run(userID: containerServiceUser, operation: .stop, log: log)
+        }
+    }
+
+    struct ExecuteContainerSystem: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "execute-container-system",
+            abstract: "Execute a container core service operation inside its launchd domain.",
+            shouldDisplay: false
+        )
+
+        @Option(help: "UID expected to execute the operation.")
+        var containerServiceUser: Int
+
+        @Option(help: "Container core service operation.")
+        var operation: String
+
+        @Option(help: "Unique identifier for this operation.")
+        var operationID: String
+
+        @Option(help: "Pre-created path that receives the structured operation result.")
+        var completionPath: String
+
+        @Option(help: "Expected launchd session type for the operation.")
+        var expectedSessionType: String = "Background"
+
+        @Flag(help: "Enable debug logs, including command output.")
+        var debug: Bool = false
+
+        func run() throws {
+            guard containerServiceUser >= 0 else {
+                throw ValidationError("--container-service-user must be a non-negative uid")
+            }
+            guard let resolvedOperation = MacOSKubeadmContainerSystemOperation(rawValue: operation) else {
+                throw ValidationError("--operation must be start or stop")
+            }
+            guard !operationID.isEmpty else {
+                throw ValidationError("--operation-id must not be empty")
+            }
+            guard completionPath.hasPrefix("/") else {
+                throw ValidationError("--completion-path must be absolute")
+            }
+            guard ["System", "Background", "Aqua"].contains(expectedSessionType) else {
+                throw ValidationError("--expected-session-type must be System, Background, or Aqua")
+            }
+            if expectedSessionType == "Aqua", resolvedOperation != .stop {
+                throw ValidationError("the Aqua migration executor only supports stop")
+            }
+            if (expectedSessionType == "System") != (containerServiceUser == 0) {
+                throw ValidationError("System session requires uid 0 and non-root users require a user session")
+            }
+
+            let log = MacOSKubeadmLog(debugEnabled: debug)
+            let executor = MacOSKubeadmContainerSystemExecutor()
+            try executor.run(
+                userID: containerServiceUser,
+                operation: resolvedOperation,
+                operationID: operationID,
+                completionPath: completionPath,
+                expectedManagerName: expectedSessionType,
+                log: log
+            )
         }
     }
 }

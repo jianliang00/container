@@ -41,6 +41,7 @@ public enum MacOSKubeadmAction: Sendable, Equatable {
     case removePath(path: String, recursive: Bool, bestEffort: Bool, sensitive: Bool)
     case runCommand(arguments: [String], bestEffort: Bool)
     case waitForPath(path: String, timeoutSeconds: Int)
+    case cleanupContainerSystemOperations
 
     public var safeDescription: String {
         switch self {
@@ -68,6 +69,8 @@ public enum MacOSKubeadmAction: Sendable, Equatable {
             return bestEffort ? "\(command) (best effort)" : command
         case .waitForPath(let path, let timeoutSeconds):
             return "wait up to \(timeoutSeconds)s for \(path)"
+        case .cleanupContainerSystemOperations:
+            return "remove all container system operation agents and artifacts"
         }
     }
 
@@ -378,6 +381,10 @@ public enum MacOSKubeadmPlanner {
                 label: MacOSKubeadmContainerSystem.bootstrapLaunchdLabel
             ),
             MacOSKubeadmStep(
+                message: "clean container system operation agents",
+                action: .cleanupContainerSystemOperations
+            ),
+            MacOSKubeadmStep(
                 message: "remove container system bootstrap launchd plist",
                 action: .removePath(
                     path: options.rooted(MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath),
@@ -640,17 +647,8 @@ public enum MacOSKubeadmPlanner {
                     message: "stop root container core services if present",
                     action: .runCommand(
                         arguments: try MacOSKubeadmContainerSystem.command(userID: 0, subcommand: "stop"),
-                        bestEffort: true
+                        bestEffort: false
                     )
-                ))
-        }
-        if let bootstrapUserDomain = try MacOSKubeadmContainerSystem.userDomainBootstrapCommand(
-            userID: containerServiceUserID
-        ) {
-            steps.append(
-                MacOSKubeadmStep(
-                    message: "ensure container service user launchd domain",
-                    action: .runCommand(arguments: bootstrapUserDomain, bestEffort: false)
                 ))
         }
         steps.append(contentsOf: [
@@ -661,7 +659,7 @@ public enum MacOSKubeadmPlanner {
                         userID: containerServiceUserID,
                         subcommand: "stop"
                     ),
-                    bestEffort: true
+                    bestEffort: false
                 )
             ),
             MacOSKubeadmStep(

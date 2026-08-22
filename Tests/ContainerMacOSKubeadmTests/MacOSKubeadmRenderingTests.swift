@@ -47,6 +47,51 @@ struct MacOSKubeadmRenderingTests {
         #expect(object["StandardErrorPath"] as? String == "/var/log/container-macos-node-bootstrap.log")
     }
 
+    @Test func containerSystemOperationPlistIsAOneShotBackgroundAgent() throws {
+        let rendered = MacOSKubeadmRenderer.containerSystemOperationPlist(
+            label: "com.apple.container-macos-kubeadm.operation.501",
+            containerServiceUserID: 501,
+            userName: "service",
+            homeDirectory: "/Users/service",
+            operation: .stop,
+            operationID: "request-1",
+            completionPath: "/var/run/container-macos-kubeadm/request-1.completion.json"
+        )
+        let object = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(rendered.utf8),
+                format: nil
+            ) as? [String: Any]
+        )
+
+        #expect(object["LimitLoadToSessionType"] as? String == "Background")
+        #expect(object["RunAtLoad"] as? Bool == true)
+        #expect(object["KeepAlive"] == nil)
+        #expect(object["StandardOutPath"] == nil)
+        #expect(object["StandardErrorPath"] == nil)
+        #expect(
+            object["EnvironmentVariables"] as? [String: String] == [
+                "HOME": "/Users/service",
+                "LOGNAME": "service",
+                "USER": "service",
+            ])
+        #expect(
+            object["ProgramArguments"] as? [String] == [
+                "/usr/local/bin/container-macos-kubeadm",
+                "execute-container-system",
+                "--container-service-user",
+                "501",
+                "--operation",
+                "stop",
+                "--operation-id",
+                "request-1",
+                "--completion-path",
+                "/var/run/container-macos-kubeadm/request-1.completion.json",
+                "--expected-session-type",
+                "Background",
+            ])
+    }
+
     @Test func longRunningLaunchdServicesRemainAlwaysAlive() throws {
         let rendered = MacOSKubeadmRenderer.criShimPlist(containerServiceUserID: 501)
         let object = try #require(

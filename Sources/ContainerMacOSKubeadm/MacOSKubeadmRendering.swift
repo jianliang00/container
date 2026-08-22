@@ -414,6 +414,43 @@ public enum MacOSKubeadmRenderer {
         )
     }
 
+    static func containerSystemOperationPlist(
+        label: String,
+        containerServiceUserID: Int,
+        userName: String,
+        homeDirectory: String,
+        operation: MacOSKubeadmContainerSystemOperation,
+        operationID: String,
+        completionPath: String,
+        sessionType: String = "Background"
+    ) -> String {
+        launchdPlist(
+            label: label,
+            programArguments: [
+                "/usr/local/bin/container-macos-kubeadm",
+                "execute-container-system",
+                "--container-service-user",
+                "\(containerServiceUserID)",
+                "--operation",
+                operation.rawValue,
+                "--operation-id",
+                operationID,
+                "--completion-path",
+                completionPath,
+                "--expected-session-type",
+                sessionType,
+            ],
+            logPath: nil,
+            keepAlive: nil,
+            environmentVariables: [
+                "HOME": homeDirectory,
+                "LOGNAME": userName,
+                "USER": userName,
+            ],
+            limitLoadToSessionType: sessionType == "System" ? nil : sessionType
+        )
+    }
+
     public static func kubeProxyPlist() -> String {
         launchdPlist(
             label: "com.apple.container.kube-proxy-macos",
@@ -501,9 +538,11 @@ public enum MacOSKubeadmRenderer {
     private static func launchdPlist(
         label: String,
         programArguments: [String],
-        logPath: String,
-        keepAlive: LaunchdKeepAlive = .always,
-        throttleInterval: Int? = nil
+        logPath: String?,
+        keepAlive: LaunchdKeepAlive? = .always,
+        throttleInterval: Int? = nil,
+        environmentVariables: [String: String] = [:],
+        limitLoadToSessionType: String? = nil
     ) -> String {
         let arguments = programArguments.map { argument in
             "        <string>\(xmlEscape(argument))</string>"
@@ -511,15 +550,21 @@ public enum MacOSKubeadmRenderer {
 
         let keepAliveValue: String
         switch keepAlive {
-        case .always:
-            keepAliveValue = "    <true/>"
-        case .unsuccessfulExit:
+        case .always?:
             keepAliveValue = """
+                    <key>KeepAlive</key>
+                    <true/>
+                """
+        case .unsuccessfulExit?:
+            keepAliveValue = """
+                    <key>KeepAlive</key>
                     <dict>
                         <key>SuccessfulExit</key>
                         <false/>
                     </dict>
                 """
+        case nil:
+            keepAliveValue = ""
         }
 
         let throttleIntervalValue: String
@@ -530,6 +575,46 @@ public enum MacOSKubeadmRenderer {
                 """
         } else {
             throttleIntervalValue = ""
+        }
+
+        let environmentValue: String
+        if environmentVariables.isEmpty {
+            environmentValue = ""
+        } else {
+            let entries = environmentVariables.keys.sorted().map { key in
+                """
+                    <key>\(xmlEscape(key))</key>
+                    <string>\(xmlEscape(environmentVariables[key]!))</string>
+                """
+            }.joined(separator: "\n")
+            environmentValue = """
+                    <key>EnvironmentVariables</key>
+                    <dict>
+                \(entries)
+                    </dict>
+                """
+        }
+
+        let sessionTypeValue: String
+        if let limitLoadToSessionType {
+            sessionTypeValue = """
+                    <key>LimitLoadToSessionType</key>
+                    <string>\(xmlEscape(limitLoadToSessionType))</string>
+                """
+        } else {
+            sessionTypeValue = ""
+        }
+
+        let logPathValue: String
+        if let logPath {
+            logPathValue = """
+                    <key>StandardOutPath</key>
+                    <string>\(xmlEscape(logPath))</string>
+                    <key>StandardErrorPath</key>
+                    <string>\(xmlEscape(logPath))</string>
+                """
+        } else {
+            logPathValue = ""
         }
 
         return """
@@ -543,15 +628,13 @@ public enum MacOSKubeadmRenderer {
                 <array>
             \(arguments)
                 </array>
+            \(environmentValue)
+            \(sessionTypeValue)
                 <key>RunAtLoad</key>
                 <true/>
-                <key>KeepAlive</key>
             \(keepAliveValue)
             \(throttleIntervalValue)
-                <key>StandardOutPath</key>
-                <string>\(xmlEscape(logPath))</string>
-                <key>StandardErrorPath</key>
-                <string>\(xmlEscape(logPath))</string>
+            \(logPathValue)
             </dict>
             </plist>
 

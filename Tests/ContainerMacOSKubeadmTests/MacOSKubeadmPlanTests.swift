@@ -938,18 +938,26 @@ struct MacOSKubeadmPlanTests {
 
         #expect(
             plan.steps.contains { step in
+                guard step.message == "stop container core services if present",
+                    case .runCommand(_, false) = step.action
+                else {
+                    return false
+                }
+                return true
+            })
+
+        #expect(
+            plan.steps.contains { step in
                 guard step.message == "start container core services",
                     case .runCommand(let arguments, false) = step.action
                 else {
                     return false
                 }
                 return arguments == [
-                    "/bin/launchctl",
-                    "asuser",
+                    "/usr/local/bin/container-macos-kubeadm",
+                    "start-container-system",
+                    "--container-service-user",
                     "0",
-                    "/usr/local/bin/container",
-                    "system",
-                    "start",
                 ]
             })
 
@@ -1060,17 +1068,15 @@ struct MacOSKubeadmPlanTests {
         #expect(
             plan.steps.contains { step in
                 guard step.message == "stop root container core services if present",
-                    case .runCommand(let arguments, true) = step.action
+                    case .runCommand(let arguments, false) = step.action
                 else {
                     return false
                 }
                 return arguments == [
-                    "/bin/launchctl",
-                    "asuser",
+                    "/usr/local/bin/container-macos-kubeadm",
+                    "stop-container-system",
+                    "--container-service-user",
                     "0",
-                    "/usr/local/bin/container",
-                    "system",
-                    "stop",
                 ]
             })
 
@@ -1082,67 +1088,43 @@ struct MacOSKubeadmPlanTests {
                     return false
                 }
                 return arguments == [
-                    "/bin/launchctl",
-                    "asuser",
+                    "/usr/local/bin/container-macos-kubeadm",
+                    "start-container-system",
+                    "--container-service-user",
                     "501",
-                    "/usr/bin/sudo",
-                    "-H",
-                    "-u",
-                    "#501",
-                    "/usr/local/bin/container",
-                    "system",
-                    "start",
                 ]
             })
 
-        let ensureDomainIndex = try #require(
-            plan.steps.firstIndex { $0.message == "ensure container service user launchd domain" }
-        )
         let stopContainerIndex = try #require(
             plan.steps.firstIndex { $0.message == "stop container core services if present" }
         )
         let startContainerIndex = try #require(
             plan.steps.firstIndex { $0.message == "start container core services" }
         )
-        #expect(ensureDomainIndex < stopContainerIndex)
         #expect(stopContainerIndex < startContainerIndex)
-
-        #expect(
-            plan.steps.contains { step in
-                guard step.message == "ensure container service user launchd domain",
-                    case .runCommand(let arguments, false) = step.action
-                else {
-                    return false
-                }
-                return arguments.count == 7
-                    && arguments[0] == "/bin/sh"
-                    && arguments[1] == "-c"
-                    && arguments[2].contains("bootstrap")
-                    && arguments[2].contains("asuser")
-                    && arguments[4] == "/bin/launchctl"
-                    && arguments[5] == "user/501"
-                    && arguments[6] == "501"
-            })
+        #expect(!plan.steps.contains { $0.message == "ensure container service user launchd domain" })
 
         #expect(
             plan.steps.contains { step in
                 guard step.message == "stop container core services if present",
-                    case .runCommand(let arguments, true) = step.action
+                    case .runCommand(let arguments, false) = step.action
                 else {
                     return false
                 }
                 return arguments == [
-                    "/bin/launchctl",
-                    "asuser",
+                    "/usr/local/bin/container-macos-kubeadm",
+                    "stop-container-system",
+                    "--container-service-user",
                     "501",
-                    "/usr/bin/sudo",
-                    "-H",
-                    "-u",
-                    "#501",
-                    "/usr/local/bin/container",
-                    "system",
-                    "stop",
                 ]
+            })
+
+        #expect(
+            !plan.steps.contains { step in
+                guard case .runCommand(let arguments, _) = step.action else {
+                    return false
+                }
+                return arguments.starts(with: ["/bin/launchctl", "asuser", "501"])
             })
 
         #expect(
@@ -1197,6 +1179,30 @@ struct MacOSKubeadmPlanTests {
             })
     }
 
+    @Test func skipStartDoesNotDispatchNonRootContainerSystemOperations() throws {
+        var options = try makeOptions(startServices: false)
+        options.containerServiceUserID = 501
+
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+
+        #expect(!plan.steps.contains { $0.message == "stop container core services if present" })
+        #expect(!plan.steps.contains { $0.message == "start container core services" })
+        #expect(
+            !plan.steps.contains { step in
+                guard case .runCommand(let arguments, _) = step.action else {
+                    return false
+                }
+                return arguments.starts(with: [
+                    "/usr/local/bin/container-macos-kubeadm",
+                    "start-container-system",
+                ])
+                    || arguments.starts(with: [
+                        "/usr/local/bin/container-macos-kubeadm",
+                        "stop-container-system",
+                    ])
+            })
+    }
+
     @Test func joinPlanRequiresDiscoveryHash() throws {
         var options = try makeOptions(startServices: false)
         options.discoveryTokenCACertHashes = []
@@ -1247,6 +1253,9 @@ struct MacOSKubeadmPlanTests {
         let stopBootstrapIndex = try #require(
             descriptions.firstIndex(of: "stop container system bootstrap launchd job if present")
         )
+        let cleanupOperationsIndex = try #require(
+            descriptions.firstIndex(of: "clean container system operation agents")
+        )
         let removeBootstrapIndex = try #require(
             descriptions.firstIndex(of: "remove container system bootstrap launchd plist")
         )
@@ -1262,7 +1271,8 @@ struct MacOSKubeadmPlanTests {
         )
 
         #expect(preflightIndex < stopBootstrapIndex)
-        #expect(stopBootstrapIndex < removeBootstrapIndex)
+        #expect(stopBootstrapIndex < cleanupOperationsIndex)
+        #expect(cleanupOperationsIndex < removeBootstrapIndex)
         #expect(removeBootstrapIndex < stopKubeletIndex)
         #expect(stopKubeletIndex < firstGeneratedRemoveIndex)
         #expect(stopKubeletIndex < stopProxyIndex)
@@ -1271,6 +1281,12 @@ struct MacOSKubeadmPlanTests {
         #expect(stopFlannelIndex < stopCRIIndex)
         #expect(stopCRIIndex < purgeIndex)
         #expect(purgeIndex < removeFlannelConfigIndex)
+        #expect(
+            plan.steps.contains { step in
+                step.message == "clean container system operation agents"
+                    && step.action == .cleanupContainerSystemOperations
+            }
+        )
         #expect(
             plan.steps.contains { step in
                 guard step.message == "remove container system bootstrap launchd plist",

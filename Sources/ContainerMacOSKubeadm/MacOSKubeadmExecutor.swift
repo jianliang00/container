@@ -173,6 +173,8 @@ public struct MacOSKubeadmJoinRunner {
             try runCommand(arguments, bestEffort: bestEffort, log: log)
         case .waitForPath(let path, let timeoutSeconds):
             try waitForPath(path, timeoutSeconds: timeoutSeconds)
+        case .cleanupContainerSystemOperations:
+            try MacOSKubeadmContainerSystemOperationRunner().cleanupAll(log: log)
         case .removePath(let path, _, let bestEffort, _):
             do {
                 guard fileManager.fileExists(atPath: path) else {
@@ -318,6 +320,8 @@ public struct MacOSKubeadmResetRunner {
             }
         case .runCommand(let arguments, let bestEffort):
             try MacOSKubeadmProcess.run(arguments, bestEffort: bestEffort, log: log)
+        case .cleanupContainerSystemOperations:
+            try MacOSKubeadmContainerSystemOperationRunner().cleanupAll(log: log)
         case .createDirectory, .copyFile, .writeFile, .waitForPath:
             throw MacOSKubeadmError.invalidInput("unsupported reset action: \(action.safeDescription)")
         }

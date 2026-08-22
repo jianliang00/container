@@ -50,11 +50,10 @@ public struct KubeProxyDefaultPodIngressInterfaceResolver: KubeProxyPodIngressIn
     ) throws -> String {
         let canonicalPodCIDR = try canonicalPodCIDR(family: family, value: podCIDR)
         let probeAddress = try Self.probeAddress(family: family, canonicalPodCIDR: canonicalPodCIDR)
-        let networkAddress = String(canonicalPodCIDR.split(separator: "/", maxSplits: 1)[0])
         let familyArgument = family == .ipv4 ? "-inet" : "-inet6"
         let probeOutput = try commandRunner("/sbin/route", ["-n", "get", familyArgument, probeAddress])
         let probeRoute = try Self.parseRoute(probeOutput)
-        let networkOutput = try commandRunner("/sbin/route", ["-n", "get", familyArgument, networkAddress])
+        let networkOutput = try commandRunner("/sbin/route", ["-n", "get", familyArgument, canonicalPodCIDR])
         let networkRoute = try Self.parseRoute(networkOutput)
 
         guard

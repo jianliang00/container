@@ -1134,7 +1134,8 @@ container_vxlan_wire_status_t container_vxlan_decode_ipv6(
     const uint8_t *inner_source = ipv6_source(inner);
     decoded->source_cidr_mismatch =
         !ipv6_address_is_unicast(inner_source) ||
-        !ipv6_address_in_network(inner_source, peer->pod_network, peer->prefix_length);
+        (memcmp(inner_source, peer->public_ip, 16) != 0 &&
+         !ipv6_address_in_network(inner_source, peer->pod_network, peer->prefix_length));
     if (decoded->source_cidr_mismatch) {
         return CONTAINER_VXLAN_WIRE_SOURCE_CIDR_MISMATCH;
     }

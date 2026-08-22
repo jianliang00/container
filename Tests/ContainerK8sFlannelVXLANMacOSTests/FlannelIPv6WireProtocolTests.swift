@@ -168,9 +168,22 @@ struct FlannelIPv6WireProtocolTests {
     }
 
     @Test
-    func rejectsPeerPublicIPv6AsInnerSourceOutsidePodCIDR() {
+    func acceptsAllowlistedPeerPublicIPv6AsInnerSource() {
         let packet = ipv6Packet(
             source: "2001:db8:200:109d::2",
+            destination: "fd42:10:244:22::9"
+        )
+        let result = decodeIPv6(inboundIPv6EthernetPrefix + packet)
+
+        #expect(result.status == CONTAINER_VXLAN_WIRE_SUCCESS)
+        #expect(result.innerPacket == packet)
+        #expect(!result.decoded.source_cidr_mismatch)
+    }
+
+    @Test
+    func rejectsDifferentPublicIPv6AsInnerSource() {
+        let packet = ipv6Packet(
+            source: "2001:db8:200:109d::3",
             destination: "fd42:10:244:22::9"
         )
         let result = decodeIPv6(inboundIPv6EthernetPrefix + packet)
@@ -178,6 +191,35 @@ struct FlannelIPv6WireProtocolTests {
         #expect(result.status == CONTAINER_VXLAN_WIRE_SOURCE_CIDR_MISMATCH)
         #expect(result.innerPacket.isEmpty)
         #expect(result.decoded.source_cidr_mismatch)
+    }
+
+    @Test
+    func rejectsPeerPublicIPv6WithoutMatchingOuterSource() {
+        let packet = ipv6Packet(
+            source: "2001:db8:200:109d::2",
+            destination: "fd42:10:244:22::9"
+        )
+        let result = decodeIPv6(
+            inboundIPv6EthernetPrefix + packet,
+            outerSourceIP: "2001:db8:200:109d::99"
+        )
+
+        #expect(result.status == CONTAINER_VXLAN_WIRE_UNKNOWN_PEER)
+        #expect(result.innerPacket.isEmpty)
+    }
+
+    @Test
+    func rejectsPeerPublicIPv6WithoutMatchingVTEPMAC() {
+        let packet = ipv6Packet(
+            source: "2001:db8:200:109d::2",
+            destination: "fd42:10:244:22::9"
+        )
+        var datagram = inboundIPv6EthernetPrefix + packet
+        datagram[19] = 0x03
+        let result = decodeIPv6(datagram)
+
+        #expect(result.status == CONTAINER_VXLAN_WIRE_UNKNOWN_PEER)
+        #expect(result.innerPacket.isEmpty)
     }
 
     @Test

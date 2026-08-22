@@ -167,9 +167,10 @@ container_vxlan_wire_status_t container_vxlan_encode_ipv6(
     container_vxlan_encoded_packet_v6_t *encoded
 );
 
-// outer_source_ip contains 16 bytes in network byte order. The decoder
-// authenticates the outer IPv6 address and Ethernet source VTEP MAC, then
-// verifies the inner source and destination before returning the IPv6 packet.
+// outer_source_ip contains 16 bytes in network byte order. The decoder matches
+// the outer IPv6 address and Ethernet source VTEP MAC to one allowlisted peer,
+// then only accepts an inner source from that peer's PodCIDR or its exact public
+// IPv6 address and an inner destination from the local PodCIDR.
 container_vxlan_wire_status_t container_vxlan_decode_ipv6(
     const container_vxlan_tunnel_config_v6_t *config,
     const container_vxlan_peer_v6_t *peers,

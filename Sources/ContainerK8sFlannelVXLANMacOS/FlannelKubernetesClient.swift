@@ -101,7 +101,9 @@ public final class FlannelKubernetesClient: FlannelKubernetesReading, FlannelKub
         annotationPrefix: String,
         publicIP: String,
         vni: Int,
-        vtepMAC: String
+        vtepMAC: String,
+        publicIPv6: String? = nil,
+        vtepMACIPv6: String? = nil
     ) throws -> FlannelNodeAnnotationPatch {
         let keys = try FlannelAnnotationKeys(prefix: annotationPrefix)
         guard FlannelIPv4.parseAddress(publicIP) != nil else {
@@ -118,12 +120,39 @@ public final class FlannelKubernetesClient: FlannelKubernetesReading, FlannelKub
         guard let backendDataString = String(data: backendData, encoding: .utf8) else {
             throw FlannelVXLANError.invalidConfiguration("failed to encode VXLAN backend data")
         }
-        return FlannelNodeAnnotationPatch(values: [
+        var values = [
             keys.kubeSubnetManager: "true",
             keys.backendType: "vxlan",
             keys.publicIP: publicIP,
             keys.backendData: backendDataString,
-        ])
+        ]
+
+        switch (publicIPv6, vtepMACIPv6) {
+        case (nil, nil):
+            break
+        case (.some(let publicIPv6), .some(let vtepMACIPv6)):
+            guard let parsedPublicIPv6 = FlannelIPv6.parseAddress(publicIPv6),
+                parsedPublicIPv6.isUsableUnderlayAddress
+            else {
+                throw FlannelVXLANError.invalidConfiguration("publicIPv6 must be a usable IPv6 underlay address")
+            }
+            guard let normalizedIPv6MAC = FlannelVTEPMAC.normalize(vtepMACIPv6) else {
+                throw FlannelVXLANError.invalidConfiguration("vtepMACIPv6 must be a valid unicast MAC address")
+            }
+            let backendV6Data = try JSONEncoder().encode(
+                FlannelBackendLeaseData(vni: vni, vtepMAC: normalizedIPv6MAC)
+            )
+            guard let backendV6DataString = String(data: backendV6Data, encoding: .utf8) else {
+                throw FlannelVXLANError.invalidConfiguration("failed to encode IPv6 VXLAN backend data")
+            }
+            values[keys.publicIPv6] = parsedPublicIPv6.string
+            values[keys.backendV6Data] = backendV6DataString
+        default:
+            throw FlannelVXLANError.invalidConfiguration(
+                "publicIPv6 and vtepMACIPv6 must be provided together"
+            )
+        }
+        return FlannelNodeAnnotationPatch(values: values)
     }
 
     public static func annotationMergePatchData(_ patch: FlannelNodeAnnotationPatch) throws -> Data {

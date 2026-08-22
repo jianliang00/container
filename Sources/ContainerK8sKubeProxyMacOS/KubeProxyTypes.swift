@@ -20,18 +20,38 @@ public struct KubeProxyMacOSConfig: Codable, Sendable, Equatable {
     public var kubeconfig: String
     public var nodeName: String
     public var syncPeriodSeconds: Int
+    public var dualStackEnabled: Bool
     public var pf: KubeProxyPFConfig
 
     public init(
         kubeconfig: String,
         nodeName: String,
         syncPeriodSeconds: Int = 5,
+        dualStackEnabled: Bool = false,
         pf: KubeProxyPFConfig = KubeProxyPFConfig()
     ) {
         self.kubeconfig = kubeconfig
         self.nodeName = nodeName
         self.syncPeriodSeconds = syncPeriodSeconds
+        self.dualStackEnabled = dualStackEnabled
         self.pf = pf
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kubeconfig
+        case nodeName
+        case syncPeriodSeconds
+        case dualStackEnabled
+        case pf
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kubeconfig = try container.decode(String.self, forKey: .kubeconfig)
+        nodeName = try container.decode(String.self, forKey: .nodeName)
+        syncPeriodSeconds = try container.decodeIfPresent(Int.self, forKey: .syncPeriodSeconds) ?? 5
+        dualStackEnabled = try container.decodeIfPresent(Bool.self, forKey: .dualStackEnabled) ?? false
+        pf = try container.decodeIfPresent(KubeProxyPFConfig.self, forKey: .pf) ?? KubeProxyPFConfig()
     }
 
     public static func load(from url: URL, decoder: JSONDecoder = JSONDecoder()) throws -> KubeProxyMacOSConfig {
@@ -52,6 +72,13 @@ public struct KubeProxyMacOSConfig: Codable, Sendable, Equatable {
             throw KubeProxyMacOSError.invalidConfiguration("syncPeriodSeconds must be greater than zero")
         }
         try pf.validate()
+        if dualStackEnabled {
+            guard pf.runtimeStatePath != nil, pf.readyStatePath != nil else {
+                throw KubeProxyMacOSError.invalidConfiguration(
+                    "dualStackEnabled requires pf.runtimeStatePath and pf.readyStatePath"
+                )
+            }
+        }
     }
 }
 
@@ -92,10 +119,11 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         return value
     }
     public var resolvedVmnetCIDR: String { vmnetCIDR ?? "192.168.64.0/24" }
+    public var ipv6AnchorName: String { "\(anchorName).ipv6" }
 
     public func validate() throws {
-        guard !anchorName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw KubeProxyMacOSError.invalidConfiguration("pf.anchorName is required")
+        guard anchorName.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+            throw KubeProxyMacOSError.invalidConfiguration("pf.anchorName is not a valid PF anchor name")
         }
         for (name, path) in [
             ("pf.configPath", configPath),
@@ -160,6 +188,34 @@ public enum KubeProxyProtocol: String, Codable, Sendable, Hashable, Comparable {
         switch self {
         case .tcp: "tcp"
         case .udp: "udp"
+        }
+    }
+}
+
+public enum KubeProxyAddressFamily: String, Codable, Sendable, Hashable, Comparable {
+    case ipv4 = "IPv4"
+    case ipv6 = "IPv6"
+
+    public static func < (lhs: KubeProxyAddressFamily, rhs: KubeProxyAddressFamily) -> Bool {
+        switch (lhs, rhs) {
+        case (.ipv4, .ipv6):
+            true
+        case (.ipv6, .ipv4), (.ipv4, .ipv4), (.ipv6, .ipv6):
+            false
+        }
+    }
+
+    public var pfName: String {
+        switch self {
+        case .ipv4: "inet"
+        case .ipv6: "inet6"
+        }
+    }
+
+    public var tableNameComponent: String {
+        switch self {
+        case .ipv4: "v4"
+        case .ipv6: "v6"
         }
     }
 }
@@ -360,19 +416,39 @@ public struct KubeProxySnapshot: Codable, Sendable, Hashable {
 }
 
 public struct KubeProxyBackend: Codable, Sendable, Hashable, Comparable {
+    public var family: KubeProxyAddressFamily
     public var ip: String
     public var port: Int
 
-    public init(ip: String, port: Int) {
+    public init(family: KubeProxyAddressFamily = .ipv4, ip: String, port: Int) {
+        self.family = family
         self.ip = ip
         self.port = port
     }
 
     public static func < (lhs: KubeProxyBackend, rhs: KubeProxyBackend) -> Bool {
+        if lhs.family != rhs.family {
+            return lhs.family < rhs.family
+        }
         if lhs.ip != rhs.ip {
             return lhs.ip < rhs.ip
         }
         return lhs.port < rhs.port
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case family
+        case ip
+        case port
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            family: try container.decodeIfPresent(KubeProxyAddressFamily.self, forKey: .family) ?? .ipv4,
+            ip: try container.decode(String.self, forKey: .ip),
+            port: try container.decode(Int.self, forKey: .port)
+        )
     }
 }
 
@@ -381,6 +457,7 @@ public struct KubeProxyServiceRule: Codable, Sendable, Hashable, Comparable {
     public var serviceName: String
     public var portName: String?
     public var protocolName: KubeProxyProtocol
+    public var family: KubeProxyAddressFamily
     public var clusterIP: String
     public var servicePort: Int
     public var backends: [KubeProxyBackend]
@@ -390,6 +467,7 @@ public struct KubeProxyServiceRule: Codable, Sendable, Hashable, Comparable {
         serviceName: String,
         portName: String? = nil,
         protocolName: KubeProxyProtocol,
+        family: KubeProxyAddressFamily = .ipv4,
         clusterIP: String,
         servicePort: Int,
         backends: [KubeProxyBackend]
@@ -398,15 +476,57 @@ public struct KubeProxyServiceRule: Codable, Sendable, Hashable, Comparable {
         self.serviceName = serviceName
         self.portName = portName
         self.protocolName = protocolName
+        self.family = family
         self.clusterIP = clusterIP
         self.servicePort = servicePort
         self.backends = backends
     }
 
     public static func < (lhs: KubeProxyServiceRule, rhs: KubeProxyServiceRule) -> Bool {
-        let lhsKey = [lhs.namespace, lhs.serviceName, lhs.portName ?? "", lhs.protocolName.rawValue, lhs.clusterIP, "\(lhs.servicePort)"]
-        let rhsKey = [rhs.namespace, rhs.serviceName, rhs.portName ?? "", rhs.protocolName.rawValue, rhs.clusterIP, "\(rhs.servicePort)"]
+        let lhsKey = [
+            lhs.namespace,
+            lhs.serviceName,
+            lhs.portName ?? "",
+            lhs.protocolName.rawValue,
+            lhs.family.rawValue,
+            lhs.clusterIP,
+            "\(lhs.servicePort)",
+        ]
+        let rhsKey = [
+            rhs.namespace,
+            rhs.serviceName,
+            rhs.portName ?? "",
+            rhs.protocolName.rawValue,
+            rhs.family.rawValue,
+            rhs.clusterIP,
+            "\(rhs.servicePort)",
+        ]
         return lhsKey.lexicographicallyPrecedes(rhsKey)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case namespace
+        case serviceName
+        case portName
+        case protocolName
+        case family
+        case clusterIP
+        case servicePort
+        case backends
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            namespace: try container.decode(String.self, forKey: .namespace),
+            serviceName: try container.decode(String.self, forKey: .serviceName),
+            portName: try container.decodeIfPresent(String.self, forKey: .portName),
+            protocolName: try container.decode(KubeProxyProtocol.self, forKey: .protocolName),
+            family: try container.decodeIfPresent(KubeProxyAddressFamily.self, forKey: .family) ?? .ipv4,
+            clusterIP: try container.decode(String.self, forKey: .clusterIP),
+            servicePort: try container.decode(Int.self, forKey: .servicePort),
+            backends: try container.decode([KubeProxyBackend].self, forKey: .backends)
+        )
     }
 }
 
@@ -419,6 +539,16 @@ public struct KubeProxyRuleSet: Codable, Sendable, Hashable {
         self.generation = generation
         self.rules = rules
         self.issues = issues
+    }
+}
+
+extension KubeProxyRuleSet {
+    func selecting(families: Set<KubeProxyAddressFamily>) -> KubeProxyRuleSet {
+        KubeProxyRuleSet(
+            generation: generation,
+            rules: rules.filter { families.contains($0.family) },
+            issues: issues
+        )
     }
 }
 

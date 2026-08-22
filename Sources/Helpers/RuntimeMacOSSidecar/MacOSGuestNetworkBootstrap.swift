@@ -39,6 +39,28 @@ enum MacOSGuestNetworkBootstrap {
                     message: "guest network bootstrap requires a MAC address for network \(attachment.network)"
                 )
             }
+            let ipv6Address: String?
+            let ipv6PrefixLength: UInt8?
+            let ipv6Gateway: String?
+            switch (attachment.ipv6Address, attachment.ipv6Gateway) {
+            case (_, nil):
+                // vmnet may report an automatically generated IPv6 prefix even
+                // when this network has no explicit IPv6 configuration. Keep
+                // that legacy status out of the guest configuration unless a
+                // matching gateway proves that IPv6 was intentionally enabled.
+                ipv6Address = nil
+                ipv6PrefixLength = nil
+                ipv6Gateway = nil
+            case (.some(let address), .some(let gateway)):
+                ipv6Address = address.address.description
+                ipv6PrefixLength = address.prefix.length
+                ipv6Gateway = gateway.description
+            case (nil, .some):
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "guest network bootstrap requires complete IPv6 address and gateway intent for network \(attachment.network)"
+                )
+            }
             return MacOSGuestNetworkInterfaceConfiguration(
                 networkID: attachment.network,
                 hostname: attachment.hostname,
@@ -46,6 +68,9 @@ enum MacOSGuestNetworkBootstrap {
                 ipv4Address: attachment.ipv4Address.address.description,
                 ipv4PrefixLength: attachment.ipv4Address.prefix.length,
                 ipv4Gateway: attachment.ipv4Gateway.description,
+                ipv6Address: ipv6Address,
+                ipv6PrefixLength: ipv6PrefixLength,
+                ipv6Gateway: ipv6Gateway,
                 mtu: attachment.mtu
             )
         }
@@ -85,6 +110,22 @@ enum MacOSGuestNetworkBootstrap {
             }
 
             let applied = unmatched.remove(at: index)
+            let expectedIPv4 = "\(expected.ipv4Address)/\(expected.ipv4PrefixLength)"
+            guard applied.ipv4Address == expectedIPv4 else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message:
+                        "guest network IPv4 mismatch for \(expected.networkID): requested \(expectedIPv4), effective \(applied.ipv4Address)"
+                )
+            }
+            let expectedIPv6 = try requestedIPv6CIDR(expected)
+            guard applied.ipv6Address == expectedIPv6 else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message:
+                        "guest network IPv6 mismatch for \(expected.networkID): requested \(expectedIPv6 ?? "none"), effective \(applied.ipv6Address ?? "none")"
+                )
+            }
             if let requestedMTU = expected.mtu, applied.effectiveMTU != requestedMTU {
                 let effectiveMTU = applied.effectiveMTU.map { String($0) } ?? "unreported"
                 throw ContainerizationError(
@@ -176,6 +217,22 @@ enum MacOSGuestNetworkBootstrap {
             searchDomains: dns.searchDomains,
             options: dns.options
         )
+    }
+
+    private static func requestedIPv6CIDR(
+        _ interface: MacOSGuestNetworkInterfaceConfiguration
+    ) throws -> String? {
+        switch (interface.ipv6Address, interface.ipv6PrefixLength, interface.ipv6Gateway) {
+        case (nil, nil, nil):
+            return nil
+        case (.some(let address), .some(let prefixLength), .some(_)):
+            return "\(address)/\(prefixLength)"
+        default:
+            throw ContainerizationError(
+                .invalidState,
+                message: "guest network request contains incomplete IPv6 intent for network \(interface.networkID)"
+            )
+        }
     }
 
     private static func normalizedDNSDomain(_ domain: String?) -> String? {

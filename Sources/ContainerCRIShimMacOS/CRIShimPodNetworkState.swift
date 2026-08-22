@@ -22,26 +22,153 @@ import Darwin
 import Glibc
 #endif
 
+public struct PodNetworkCIDRs: Codable, Equatable, Sendable {
+    public var ipv4: String
+    public var ipv6: String?
+
+    public init(ipv4: String, ipv6: String? = nil) {
+        self.ipv4 = ipv4
+        self.ipv6 = ipv6
+    }
+}
+
 public struct PodNetworkRuntimeState: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = 2
+
+    public var schemaVersion: Int
     public var networkName: String
-    public var podCIDR: String
+    public var podCIDRs: PodNetworkCIDRs
     public var generation: UInt64
     public var updatedAt: Date
 
-    public init(networkName: String, podCIDR: String, generation: UInt64, updatedAt: Date) {
+    public var podCIDR: String {
+        get { podCIDRs.ipv4 }
+        set { podCIDRs.ipv4 = newValue }
+    }
+
+    public init(
+        networkName: String,
+        podCIDRs: PodNetworkCIDRs,
+        generation: UInt64,
+        updatedAt: Date,
+        schemaVersion: Int = Self.currentSchemaVersion
+    ) {
+        self.schemaVersion = schemaVersion
         self.networkName = networkName
-        self.podCIDR = podCIDR
+        self.podCIDRs = podCIDRs
         self.generation = generation
         self.updatedAt = updatedAt
+    }
+
+    public init(networkName: String, podCIDR: String, generation: UInt64, updatedAt: Date) {
+        self.init(
+            networkName: networkName,
+            podCIDRs: PodNetworkCIDRs(ipv4: podCIDR),
+            generation: generation,
+            updatedAt: updatedAt
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case networkName
+        case podCIDR
+        case podCIDRs
+        case generation
+        case updatedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        guard (1...Self.currentSchemaVersion).contains(schemaVersion) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "unsupported pod network runtime state schema version \(schemaVersion)"
+            )
+        }
+        networkName = try container.decode(String.self, forKey: .networkName)
+        podCIDRs = try Self.decodePodCIDRs(from: container)
+        generation = try container.decode(UInt64.self, forKey: .generation)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(networkName, forKey: .networkName)
+        try container.encode(podCIDRs.ipv4, forKey: .podCIDR)
+        try container.encode(podCIDRs, forKey: .podCIDRs)
+        try container.encode(generation, forKey: .generation)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    private static func decodePodCIDRs(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> PodNetworkCIDRs {
+        let legacyIPv4 = try container.decodeIfPresent(String.self, forKey: .podCIDR)
+        if let podCIDRs = try container.decodeIfPresent(PodNetworkCIDRs.self, forKey: .podCIDRs) {
+            if let legacyIPv4,
+                (try? canonicalIPv4PodCIDR(legacyIPv4)) != (try? canonicalIPv4PodCIDR(podCIDRs.ipv4))
+            {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .podCIDRs,
+                    in: container,
+                    debugDescription: "pod network runtime state IPv4 aliases do not match"
+                )
+            }
+            return podCIDRs
+        }
+        guard let legacyIPv4 else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.podCIDR,
+                DecodingError.Context(
+                    codingPath: container.codingPath,
+                    debugDescription: "pod network runtime state is missing PodCIDRs"
+                )
+            )
+        }
+        return PodNetworkCIDRs(ipv4: legacyIPv4)
     }
 }
 
 public struct PodNetworkReadyState: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = 2
+
+    public var schemaVersion: Int
     public var networkName: String
-    public var podCIDR: String
+    public var podCIDRs: PodNetworkCIDRs
+    public var ipv4Ready: Bool
+    public var ipv6Ready: Bool?
     public var runtimeGeneration: UInt64
     public var mtu: UInt32
     public var expiresAtUnixSeconds: Int64
+
+    public var podCIDR: String {
+        get { podCIDRs.ipv4 }
+        set { podCIDRs.ipv4 = newValue }
+    }
+
+    public init(
+        networkName: String,
+        podCIDRs: PodNetworkCIDRs,
+        runtimeGeneration: UInt64,
+        mtu: UInt32,
+        expiresAtUnixSeconds: Int64,
+        ipv4Ready: Bool = true,
+        ipv6Ready: Bool? = nil,
+        schemaVersion: Int = Self.currentSchemaVersion
+    ) {
+        self.schemaVersion = schemaVersion
+        self.networkName = networkName
+        self.podCIDRs = podCIDRs
+        self.ipv4Ready = ipv4Ready
+        self.ipv6Ready = ipv6Ready
+        self.runtimeGeneration = runtimeGeneration
+        self.mtu = mtu
+        self.expiresAtUnixSeconds = expiresAtUnixSeconds
+    }
 
     public init(
         networkName: String,
@@ -50,17 +177,93 @@ public struct PodNetworkReadyState: Codable, Equatable, Sendable {
         mtu: UInt32,
         expiresAtUnixSeconds: Int64
     ) {
-        self.networkName = networkName
-        self.podCIDR = podCIDR
-        self.runtimeGeneration = runtimeGeneration
-        self.mtu = mtu
-        self.expiresAtUnixSeconds = expiresAtUnixSeconds
+        self.init(
+            networkName: networkName,
+            podCIDRs: PodNetworkCIDRs(ipv4: podCIDR),
+            runtimeGeneration: runtimeGeneration,
+            mtu: mtu,
+            expiresAtUnixSeconds: expiresAtUnixSeconds
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case networkName
+        case podCIDR
+        case podCIDRs
+        case ipv4Ready
+        case ipv6Ready
+        case runtimeGeneration
+        case mtu
+        case expiresAtUnixSeconds
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        guard (1...Self.currentSchemaVersion).contains(schemaVersion) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "unsupported pod network ready state schema version \(schemaVersion)"
+            )
+        }
+        networkName = try container.decode(String.self, forKey: .networkName)
+        podCIDRs = try Self.decodePodCIDRs(from: container)
+        ipv4Ready = try container.decodeIfPresent(Bool.self, forKey: .ipv4Ready) ?? true
+        ipv6Ready = try container.decodeIfPresent(Bool.self, forKey: .ipv6Ready)
+        runtimeGeneration = try container.decode(UInt64.self, forKey: .runtimeGeneration)
+        mtu = try container.decode(UInt32.self, forKey: .mtu)
+        expiresAtUnixSeconds = try container.decode(Int64.self, forKey: .expiresAtUnixSeconds)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(networkName, forKey: .networkName)
+        try container.encode(podCIDRs.ipv4, forKey: .podCIDR)
+        try container.encode(podCIDRs, forKey: .podCIDRs)
+        try container.encode(ipv4Ready, forKey: .ipv4Ready)
+        try container.encodeIfPresent(ipv6Ready, forKey: .ipv6Ready)
+        try container.encode(runtimeGeneration, forKey: .runtimeGeneration)
+        try container.encode(mtu, forKey: .mtu)
+        try container.encode(expiresAtUnixSeconds, forKey: .expiresAtUnixSeconds)
+    }
+
+    private static func decodePodCIDRs(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> PodNetworkCIDRs {
+        let legacyIPv4 = try container.decodeIfPresent(String.self, forKey: .podCIDR)
+        if let podCIDRs = try container.decodeIfPresent(PodNetworkCIDRs.self, forKey: .podCIDRs) {
+            if let legacyIPv4,
+                (try? canonicalIPv4PodCIDR(legacyIPv4)) != (try? canonicalIPv4PodCIDR(podCIDRs.ipv4))
+            {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .podCIDRs,
+                    in: container,
+                    debugDescription: "pod network ready state IPv4 aliases do not match"
+                )
+            }
+            return podCIDRs
+        }
+        guard let legacyIPv4 else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.podCIDR,
+                DecodingError.Context(
+                    codingPath: container.codingPath,
+                    debugDescription: "pod network ready state is missing PodCIDRs"
+                )
+            )
+        }
+        return PodNetworkCIDRs(ipv4: legacyIPv4)
     }
 }
 
 struct PodNetworkReadyLease: Equatable, Sendable {
-    var podCIDR: String
+    var podCIDRs: PodNetworkCIDRs
     var mtu: UInt32
+
+    var podCIDR: String { podCIDRs.ipv4 }
 }
 
 enum PodNetworkReadyLeaseValidationError: Error, Equatable, CustomStringConvertible, Sendable {
@@ -69,6 +272,8 @@ enum PodNetworkReadyLeaseValidationError: Error, Equatable, CustomStringConverti
     case readyStateMissing
     case runtimeStateMismatch
     case readyStateMismatch
+    case ipv4NotReady
+    case ipv6NotReady
     case readyStateExpired
     case mtuOutOfRange
 
@@ -84,6 +289,10 @@ enum PodNetworkReadyLeaseValidationError: Error, Equatable, CustomStringConverti
             return "pod network runtime state does not match the configured network"
         case .readyStateMismatch:
             return "pod network ready state does not match the runtime state"
+        case .ipv4NotReady:
+            return "pod network IPv4 family is not ready"
+        case .ipv6NotReady:
+            return "pod network IPv6 family is not ready"
         case .readyStateExpired:
             return "pod network ready state lease has expired"
         case .mtuOutOfRange:
@@ -94,6 +303,8 @@ enum PodNetworkReadyLeaseValidationError: Error, Equatable, CustomStringConverti
 
 public enum PodNetworkStateError: Error, Equatable, CustomStringConvertible, Sendable {
     case invalidIPv4PodCIDR
+    case invalidIPv6PodCIDR
+    case invalidPodCIDRList
     case runtimeStateReadFailed
     case runtimeStateWriteFailed
     case readyStateReadFailed
@@ -103,6 +314,10 @@ public enum PodNetworkStateError: Error, Equatable, CustomStringConvertible, Sen
         switch self {
         case .invalidIPv4PodCIDR:
             return "pod CIDR must be a valid IPv4 CIDR"
+        case .invalidIPv6PodCIDR:
+            return "pod CIDR must be a valid IPv6 CIDR"
+        case .invalidPodCIDRList:
+            return "pod CIDRs must contain exactly one valid IPv4 CIDR and one valid IPv6 CIDR"
         case .runtimeStateReadFailed:
             return "failed to read pod network runtime state"
         case .runtimeStateWriteFailed:
@@ -133,11 +348,26 @@ public actor PodNetworkStateStore {
         path: String,
         updatedAt: Date = Date()
     ) throws -> PodNetworkRuntimeState {
-        let canonicalPodCIDR = try canonicalIPv4PodCIDR(podCIDR)
+        try updateRuntimeState(
+            networkName: networkName,
+            podCIDRs: PodNetworkCIDRs(ipv4: podCIDR),
+            path: path,
+            updatedAt: updatedAt
+        )
+    }
+
+    @discardableResult
+    public func updateRuntimeState(
+        networkName: String,
+        podCIDRs: PodNetworkCIDRs,
+        path: String,
+        updatedAt: Date = Date()
+    ) throws -> PodNetworkRuntimeState {
+        let canonicalPodCIDRs = try canonicalPodNetworkCIDRs(podCIDRs)
         let previous = try loadRuntimeState(path: path)
         if let previous,
             previous.networkName == networkName,
-            previous.podCIDR == canonicalPodCIDR
+            (try? canonicalPodNetworkCIDRs(previous.podCIDRs)) == canonicalPodCIDRs
         {
             return previous
         }
@@ -155,7 +385,7 @@ public actor PodNetworkStateStore {
 
         let state = PodNetworkRuntimeState(
             networkName: networkName,
-            podCIDR: canonicalPodCIDR,
+            podCIDRs: canonicalPodCIDRs,
             generation: generation,
             updatedAt: updatedAt
         )
@@ -234,22 +464,32 @@ func validatePodNetworkReadyLease(
     readyState: PodNetworkReadyState,
     now: Date = Date()
 ) throws -> PodNetworkReadyLease {
+    let dualStackEnabled = config.dualStackEnabled
     guard config.enabled == true,
         let networkName = config.networkName?.trimmed,
         !networkName.isEmpty,
         runtimeState.generation > 0,
         runtimeState.networkName == networkName,
-        let runtimePodCIDR = try? canonicalIPv4PodCIDR(runtimeState.podCIDR)
+        let runtimePodCIDRs = try? canonicalPodNetworkCIDRs(runtimeState.podCIDRs),
+        !dualStackEnabled || runtimePodCIDRs.ipv6 != nil
     else {
         throw PodNetworkReadyLeaseValidationError.runtimeStateMismatch
     }
 
     guard readyState.networkName == runtimeState.networkName,
-        let readyPodCIDR = try? canonicalIPv4PodCIDR(readyState.podCIDR),
-        readyPodCIDR == runtimePodCIDR,
+        let readyPodCIDRs = try? canonicalPodNetworkCIDRs(readyState.podCIDRs),
+        readyPodCIDRs.ipv4 == runtimePodCIDRs.ipv4,
+        !dualStackEnabled || readyPodCIDRs.ipv6 == runtimePodCIDRs.ipv6,
         readyState.runtimeGeneration == runtimeState.generation
     else {
         throw PodNetworkReadyLeaseValidationError.readyStateMismatch
+    }
+
+    guard readyState.ipv4Ready else {
+        throw PodNetworkReadyLeaseValidationError.ipv4NotReady
+    }
+    if dualStackEnabled, readyState.ipv6Ready != true {
+        throw PodNetworkReadyLeaseValidationError.ipv6NotReady
     }
 
     let nowUnixSeconds = Int64(now.timeIntervalSince1970.rounded(.down))
@@ -260,7 +500,56 @@ func validatePodNetworkReadyLease(
         throw PodNetworkReadyLeaseValidationError.mtuOutOfRange
     }
 
-    return PodNetworkReadyLease(podCIDR: runtimePodCIDR, mtu: readyState.mtu)
+    let leasePodCIDRs =
+        dualStackEnabled
+        ? runtimePodCIDRs
+        : PodNetworkCIDRs(ipv4: runtimePodCIDRs.ipv4)
+    return PodNetworkReadyLease(podCIDRs: leasePodCIDRs, mtu: readyState.mtu)
+}
+
+func canonicalPodNetworkCIDRs(
+    _ value: String,
+    dualStackEnabled: Bool
+) throws -> PodNetworkCIDRs {
+    guard dualStackEnabled else {
+        return PodNetworkCIDRs(ipv4: try canonicalIPv4PodCIDRList(value))
+    }
+
+    let candidates = value.split(separator: ",", omittingEmptySubsequences: false)
+    guard !candidates.isEmpty else {
+        throw PodNetworkStateError.invalidPodCIDRList
+    }
+
+    var ipv4PodCIDRs: [String] = []
+    var ipv6PodCIDRs: [String] = []
+    for rawCandidate in candidates {
+        let candidate = rawCandidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else {
+            throw PodNetworkStateError.invalidPodCIDRList
+        }
+        if let canonical = try? canonicalIPv4PodCIDR(candidate) {
+            ipv4PodCIDRs.append(canonical)
+            continue
+        }
+        if let canonical = try? canonicalIPv6PodCIDR(candidate) {
+            ipv6PodCIDRs.append(canonical)
+            continue
+        }
+        throw PodNetworkStateError.invalidPodCIDRList
+    }
+
+    guard ipv4PodCIDRs.count == 1, ipv6PodCIDRs.count == 1 else {
+        throw PodNetworkStateError.invalidPodCIDRList
+    }
+    return PodNetworkCIDRs(ipv4: ipv4PodCIDRs[0], ipv6: ipv6PodCIDRs[0])
+}
+
+func canonicalPodNetworkCIDRs(
+    _ value: PodNetworkCIDRs
+) throws -> PodNetworkCIDRs {
+    let ipv4 = try canonicalIPv4PodCIDR(value.ipv4)
+    let ipv6 = try value.ipv6.map { try canonicalIPv6PodCIDR($0) }
+    return PodNetworkCIDRs(ipv4: ipv4, ipv6: ipv6)
 }
 
 func canonicalIPv4PodCIDR(_ value: String) throws -> String {
@@ -324,15 +613,49 @@ func canonicalIPv4PodCIDRList(_ value: String) throws -> String {
 }
 
 private func isValidIPv6CIDR(_ value: String) -> Bool {
-    let components = value.split(separator: "/", omittingEmptySubsequences: false)
+    (try? canonicalIPv6PodCIDR(value)) != nil
+}
+
+func canonicalIPv6PodCIDR(_ value: String) throws -> String {
+    let components = value.trimmed.split(separator: "/", omittingEmptySubsequences: false)
     guard components.count == 2,
         let prefixLength = parseDecimal(components[1]),
         prefixLength <= 128
     else {
-        return false
+        throw PodNetworkStateError.invalidIPv6PodCIDR
     }
+
     var address = in6_addr()
-    return String(components[0]).withCString { inet_pton(AF_INET6, $0, &address) } == 1
+    guard String(components[0]).withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else {
+        throw PodNetworkStateError.invalidIPv6PodCIDR
+    }
+
+    var bytes = withUnsafeBytes(of: &address) { Array($0) }
+    let fullBytes = prefixLength / 8
+    let remainingBits = prefixLength % 8
+    if remainingBits != 0 {
+        bytes[fullBytes] &= UInt8.max << UInt8(8 - remainingBits)
+    }
+    let firstHostByte = fullBytes + (remainingBits == 0 ? 0 : 1)
+    if firstHostByte < bytes.count {
+        for index in firstHostByte..<bytes.count {
+            bytes[index] = 0
+        }
+    }
+
+    var networkAddress = in6_addr()
+    withUnsafeMutableBytes(of: &networkAddress) { destination in
+        destination.copyBytes(from: bytes)
+    }
+    var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+    guard inet_ntop(AF_INET6, &networkAddress, &buffer, socklen_t(buffer.count)) != nil else {
+        throw PodNetworkStateError.invalidIPv6PodCIDR
+    }
+    let renderedAddress = String(
+        decoding: buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) },
+        as: UTF8.self
+    )
+    return renderedAddress + "/\(prefixLength)"
 }
 
 private func parseDecimal(_ value: Substring) -> Int? {

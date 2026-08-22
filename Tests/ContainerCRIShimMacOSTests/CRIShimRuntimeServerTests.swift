@@ -283,6 +283,80 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func podSandboxStatusRequiresIPv6GatewayOnPrimaryAttachment() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let metadata = CRIShimSandboxMetadata(
+            id: "sandbox-1",
+            runtimeHandler: "macos",
+            sandboxImage: "example.com/macos/sandbox:latest",
+            state: .running,
+            createdAt: now,
+            updatedAt: now
+        )
+        let snapshot = SandboxSnapshot(
+            status: .running,
+            networks: [
+                try makeNetworkAttachment(
+                    network: "primary",
+                    address: "192.168.64.20/24",
+                    gateway: "192.168.64.1",
+                    ipv6Address: "fd42:25e3:5eb4:24a4::20/64"
+                ),
+                try makeNetworkAttachment(
+                    network: "secondary",
+                    address: "192.168.65.20/24",
+                    gateway: "192.168.65.1",
+                    ipv6Address: "fd42:10:244:16::20/64",
+                    ipv6Gateway: "fd42:10:244:16::1"
+                ),
+            ],
+            containers: []
+        )
+
+        let status = makeCRIPodSandboxStatus(
+            metadata,
+            sandboxSnapshot: snapshot,
+            dualStackEnabled: true
+        )
+        #expect(status.hasNetwork)
+        #expect(status.network.ip == "192.168.64.20")
+        #expect(status.network.additionalIps.isEmpty)
+    }
+
+    @Test
+    func podSandboxStatusPreservesSecondaryIPv4AttachmentsWhenDualStackIsDisabled() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let metadata = CRIShimSandboxMetadata(
+            id: "sandbox-1",
+            runtimeHandler: "macos",
+            sandboxImage: "example.com/macos/sandbox:latest",
+            state: .running,
+            createdAt: now,
+            updatedAt: now
+        )
+        let snapshot = SandboxSnapshot(
+            status: .running,
+            networks: [
+                try makeNetworkAttachment(
+                    network: "primary",
+                    address: "192.168.64.20/24",
+                    gateway: "192.168.64.1"
+                ),
+                try makeNetworkAttachment(
+                    network: "secondary",
+                    address: "192.168.65.20/24",
+                    gateway: "192.168.65.1"
+                ),
+            ],
+            containers: []
+        )
+
+        let status = makeCRIPodSandboxStatus(metadata, sandboxSnapshot: snapshot)
+        #expect(status.network.ip == "192.168.64.20")
+        #expect(status.network.additionalIps.map(\.ip) == ["192.168.65.20"])
+    }
+
+    @Test
     func grpcServerServesVersionOnUnixDomainSocket() async throws {
         let socketPath = "/tmp/cri-shim-grpc-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
@@ -294,6 +368,7 @@ struct CRIShimRuntimeServerTests {
         config.stateDirectory = stateDirectory.path
         config.podNetwork = PodNetworkConfig(
             enabled: true,
+            dualStackEnabled: true,
             networkName: "kubernetes-pods",
             runtimeStatePath: podNetworkRuntimeStateURL.path,
             readyStatePath: podNetworkReadyStateURL.path
@@ -404,7 +479,9 @@ struct CRIShimRuntimeServerTests {
                         try makeNetworkAttachment(
                             network: "default",
                             address: "192.168.64.20/24",
-                            gateway: "192.168.64.1"
+                            gateway: "192.168.64.1",
+                            ipv6Address: "fd42:10:244:16::20/64",
+                            ipv6Gateway: "fd42:10:244:16::1"
                         ),
                         try makeNetworkAttachment(
                             network: "secondary",
@@ -632,6 +709,7 @@ struct CRIShimRuntimeServerTests {
         )
         #expect(firstPodNetworkState.networkName == "kubernetes-pods")
         #expect(firstPodNetworkState.podCIDR == "10.42.1.0/24")
+        #expect(firstPodNetworkState.podCIDRs.ipv6 == "fd42:10:244:16::/64")
         #expect(firstPodNetworkState.generation == 1)
 
         updateRuntimeConfigRequest.runtimeConfig.networkConfig.podCidr = "10.42.1.0/24,fd42:10:244:16::/64"
@@ -647,14 +725,20 @@ struct CRIShimRuntimeServerTests {
             try await podNetworkStateStore.loadRuntimeState(path: podNetworkRuntimeStateURL.path)
         )
         #expect(secondPodNetworkState.podCIDR == "10.42.2.0/24")
+        #expect(secondPodNetworkState.podCIDRs.ipv6 == "fd42:10:244:17::/64")
         #expect(secondPodNetworkState.generation == 2)
         try await podNetworkStateStore.writeReadyState(
             PodNetworkReadyState(
                 networkName: "kubernetes-pods",
-                podCIDR: "10.42.2.0/24",
+                podCIDRs: PodNetworkCIDRs(
+                    ipv4: "10.42.2.0/24",
+                    ipv6: "fd42:10:244:17::/64"
+                ),
                 runtimeGeneration: secondPodNetworkState.generation,
                 mtu: 1_420,
-                expiresAtUnixSeconds: Int64(Date().timeIntervalSince1970.rounded(.down)) + 300
+                expiresAtUnixSeconds: Int64(Date().timeIntervalSince1970.rounded(.down)) + 300,
+                ipv4Ready: true,
+                ipv6Ready: true
             ),
             path: podNetworkReadyStateURL.path
         )
@@ -769,7 +853,7 @@ struct CRIShimRuntimeServerTests {
         #expect(sandboxStatus.status.state == .sandboxReady)
         #expect(sandboxStatus.status.hasNetwork)
         #expect(sandboxStatus.status.network.ip == "192.168.64.20")
-        #expect(sandboxStatus.status.network.additionalIps.map(\.ip) == ["192.168.65.20"])
+        #expect(sandboxStatus.status.network.additionalIps.map(\.ip) == ["fd42:10:244:16::20"])
         #expect(sandboxStatus.containersStatuses.map(\.id) == ["container-1"])
         #expect(sandboxStatus.containersStatuses[0].startedAt == 1_700_000_030_000_000_000)
         #expect(sandboxStatus.info["metadata"]?.contains(#""runtimeHandler":"macos""#) == true)
@@ -2647,14 +2731,17 @@ private func keyValue(_ key: String, _ value: String) -> Runtime_V1_KeyValue {
 private func makeNetworkAttachment(
     network: String,
     address: String,
-    gateway: String
+    gateway: String,
+    ipv6Address: String? = nil,
+    ipv6Gateway: String? = nil
 ) throws -> ContainerResource.Attachment {
     ContainerResource.Attachment(
         network: network,
         hostname: "demo",
         ipv4Address: try CIDRv4(address),
         ipv4Gateway: try IPv4Address(gateway),
-        ipv6Address: nil,
+        ipv6Address: try ipv6Address.map { try CIDRv6($0) },
+        ipv6Gateway: try ipv6Gateway.map { try IPv6Address($0) },
         macAddress: nil
     )
 }

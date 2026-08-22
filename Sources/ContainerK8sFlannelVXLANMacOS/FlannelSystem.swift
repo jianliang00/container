@@ -21,11 +21,13 @@ import Foundation
 public struct FlannelUnderlayInterface: Sendable, Equatable {
     public var name: String
     public var ipv4Address: String
+    public var ipv6Address: String?
     public var mtu: Int
 
-    public init(name: String, ipv4Address: String, mtu: Int) {
+    public init(name: String, ipv4Address: String, ipv6Address: String? = nil, mtu: Int) {
         self.name = name
         self.ipv4Address = ipv4Address
+        self.ipv6Address = ipv6Address
         self.mtu = mtu
     }
 }
@@ -39,6 +41,15 @@ public protocol FlannelNetworkManaging: Sendable {
         knownOwnership: FlannelHostOnlyNetworkOwnership?
     ) async throws -> FlannelHostOnlyNetworkReconcileResult
 
+    func ensureHostOnlyNetwork(
+        name: String,
+        podCIDR: String,
+        ipv6PodCIDR: String?,
+        plugin: String,
+        variant: String,
+        knownOwnership: FlannelHostOnlyNetworkOwnership?
+    ) async throws -> FlannelHostOnlyNetworkReconcileResult
+
     func purgeHostOnlyNetwork(
         ownership: FlannelHostOnlyNetworkOwnership
     ) async throws -> FlannelHostOnlyNetworkPurgeResult
@@ -46,6 +57,28 @@ public protocol FlannelNetworkManaging: Sendable {
     func validateOwnedHostOnlyNetwork(
         ownership: FlannelHostOnlyNetworkOwnership
     ) async throws -> Bool
+}
+
+extension FlannelNetworkManaging {
+    public func ensureHostOnlyNetwork(
+        name: String,
+        podCIDR: String,
+        ipv6PodCIDR: String?,
+        plugin: String,
+        variant: String,
+        knownOwnership: FlannelHostOnlyNetworkOwnership?
+    ) async throws -> FlannelHostOnlyNetworkReconcileResult {
+        guard ipv6PodCIDR == nil else {
+            throw FlannelVXLANError.runtime("network manager does not support an explicit IPv6 PodCIDR")
+        }
+        return try await ensureHostOnlyNetwork(
+            name: name,
+            podCIDR: podCIDR,
+            plugin: plugin,
+            variant: variant,
+            knownOwnership: knownOwnership
+        )
+    }
 }
 
 public struct FlannelHostOnlyNetworkReconcileResult: Sendable, Equatable {
@@ -114,9 +147,48 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
         variant: String,
         knownOwnership: FlannelHostOnlyNetworkOwnership?
     ) async throws -> FlannelHostOnlyNetworkReconcileResult {
+        try await ensureHostOnlyNetwork(
+            name: name,
+            podCIDR: podCIDR,
+            ipv6PodCIDR: nil,
+            plugin: plugin,
+            variant: variant,
+            knownOwnership: knownOwnership
+        )
+    }
+
+    public func ensureHostOnlyNetwork(
+        name: String,
+        podCIDR: String,
+        ipv6PodCIDR: String?,
+        plugin: String,
+        variant: String,
+        knownOwnership: FlannelHostOnlyNetworkOwnership?
+    ) async throws -> FlannelHostOnlyNetworkReconcileResult {
+        let canonicalIPv6PodCIDR: String?
+        if let ipv6PodCIDR {
+            guard let cidr = FlannelIPv6.parseCIDR(ipv6PodCIDR),
+                cidr.prefixLength == 64,
+                cidr.network.isUsableUnderlayAddress
+            else {
+                throw FlannelVXLANError.runtime(
+                    "host-only IPv6 PodCIDR must be a canonical, usable /64 network"
+                )
+            }
+            canonicalIPv6PodCIDR = cidr.string
+        } else {
+            canonicalIPv6PodCIDR = nil
+        }
         let existing = try await backend.listNetworks().first(where: { $0.id == name })
         if let existing {
-            try validate(existing: existing, name: name, podCIDR: podCIDR, plugin: plugin, variant: variant)
+            try validate(
+                existing: existing,
+                name: name,
+                podCIDR: podCIDR,
+                ipv6PodCIDR: canonicalIPv6PodCIDR,
+                plugin: plugin,
+                variant: variant
+            )
             return FlannelHostOnlyNetworkReconcileResult(
                 created: false,
                 ownership: matchingOwnership(existing: existing, knownOwnership: knownOwnership)
@@ -128,6 +200,7 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
             name: name,
             mode: .hostOnly,
             ipv4Subnet: try CIDRv4(podCIDR),
+            ipv6Subnet: try canonicalIPv6PodCIDR.map { try CIDRv6($0) },
             plugin: plugin,
             options: [
                 "variant": variant,
@@ -143,25 +216,41 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
             guard let raced = try await backend.listNetworks().first(where: { $0.id == name }) else {
                 throw error
             }
-            try validate(existing: raced, name: name, podCIDR: podCIDR, plugin: plugin, variant: variant)
+            try validate(
+                existing: raced,
+                name: name,
+                podCIDR: podCIDR,
+                ipv6PodCIDR: canonicalIPv6PodCIDR,
+                plugin: plugin,
+                variant: variant
+            )
             return FlannelHostOnlyNetworkReconcileResult(
                 created: false,
                 ownership: ownership(
                     existing: raced,
                     name: name,
                     podCIDR: podCIDR,
+                    ipv6PodCIDR: canonicalIPv6PodCIDR,
                     plugin: plugin,
                     variant: variant,
                     ownershipID: ownershipID
                 )
             )
         }
-        try validate(existing: created, name: name, podCIDR: podCIDR, plugin: plugin, variant: variant)
+        try validate(
+            existing: created,
+            name: name,
+            podCIDR: podCIDR,
+            ipv6PodCIDR: canonicalIPv6PodCIDR,
+            plugin: plugin,
+            variant: variant
+        )
         guard
             let ownership = ownership(
                 existing: created,
                 name: name,
                 podCIDR: podCIDR,
+                ipv6PodCIDR: canonicalIPv6PodCIDR,
                 plugin: plugin,
                 variant: variant,
                 ownershipID: ownershipID
@@ -206,6 +295,7 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
         existing: NetworkState,
         name: String,
         podCIDR: String,
+        ipv6PodCIDR: String?,
         plugin: String,
         variant: String
     ) throws {
@@ -229,6 +319,17 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
         else {
             throw FlannelVXLANError.runtime("network \(name) does not match PodCIDR \(podCIDR)")
         }
+        if let ipv6PodCIDR {
+            guard ipv6NetworkMatches(existing: existing, expected: ipv6PodCIDR) else {
+                throw FlannelVXLANError.runtime(
+                    "network \(name) does not match IPv6 PodCIDR \(ipv6PodCIDR)"
+                )
+            }
+        } else if existing.configuration.ipv6Subnet != nil {
+            throw FlannelVXLANError.runtime(
+                "network \(name) has an explicitly configured IPv6 subnet while dual-stack is disabled"
+            )
+        }
     }
 
     private func validate(
@@ -239,6 +340,7 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
             existing: existing,
             name: ownership.name,
             podCIDR: ownership.podCIDR,
+            ipv6PodCIDR: ownership.ipv6PodCIDR,
             plugin: ownership.plugin,
             variant: ownership.variant
         )
@@ -258,6 +360,7 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
             existing.id == knownOwnership.name,
             FlannelIPv4.parseCIDR(existing.status.ipv4Subnet.description)
                 == FlannelIPv4.parseCIDR(knownOwnership.podCIDR),
+            ipv6NetworkMatches(existing: existing, expected: knownOwnership.ipv6PodCIDR),
             existing.configuration.plugin == knownOwnership.plugin,
             existing.configuration.options["variant"] == knownOwnership.variant
         else {
@@ -270,6 +373,7 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
         existing: NetworkState,
         name: String,
         podCIDR: String,
+        ipv6PodCIDR: String?,
         plugin: String,
         variant: String,
         ownershipID: String
@@ -279,13 +383,53 @@ public struct ContainerKitFlannelNetworkManager: FlannelNetworkManaging {
         else {
             return nil
         }
+        let canonicalIPv6CIDR: String?
+        if let ipv6PodCIDR {
+            guard let cidr = FlannelIPv6.parseCIDR(ipv6PodCIDR), cidr.prefixLength > 0 else {
+                return nil
+            }
+            canonicalIPv6CIDR = cidr.string
+        } else {
+            canonicalIPv6CIDR = nil
+        }
         return FlannelHostOnlyNetworkOwnership(
             name: name,
             podCIDR: canonicalCIDR,
+            ipv6PodCIDR: canonicalIPv6CIDR,
             plugin: plugin,
             variant: variant,
             ownershipID: ownershipID
         )
+    }
+
+    private func ipv6NetworkMatches(existing: NetworkState, expected: String?) -> Bool {
+        guard let expected else {
+            return existing.configuration.ipv6Subnet == nil
+        }
+        guard let configured = existing.configuration.ipv6Subnet,
+            let running = existing.status.ipv6Subnet,
+            let gateway = existing.status.ipv6Gateway,
+            let expected = FlannelIPv6.parseCIDR(expected),
+            expected.prefixLength == 64,
+            expected.network.isUsableUnderlayAddress,
+            configured.prefix.length == 64,
+            running.prefix.length == 64,
+            configured.address == configured.lower,
+            running.address == running.lower,
+            configured.description == expected.string,
+            running.description == expected.string,
+            configured.contains(gateway),
+            running.contains(gateway),
+            !gateway.isUnspecified,
+            !gateway.isLoopback,
+            !gateway.isMulticast,
+            !gateway.isLinkLocal,
+            gateway != running.lower,
+            gateway.value == running.lower.value + 1
+        else {
+            return false
+        }
+        return true
     }
 }
 
@@ -293,11 +437,38 @@ public protocol FlannelSystemManaging: Sendable {
     func inspectUnderlayInterface(_ name: String) throws -> FlannelUnderlayInterface
     func resolveUnderlayInterface(nodeInternalIP: String?) throws -> FlannelUnderlayInterface
     func validateUnderlayRoute(destination: String, interface: String) throws
+    func validateIPv6UnderlayRoute(destination: String, interface: String) throws
     func interfaceExists(_ name: String) throws -> Bool
     func enableIPv4Forwarding() throws
+    func enableIPv6Forwarding() throws
     func configureTunnelInterface(_ name: String, localAddress: String, mtu: Int) throws
+    func configureIPv6TunnelInterface(_ name: String, localAddress: String, mtu: Int) throws
     func ensureRoute(podCIDR: String, interface: String) throws
     func removeRoute(podCIDR: String, interface: String) throws
+    func ensureIPv6Route(podCIDR: String, interface: String) throws
+    func removeIPv6Route(podCIDR: String, interface: String) throws
+}
+
+extension FlannelSystemManaging {
+    public func validateIPv6UnderlayRoute(destination: String, interface: String) throws {
+        throw FlannelVXLANError.runtime("system manager does not support IPv6 underlay routes")
+    }
+
+    public func enableIPv6Forwarding() throws {
+        throw FlannelVXLANError.runtime("system manager does not support IPv6 forwarding")
+    }
+
+    public func configureIPv6TunnelInterface(_ name: String, localAddress: String, mtu: Int) throws {
+        throw FlannelVXLANError.runtime("system manager does not support IPv6 tunnel interfaces")
+    }
+
+    public func ensureIPv6Route(podCIDR: String, interface: String) throws {
+        throw FlannelVXLANError.runtime("system manager does not support IPv6 routes")
+    }
+
+    public func removeIPv6Route(podCIDR: String, interface: String) throws {
+        throw FlannelVXLANError.runtime("system manager does not support IPv6 routes")
+    }
 }
 
 public struct FlannelSystemManager: FlannelSystemManaging {
@@ -366,6 +537,26 @@ public struct FlannelSystemManager: FlannelSystemManaging {
         }
     }
 
+    public func validateIPv6UnderlayRoute(destination: String, interface: String) throws {
+        guard let address = FlannelIPv6.parseAddress(destination), address.isUsableUnderlayAddress else {
+            throw FlannelVXLANError.runtime("underlay route destination is not a usable IPv6 address")
+        }
+        try Self.validateInterfaceName(interface, description: "underlay route interface")
+
+        let output = try run("/sbin/route", ["-n", "get", "-inet6", address.string])
+        let interfaces = Self.routeInterfaces(in: output)
+        guard interfaces.count == 1, let resolvedInterface = interfaces.first else {
+            throw FlannelVXLANError.runtime(
+                "underlay route to \(destination) did not identify exactly one egress interface"
+            )
+        }
+        guard resolvedInterface == interface else {
+            throw FlannelVXLANError.runtime(
+                "underlay route to \(destination) uses \(resolvedInterface), expected \(interface)"
+            )
+        }
+    }
+
     private func inspectUnderlayInterface(
         _ name: String,
         requiredIPv4Address: String?
@@ -383,6 +574,17 @@ public struct FlannelSystemManager: FlannelSystemManaging {
             return String(fields[1])
         }
         let ipv4Address = requiredIPv4Address ?? ipv4Addresses.first
+        let ipv6Address = lines.lazy.compactMap { line -> String? in
+            let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard fields.count >= 2, fields[0] == "inet6" else {
+                return nil
+            }
+            let value = String(fields[1]).split(separator: "%", maxSplits: 1).first.map(String.init) ?? ""
+            guard let address = FlannelIPv6.parseAddress(value), address.isUsableUnderlayAddress else {
+                return nil
+            }
+            return address.string
+        }.first
         let mtu = lines.lazy.compactMap { line -> Int? in
             let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
             guard let index = fields.firstIndex(of: "mtu"), fields.indices.contains(index + 1) else {
@@ -393,7 +595,12 @@ public struct FlannelSystemManager: FlannelSystemManaging {
         guard let ipv4Address, ipv4Addresses.contains(ipv4Address), let mtu, mtu >= 576 else {
             throw FlannelVXLANError.runtime("underlay interface \(name) has no usable IPv4 address or MTU")
         }
-        return FlannelUnderlayInterface(name: name, ipv4Address: ipv4Address, mtu: mtu)
+        return FlannelUnderlayInterface(
+            name: name,
+            ipv4Address: ipv4Address,
+            ipv6Address: ipv6Address,
+            mtu: mtu
+        )
     }
 
     public func interfaceExists(_ name: String) throws -> Bool {
@@ -417,6 +624,15 @@ public struct FlannelSystemManager: FlannelSystemManaging {
         _ = try run("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=1"])
     }
 
+    public func enableIPv6Forwarding() throws {
+        let value = try run("/usr/sbin/sysctl", ["-n", "net.inet6.ip6.forwarding"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value != "1" else {
+            return
+        }
+        _ = try run("/usr/sbin/sysctl", ["-w", "net.inet6.ip6.forwarding=1"])
+    }
+
     public func configureTunnelInterface(_ name: String, localAddress: String, mtu: Int) throws {
         guard FlannelIPv4.parseAddress(localAddress) != nil else {
             throw FlannelVXLANError.runtime("tunnel local address is not valid IPv4")
@@ -424,6 +640,20 @@ public struct FlannelSystemManager: FlannelSystemManaging {
         _ = try run(
             "/sbin/ifconfig",
             [name, "inet", localAddress, localAddress, "netmask", "255.255.255.255", "mtu", "\(mtu)", "up"]
+        )
+    }
+
+    public func configureIPv6TunnelInterface(_ name: String, localAddress: String, mtu: Int) throws {
+        guard let address = FlannelIPv6.parseAddress(localAddress), !address.isUnspecified else {
+            throw FlannelVXLANError.runtime("tunnel local address is not valid IPv6")
+        }
+        try Self.validateInterfaceName(name, description: "tunnel interface")
+        guard (1_280...9_000).contains(mtu) else {
+            throw FlannelVXLANError.runtime("IPv6 tunnel MTU must be between 1280 and 9000")
+        }
+        _ = try run(
+            "/sbin/ifconfig",
+            [name, "inet6", address.string, address.string, "prefixlen", "128", "mtu", "\(mtu)", "up"]
         )
     }
 
@@ -493,6 +723,53 @@ public struct FlannelSystemManager: FlannelSystemManaging {
         }
     }
 
+    public func ensureIPv6Route(podCIDR: String, interface: String) throws {
+        let cidr = try Self.validateManagedIPv6Route(podCIDR: podCIDR, interface: interface)
+        if let existingInterface = try exactIPv6RouteInterface(for: cidr) {
+            guard existingInterface == interface else {
+                throw FlannelVXLANError.runtime(
+                    "route \(cidr.string) already exists on \(existingInterface), expected \(interface)"
+                )
+            }
+            return
+        }
+
+        do {
+            _ = try run("/sbin/route", ["-n", "add", "-inet6", "-net", cidr.string, "-interface", interface])
+        } catch {
+            if try exactIPv6RouteInterface(for: cidr) == interface {
+                return
+            }
+            throw error
+        }
+        guard try exactIPv6RouteInterface(for: cidr) == interface else {
+            throw FlannelVXLANError.runtime("route \(cidr.string) was not installed on \(interface)")
+        }
+    }
+
+    public func removeIPv6Route(podCIDR: String, interface: String) throws {
+        let cidr = try Self.validateManagedIPv6Route(podCIDR: podCIDR, interface: interface)
+        guard let existingInterface = try exactIPv6RouteInterface(for: cidr) else {
+            return
+        }
+        guard existingInterface == interface else {
+            throw FlannelVXLANError.runtime(
+                "refusing to remove route \(cidr.string) from \(interface) because it exists on \(existingInterface)"
+            )
+        }
+        do {
+            _ = try run("/sbin/route", ["-n", "delete", "-inet6", "-net", cidr.string, "-interface", interface])
+        } catch {
+            guard try exactIPv6RouteInterface(for: cidr) == nil else {
+                throw error
+            }
+            return
+        }
+        guard try exactIPv6RouteInterface(for: cidr) == nil else {
+            throw FlannelVXLANError.runtime("route \(cidr.string) remains after removal")
+        }
+    }
+
     private static func validateManagedRoute(podCIDR: String, interface: String) throws -> FlannelIPv4.CIDR {
         guard let canonicalCIDR = FlannelIPv4.parseCIDR(podCIDR), canonicalCIDR.prefixLength > 0 else {
             throw FlannelVXLANError.runtime("managed route PodCIDR must be valid IPv4 and must not be default")
@@ -501,6 +778,41 @@ public struct FlannelSystemManager: FlannelSystemManaging {
             throw FlannelVXLANError.runtime("managed route interface is invalid")
         }
         return canonicalCIDR
+    }
+
+    private static func validateManagedIPv6Route(
+        podCIDR: String,
+        interface: String
+    ) throws -> FlannelIPv6.CIDR {
+        guard let canonicalCIDR = FlannelIPv6.parseCIDR(podCIDR), canonicalCIDR.prefixLength > 0 else {
+            throw FlannelVXLANError.runtime("managed route PodCIDR must be valid IPv6 and must not be default")
+        }
+        try validateInterfaceName(interface, description: "managed route interface")
+        return canonicalCIDR
+    }
+
+    private static func validateInterfaceName(_ value: String, description: String) throws {
+        guard value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
+            throw FlannelVXLANError.runtime("\(description) is invalid")
+        }
+    }
+
+    private func exactIPv6RouteInterface(for podCIDR: FlannelIPv6.CIDR) throws -> String? {
+        let output = try run("/usr/sbin/netstat", ["-rn", "-f", "inet6"])
+        let matches = output.split(separator: "\n").compactMap { line -> String? in
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 4,
+                let destination = FlannelIPv6.parseCIDR(String(fields[0])),
+                destination == podCIDR
+            else {
+                return nil
+            }
+            return String(fields[3])
+        }
+        guard matches.count <= 1 else {
+            throw FlannelVXLANError.runtime("route \(podCIDR.string) has multiple exact interfaces")
+        }
+        return matches.first
     }
 
     private func exactRouteState(for podCIDR: FlannelIPv4.CIDR) throws -> ManagedRouteState {

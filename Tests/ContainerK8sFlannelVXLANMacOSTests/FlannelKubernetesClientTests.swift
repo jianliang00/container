@@ -130,11 +130,67 @@ struct FlannelKubernetesClientTests {
         #expect(annotations["network.example.com/flannel-kube-subnet-manager"] as? String == "true")
         #expect(annotations["network.example.com/flannel-backend-type"] as? String == "vxlan")
         #expect(annotations["network.example.com/flannel-public-ip"] as? String == "192.0.2.9")
+        #expect(annotations["network.example.com/flannel-public-ipv6"] == nil)
+        #expect(annotations["network.example.com/flannel-backend-v6-data"] == nil)
 
         let backendDataString = try #require(annotations["network.example.com/flannel-backend-data"] as? String)
         let backendData = try JSONDecoder().decode(FlannelBackendLeaseData.self, from: Data(backendDataString.utf8))
         #expect(backendData.vni == 4096)
         #expect(backendData.vtepMAC == "02:aa:bb:cc:dd:ee")
+    }
+
+    @Test
+    func rendersIndependentIPv6FlannelLeaseAnnotations() throws {
+        let patch = try FlannelKubernetesClient.leaseAnnotationPatch(
+            annotationPrefix: "network.example.com/flannel",
+            publicIP: "192.0.2.9",
+            vni: 4096,
+            vtepMAC: "02:aa:bb:cc:dd:ee",
+            publicIPv6: "FD31:0:0::9",
+            vtepMACIPv6: "02-AA-BB-CC-DD-FF"
+        )
+
+        #expect(patch.values["network.example.com/flannel-public-ipv6"] == "fd31::9")
+        let backendV6DataString = try #require(
+            patch.values["network.example.com/flannel-backend-v6-data"]
+        )
+        let backendV6Data = try JSONDecoder().decode(
+            FlannelBackendLeaseData.self,
+            from: Data(backendV6DataString.utf8)
+        )
+        #expect(backendV6Data.vni == 4096)
+        #expect(backendV6Data.vtepMAC == "02:aa:bb:cc:dd:ff")
+    }
+
+    @Test
+    func rejectsIncompleteOrUnusableIPv6LeaseAnnotations() {
+        #expect(
+            throws: FlannelVXLANError.invalidConfiguration(
+                "publicIPv6 and vtepMACIPv6 must be provided together"
+            )
+        ) {
+            try FlannelKubernetesClient.leaseAnnotationPatch(
+                annotationPrefix: "flannel.alpha.coreos.com",
+                publicIP: "192.0.2.9",
+                vni: 4096,
+                vtepMAC: "02:aa:bb:cc:dd:ee",
+                publicIPv6: "fd31::9"
+            )
+        }
+        #expect(
+            throws: FlannelVXLANError.invalidConfiguration(
+                "publicIPv6 must be a usable IPv6 underlay address"
+            )
+        ) {
+            try FlannelKubernetesClient.leaseAnnotationPatch(
+                annotationPrefix: "flannel.alpha.coreos.com",
+                publicIP: "192.0.2.9",
+                vni: 4096,
+                vtepMAC: "02:aa:bb:cc:dd:ee",
+                publicIPv6: "fe80::1",
+                vtepMACIPv6: "02:aa:bb:cc:dd:ff"
+            )
+        }
     }
 
     @Test
@@ -173,8 +229,10 @@ struct FlannelKubernetesClientTests {
         #expect(keys.prefix == "flannel.alpha.coreos.com/")
         #expect(keys.kubeSubnetManager == "flannel.alpha.coreos.com/kube-subnet-manager")
         #expect(keys.backendData == "flannel.alpha.coreos.com/backend-data")
+        #expect(keys.backendV6Data == "flannel.alpha.coreos.com/backend-v6-data")
         #expect(keys.backendType == "flannel.alpha.coreos.com/backend-type")
         #expect(keys.publicIP == "flannel.alpha.coreos.com/public-ip")
+        #expect(keys.publicIPv6 == "flannel.alpha.coreos.com/public-ipv6")
     }
 }
 

@@ -34,10 +34,34 @@ struct KubeProxyMacOS: AsyncParsableCommand {
     @Flag(name: .customLong("dry-run"), help: "Print the generated PF anchor instead of applying it.")
     var dryRun: Bool = false
 
+    @Flag(
+        name: .customLong("withdraw"),
+        help: "Remove managed PF references, flush both family anchors, and delete their files."
+    )
+    var withdraw: Bool = false
+
     @Option(name: .customLong("snapshot"), help: "Path to a KubeProxySnapshot JSON file. Useful for dry-run validation.")
     var snapshotPath: String?
 
     func run() async throws {
+        if withdraw {
+            guard !once, !dryRun, snapshotPath == nil else {
+                throw ValidationError("--withdraw cannot be combined with --once, --dry-run, or --snapshot")
+            }
+            let configURL = URL(fileURLWithPath: configPath).standardizedFileURL
+            let pfConfig: KubeProxyPFConfig
+            if FileManager.default.fileExists(atPath: configURL.path) {
+                pfConfig = try KubeProxyMacOSConfig.load(from: configURL).pf
+            } else {
+                guard configURL.path == "/etc/kubernetes/kube-proxy.conf" else {
+                    throw ValidationError("--withdraw config is missing at \(configURL.path)")
+                }
+                pfConfig = KubeProxyPFConfig()
+                try pfConfig.validate()
+            }
+            try KubeProxyPFRuleApplier(config: pfConfig).withdraw()
+            return
+        }
         let config = try KubeProxyMacOSConfig.load(from: URL(fileURLWithPath: configPath))
         if let snapshotPath {
             let data = try Data(contentsOf: URL(fileURLWithPath: snapshotPath))

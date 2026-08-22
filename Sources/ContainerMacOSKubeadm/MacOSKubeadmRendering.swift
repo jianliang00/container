@@ -129,6 +129,7 @@ public enum MacOSKubeadmRenderer {
     public static func criShimConfiguration(
         sandboxImage: String,
         networkMode: MacOSKubeadmNetworkMode = .full,
+        dualStackEnabled: Bool = false,
         runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = []
     ) -> String {
         let sandboxImageJSON = jsonString(sandboxImage)
@@ -180,6 +181,7 @@ public enum MacOSKubeadmRenderer {
                     },
                     "podNetwork": {
                         "enabled": true,
+                        "dualStackEnabled": \(dualStackEnabled),
                         "networkName": "kubernetes-pod",
                         "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
                         "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
@@ -257,7 +259,8 @@ public enum MacOSKubeadmRenderer {
 
     public static func flannelVXLANConfiguration(
         nodeName: String,
-        containerServiceUserID: Int = 0
+        containerServiceUserID: Int = 0,
+        dualStackEnabled: Bool = false
     ) -> String {
         """
         {
@@ -265,6 +268,7 @@ public enum MacOSKubeadmRenderer {
             "nodeKubeconfig": "/etc/kubernetes/kubelet.conf",
             "nodeName": \(jsonString(nodeName)),
             "containerServiceUserID": \(containerServiceUserID),
+            "dualStackEnabled": \(dualStackEnabled),
             "configMapNamespace": "kube-flannel",
             "configMapName": "kube-flannel-cfg",
             "networkConfigKey": "net-conf.json",
@@ -281,12 +285,16 @@ public enum MacOSKubeadmRenderer {
         """
     }
 
-    public static func kubeProxyConfiguration(nodeName: String) -> String {
+    public static func kubeProxyConfiguration(
+        nodeName: String,
+        dualStackEnabled: Bool = false
+    ) -> String {
         """
         {
             "kubeconfig": "/etc/kubernetes/kube-proxy.kubeconfig",
             "nodeName": "\(nodeName)",
             "syncPeriodSeconds": 5,
+            "dualStackEnabled": \(dualStackEnabled),
             "pf": {
                 "anchorName": "com.apple.container.kube-proxy",
                 "configPath": "/etc/pf.conf",

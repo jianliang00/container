@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Darwin
 import Foundation
 import RuntimeMacOSSidecarShared
 import SystemConfiguration
@@ -26,6 +27,31 @@ struct GuestSystemNetworkConfigurator {
         let ipv4Address: String
         let ipv4PrefixLength: UInt8
         let ipv4Gateway: String
+        let ipv6Address: String?
+        let ipv6PrefixLength: UInt8?
+        let ipv6Gateway: String?
+
+        init(
+            networkID: String,
+            interfaceName: String,
+            macAddress: String,
+            ipv4Address: String,
+            ipv4PrefixLength: UInt8,
+            ipv4Gateway: String,
+            ipv6Address: String? = nil,
+            ipv6PrefixLength: UInt8? = nil,
+            ipv6Gateway: String? = nil
+        ) {
+            self.networkID = networkID
+            self.interfaceName = interfaceName
+            self.macAddress = macAddress
+            self.ipv4Address = ipv4Address
+            self.ipv4PrefixLength = ipv4PrefixLength
+            self.ipv4Gateway = ipv4Gateway
+            self.ipv6Address = ipv6Address
+            self.ipv6PrefixLength = ipv6PrefixLength
+            self.ipv6Gateway = ipv6Gateway
+        }
     }
 
     struct AppliedInterface: Sendable, Equatable {
@@ -33,6 +59,21 @@ struct GuestSystemNetworkConfigurator {
         let interfaceName: String
         let macAddress: String
         let ipv4Address: String
+        let ipv6Address: String?
+
+        init(
+            networkID: String,
+            interfaceName: String,
+            macAddress: String,
+            ipv4Address: String,
+            ipv6Address: String? = nil
+        ) {
+            self.networkID = networkID
+            self.interfaceName = interfaceName
+            self.macAddress = macAddress
+            self.ipv4Address = ipv4Address
+            self.ipv6Address = ipv6Address
+        }
     }
 
     struct Result: Sendable, Equatable {
@@ -51,11 +92,13 @@ struct GuestSystemNetworkConfigurator {
         let addedToSet: Bool
         let enabled: Bool
         let ipv4: ProtocolSnapshot?
+        let ipv6: ProtocolSnapshot?
         let dns: ProtocolSnapshot?
     }
 
     private struct ConfiguredInterface {
         let request: InterfaceConfiguration
+        let service: SCNetworkService
         let serviceID: String
         let isPrimary: Bool
     }
@@ -67,6 +110,9 @@ struct GuestSystemNetworkConfigurator {
     ) throws -> Result {
         guard !interfaces.isEmpty else {
             return Result(interfaces: [], effectiveDNS: nil)
+        }
+        for interface in interfaces {
+            _ = try requestedIPv6Configuration(interface)
         }
 
         guard
@@ -107,6 +153,7 @@ struct GuestSystemNetworkConfigurator {
                         addedToSet: serviceResult.addedToSet,
                         enabled: SCNetworkServiceGetEnabled(service),
                         ipv4: protocolSnapshot(service: service, type: kSCNetworkProtocolTypeIPv4),
+                        ipv6: protocolSnapshot(service: service, type: kSCNetworkProtocolTypeIPv6),
                         dns: protocolSnapshot(service: service, type: kSCNetworkProtocolTypeDNS)
                     )
                 )
@@ -123,6 +170,22 @@ struct GuestSystemNetworkConfigurator {
                     ),
                     enabled: true
                 )
+                if try requestedIPv6Configuration(interface) != nil {
+                    try setProtocolConfiguration(
+                        service: service,
+                        type: kSCNetworkProtocolTypeIPv6,
+                        configuration: try ipv6ConfigurationDictionary(
+                            for: interface,
+                            includeDefaultRoute: index == primaryIndex
+                        ),
+                        enabled: true
+                    )
+                } else if SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeIPv6) != nil {
+                    try disableProtocolConfiguration(
+                        service: service,
+                        type: kSCNetworkProtocolTypeIPv6
+                    )
+                }
 
                 if index == primaryIndex, let dns {
                     try setProtocolConfiguration(
@@ -146,6 +209,7 @@ struct GuestSystemNetworkConfigurator {
                 configured.append(
                     ConfiguredInterface(
                         request: interface,
+                        service: service,
                         serviceID: serviceID,
                         isPrimary: index == primaryIndex
                     )
@@ -186,6 +250,24 @@ struct GuestSystemNetworkConfigurator {
         ]
         if includeDefaultRoute {
             configuration[kSCPropNetIPv4Router as String] = interface.ipv4Gateway
+        }
+        return configuration
+    }
+
+    static func ipv6ConfigurationDictionary(
+        for interface: InterfaceConfiguration,
+        includeDefaultRoute: Bool = true
+    ) throws -> [String: Any] {
+        guard let ipv6 = try requestedIPv6Configuration(interface) else {
+            throw makeError("IPv6 configuration is not present for \(interface.interfaceName)")
+        }
+        var configuration: [String: Any] = [
+            kSCPropNetIPv6ConfigMethod as String: kSCValNetIPv6ConfigMethodManual as String,
+            kSCPropNetIPv6Addresses as String: [ipv6.address],
+            kSCPropNetIPv6PrefixLength as String: [Int(ipv6.prefixLength)],
+        ]
+        if includeDefaultRoute {
+            configuration[kSCPropNetIPv6Router as String] = ipv6.gateway
         }
         return configuration
     }
@@ -307,18 +389,24 @@ struct GuestSystemNetworkConfigurator {
         let setServices = (SCNetworkSetCopyServices(networkSet) as NSArray?) ?? []
         let setServiceIDs = Set(
             setServices.compactMap { value -> String? in
-                let service = value as! SCNetworkService
+                guard let service = networkService(from: value) else {
+                    return nil
+                }
                 return SCNetworkServiceGetServiceID(service) as String?
             }
         )
         let setServiceNames = Set(
             setServices.compactMap { value -> String? in
-                let service = value as! SCNetworkService
+                guard let service = networkService(from: value) else {
+                    return nil
+                }
                 return SCNetworkServiceGetName(service) as String?
             }
         )
         let matchingServices = services.compactMap { value -> SCNetworkService? in
-            let service = value as! SCNetworkService
+            guard let service = networkService(from: value) else {
+                return nil
+            }
             guard
                 let interface = SCNetworkServiceGetInterface(service),
                 SCNetworkInterfaceGetBSDName(interface) as String? == interfaceName
@@ -344,7 +432,7 @@ struct GuestSystemNetworkConfigurator {
         } else {
             let availableInterfaces = SCNetworkInterfaceCopyAll() as NSArray
             guard
-                let interface = availableInterfaces.map({ $0 as! SCNetworkInterface }).first(where: {
+                let interface = availableInterfaces.compactMap(networkInterface(from:)).first(where: {
                     SCNetworkInterfaceGetBSDName($0) as String? == interfaceName
                 })
             else {
@@ -377,6 +465,22 @@ struct GuestSystemNetworkConfigurator {
         return (service, created, !isInSet)
     }
 
+    private static func networkService(from value: Any) -> SCNetworkService? {
+        let object = value as AnyObject
+        guard CFGetTypeID(object) == SCNetworkServiceGetTypeID() else {
+            return nil
+        }
+        return unsafeDowncast(object, to: SCNetworkService.self)
+    }
+
+    private static func networkInterface(from value: Any) -> SCNetworkInterface? {
+        let object = value as AnyObject
+        guard CFGetTypeID(object) == SCNetworkInterfaceGetTypeID() else {
+            return nil
+        }
+        return unsafeDowncast(object, to: SCNetworkInterface.self)
+    }
+
     private static func setProtocolConfiguration(
         service: SCNetworkService,
         type: CFString,
@@ -396,6 +500,21 @@ struct GuestSystemNetworkConfigurator {
         }
         guard SCNetworkProtocolSetEnabled(networkProtocol, enabled) else {
             throw makeSystemConfigurationError("set \(type) network protocol state")
+        }
+    }
+
+    private static func disableProtocolConfiguration(
+        service: SCNetworkService,
+        type: CFString
+    ) throws {
+        guard let networkProtocol = SCNetworkServiceCopyProtocol(service, type) else {
+            return
+        }
+        guard SCNetworkProtocolSetConfiguration(networkProtocol, nil) else {
+            throw makeSystemConfigurationError("clear \(type) network protocol configuration")
+        }
+        guard SCNetworkProtocolSetEnabled(networkProtocol, false) else {
+            throw makeSystemConfigurationError("disable \(type) network protocol")
         }
     }
 
@@ -424,6 +543,7 @@ struct GuestSystemNetworkConfigurator {
                 continue
             }
             restoreProtocol(snapshot.ipv4, service: snapshot.service, type: kSCNetworkProtocolTypeIPv4)
+            restoreProtocol(snapshot.ipv6, service: snapshot.service, type: kSCNetworkProtocolTypeIPv6)
             restoreProtocol(snapshot.dns, service: snapshot.service, type: kSCNetworkProtocolTypeDNS)
             _ = SCNetworkServiceSetEnabled(snapshot.service, snapshot.enabled)
             if snapshot.addedToSet {
@@ -473,7 +593,15 @@ struct GuestSystemNetworkConfigurator {
         for attempt in 0..<50 {
             do {
                 let appliedInterfaces = try configured.map {
-                    try readEffectiveIPv4($0, store: store)
+                    let ipv4 = try readEffectiveIPv4($0, store: store)
+                    let ipv6 = try readEffectiveIPv6($0, store: store)
+                    return AppliedInterface(
+                        networkID: ipv4.networkID,
+                        interfaceName: ipv4.interfaceName,
+                        macAddress: ipv4.macAddress,
+                        ipv4Address: ipv4.ipv4Address,
+                        ipv6Address: ipv6
+                    )
                 }
                 let effectiveDNS: MacOSGuestEffectiveDNSConfiguration?
                 if let dns {
@@ -534,8 +662,89 @@ struct GuestSystemNetworkConfigurator {
             networkID: request.networkID,
             interfaceName: interfaceName,
             macAddress: request.macAddress,
-            ipv4Address: "\(request.ipv4Address)/\(request.ipv4PrefixLength)"
+            ipv4Address: "\(request.ipv4Address)/\(request.ipv4PrefixLength)",
+            ipv6Address: nil
         )
+    }
+
+    private static func readEffectiveIPv6(
+        _ configured: ConfiguredInterface,
+        store: SCDynamicStore
+    ) throws -> String? {
+        guard let expected = try requestedIPv6Configuration(configured.request) else {
+            let networkProtocol = SCNetworkServiceCopyProtocol(
+                configured.service,
+                kSCNetworkProtocolTypeIPv6
+            )
+            try validateDisabledIPv6State(
+                protocolEnabled: networkProtocol.map { SCNetworkProtocolGetEnabled($0) },
+                configuredProperties: networkProtocol.flatMap {
+                    SCNetworkProtocolGetConfiguration($0).map { $0 as NSDictionary }
+                },
+                effectiveProperties: dynamicStoreDictionary(
+                    store: store,
+                    key: "State:/Network/Service/\(configured.serviceID)/IPv6"
+                ),
+                interfaceName: configured.request.interfaceName
+            )
+            return nil
+        }
+        let key = "State:/Network/Service/\(configured.serviceID)/IPv6"
+        guard let dictionary = dynamicStoreDictionary(store: store, key: key) else {
+            throw makeError("active IPv6 state is missing for service \(configured.serviceID)")
+        }
+
+        let request = configured.request
+        let addresses = stringArray(dictionary[kSCPropNetIPv6Addresses as String])
+        let prefixLengths = integerArray(dictionary[kSCPropNetIPv6PrefixLength as String])
+        let router = dictionary[kSCPropNetIPv6Router as String] as? String
+        let interfaceName = dictionary[kSCPropInterfaceName as String] as? String ?? request.interfaceName
+
+        guard addresses.contains(where: { ipv6AddressesEqual($0, expected.address) }) else {
+            throw makeError("active IPv6 address mismatch for \(request.interfaceName): \(addresses)")
+        }
+        guard prefixLengths.contains(Int(expected.prefixLength)) else {
+            throw makeError("active IPv6 prefix mismatch for \(request.interfaceName): \(prefixLengths)")
+        }
+        if configured.isPrimary {
+            guard let router, ipv6AddressesEqual(router, expected.gateway) else {
+                throw makeError("active IPv6 router mismatch for \(request.interfaceName): \(router ?? "missing")")
+            }
+        } else if let router {
+            throw makeError("secondary interface \(request.interfaceName) unexpectedly installed IPv6 router \(router)")
+        }
+        guard interfaceName == request.interfaceName else {
+            throw makeError("active IPv6 interface mismatch for service \(configured.serviceID): \(interfaceName)")
+        }
+
+        return "\(expected.address)/\(expected.prefixLength)"
+    }
+
+    static func validateDisabledIPv6State(
+        protocolEnabled: Bool?,
+        configuredProperties: NSDictionary?,
+        effectiveProperties: NSDictionary?,
+        interfaceName: String
+    ) throws {
+        if protocolEnabled == true {
+            throw makeError("IPv6 protocol remained enabled for \(interfaceName)")
+        }
+        if configuredProperties != nil {
+            throw makeError("static IPv6 configuration remained for \(interfaceName)")
+        }
+        guard let effectiveProperties else {
+            return
+        }
+
+        let addresses = stringArray(effectiveProperties[kSCPropNetIPv6Addresses as String])
+        let unexpectedAddresses = addresses.filter { !isLinkLocalIPv6Address($0) }
+        guard unexpectedAddresses.isEmpty else {
+            throw makeError("active IPv6 address remained for \(interfaceName): \(unexpectedAddresses)")
+        }
+
+        if let router = nonEmptyString(effectiveProperties[kSCPropNetIPv6Router as String]) {
+            throw makeError("active IPv6 router remained for \(interfaceName): \(router)")
+        }
     }
 
     private static func readEffectiveDNS(
@@ -587,6 +796,74 @@ struct GuestSystemNetworkConfigurator {
 
     private static func stringArray(_ value: Any?) -> [String] {
         (value as? [String]) ?? []
+    }
+
+    private static func integerArray(_ value: Any?) -> [Int] {
+        guard let values = value as? [NSNumber] else {
+            return []
+        }
+        return values.map(\.intValue)
+    }
+
+    private static func requestedIPv6Configuration(
+        _ interface: InterfaceConfiguration
+    ) throws -> (address: String, prefixLength: UInt8, gateway: String)? {
+        switch (interface.ipv6Address, interface.ipv6PrefixLength, interface.ipv6Gateway) {
+        case (nil, nil, nil):
+            return nil
+        case (.some(let address), .some(let prefixLength), .some(let gateway)):
+            guard prefixLength == 64,
+                let addressBytes = normalizedIPv6Address(address),
+                let gatewayBytes = normalizedIPv6Address(gateway),
+                usableIPv6Unicast(addressBytes),
+                usableIPv6Unicast(gatewayBytes),
+                addressBytes != gatewayBytes,
+                addressBytes.suffix(8).contains(where: { $0 != 0 }),
+                gatewayBytes.suffix(8).contains(where: { $0 != 0 }),
+                addressBytes.prefix(8).elementsEqual(gatewayBytes.prefix(8))
+            else {
+                throw makeError("invalid IPv6 configuration for \(interface.interfaceName)")
+            }
+            return (address, prefixLength, gateway)
+        default:
+            throw makeError("incomplete IPv6 configuration for \(interface.interfaceName)")
+        }
+    }
+
+    private static func ipv6AddressesEqual(_ lhs: String, _ rhs: String) -> Bool {
+        normalizedIPv6Address(lhs) == normalizedIPv6Address(rhs)
+    }
+
+    private static func normalizedIPv6Address(_ value: String) -> [UInt8]? {
+        var address = in6_addr()
+        guard value.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else {
+            return nil
+        }
+        return withUnsafeBytes(of: &address) { Array($0) }
+    }
+
+    private static func isLinkLocalIPv6Address(_ value: String) -> Bool {
+        guard let addressPart = value.split(separator: "%", maxSplits: 1).first else {
+            return false
+        }
+        let unscoped = String(addressPart)
+        guard let address = normalizedIPv6Address(unscoped) else {
+            return false
+        }
+        return address[0] == 0xfe && (address[1] & 0xc0) == 0x80
+    }
+
+    private static func usableIPv6Unicast(_ address: [UInt8]) -> Bool {
+        guard address.count == 16,
+            address.contains(where: { $0 != 0 }),
+            address[0] != 0xff,
+            !(address[0] == 0xfe && (address[1] & 0xc0) == 0x80),
+            address != [UInt8](repeating: 0, count: 15) + [1]
+        else {
+            return false
+        }
+        let ipv4MappedPrefix = [UInt8](repeating: 0, count: 10) + [0xff, 0xff]
+        return !address.prefix(12).elementsEqual(ipv4MappedPrefix)
     }
 
     private static func nonEmptyString(_ value: Any?) -> String? {

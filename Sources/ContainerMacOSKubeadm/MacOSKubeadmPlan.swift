@@ -175,6 +175,7 @@ public enum MacOSKubeadmPlanner {
                     contents: MacOSKubeadmRenderer.criShimConfiguration(
                         sandboxImage: options.sandboxImage,
                         networkMode: options.networkMode,
+                        dualStackEnabled: options.enableDualStack,
                         runtimeClasses: options.runtimeClasses
                     ),
                     mode: 0o644,
@@ -250,7 +251,8 @@ public enum MacOSKubeadmPlanner {
                         path: options.rooted("/etc/kubernetes/flannel-vxlan-macos.conf"),
                         contents: MacOSKubeadmRenderer.flannelVXLANConfiguration(
                             nodeName: options.nodeName,
-                            containerServiceUserID: options.containerServiceUserID
+                            containerServiceUserID: options.containerServiceUserID,
+                            dualStackEnabled: options.enableDualStack
                         ),
                         mode: 0o644,
                         sensitive: false
@@ -260,7 +262,10 @@ public enum MacOSKubeadmPlanner {
                     message: "write kube-proxy configuration",
                     action: .writeFile(
                         path: options.rooted("/etc/kubernetes/kube-proxy.conf"),
-                        contents: MacOSKubeadmRenderer.kubeProxyConfiguration(nodeName: options.nodeName),
+                        contents: MacOSKubeadmRenderer.kubeProxyConfiguration(
+                            nodeName: options.nodeName,
+                            dualStackEnabled: options.enableDualStack
+                        ),
                         mode: 0o644,
                         sensitive: false
                     )
@@ -391,8 +396,27 @@ public enum MacOSKubeadmPlanner {
                 )
             ),
             MacOSKubeadmStep(
+                message: "withdraw kube-proxy PF configuration",
+                action: .runCommand(
+                    arguments: [
+                        "/usr/local/bin/container-kube-proxy-macos",
+                        "--config",
+                        options.rooted("/etc/kubernetes/kube-proxy.conf"),
+                        "--withdraw",
+                    ],
+                    bestEffort: false
+                )
+            ),
+            MacOSKubeadmStep(
                 message: "flush kube-proxy PF anchor if present",
                 action: .runCommand(arguments: ["/sbin/pfctl", "-a", "com.apple.container.kube-proxy", "-F", "all"], bestEffort: true)
+            ),
+            MacOSKubeadmStep(
+                message: "flush kube-proxy IPv6 PF anchor if present",
+                action: .runCommand(
+                    arguments: ["/sbin/pfctl", "-a", "com.apple.container.kube-proxy.ipv6", "-F", "all"],
+                    bestEffort: true
+                )
             ),
         ]
 
@@ -466,6 +490,9 @@ public enum MacOSKubeadmPlanner {
     private static func validate(_ options: MacOSKubeadmJoinOptions) throws {
         guard options.apiServer.scheme?.lowercased() == "https", options.apiServer.host != nil else {
             throw MacOSKubeadmError.invalidInput("--apiserver must use HTTPS")
+        }
+        guard !options.enableDualStack || options.networkMode == .full else {
+            throw MacOSKubeadmError.invalidInput("--enable-dual-stack requires --network-mode full")
         }
         guard options.nodeName.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
             throw MacOSKubeadmError.invalidInput("--node-name may only contain letters, numbers, '.', '_', and '-'")
@@ -747,9 +774,28 @@ public enum MacOSKubeadmPlanner {
         }
         steps.append(contentsOf: [
             MacOSKubeadmStep(
+                message: "withdraw previous kube-proxy PF configuration",
+                action: .runCommand(
+                    arguments: [
+                        "/usr/local/bin/container-kube-proxy-macos",
+                        "--config",
+                        options.rooted("/etc/kubernetes/kube-proxy.conf"),
+                        "--withdraw",
+                    ],
+                    bestEffort: false
+                )
+            ),
+            MacOSKubeadmStep(
                 message: "flush previous kube-proxy PF anchor",
                 action: .runCommand(
                     arguments: ["/sbin/pfctl", "-a", "com.apple.container.kube-proxy", "-F", "all"],
+                    bestEffort: true
+                )
+            ),
+            MacOSKubeadmStep(
+                message: "flush previous kube-proxy IPv6 PF anchor",
+                action: .runCommand(
+                    arguments: ["/sbin/pfctl", "-a", "com.apple.container.kube-proxy.ipv6", "-F", "all"],
                     bestEffort: true
                 )
             ),

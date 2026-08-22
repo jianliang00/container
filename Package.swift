@@ -324,7 +324,10 @@ let package = Package(
         .target(
             name: "CContainerK8sFlannelVXLANMacOS",
             dependencies: [],
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [
+                .define("CONTAINER_VXLAN_TEST_HOOKS", .when(configuration: .debug))
+            ]
         ),
         .target(
             name: "ContainerK8sFlannelVXLANMacOS",

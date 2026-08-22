@@ -269,19 +269,39 @@ public struct KubeProxyConfig: Codable, Equatable, Sendable {
 
 public struct PodNetworkConfig: Codable, Equatable, Sendable {
     public var enabled: Bool?
+    public var dualStackEnabled: Bool
     public var networkName: String?
     public var runtimeStatePath: String?
     public var readyStatePath: String?
 
     public init(
         enabled: Bool? = nil,
+        dualStackEnabled: Bool = false,
         networkName: String? = nil,
         runtimeStatePath: String? = nil,
         readyStatePath: String? = nil
     ) {
         self.enabled = enabled
+        self.dualStackEnabled = dualStackEnabled
         self.networkName = networkName
         self.runtimeStatePath = runtimeStatePath
         self.readyStatePath = readyStatePath
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case dualStackEnabled
+        case networkName
+        case runtimeStatePath
+        case readyStatePath
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        dualStackEnabled = try container.decodeIfPresent(Bool.self, forKey: .dualStackEnabled) ?? false
+        networkName = try container.decodeIfPresent(String.self, forKey: .networkName)
+        runtimeStatePath = try container.decodeIfPresent(String.self, forKey: .runtimeStatePath)
+        readyStatePath = try container.decodeIfPresent(String.self, forKey: .readyStatePath)
     }
 }

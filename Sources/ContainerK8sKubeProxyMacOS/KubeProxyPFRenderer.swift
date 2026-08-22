@@ -14,7 +14,12 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Darwin
 import Foundation
+
+public enum KubeProxyPFCoordination {
+    public static let advisoryLockPath = "/var/run/com.apple.container.pf.lock"
+}
 
 public enum KubeProxyPFRenderer {
     private static let maximumTableNameLength = 31
@@ -63,7 +68,7 @@ public enum KubeProxyPFRenderer {
             let backendPort = rule.backends[0].port
             let roundRobin = rule.backends.count > 1 ? " round-robin" : ""
             lines.append(
-                "rdr pass inet proto \(rule.protocolName.pfName) from any to \(rule.clusterIP) port \(rule.servicePort) -> <\(tableName)> port \(backendPort)\(roundRobin)"
+                "rdr pass \(rule.family.pfName) proto \(rule.protocolName.pfName) from any to \(rule.clusterIP) port \(rule.servicePort) -> <\(tableName)> port \(backendPort)\(roundRobin)"
             )
         }
 
@@ -81,6 +86,7 @@ public enum KubeProxyPFRenderer {
     public static func tableName(for rule: KubeProxyServiceRule) -> String {
         let raw = [
             "ckp",
+            rule.family.tableNameComponent,
             rule.namespace,
             rule.serviceName,
             rule.portName ?? "\(rule.servicePort)",
@@ -118,24 +124,248 @@ public protocol KubeProxyRuleApplying: Sendable {
         localPodCIDR: String,
         masqueradePodTraffic: Bool
     ) throws
+
+    func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        podNetwork: KubeProxyFamilyRuleApplication
+    ) throws
+
+    func withdraw() throws
+
+    func withdrawIPv6() throws
+}
+
+public struct KubeProxyFamilyRuleApplication: Sendable, Equatable {
+    public var ipv4PodCIDR: String
+    public var ipv6PodCIDR: String?
+    public var ipv4Ready: Bool
+    public var ipv6Ready: Bool
+    public var dualStackEnabled: Bool
+    public var masqueradeIPv4PodTraffic: Bool
+
+    public init(
+        ipv4PodCIDR: String,
+        ipv6PodCIDR: String? = nil,
+        ipv4Ready: Bool = true,
+        ipv6Ready: Bool = false,
+        dualStackEnabled: Bool = false,
+        masqueradeIPv4PodTraffic: Bool = true
+    ) {
+        self.ipv4PodCIDR = ipv4PodCIDR
+        self.ipv6PodCIDR = ipv6PodCIDR
+        self.ipv4Ready = ipv4Ready
+        self.ipv6Ready = ipv6Ready
+        self.dualStackEnabled = dualStackEnabled
+        self.masqueradeIPv4PodTraffic = masqueradeIPv4PodTraffic
+    }
+}
+
+extension KubeProxyRuleApplying {
+    public func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        podNetwork: KubeProxyFamilyRuleApplication
+    ) throws {
+        guard podNetwork.ipv4Ready else {
+            throw KubeProxyMacOSError.applyFailed("pod network IPv4 family is not ready")
+        }
+        guard !podNetwork.dualStackEnabled else {
+            throw KubeProxyMacOSError.unsupported(
+                "this rule applier does not implement dual-stack family transactions"
+            )
+        }
+        try apply(
+            ruleSet.selecting(families: [.ipv4]),
+            localPodCIDR: podNetwork.ipv4PodCIDR,
+            masqueradePodTraffic: podNetwork.masqueradeIPv4PodTraffic
+        )
+    }
+
+    public func withdraw() throws {
+        throw KubeProxyMacOSError.unsupported("this rule applier does not implement PF withdrawal")
+    }
+
+    public func withdrawIPv6() throws {
+        throw KubeProxyMacOSError.unsupported("this rule applier does not implement IPv6 PF withdrawal")
+    }
 }
 
 public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
     public let config: KubeProxyPFConfig
     private let egressInterfaceResolver: any KubeProxyEgressInterfaceResolving
+    private let advisoryLockPath: String
+
+    // NSLock covers callers in this process; the advisory lock coordinates
+    // cooperating PF writers across processes. Direct pfctl calls remain outside it.
+    private static let processApplyLock = NSLock()
 
     public init(
         config: KubeProxyPFConfig = KubeProxyPFConfig(),
         egressInterfaceResolver: any KubeProxyEgressInterfaceResolving = KubeProxyDefaultIPv4EgressInterfaceResolver()
     ) {
+        self.init(
+            config: config,
+            egressInterfaceResolver: egressInterfaceResolver,
+            advisoryLockPath: KubeProxyPFCoordination.advisoryLockPath
+        )
+    }
+
+    init(
+        config: KubeProxyPFConfig,
+        egressInterfaceResolver: any KubeProxyEgressInterfaceResolving = KubeProxyDefaultIPv4EgressInterfaceResolver(),
+        advisoryLockPath: String
+    ) {
         self.config = config
         self.egressInterfaceResolver = egressInterfaceResolver
+        self.advisoryLockPath = advisoryLockPath
     }
 
     public func apply(
         _ ruleSet: KubeProxyRuleSet,
         localPodCIDR: String,
         masqueradePodTraffic: Bool = false
+    ) throws {
+        try withMutationLock {
+            try applyLegacyLocked(
+                ruleSet.selecting(families: [.ipv4]),
+                localPodCIDR: localPodCIDR,
+                masqueradePodTraffic: masqueradePodTraffic
+            )
+        }
+    }
+
+    public func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        podNetwork: KubeProxyFamilyRuleApplication
+    ) throws {
+        try withMutationLock {
+            guard podNetwork.ipv4Ready else {
+                throw KubeProxyMacOSError.applyFailed("pod network IPv4 family is not ready")
+            }
+            guard let canonicalIPv4PodCIDR = KubeProxyIPv4CIDR.canonicalize(podNetwork.ipv4PodCIDR),
+                canonicalIPv4PodCIDR == podNetwork.ipv4PodCIDR
+            else {
+                throw KubeProxyMacOSError.applyFailed("local IPv4 PodCIDR is not canonical")
+            }
+
+            let canonicalIPv6PodCIDR: String?
+            if podNetwork.dualStackEnabled, podNetwork.ipv6Ready {
+                guard let ipv6PodCIDR = podNetwork.ipv6PodCIDR,
+                    let canonical = KubeProxyIPv6CIDR.canonicalize(ipv6PodCIDR),
+                    canonical == ipv6PodCIDR
+                else {
+                    throw KubeProxyMacOSError.applyFailed(
+                        "ready IPv6 family requires a canonical local IPv6 PodCIDR"
+                    )
+                }
+                canonicalIPv6PodCIDR = canonical
+            } else {
+                canonicalIPv6PodCIDR = nil
+            }
+
+            let originalConfig = try readPFConfig()
+            let ipv6AnchorURL = anchorURL(named: config.ipv6AnchorName)
+            let hasStaleIPv6State =
+                FileManager.default.fileExists(atPath: ipv6AnchorURL.path)
+                || hasAnchorReferences(content: originalConfig.content, anchorName: config.ipv6AnchorName)
+
+            if !podNetwork.ipv6Ready, !hasStaleIPv6State {
+                try applyLegacyLocked(
+                    ruleSet.selecting(families: [.ipv4]),
+                    localPodCIDR: canonicalIPv4PodCIDR,
+                    masqueradePodTraffic: podNetwork.masqueradeIPv4PodTraffic
+                )
+                return
+            }
+
+            try applyFamiliesLocked(
+                ruleSet,
+                podNetwork: podNetwork,
+                canonicalIPv4PodCIDR: canonicalIPv4PodCIDR,
+                canonicalIPv6PodCIDR: canonicalIPv6PodCIDR,
+                originalConfig: originalConfig
+            )
+        }
+    }
+
+    public func withdraw() throws {
+        try withMutationLock {
+            try withdrawLocked(families: [.ipv4, .ipv6])
+        }
+    }
+
+    public func withdrawIPv6() throws {
+        try withMutationLock {
+            try withdrawLocked(families: [.ipv6])
+        }
+    }
+
+    private func withdrawLocked(families: Set<KubeProxyAddressFamily>) throws {
+        let fileManager = FileManager.default
+        let configURL = URL(fileURLWithPath: config.configPath)
+        let ipv4AnchorURL = anchorURL(named: config.anchorName)
+        let ipv6AnchorURL = anchorURL(named: config.ipv6AnchorName)
+        let originalConfig = try readPFConfig()
+        guard originalConfig.data != nil else {
+            throw KubeProxyMacOSError.applyFailed("PF config is missing at \(config.configPath)")
+        }
+        let originalIPv4AnchorData = fileManager.contents(atPath: ipv4AnchorURL.path)
+        let originalIPv6AnchorData = fileManager.contents(atPath: ipv6AnchorURL.path)
+        var candidateConfig = originalConfig.content
+        if families.contains(.ipv4) {
+            candidateConfig = pfConfigWithAnchorReferences(
+                content: candidateConfig,
+                anchorName: config.anchorName,
+                anchorURL: ipv4AnchorURL,
+                includeNATAnchor: false,
+                enabled: false
+            )
+        }
+        if families.contains(.ipv6) {
+            candidateConfig = pfConfigWithAnchorReferences(
+                content: candidateConfig,
+                anchorName: config.ipv6AnchorName,
+                anchorURL: ipv6AnchorURL,
+                includeNATAnchor: false,
+                enabled: false
+            )
+        }
+        let hasManagedAnchorFiles =
+            (families.contains(.ipv4) && originalIPv4AnchorData != nil)
+            || (families.contains(.ipv6) && originalIPv6AnchorData != nil)
+        if candidateConfig == originalConfig.content, !hasManagedAnchorFiles {
+            if families.contains(.ipv4) {
+                try flushManagedAnchors(families)
+            }
+            return
+        }
+        var attemptedRootReload = false
+
+        do {
+            try validateAndInstallConfig(candidateConfig, configURL: configURL)
+            attemptedRootReload = true
+            try runPFCTL(arguments: ["-f", configURL.path], failureMessage: "pfctl reload failed")
+            try flushManagedAnchors(families)
+            if families.contains(.ipv4) {
+                try removeFileIfPresent(at: ipv4AnchorURL)
+            }
+            if families.contains(.ipv6) {
+                try removeFileIfPresent(at: ipv6AnchorURL)
+            }
+        } catch {
+            let restoredIPv4Anchor = restoreFile(at: ipv4AnchorURL, originalData: originalIPv4AnchorData)
+            let restoredIPv6Anchor = restoreFile(at: ipv6AnchorURL, originalData: originalIPv6AnchorData)
+            let restoredConfig = restoreFile(at: configURL, originalData: originalConfig.data)
+            if attemptedRootReload, restoredIPv4Anchor, restoredIPv6Anchor, restoredConfig {
+                try? runPFCTL(arguments: ["-f", configURL.path], failureMessage: "pfctl rollback failed")
+            }
+            throw error
+        }
+    }
+
+    private func applyLegacyLocked(
+        _ ruleSet: KubeProxyRuleSet,
+        localPodCIDR: String,
+        masqueradePodTraffic: Bool
     ) throws {
         guard let canonicalPodCIDR = KubeProxyIPv4CIDR.canonicalize(localPodCIDR),
             canonicalPodCIDR == localPodCIDR
@@ -146,7 +376,7 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
         let fileManager = FileManager.default
         let configURL = URL(fileURLWithPath: config.configPath)
         let anchorsURL = URL(fileURLWithPath: config.anchorsPath)
-        let anchorURL = anchorsURL.appendingPathComponent(config.anchorName)
+        let anchorURL = anchorURL(named: config.anchorName)
 
         try ensurePFEnabled()
         try fileManager.createDirectory(at: anchorsURL, withIntermediateDirectories: true)
@@ -169,8 +399,10 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
         )
         let candidateConfig = pfConfigWithAnchorReferences(
             content: originalConfig,
+            anchorName: config.anchorName,
             anchorURL: anchorURL,
-            includeNATAnchor: masqueradePodTraffic
+            includeNATAnchor: masqueradePodTraffic,
+            enabled: true
         )
         let rootConfigChanged = candidateConfig != originalConfig
         var attemptedRootReload = false
@@ -208,6 +440,100 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
         }
     }
 
+    private func applyFamiliesLocked(
+        _ ruleSet: KubeProxyRuleSet,
+        podNetwork: KubeProxyFamilyRuleApplication,
+        canonicalIPv4PodCIDR: String,
+        canonicalIPv6PodCIDR: String?,
+        originalConfig: (data: Data?, content: String)
+    ) throws {
+        let fileManager = FileManager.default
+        let configURL = URL(fileURLWithPath: config.configPath)
+        let anchorsURL = URL(fileURLWithPath: config.anchorsPath)
+        let ipv4AnchorURL = anchorURL(named: config.anchorName)
+        let ipv6AnchorURL = anchorURL(named: config.ipv6AnchorName)
+        let ipv6Active = podNetwork.dualStackEnabled && podNetwork.ipv6Ready
+        let egressInterface = try resolvedEgressInterface(
+            masqueradePodTraffic: podNetwork.masqueradeIPv4PodTraffic
+        )
+
+        try ensurePFEnabled()
+        try fileManager.createDirectory(at: anchorsURL, withIntermediateDirectories: true)
+
+        let originalIPv4AnchorData = fileManager.contents(atPath: ipv4AnchorURL.path)
+        let originalIPv6AnchorData = fileManager.contents(atPath: ipv6AnchorURL.path)
+        let ipv4Anchor = try KubeProxyPFRenderer.renderAnchor(
+            ruleSet: ruleSet.selecting(families: [.ipv4]),
+            anchorName: config.anchorName,
+            localPodCIDR: canonicalIPv4PodCIDR,
+            masqueradePodTraffic: podNetwork.masqueradeIPv4PodTraffic,
+            egressInterface: egressInterface
+        )
+        let ipv6Anchor: String
+        if ipv6Active, let canonicalIPv6PodCIDR {
+            ipv6Anchor = try KubeProxyPFRenderer.renderAnchor(
+                ruleSet: ruleSet.selecting(families: [.ipv6]),
+                anchorName: config.ipv6AnchorName,
+                localPodCIDR: canonicalIPv6PodCIDR,
+                masqueradePodTraffic: false
+            )
+        } else {
+            ipv6Anchor = """
+                # generated by container-kube-proxy-macos
+                # anchor: \(config.ipv6AnchorName)
+                # IPv6 family disabled or not ready
+
+                """
+        }
+
+        var candidateConfig = pfConfigWithAnchorReferences(
+            content: originalConfig.content,
+            anchorName: config.anchorName,
+            anchorURL: ipv4AnchorURL,
+            includeNATAnchor: podNetwork.masqueradeIPv4PodTraffic,
+            enabled: true
+        )
+        candidateConfig = pfConfigWithAnchorReferences(
+            content: candidateConfig,
+            anchorName: config.ipv6AnchorName,
+            anchorURL: ipv6AnchorURL,
+            includeNATAnchor: false,
+            enabled: ipv6Active
+        )
+        var attemptedRootReload = false
+
+        do {
+            try ipv4Anchor.write(to: ipv4AnchorURL, atomically: true, encoding: .utf8)
+            try ipv6Anchor.write(to: ipv6AnchorURL, atomically: true, encoding: .utf8)
+            try validateAndInstallConfig(candidateConfig, configURL: configURL)
+            attemptedRootReload = true
+            try runPFCTL(arguments: ["-f", configURL.path], failureMessage: "pfctl reload failed")
+
+            if !ipv6Active {
+                try runPFCTL(
+                    arguments: ["-a", config.ipv6AnchorName, "-F", "all"],
+                    failureMessage: "pfctl IPv6 anchor flush failed"
+                )
+                if !podNetwork.dualStackEnabled {
+                    try fileManager.removeItem(at: ipv6AnchorURL)
+                }
+            }
+        } catch {
+            let restoredIPv4Anchor = restoreFile(at: ipv4AnchorURL, originalData: originalIPv4AnchorData)
+            let restoredIPv6Anchor = restoreFile(at: ipv6AnchorURL, originalData: originalIPv6AnchorData)
+            let restoredConfig = restoreFile(at: configURL, originalData: originalConfig.data)
+            if attemptedRootReload,
+                restoredIPv4Anchor,
+                restoredIPv6Anchor,
+                restoredConfig,
+                originalConfig.data != nil
+            {
+                try? runPFCTL(arguments: ["-f", configURL.path], failureMessage: "pfctl rollback failed")
+            }
+            throw error
+        }
+    }
+
     private func resolvedEgressInterface(masqueradePodTraffic: Bool) throws -> String {
         if let configured = config.configuredEgressInterface {
             return configured
@@ -234,12 +560,14 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
 
     private func pfConfigWithAnchorReferences(
         content: String,
+        anchorName: String,
         anchorURL: URL,
-        includeNATAnchor: Bool
+        includeNATAnchor: Bool,
+        enabled: Bool
     ) -> String {
-        let natAnchor = "nat-anchor \"\(config.anchorName)\""
-        let rdrAnchor = "rdr-anchor \"\(config.anchorName)\""
-        let loadAnchor = "load anchor \"\(config.anchorName)\" from \"\(anchorURL.path)\""
+        let natAnchor = "nat-anchor \"\(anchorName)\""
+        let rdrAnchor = "rdr-anchor \"\(anchorName)\""
+        let loadAnchor = "load anchor \"\(anchorName)\" from \"\(anchorURL.path)\""
         var lines = content.components(separatedBy: .newlines)
         if lines.isEmpty {
             lines = [""]
@@ -248,19 +576,19 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
         let hasNATAnchor = lines.contains { line in
             line.trimmingCharacters(in: .whitespaces) == natAnchor
         }
-        if includeNATAnchor, !hasNATAnchor {
+        if enabled, includeNATAnchor, !hasNATAnchor {
             let insertionIndex =
                 lines.firstIndex { line in
                     pfDirective(line, startsWith: "rdr-anchor") || pfDirective(line, startsWith: "nat-anchor")
                 } ?? max(lines.endIndex - 1, lines.startIndex)
             lines.insert(natAnchor, at: insertionIndex)
-        } else if !includeNATAnchor {
+        } else if !enabled || !includeNATAnchor {
             lines.removeAll { line in
                 line.trimmingCharacters(in: .whitespaces) == natAnchor
             }
         }
 
-        if !lines.contains(where: { normalizedPFDirective($0) == rdrAnchor }) {
+        if enabled, !lines.contains(where: { normalizedPFDirective($0) == rdrAnchor }) {
             let anchorKeywords = ["scrub-anchor", "nat-anchor", "rdr-anchor", "dummynet-anchor", "anchor", "load anchor"]
             let insertionIndex =
                 lines.firstIndex { line in
@@ -269,13 +597,85 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
                     }
                 } ?? max(lines.endIndex - 1, lines.startIndex)
             lines.insert(rdrAnchor, at: insertionIndex)
+        } else if !enabled {
+            lines.removeAll { normalizedPFDirective($0) == rdrAnchor }
         }
 
-        if !lines.contains(where: { normalizedPFDirective($0) == loadAnchor }) {
+        if enabled, !lines.contains(where: { normalizedPFDirective($0) == loadAnchor }) {
             lines.insert(loadAnchor, at: max(lines.endIndex - 1, lines.startIndex))
+        } else if !enabled {
+            lines.removeAll { normalizedPFDirective($0) == loadAnchor }
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private func anchorURL(named anchorName: String) -> URL {
+        URL(fileURLWithPath: config.anchorsPath).appendingPathComponent(anchorName)
+    }
+
+    private func readPFConfig() throws -> (data: Data?, content: String) {
+        let data = FileManager.default.contents(atPath: config.configPath)
+        let content =
+            try data.map { data in
+                guard let value = String(data: data, encoding: .utf8) else {
+                    throw KubeProxyMacOSError.applyFailed("\(config.configPath) is not valid UTF-8")
+                }
+                return value
+            } ?? ""
+        return (data, content)
+    }
+
+    private func hasAnchorReferences(content: String, anchorName: String) -> Bool {
+        let directives = [
+            "nat-anchor \"\(anchorName)\"",
+            "rdr-anchor \"\(anchorName)\"",
+            "load anchor \"\(anchorName)\"",
+        ]
+        return content.components(separatedBy: .newlines).contains { line in
+            let normalized = normalizedPFDirective(line)
+            return directives.contains { directive in
+                normalized == directive || normalized.hasPrefix("\(directive) ")
+            }
+        }
+    }
+
+    private func withMutationLock<T>(_ operation: () throws -> T) throws -> T {
+        Self.processApplyLock.lock()
+        defer { Self.processApplyLock.unlock() }
+
+        let descriptor = advisoryLockPath.withCString { path in
+            Darwin.open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        }
+        guard descriptor >= 0 else {
+            throw KubeProxyMacOSError.applyFailed(
+                "failed to open PF advisory lock at \(advisoryLockPath): \(posixErrorDescription())"
+            )
+        }
+        defer { Darwin.close(descriptor) }
+        _ = Darwin.fcntl(descriptor, F_SETFD, FD_CLOEXEC)
+
+        var lock = Darwin.flock()
+        lock.l_type = Int16(F_WRLCK)
+        lock.l_whence = Int16(SEEK_SET)
+        while Darwin.fcntl(descriptor, F_SETLKW, &lock) != 0 {
+            guard errno == EINTR else {
+                throw KubeProxyMacOSError.applyFailed(
+                    "failed to acquire PF advisory lock at \(advisoryLockPath): \(posixErrorDescription())"
+                )
+            }
+        }
+        defer {
+            var unlock = Darwin.flock()
+            unlock.l_type = Int16(F_UNLCK)
+            unlock.l_whence = Int16(SEEK_SET)
+            _ = Darwin.fcntl(descriptor, F_SETLK, &unlock)
+        }
+        return try operation()
+    }
+
+    private func posixErrorDescription() -> String {
+        String(cString: strerror(errno))
     }
 
     private func validateAndInstallConfig(_ content: String, configURL: URL) throws {
@@ -312,6 +712,28 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
             return true
         } catch {
             return false
+        }
+    }
+
+    private func removeFileIfPresent(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func flushManagedAnchors(_ families: Set<KubeProxyAddressFamily>) throws {
+        if families.contains(.ipv4) {
+            try runPFCTL(
+                arguments: ["-a", config.anchorName, "-F", "all"],
+                failureMessage: "pfctl IPv4 anchor flush failed"
+            )
+        }
+        if families.contains(.ipv6) {
+            try runPFCTL(
+                arguments: ["-a", config.ipv6AnchorName, "-F", "all"],
+                failureMessage: "pfctl IPv6 anchor flush failed"
+            )
         }
     }
 
@@ -401,11 +823,54 @@ public struct KubeProxyDryRunRuleApplier: KubeProxyRuleApplying {
         }
         output(
             try KubeProxyPFRenderer.renderAnchor(
-                ruleSet: ruleSet,
+                ruleSet: ruleSet.selecting(families: [.ipv4]),
                 anchorName: anchorName,
                 localPodCIDR: canonicalPodCIDR,
                 masqueradePodTraffic: masqueradePodTraffic,
                 egressInterface: resolvedEgressInterface
             ))
+    }
+
+    public func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        podNetwork: KubeProxyFamilyRuleApplication
+    ) throws {
+        guard podNetwork.ipv4Ready else {
+            throw KubeProxyMacOSError.applyFailed("pod network IPv4 family is not ready")
+        }
+        try apply(
+            ruleSet.selecting(families: [.ipv4]),
+            localPodCIDR: podNetwork.ipv4PodCIDR,
+            masqueradePodTraffic: podNetwork.masqueradeIPv4PodTraffic
+        )
+
+        let ipv6AnchorName = "\(anchorName).ipv6"
+        if podNetwork.dualStackEnabled, podNetwork.ipv6Ready {
+            guard let ipv6PodCIDR = podNetwork.ipv6PodCIDR,
+                KubeProxyIPv6CIDR.canonicalize(ipv6PodCIDR) == ipv6PodCIDR
+            else {
+                throw KubeProxyMacOSError.applyFailed(
+                    "ready IPv6 family requires a canonical local IPv6 PodCIDR"
+                )
+            }
+            output(
+                try KubeProxyPFRenderer.renderAnchor(
+                    ruleSet: ruleSet.selecting(families: [.ipv6]),
+                    anchorName: ipv6AnchorName,
+                    localPodCIDR: ipv6PodCIDR,
+                    masqueradePodTraffic: false
+                ))
+        } else if podNetwork.dualStackEnabled {
+            output("# pfctl -a \(ipv6AnchorName) -F all\n")
+        }
+    }
+
+    public func withdraw() throws {
+        output("# pfctl -a \(anchorName) -F all\n")
+        output("# pfctl -a \(anchorName).ipv6 -F all\n")
+    }
+
+    public func withdrawIPv6() throws {
+        output("# pfctl -a \(anchorName).ipv6 -F all\n")
     }
 }

@@ -62,6 +62,9 @@ struct GuestNetworkConfiguratorTests {
                     ipv4Address: "192.168.64.2",
                     ipv4PrefixLength: 24,
                     ipv4Gateway: "192.168.64.1",
+                    ipv6Address: "fd42:10:244:22::2",
+                    ipv6PrefixLength: 64,
+                    ipv6Gateway: "fd42:10:244:22::1",
                     mtu: 1_450
                 )
             ],
@@ -125,11 +128,15 @@ struct GuestNetworkConfiguratorTests {
         #expect(result.effectiveDNS?.searchDomains == ["svc.cluster.local"])
         #expect(result.effectiveDNS?.options == ["ndots:5"])
         #expect(result.interfaces[0].effectiveMTU == 1_450)
+        #expect(result.interfaces[0].ipv6Address == "fd42:10:244:22::2/64")
 
         let invocation = try #require(systemRecorder.invocation())
         #expect(invocation.primaryIndex == 0)
         #expect(invocation.interfaces[0].interfaceName == "en0")
         #expect(invocation.interfaces[0].ipv4Address == "192.168.64.2")
+        #expect(invocation.interfaces[0].ipv6Address == "fd42:10:244:22::2")
+        #expect(invocation.interfaces[0].ipv6PrefixLength == 64)
+        #expect(invocation.interfaces[0].ipv6Gateway == "fd42:10:244:22::1")
         #expect(invocation.dns?.nameservers == ["127.0.0.1"])
         #expect(invocation.dns?.options == ["ndots:5"])
         #expect(proxyRecorder.configuration()?.nameservers == ["192.168.64.1"])
@@ -178,6 +185,150 @@ struct GuestNetworkConfiguratorTests {
         #expect(dns["DomainName"] as? String == "cluster.local")
         #expect(dns["SearchDomains"] as? [String] == ["default.svc.cluster.local", "svc.cluster.local"])
         #expect(dns["Options"] as? String == "ndots:5 timeout:2")
+    }
+
+    @Test
+    func buildsManualIPv6ProtocolConfiguration() throws {
+        let interface = GuestSystemNetworkConfigurator.InterfaceConfiguration(
+            networkID: "default",
+            interfaceName: "en0",
+            macAddress: "02:42:ac:11:00:02",
+            ipv4Address: "192.168.64.2",
+            ipv4PrefixLength: 24,
+            ipv4Gateway: "192.168.64.1",
+            ipv6Address: "fd42:10:244:22::2",
+            ipv6PrefixLength: 64,
+            ipv6Gateway: "fd42:10:244:22::1"
+        )
+
+        let primary = try GuestSystemNetworkConfigurator.ipv6ConfigurationDictionary(for: interface)
+        let secondary = try GuestSystemNetworkConfigurator.ipv6ConfigurationDictionary(
+            for: interface,
+            includeDefaultRoute: false
+        )
+
+        #expect(primary["ConfigMethod"] as? String == "Manual")
+        #expect(primary["Addresses"] as? [String] == ["fd42:10:244:22::2"])
+        #expect(primary["PrefixLength"] as? [Int] == [64])
+        #expect(primary["Router"] as? String == "fd42:10:244:22::1")
+        #expect(secondary["Router"] == nil)
+    }
+
+    @Test
+    func rejectsPartialIPv6ProtocolConfiguration() throws {
+        let interface = GuestSystemNetworkConfigurator.InterfaceConfiguration(
+            networkID: "default",
+            interfaceName: "en0",
+            macAddress: "02:42:ac:11:00:02",
+            ipv4Address: "192.168.64.2",
+            ipv4PrefixLength: 24,
+            ipv4Gateway: "192.168.64.1",
+            ipv6Address: "fd42:10:244:22::2"
+        )
+
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.ipv6ConfigurationDictionary(for: interface)
+        }
+    }
+
+    @Test(
+        arguments: [
+            ("fd42:10:244:22::2", UInt8(80), "fd42:10:244:22::1"),
+            ("fd42:10:244:22::2", UInt8(64), "fd42:10:244:23::1"),
+            ("fd42:10:244:22::2", UInt8(64), "fd42:10:244:22::2"),
+            ("fd42:10:244:22::2", UInt8(64), "fd42:10:244:22::"),
+            ("fe80::2", UInt8(64), "fe80::1"),
+            ("ff02::2", UInt8(64), "ff02::1"),
+        ]
+    )
+    func rejectsUnsafeIPv6ProtocolConfiguration(
+        address: String,
+        prefixLength: UInt8,
+        gateway: String
+    ) {
+        let interface = GuestSystemNetworkConfigurator.InterfaceConfiguration(
+            networkID: "default",
+            interfaceName: "en0",
+            macAddress: "02:42:ac:11:00:02",
+            ipv4Address: "192.168.64.2",
+            ipv4PrefixLength: 24,
+            ipv4Gateway: "192.168.64.1",
+            ipv6Address: address,
+            ipv6PrefixLength: prefixLength,
+            ipv6Gateway: gateway
+        )
+
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.ipv6ConfigurationDictionary(for: interface)
+        }
+    }
+
+    @Test
+    func validatesDisabledIPv6StateAfterCleanup() throws {
+        try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+            protocolEnabled: nil,
+            configuredProperties: nil,
+            effectiveProperties: nil,
+            interfaceName: "en0"
+        )
+        try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+            protocolEnabled: false,
+            configuredProperties: nil,
+            effectiveProperties: [
+                "Addresses": ["fe80::1%en0"],
+                "PrefixLength": [64],
+                "InterfaceName": "en0",
+            ],
+            interfaceName: "en0"
+        )
+    }
+
+    @Test
+    func rejectsDisabledIPv6StateWithResidualAddressOrRouter() {
+        let residualStates: [NSDictionary] = [
+            [
+                "Addresses": ["fe80::1", "fd42:10:244:22::2"],
+                "PrefixLength": [64, 64],
+                "InterfaceName": "en0",
+            ],
+            [
+                "Addresses": ["fe80::1"],
+                "PrefixLength": [64],
+                "Router": "fe80::ffff%en0",
+                "InterfaceName": "en0",
+            ],
+        ]
+
+        for residualState in residualStates {
+            #expect(throws: (any Error).self) {
+                try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+                    protocolEnabled: false,
+                    configuredProperties: nil,
+                    effectiveProperties: residualState,
+                    interfaceName: "en0"
+                )
+            }
+        }
+    }
+
+    @Test
+    func rejectsDisabledIPv6StateWithEnabledOrConfiguredProtocol() {
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+                protocolEnabled: true,
+                configuredProperties: nil,
+                effectiveProperties: nil,
+                interfaceName: "en0"
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try GuestSystemNetworkConfigurator.validateDisabledIPv6State(
+                protocolEnabled: false,
+                configuredProperties: ["ConfigMethod": "Manual"],
+                effectiveProperties: nil,
+                interfaceName: "en0"
+            )
+        }
     }
 
     @Test
@@ -319,12 +470,15 @@ extension GuestNetworkConfiguratorTests {
         interfaces: [GuestSystemNetworkConfigurator.InterfaceConfiguration],
         dns: MacOSGuestDNSConfiguration?
     ) -> GuestSystemNetworkConfigurator.Result {
-        let applied = interfaces.map {
+        let applied = interfaces.map { interface in
             GuestSystemNetworkConfigurator.AppliedInterface(
-                networkID: $0.networkID,
-                interfaceName: $0.interfaceName,
-                macAddress: $0.macAddress,
-                ipv4Address: "\($0.ipv4Address)/\($0.ipv4PrefixLength)"
+                networkID: interface.networkID,
+                interfaceName: interface.interfaceName,
+                macAddress: interface.macAddress,
+                ipv4Address: "\(interface.ipv4Address)/\(interface.ipv4PrefixLength)",
+                ipv6Address: interface.ipv6Address.flatMap { address in
+                    interface.ipv6PrefixLength.map { "\(address)/\($0)" }
+                }
             )
         }
         let effectiveDNS = dns.map {

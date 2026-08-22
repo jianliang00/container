@@ -59,6 +59,9 @@ extension MacOSKubeadm {
         @Option(help: "Node network mode: full or compat.")
         var networkMode: String = MacOSKubeadmNetworkMode.full.rawValue
 
+        @Flag(help: "Enable dual-stack Pod networking. Supported only with --network-mode full.")
+        var enableDualStack: Bool = false
+
         @Option(help: "UID whose bootstrap domain runs container core services. Defaults to SUDO_UID when available, otherwise 0.")
         var containerServiceUser: Int?
 
@@ -77,6 +80,9 @@ extension MacOSKubeadm {
         func run() throws {
             let apiServer = try parseAPIServerEndpoint(apiServerEndpoint)
             let resolvedNetworkMode = try parseNetworkMode(networkMode)
+            guard !enableDualStack || resolvedNetworkMode == .full else {
+                throw ValidationError("--enable-dual-stack requires --network-mode full")
+            }
             let resolvedContainerServiceUser = try resolveContainerServiceUser()
             let resolvedRuntimeClasses = try runtimeClass.map {
                 try parseRuntimeClass($0, networkMode: resolvedNetworkMode)
@@ -90,6 +96,7 @@ extension MacOSKubeadm {
                 sandboxImage: sandboxImage,
                 runtimeClasses: resolvedRuntimeClasses,
                 networkMode: resolvedNetworkMode,
+                enableDualStack: enableDualStack,
                 containerServiceUserID: resolvedContainerServiceUser,
                 installRoot: installRoot,
                 startServices: !skipStart,

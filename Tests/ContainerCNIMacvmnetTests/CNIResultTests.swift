@@ -14,6 +14,8 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
+import ContainerizationExtras
 import Foundation
 import Testing
 
@@ -51,6 +53,48 @@ struct CNIResultTests {
 
         #expect(decoded.cniVersion == "1.1.0")
         #expect(decoded.supportedVersions == ["1.1.0"])
+    }
+
+    @Test func projectsExplicitDualStackAttachment() throws {
+        let attachment = Attachment(
+            network: "kubernetes-pod",
+            hostname: "sandbox-1",
+            ipv4Address: try CIDRv4("10.250.34.2/24"),
+            ipv4Gateway: try IPv4Address("10.250.34.1"),
+            ipv6Address: try CIDRv6("fd42:10:244:22::2/64"),
+            ipv6Gateway: try IPv6Address("fd42:10:244:22::1"),
+            macAddress: try MACAddress("02:00:00:00:00:01")
+        )
+
+        let result = CNIResult(
+            attachment: attachment,
+            interfaceName: "eth0",
+            sandbox: try CNISandboxURI("macvmnet://sandbox/sandbox-1")
+        )
+
+        #expect(result.ips?.map(\.address) == ["10.250.34.2/24", "fd42:10:244:22::2/64"])
+        #expect(result.ips?.map(\.gateway) == ["10.250.34.1", "fd42:10:244:22::1"])
+        #expect(
+            result.routes == [
+                CNIRoute(dst: "0.0.0.0/0", gw: "10.250.34.1"),
+                CNIRoute(dst: "::/0", gw: "fd42:10:244:22::1"),
+            ])
+    }
+
+    @Test func ignoresVmnetGeneratedIPv6AddressWithoutExplicitGateway() throws {
+        let attachment = Attachment(
+            network: "kubernetes-pod",
+            hostname: "sandbox-1",
+            ipv4Address: try CIDRv4("10.250.34.2/24"),
+            ipv4Gateway: try IPv4Address("10.250.34.1"),
+            ipv6Address: try CIDRv6("fd42:25e3:5eb4:24a4::2/64"),
+            macAddress: try MACAddress("02:00:00:00:00:01")
+        )
+
+        let result = CNIResult(attachment: attachment, interfaceName: "eth0", sandbox: nil)
+
+        #expect(result.ips?.map(\.address) == ["10.250.34.2/24"])
+        #expect(result.routes == [CNIRoute(dst: "0.0.0.0/0", gw: "10.250.34.1")])
     }
 
     @Test func encodesStableCNIErrorResponse() throws {

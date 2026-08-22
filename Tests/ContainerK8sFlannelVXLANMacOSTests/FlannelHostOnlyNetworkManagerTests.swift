@@ -136,6 +136,129 @@ struct FlannelHostOnlyNetworkManagerTests {
         #expect(await backend.networks.count == 1)
         #expect(await backend.deleteCalls == ["kubernetes-pod"])
     }
+
+    @Test
+    func createsAndStrictlyValidatesExplicitDualStackNetwork() async throws {
+        let backend = MockFlannelNetworkBackend()
+        let manager = ContainerKitFlannelNetworkManager(backend: backend)
+
+        let result = try await manager.ensureHostOnlyNetwork(
+            name: "kubernetes-pod",
+            podCIDR: "10.250.22.19/24",
+            ipv6PodCIDR: "fd42:10:244:22::19/64",
+            plugin: "container-network-vmnet",
+            variant: "reserved",
+            knownOwnership: nil
+        )
+        let ownership = try #require(result.ownership)
+        let network = try #require(await backend.networks.first)
+
+        #expect(result.created)
+        #expect(ownership.podCIDR == "10.250.22.0/24")
+        #expect(ownership.ipv6PodCIDR == "fd42:10:244:22::/64")
+        #expect(network.configuration.ipv6Subnet?.description == "fd42:10:244:22::/64")
+        #expect(network.status.ipv6Subnet?.description == "fd42:10:244:22::/64")
+
+        let mismatched = try makeNetwork(
+            name: "kubernetes-pod",
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:25e3:5eb4:24a4::/64",
+            plugin: "container-network-vmnet",
+            variant: "reserved",
+            ownershipID: ownership.ownershipID
+        )
+        await backend.replaceNetworks([mismatched])
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await manager.ensureHostOnlyNetwork(
+                name: "kubernetes-pod",
+                podCIDR: "10.250.22.0/24",
+                ipv6PodCIDR: "fd42:10:244:22::/64",
+                plugin: "container-network-vmnet",
+                variant: "reserved",
+                knownOwnership: ownership
+            )
+        }
+    }
+
+    @Test
+    func rejectsExplicitDualStackNetworkWithoutExpectedIPv6Gateway() async throws {
+        let invalidGateways: [(included: Bool, value: String?)] = [
+            (false, nil),
+            (true, "fd42:10:244:23::1"),
+            (true, "fd42:10:244:22::2"),
+        ]
+
+        for invalidGateway in invalidGateways {
+            let existing = try makeNetwork(
+                name: "kubernetes-pod",
+                podCIDR: "10.250.22.0/24",
+                ipv6PodCIDR: "fd42:10:244:22::/64",
+                plugin: "container-network-vmnet",
+                variant: "reserved",
+                ownershipID: nil,
+                includeIPv6Gateway: invalidGateway.included,
+                runningIPv6Gateway: invalidGateway.value
+            )
+            let manager = ContainerKitFlannelNetworkManager(
+                backend: MockFlannelNetworkBackend(networks: [existing])
+            )
+
+            await #expect(throws: FlannelVXLANError.self) {
+                try await manager.ensureHostOnlyNetwork(
+                    name: "kubernetes-pod",
+                    podCIDR: "10.250.22.0/24",
+                    ipv6PodCIDR: "fd42:10:244:22::/64",
+                    plugin: "container-network-vmnet",
+                    variant: "reserved",
+                    knownOwnership: nil
+                )
+            }
+        }
+    }
+
+    @Test
+    func rejectsExplicitIPv6NetworkWhenDualStackIsDisabled() async throws {
+        let existing = try makeNetwork(
+            name: "kubernetes-pod",
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64",
+            plugin: "container-network-vmnet",
+            variant: "reserved",
+            ownershipID: nil
+        )
+        let manager = ContainerKitFlannelNetworkManager(
+            backend: MockFlannelNetworkBackend(networks: [existing])
+        )
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await manager.ensureHostOnlyNetwork(
+                name: "kubernetes-pod",
+                podCIDR: "10.250.22.0/24",
+                plugin: "container-network-vmnet",
+                variant: "reserved",
+                knownOwnership: nil
+            )
+        }
+    }
+
+    @Test
+    func rejectsIPv6PodCIDRThatCannotUseEUI64Allocation() async {
+        let backend = MockFlannelNetworkBackend()
+        let manager = ContainerKitFlannelNetworkManager(backend: backend)
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await manager.ensureHostOnlyNetwork(
+                name: "kubernetes-pod",
+                podCIDR: "10.250.22.0/24",
+                ipv6PodCIDR: "fd42:10:244:22::/80",
+                plugin: "container-network-vmnet",
+                variant: "reserved",
+                knownOwnership: nil
+            )
+        }
+        #expect(await backend.networks.isEmpty)
+    }
 }
 
 private actor MockFlannelNetworkBackend: FlannelNetworkBackend {
@@ -156,6 +279,7 @@ private actor MockFlannelNetworkBackend: FlannelNetworkBackend {
         let network = try makeNetwork(
             name: configuration.name,
             podCIDR: podCIDR,
+            ipv6PodCIDR: configuration.ipv6Subnet?.description,
             plugin: configuration.plugin,
             variant: try #require(configuration.options["variant"]),
             ownershipID: configuration.options[ContainerKitFlannelNetworkManager.ownershipOptionKey]
@@ -175,21 +299,38 @@ private actor MockFlannelNetworkBackend: FlannelNetworkBackend {
     func failDeletion(_ value: Bool) {
         deletionFails = value
     }
+
+    func replaceNetworks(_ value: [NetworkState]) {
+        networks = value
+    }
 }
 
 private func makeNetwork(
     name: String,
     podCIDR: String,
+    ipv6PodCIDR: String? = nil,
     plugin: String,
     variant: String,
-    ownershipID: String?
+    ownershipID: String?,
+    includeIPv6Gateway: Bool = true,
+    runningIPv6Gateway: String? = nil
 ) throws -> NetworkState {
     var options = ["variant": variant]
     options[ContainerKitFlannelNetworkManager.ownershipOptionKey] = ownershipID
+    let ipv6Subnet = try ipv6PodCIDR.map { try CIDRv6($0) }
+    let ipv6Gateway: IPv6Address?
+    if let runningIPv6Gateway {
+        ipv6Gateway = try IPv6Address(runningIPv6Gateway)
+    } else if includeIPv6Gateway, let ipv6Subnet {
+        ipv6Gateway = IPv6Address(ipv6Subnet.lower.value + 1)
+    } else {
+        ipv6Gateway = nil
+    }
     let configuration = try NetworkConfiguration(
         name: name,
         mode: .hostOnly,
         ipv4Subnet: try CIDRv4(podCIDR),
+        ipv6Subnet: ipv6Subnet,
         plugin: plugin,
         options: options
     )
@@ -198,7 +339,8 @@ private func makeNetwork(
         status: NetworkStatus(
             ipv4Subnet: try CIDRv4(podCIDR),
             ipv4Gateway: try IPv4Address("10.250.22.1"),
-            ipv6Subnet: nil
+            ipv6Subnet: ipv6Subnet,
+            ipv6Gateway: ipv6Gateway
         )
     )
 }

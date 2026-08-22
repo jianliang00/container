@@ -77,7 +77,10 @@ struct GuestNetworkConfigurator {
                     macAddress: interface.macAddress,
                     ipv4Address: interface.ipv4Address,
                     ipv4PrefixLength: interface.ipv4PrefixLength,
-                    ipv4Gateway: interface.ipv4Gateway
+                    ipv4Gateway: interface.ipv4Gateway,
+                    ipv6Address: interface.ipv6Address,
+                    ipv6PrefixLength: interface.ipv6PrefixLength,
+                    ipv6Gateway: interface.ipv6Gateway
                 )
             )
         }
@@ -104,6 +107,7 @@ struct GuestNetworkConfigurator {
                     interfaceName: effective.interfaceName,
                     macAddress: effective.macAddress,
                     ipv4Address: effective.ipv4Address,
+                    ipv6Address: effective.ipv6Address,
                     effectiveMTU: effectiveMTU
                 )
             )

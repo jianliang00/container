@@ -120,6 +120,152 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
+    func compilesIPv6OnlyServiceWithIPv6EndpointSlice() throws {
+        let snapshot = KubeProxySnapshot(
+            services: [makeService(clusterIPs: ["fd42:10:96::42"], ipFamilies: ["IPv6"])],
+            endpointSlices: [
+                makeEndpointSlice(
+                    addressType: "IPv6",
+                    endpoints: [
+                        KubeProxyEndpoint(addresses: ["fd42:10:244:22::10"], conditions: .init(ready: true), nodeName: "node-a"),
+                        KubeProxyEndpoint(addresses: ["fd42:10:244:22::11"], conditions: .init(ready: true), nodeName: "node-a"),
+                    ]
+                )
+            ]
+        )
+
+        let ruleSet = KubeProxyCompiler.compile(snapshot: snapshot, nodeName: "node-a")
+
+        #expect(ruleSet.issues.isEmpty)
+        #expect(ruleSet.rules.count == 1)
+        let rule = try #require(ruleSet.rules.first)
+        #expect(rule.family == .ipv6)
+        #expect(rule.clusterIP == "fd42:10:96::42")
+        #expect(
+            rule.backends == [
+                KubeProxyBackend(family: .ipv6, ip: "fd42:10:244:22::10", port: 8080),
+                KubeProxyBackend(family: .ipv6, ip: "fd42:10:244:22::11", port: 8080),
+            ])
+    }
+
+    @Test
+    func compilesEachDualStackClusterIPAgainstSameFamilySlice() throws {
+        let snapshot = KubeProxySnapshot(
+            services: [
+                makeService(
+                    clusterIPs: ["10.96.0.42", "fd42:10:96::42"],
+                    ipFamilies: ["IPv4", "IPv6"]
+                )
+            ],
+            endpointSlices: [
+                makeEndpointSlice(
+                    name: "echo-v4",
+                    endpoints: [
+                        KubeProxyEndpoint(addresses: ["192.168.65.10"], conditions: .init(ready: true), nodeName: "node-a")
+                    ]
+                ),
+                makeEndpointSlice(
+                    name: "echo-v6",
+                    addressType: "IPv6",
+                    endpoints: [
+                        KubeProxyEndpoint(addresses: ["fd42:10:244:22::10"], conditions: .init(ready: true), nodeName: "node-a")
+                    ]
+                ),
+            ]
+        )
+
+        let ruleSet = KubeProxyCompiler.compile(snapshot: snapshot, nodeName: "node-a")
+        let rulesByFamily = Dictionary(uniqueKeysWithValues: ruleSet.rules.map { ($0.family, $0) })
+
+        #expect(ruleSet.rules.count == 2)
+        #expect(rulesByFamily[.ipv4]?.clusterIP == "10.96.0.42")
+        #expect(rulesByFamily[.ipv4]?.backends == [KubeProxyBackend(ip: "192.168.65.10", port: 8080)])
+        #expect(rulesByFamily[.ipv6]?.clusterIP == "fd42:10:96::42")
+        #expect(
+            rulesByFamily[.ipv6]?.backends == [
+                KubeProxyBackend(family: .ipv6, ip: "fd42:10:244:22::10", port: 8080)
+            ])
+    }
+
+    @Test
+    func neverMixesEndpointSliceOrBackendAddressFamilies() throws {
+        let snapshot = KubeProxySnapshot(
+            services: [
+                makeService(
+                    clusterIPs: ["10.96.0.42", "fd42:10:96::42"],
+                    ipFamilies: ["IPv4", "IPv6"]
+                )
+            ],
+            endpointSlices: [
+                makeEndpointSlice(
+                    name: "echo-v4",
+                    endpoints: [
+                        KubeProxyEndpoint(
+                            addresses: ["192.168.65.10", "fd42:10:244:22::bad"],
+                            conditions: .init(ready: true),
+                            nodeName: "node-a"
+                        )
+                    ]
+                ),
+                makeEndpointSlice(
+                    name: "echo-v6",
+                    addressType: "IPv6",
+                    endpoints: [
+                        KubeProxyEndpoint(
+                            addresses: ["fd42:10:244:22::10", "192.168.65.99"],
+                            conditions: .init(ready: true),
+                            nodeName: "node-a"
+                        )
+                    ]
+                ),
+            ]
+        )
+
+        let rules = KubeProxyCompiler.compile(snapshot: snapshot, nodeName: "node-a").rules
+        let ipv4Rule = try #require(rules.first { $0.family == .ipv4 })
+        let ipv6Rule = try #require(rules.first { $0.family == .ipv6 })
+
+        #expect(ipv4Rule.backends == [KubeProxyBackend(ip: "192.168.65.10", port: 8080)])
+        #expect(
+            ipv6Rule.backends == [
+                KubeProxyBackend(family: .ipv6, ip: "fd42:10:244:22::10", port: 8080)
+            ])
+    }
+
+    @Test
+    func localTrafficPolicyFiltersIPv6EndpointsByNode() throws {
+        let snapshot = KubeProxySnapshot(
+            services: [
+                makeService(
+                    internalTrafficPolicy: .local,
+                    clusterIPs: ["fd42:10:96::42"],
+                    ipFamilies: ["IPv6"]
+                )
+            ],
+            endpointSlices: [
+                makeEndpointSlice(
+                    addressType: "IPv6",
+                    endpoints: [
+                        KubeProxyEndpoint(addresses: ["fd42:10:244:22::10"], conditions: .init(ready: true), nodeName: "node-a"),
+                        KubeProxyEndpoint(addresses: ["fd42:10:244:23::10"], conditions: .init(ready: true), nodeName: "node-b"),
+                        KubeProxyEndpoint(addresses: ["fd42:10:244:24::10"], conditions: .init(ready: true)),
+                    ]
+                )
+            ]
+        )
+
+        let rules = KubeProxyCompiler.compile(snapshot: snapshot, nodeName: "node-a").rules
+        #expect(rules.count == 1)
+        let rule = try #require(rules.first)
+
+        #expect(rule.family == .ipv6)
+        #expect(
+            rule.backends == [
+                KubeProxyBackend(family: .ipv6, ip: "fd42:10:244:22::10", port: 8080)
+            ])
+    }
+
+    @Test
     func excludesUnreadyNonServingAndTerminatingEndpoints() throws {
         let snapshot = makeSnapshot(
             endpoints: [
@@ -203,9 +349,9 @@ struct KubeProxyCompilerTests {
 
         #expect(anchor.contains("# generation: 7"))
         #expect(anchor.contains("# local PodCIDR: 10.250.25.0/24"))
-        #expect(anchor.contains("table <ckp_default_echo_http_tcp_80> persist { 192.168.65.10, 192.168.65.11 }"))
+        #expect(anchor.contains("table <ckp_v4_default_echo_http_tcp_80> persist { 192.168.65.10, 192.168.65.11 }"))
         #expect(!anchor.contains("nat on"))
-        #expect(anchor.contains("rdr pass inet proto tcp from any to 10.96.0.42 port 80 -> <ckp_default_echo_http_tcp_80> port 8080 round-robin"))
+        #expect(anchor.contains("rdr pass inet proto tcp from any to 10.96.0.42 port 80 -> <ckp_v4_default_echo_http_tcp_80> port 8080 round-robin"))
     }
 
     @Test
@@ -224,6 +370,82 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
+    func rendersIPv6PFRuleWithoutNAT66() throws {
+        let snapshot = KubeProxySnapshot(
+            services: [makeService(clusterIPs: ["fd42:10:96::42"], ipFamilies: ["IPv6"])],
+            endpointSlices: [
+                makeEndpointSlice(
+                    addressType: "IPv6",
+                    endpoints: [
+                        KubeProxyEndpoint(addresses: ["fd42:10:244:22::10"], conditions: .init(ready: true), nodeName: "node-a")
+                    ]
+                )
+            ]
+        )
+        let ruleSet = KubeProxyCompiler.compile(snapshot: snapshot, nodeName: "node-a")
+        let anchor = try KubeProxyPFRenderer.renderAnchor(
+            ruleSet: ruleSet,
+            localPodCIDR: "192.168.64.0/24",
+            masqueradePodTraffic: true,
+            egressInterface: "en7"
+        )
+
+        #expect(anchor.contains("table <ckp_v6_default_echo_http_tcp_80> persist { fd42:10:244:22::10 }"))
+        #expect(
+            anchor.contains(
+                "rdr pass inet6 proto tcp from any to fd42:10:96::42 port 80 -> <ckp_v6_default_echo_http_tcp_80> port 8080"
+            ))
+        #expect(anchor.contains("nat on en7 inet from 192.168.64.0/24 to any -> (en7)"))
+        #expect(!anchor.contains("nat on en7 inet6"))
+    }
+
+    @Test
+    func familyMakesPFTableNamesDistinct() {
+        let ipv4Rule = KubeProxyServiceRule(
+            namespace: "default",
+            serviceName: "echo",
+            portName: "http",
+            protocolName: .tcp,
+            family: .ipv4,
+            clusterIP: "10.96.0.42",
+            servicePort: 80,
+            backends: [KubeProxyBackend(ip: "192.168.65.10", port: 8080)]
+        )
+        let ipv6Rule = KubeProxyServiceRule(
+            namespace: "default",
+            serviceName: "echo",
+            portName: "http",
+            protocolName: .tcp,
+            family: .ipv6,
+            clusterIP: "fd42:10:96::42",
+            servicePort: 80,
+            backends: [KubeProxyBackend(family: .ipv6, ip: "fd42:10:244:22::10", port: 8080)]
+        )
+
+        let ipv4TableName = KubeProxyPFRenderer.tableName(for: ipv4Rule)
+        let ipv6TableName = KubeProxyPFRenderer.tableName(for: ipv6Rule)
+
+        #expect(ipv4TableName.contains("_v4_"))
+        #expect(ipv6TableName.contains("_v6_"))
+        #expect(ipv4TableName != ipv6TableName)
+    }
+
+    @Test
+    func decodesLegacyRuleStateAsIPv4() throws {
+        let data = Data(
+            #"{"generation":7,"rules":[{"namespace":"default","serviceName":"echo","protocolName":"TCP","clusterIP":"10.96.0.42","servicePort":80,"backends":[{"ip":"192.168.65.10","port":8080}]}],"issues":[]}"#
+                .utf8
+        )
+
+        let ruleSet = try JSONDecoder().decode(KubeProxyRuleSet.self, from: data)
+        let rule = try #require(ruleSet.rules.first)
+        let backend = try #require(rule.backends.first)
+
+        #expect(rule.family == .ipv4)
+        #expect(backend.family == .ipv4)
+    }
+
+    @Test
     func limitsPFTableNamesToPlatformMaximum() throws {
         let rule = KubeProxyServiceRule(
             namespace: "default",
@@ -237,7 +459,7 @@ struct KubeProxyCompilerTests {
         let tableName = KubeProxyPFRenderer.tableName(for: rule)
 
         #expect(tableName.utf8.count == 31)
-        #expect(tableName.hasPrefix("ckp_default_kubernet_"))
+        #expect(tableName.hasPrefix("ckp_v4_default_kuber"))
         #expect(tableName == KubeProxyPFRenderer.tableName(for: rule))
     }
 
@@ -262,7 +484,8 @@ struct KubeProxyCompilerTests {
                 configPath: configURL.path,
                 anchorsPath: anchorsURL.path,
                 pfctlPath: pfctl.path
-            )
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
         let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
 
@@ -276,7 +499,7 @@ struct KubeProxyCompilerTests {
         #expect(config.contains("load anchor \"com.apple.container.kube-proxy.test\" from \"\(anchorURL.path)\""))
         #expect(anchor.contains("# local PodCIDR: 10.250.25.0/24"))
         #expect(!anchor.contains("nat on"))
-        #expect(anchor.contains("rdr pass inet proto tcp from any to 10.96.0.42 port 80 -> <ckp_default_echo_http_tcp_80> port 8080 round-robin"))
+        #expect(anchor.contains("rdr pass inet proto tcp from any to 10.96.0.42 port 80 -> <ckp_v4_default_echo_http_tcp_80> port 8080 round-robin"))
     }
 
     @Test
@@ -297,7 +520,8 @@ struct KubeProxyCompilerTests {
                 anchorsPath: anchorsURL.path,
                 pfctlPath: pfctl.path
             ),
-            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7")
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
         let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
 
@@ -340,7 +564,8 @@ struct KubeProxyCompilerTests {
                 configPath: configURL.path,
                 anchorsPath: anchorsURL.path,
                 pfctlPath: pfctl.path
-            )
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
         let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
 
@@ -382,7 +607,8 @@ struct KubeProxyCompilerTests {
                 configPath: configURL.path,
                 anchorsPath: anchorsURL.path,
                 pfctlPath: pfctl.path
-            )
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
         let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
 
@@ -426,7 +652,8 @@ struct KubeProxyCompilerTests {
                 configPath: configURL.path,
                 anchorsPath: anchorsURL.path,
                 pfctlPath: pfctl.path
-            )
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
 
         #expect(throws: (any Error).self) {
@@ -444,6 +671,366 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
+    func dualStackApplierUsesIndependentFamilyAnchorsWithoutNAT66() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        try "set skip on lo0\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: pfctl.path
+            ),
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        let ruleSet = KubeProxyCompiler.compile(snapshot: makeDualStackSnapshot(), nodeName: "node-a")
+
+        try applier.apply(
+            ruleSet,
+            podNetwork: KubeProxyFamilyRuleApplication(
+                ipv4PodCIDR: "10.250.25.0/24",
+                ipv6PodCIDR: "fd42:10:244:19::/64",
+                ipv6Ready: true,
+                dualStackEnabled: true
+            )
+        )
+
+        let ipv4AnchorURL = anchorsURL.appendingPathComponent(anchorName)
+        let ipv6AnchorURL = anchorsURL.appendingPathComponent("\(anchorName).ipv6")
+        let config = try String(contentsOf: configURL, encoding: .utf8)
+        let ipv4Anchor = try String(contentsOf: ipv4AnchorURL, encoding: .utf8)
+        let ipv6Anchor = try String(contentsOf: ipv6AnchorURL, encoding: .utf8)
+        #expect(config.contains("nat-anchor \"\(anchorName)\""))
+        #expect(config.contains("rdr-anchor \"\(anchorName)\""))
+        #expect(config.contains("rdr-anchor \"\(anchorName).ipv6\""))
+        #expect(!config.contains("nat-anchor \"\(anchorName).ipv6\""))
+        #expect(ipv4Anchor.contains("nat on en7 inet from 10.250.25.0/24"))
+        #expect(ipv4Anchor.contains("rdr pass inet proto tcp"))
+        #expect(!ipv4Anchor.contains("rdr pass inet6"))
+        #expect(ipv6Anchor.contains("# local PodCIDR: fd42:10:244:19::/64"))
+        #expect(ipv6Anchor.contains("rdr pass inet6 proto tcp"))
+        #expect(!ipv6Anchor.contains("nat on"))
+    }
+
+    @Test
+    func staleIPv6FamilyIsFlushedWithoutFlushingIPv4() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        try "set skip on lo0\n".write(to: configURL, atomically: true, encoding: .utf8)
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: pfctl.path
+            ),
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        let ruleSet = KubeProxyCompiler.compile(snapshot: makeDualStackSnapshot(), nodeName: "node-a")
+        let ready = KubeProxyFamilyRuleApplication(
+            ipv4PodCIDR: "10.250.25.0/24",
+            ipv6PodCIDR: "fd42:10:244:19::/64",
+            ipv6Ready: true,
+            dualStackEnabled: true
+        )
+
+        try applier.apply(ruleSet, podNetwork: ready)
+        try Data().write(to: argumentsLogURL)
+        var stale = ready
+        stale.ipv6Ready = false
+        try applier.apply(ruleSet.selecting(families: [.ipv4]), podNetwork: stale)
+
+        let arguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        let config = try String(contentsOf: configURL, encoding: .utf8)
+        let ipv4Anchor = try String(contentsOf: anchorsURL.appendingPathComponent(anchorName), encoding: .utf8)
+        let ipv6Anchor = try String(
+            contentsOf: anchorsURL.appendingPathComponent("\(anchorName).ipv6"),
+            encoding: .utf8
+        )
+        #expect(arguments.contains("-a \(anchorName).ipv6 -F all"))
+        #expect(!arguments.contains("-a \(anchorName) -F all"))
+        #expect(config.contains("rdr-anchor \"\(anchorName)\""))
+        #expect(!config.contains("rdr-anchor \"\(anchorName).ipv6\""))
+        #expect(ipv4Anchor.contains("rdr pass inet proto tcp"))
+        #expect(ipv6Anchor.contains("IPv6 family disabled or not ready"))
+    }
+
+    @Test
+    func dualStackApplierRestoresBothAnchorsAfterRootReloadFailure() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makePFCTLFailingFirstRootReload(in: directory, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        let ipv4AnchorURL = anchorsURL.appendingPathComponent(anchorName)
+        let ipv6AnchorURL = anchorsURL.appendingPathComponent("\(anchorName).ipv6")
+        try FileManager.default.createDirectory(at: anchorsURL, withIntermediateDirectories: true)
+        let originalConfig = "set skip on lo0\n"
+        let originalIPv4Anchor = "# original IPv4 anchor\n"
+        let originalIPv6Anchor = "# original IPv6 anchor\n"
+        try originalConfig.write(to: configURL, atomically: true, encoding: .utf8)
+        try originalIPv4Anchor.write(to: ipv4AnchorURL, atomically: true, encoding: .utf8)
+        try originalIPv6Anchor.write(to: ipv6AnchorURL, atomically: true, encoding: .utf8)
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: pfctl.path
+            ),
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+
+        #expect(throws: (any Error).self) {
+            try applier.apply(
+                KubeProxyCompiler.compile(snapshot: makeDualStackSnapshot(), nodeName: "node-a"),
+                podNetwork: KubeProxyFamilyRuleApplication(
+                    ipv4PodCIDR: "10.250.25.0/24",
+                    ipv6PodCIDR: "fd42:10:244:19::/64",
+                    ipv6Ready: true,
+                    dualStackEnabled: true
+                )
+            )
+        }
+
+        let arguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        #expect(try String(contentsOf: configURL, encoding: .utf8) == originalConfig)
+        #expect(try String(contentsOf: ipv4AnchorURL, encoding: .utf8) == originalIPv4Anchor)
+        #expect(try String(contentsOf: ipv6AnchorURL, encoding: .utf8) == originalIPv6Anchor)
+        #expect(arguments.components(separatedBy: .newlines).filter { $0 == "-f \(configURL.path)" }.count == 2)
+    }
+
+    @Test
+    func withdrawRemovesPersistentReferencesFlushesFamiliesAndDeletesAnchors() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        try "set skip on lo0\n".write(to: configURL, atomically: true, encoding: .utf8)
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: pfctl.path
+            ),
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        try applier.apply(
+            KubeProxyCompiler.compile(snapshot: makeDualStackSnapshot(), nodeName: "node-a"),
+            podNetwork: KubeProxyFamilyRuleApplication(
+                ipv4PodCIDR: "10.250.25.0/24",
+                ipv6PodCIDR: "fd42:10:244:19::/64",
+                ipv6Ready: true,
+                dualStackEnabled: true
+            )
+        )
+        try Data().write(to: argumentsLogURL)
+
+        try applier.withdraw()
+
+        let config = try String(contentsOf: configURL, encoding: .utf8)
+        let arguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        #expect(!config.contains("anchor \"\(anchorName)\""))
+        #expect(!config.contains("anchor \"\(anchorName).ipv6\""))
+        #expect(arguments.contains("-a \(anchorName) -F all"))
+        #expect(arguments.contains("-a \(anchorName).ipv6 -F all"))
+        #expect(!FileManager.default.fileExists(atPath: anchorsURL.appendingPathComponent(anchorName).path))
+        #expect(!FileManager.default.fileExists(atPath: anchorsURL.appendingPathComponent("\(anchorName).ipv6").path))
+    }
+
+    @Test
+    func withdrawIPv6PreservesIPv4PersistentState() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        try "set skip on lo0\n".write(to: configURL, atomically: true, encoding: .utf8)
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: pfctl.path
+            ),
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        try applier.apply(
+            KubeProxyCompiler.compile(snapshot: makeDualStackSnapshot(), nodeName: "node-a"),
+            podNetwork: KubeProxyFamilyRuleApplication(
+                ipv4PodCIDR: "10.250.25.0/24",
+                ipv6PodCIDR: "fd42:10:244:19::/64",
+                ipv6Ready: true,
+                dualStackEnabled: true
+            )
+        )
+        try Data().write(to: argumentsLogURL)
+
+        try applier.withdrawIPv6()
+
+        let config = try String(contentsOf: configURL, encoding: .utf8)
+        let arguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        #expect(config.contains("rdr-anchor \"\(anchorName)\""))
+        #expect(config.contains("load anchor \"\(anchorName)\""))
+        #expect(!config.contains("anchor \"\(anchorName).ipv6\""))
+        #expect(arguments.contains("-a \(anchorName).ipv6 -F all"))
+        #expect(!arguments.contains("-a \(anchorName) -F all"))
+        #expect(FileManager.default.fileExists(atPath: anchorsURL.appendingPathComponent(anchorName).path))
+        #expect(!FileManager.default.fileExists(atPath: anchorsURL.appendingPathComponent("\(anchorName).ipv6").path))
+
+        try Data().write(to: argumentsLogURL)
+        try applier.withdrawIPv6()
+
+        #expect(try Data(contentsOf: argumentsLogURL).isEmpty)
+    }
+
+    @Test
+    func withdrawIPv6IsNoOpWhenManagedIPv6StateIsAbsent() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let originalConfig = "set skip on lo0\n"
+        try originalConfig.write(to: configURL, atomically: true, encoding: .utf8)
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: "com.apple.container.kube-proxy.test",
+                configPath: configURL.path,
+                anchorsPath: directory.appendingPathComponent("anchors").path,
+                pfctlPath: pfctl.path
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+
+        try applier.withdrawIPv6()
+        try applier.withdrawIPv6()
+
+        #expect(try String(contentsOf: configURL, encoding: .utf8) == originalConfig)
+        #expect(!FileManager.default.fileExists(atPath: argumentsLogURL.path))
+    }
+
+    @Test
+    func withdrawRestoresPersistentConfigurationWhenReloadFails() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makePFCTLFailingFirstRootReload(in: directory, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        let ipv4AnchorURL = anchorsURL.appendingPathComponent(anchorName)
+        let ipv6AnchorURL = anchorsURL.appendingPathComponent("\(anchorName).ipv6")
+        try FileManager.default.createDirectory(at: anchorsURL, withIntermediateDirectories: true)
+        let originalConfig = """
+            nat-anchor "\(anchorName)"
+            rdr-anchor "\(anchorName)"
+            rdr-anchor "\(anchorName).ipv6"
+            load anchor "\(anchorName)" from "\(ipv4AnchorURL.path)"
+            load anchor "\(anchorName).ipv6" from "\(ipv6AnchorURL.path)"
+
+            """
+        let originalIPv4Anchor = "# original IPv4 anchor\n"
+        let originalIPv6Anchor = "# original IPv6 anchor\n"
+        try originalConfig.write(to: configURL, atomically: true, encoding: .utf8)
+        try originalIPv4Anchor.write(to: ipv4AnchorURL, atomically: true, encoding: .utf8)
+        try originalIPv6Anchor.write(to: ipv6AnchorURL, atomically: true, encoding: .utf8)
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: pfctl.path
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+
+        #expect(throws: (any Error).self) {
+            try applier.withdraw()
+        }
+
+        let arguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        #expect(try String(contentsOf: configURL, encoding: .utf8) == originalConfig)
+        #expect(try String(contentsOf: ipv4AnchorURL, encoding: .utf8) == originalIPv4Anchor)
+        #expect(try String(contentsOf: ipv6AnchorURL, encoding: .utf8) == originalIPv6Anchor)
+        #expect(arguments.components(separatedBy: .newlines).filter { $0 == "-f \(configURL.path)" }.count == 2)
+    }
+
+    @Test
+    func withdrawIsIdempotentWhenManagedPFStateIsAlreadyAbsent() throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let originalConfig = "set skip on lo0\n"
+        try originalConfig.write(to: configURL, atomically: true, encoding: .utf8)
+        let anchorName = "com.apple.container.kube-proxy.test"
+        let applier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: directory.appendingPathComponent("anchors").path,
+                pfctlPath: pfctl.path
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+
+        try applier.withdraw()
+
+        let arguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        #expect(try String(contentsOf: configURL, encoding: .utf8) == originalConfig)
+        #expect(arguments.contains("-a \(anchorName) -F all"))
+        #expect(arguments.contains("-a \(anchorName).ipv6 -F all"))
+    }
+
+    @Test
+    func usesSharedSystemPFAdvisoryLockPath() {
+        #expect(KubeProxyPFCoordination.advisoryLockPath == "/var/run/com.apple.container.pf.lock")
+    }
+
+    @Test
     func decodesLegacyPFConfigWithDefaultNetworkSettings() throws {
         let data = Data(
             #"{"anchorName":"test","configPath":"/tmp/pf.conf","anchorsPath":"/tmp/anchors","pfctlPath":"/tmp/pfctl"}"#.utf8
@@ -455,11 +1042,56 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
+    func decodesLegacyControllerConfigWithDualStackDisabled() throws {
+        let data = Data(
+            #"{"kubeconfig":"/tmp/kubeconfig","nodeName":"node-a","pf":{"anchorName":"test","configPath":"/tmp/pf.conf","anchorsPath":"/tmp/anchors","pfctlPath":"/tmp/pfctl"}}"#
+                .utf8
+        )
+
+        let config = try JSONDecoder().decode(KubeProxyMacOSConfig.self, from: data)
+
+        #expect(config.syncPeriodSeconds == 5)
+        #expect(config.dualStackEnabled == false)
+    }
+
+    @Test
+    func dualStackControllerConfigRequiresPodNetworkStatePaths() {
+        let config = KubeProxyMacOSConfig(
+            kubeconfig: "/tmp/kubeconfig",
+            nodeName: "node-a",
+            dualStackEnabled: true
+        )
+
+        #expect(
+            throws: KubeProxyMacOSError.invalidConfiguration(
+                "dualStackEnabled requires pf.runtimeStatePath and pf.readyStatePath"
+            )
+        ) {
+            try config.validate()
+        }
+    }
+
+    @Test
     func rejectsInvalidVmnetCIDR() {
         let config = KubeProxyPFConfig(vmnetCIDR: "999.168.64.0/24")
 
         #expect(throws: KubeProxyMacOSError.invalidConfiguration("pf.vmnetCIDR is not a valid IPv4 CIDR")) {
             try config.validate()
+        }
+    }
+
+    @Test
+    func rejectsUnsafePFAnchorNameBeforeRenderingRootConfig() {
+        for anchorName in ["", "unsafe anchor", "unsafe\"anchor", "unsafe/anchor", "unsafe\nanchor"] {
+            let config = KubeProxyPFConfig(anchorName: anchorName)
+
+            #expect(
+                throws: KubeProxyMacOSError.invalidConfiguration(
+                    "pf.anchorName is not a valid PF anchor name"
+                )
+            ) {
+                try config.validate()
+            }
         }
     }
 
@@ -496,6 +1128,225 @@ struct KubeProxyCompilerTests {
 
         #expect(applier.appliedPodCIDRs == ["10.250.25.0/24"])
         #expect(applier.appliedMasqueradePodTraffic == [true])
+    }
+
+    @Test
+    func dualStackControllerConsumesV2FamilyReadiness() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let paths = try writeDualStackPodNetworkStates(in: directory)
+        let applier = RecordingFamilyRuleApplier()
+        let controller = KubeProxyController(
+            config: makeControllerConfig(
+                runtimeStatePath: paths.runtime.path,
+                readyStatePath: paths.ready.path,
+                dualStackEnabled: true
+            ),
+            reader: KubeProxyStaticSnapshotReader(makeDualStackSnapshot()),
+            applier: applier
+        )
+
+        let result = try await controller.runOnce(generation: 2)
+
+        let application = try #require(applier.applications.first)
+        #expect(application.ipv4PodCIDR == "10.250.25.0/24")
+        #expect(application.ipv6PodCIDR == "fd42:10:244:19::/64")
+        #expect(application.ipv4Ready)
+        #expect(application.ipv6Ready)
+        #expect(application.dualStackEnabled)
+        #expect(Set(result.ruleSet.rules.map(\.family)) == [.ipv4, .ipv6])
+    }
+
+    @Test
+    func dualStackControllerRefreshesIPv4AndMarksIPv6StaleBeforeFailing() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let paths = try writeDualStackPodNetworkStates(in: directory, ipv6Ready: false)
+        let applier = RecordingFamilyRuleApplier()
+        let controller = KubeProxyController(
+            config: makeControllerConfig(
+                runtimeStatePath: paths.runtime.path,
+                readyStatePath: paths.ready.path,
+                dualStackEnabled: true
+            ),
+            reader: KubeProxyStaticSnapshotReader(makeDualStackSnapshot()),
+            applier: applier
+        )
+
+        do {
+            _ = try await controller.runOnce(generation: 3)
+            Issue.record("expected unready IPv6 family to fail")
+        } catch {
+            #expect(String(describing: error).contains("IPv6 family is not ready"))
+        }
+
+        let application = try #require(applier.applications.first)
+        let appliedRuleSet = try #require(applier.ruleSets.first)
+        #expect(application.ipv4Ready)
+        #expect(!application.ipv6Ready)
+        #expect(Set(appliedRuleSet.rules.map(\.family)) == [.ipv4])
+        #expect(applier.ipv6WithdrawalCount == 1)
+    }
+
+    @Test
+    func dualStackControllerWithdrawsStaleIPv6BeforeReadingKubernetesSnapshot() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let paths = try writeDualStackPodNetworkStates(in: directory, ipv6Ready: false)
+        let applier = RecordingFamilyRuleApplier()
+        let controller = KubeProxyController(
+            config: makeControllerConfig(
+                runtimeStatePath: paths.runtime.path,
+                readyStatePath: paths.ready.path,
+                dualStackEnabled: true
+            ),
+            reader: FailingSnapshotReader(),
+            applier: applier
+        )
+
+        do {
+            _ = try await controller.runOnce(generation: 4)
+            Issue.record("expected Kubernetes snapshot read to fail")
+        } catch {
+            #expect(String(describing: error).contains("snapshot unavailable"))
+        }
+        #expect(applier.ipv6WithdrawalCount == 1)
+        #expect(applier.applications.isEmpty)
+    }
+
+    @Test
+    func gateOffControllerDoesNotRequireIPv6WithdrawalBeforeReadingKubernetesSnapshot() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let paths = try writeDualStackPodNetworkStates(in: directory)
+        let applier = RecordingFamilyRuleApplier()
+        let controller = KubeProxyController(
+            config: makeControllerConfig(
+                runtimeStatePath: paths.runtime.path,
+                readyStatePath: paths.ready.path,
+                dualStackEnabled: false
+            ),
+            reader: FailingSnapshotReader(),
+            applier: applier
+        )
+
+        do {
+            _ = try await controller.runOnce(generation: 4)
+            Issue.record("expected Kubernetes snapshot read to fail")
+        } catch {
+            #expect(String(describing: error).contains("snapshot unavailable"))
+        }
+        #expect(applier.ipv6WithdrawalCount == 0)
+        #expect(applier.applications.isEmpty)
+    }
+
+    @Test
+    func gateOffControllerSupportsLegacyOnlyRuleApplier() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let paths = try writeDualStackPodNetworkStates(in: directory)
+        let applier = LegacyOnlyRuleApplier()
+        let controller = KubeProxyController(
+            config: makeControllerConfig(
+                runtimeStatePath: paths.runtime.path,
+                readyStatePath: paths.ready.path,
+                dualStackEnabled: false
+            ),
+            reader: KubeProxyStaticSnapshotReader(makeDualStackSnapshot()),
+            applier: applier
+        )
+
+        let result = try await controller.runOnce(generation: 4)
+
+        #expect(applier.appliedPodCIDRs == ["10.250.25.0/24"])
+        #expect(Set(result.ruleSet.rules.map(\.family)) == [.ipv4])
+    }
+
+    @Test
+    func dualStackControllerRejectsUnreadyIPv4BeforeApplyingRules() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let paths = try writeDualStackPodNetworkStates(in: directory, ipv4Ready: false)
+        let applier = RecordingFamilyRuleApplier()
+        let controller = KubeProxyController(
+            config: makeControllerConfig(
+                runtimeStatePath: paths.runtime.path,
+                readyStatePath: paths.ready.path,
+                dualStackEnabled: true
+            ),
+            reader: KubeProxyStaticSnapshotReader(makeDualStackSnapshot()),
+            applier: applier
+        )
+
+        do {
+            _ = try await controller.runOnce(generation: 4)
+            Issue.record("expected unready IPv4 family to fail")
+        } catch {
+            #expect(String(describing: error).contains("IPv4 family is not ready"))
+        }
+        #expect(applier.applications.isEmpty)
+        #expect(applier.withdrawalCount == 1)
+    }
+
+    @Test
+    func dualStackControllerWithdrawsWhenReadyStateIsMissingExpiredOrMismatched() async throws {
+        enum Failure: Equatable {
+            case missing
+            case expired
+            case generationMismatch
+        }
+
+        for failure in [Failure.missing, .expired, .generationMismatch] {
+            let directory = try makeTemporaryDirectory()
+            defer {
+                try? FileManager.default.removeItem(at: directory)
+            }
+            let paths = try writeDualStackPodNetworkStates(
+                in: directory,
+                readyGeneration: failure == .generationMismatch ? 2 : 1,
+                readyExpiresAtUnixSeconds: failure == .expired
+                    ? Int64(Date().timeIntervalSince1970.rounded(.down)) - 1
+                    : Int64(Date().timeIntervalSince1970.rounded(.down)) + 300
+            )
+            if failure == .missing {
+                try FileManager.default.removeItem(at: paths.ready)
+            }
+            let applier = RecordingFamilyRuleApplier()
+            let controller = KubeProxyController(
+                config: makeControllerConfig(
+                    runtimeStatePath: paths.runtime.path,
+                    readyStatePath: paths.ready.path,
+                    dualStackEnabled: true
+                ),
+                reader: KubeProxyStaticSnapshotReader(makeDualStackSnapshot()),
+                applier: applier
+            )
+
+            do {
+                _ = try await controller.runOnce(generation: 5)
+                Issue.record("expected invalid family readiness to fail")
+            } catch {
+                #expect(
+                    String(describing: error).contains("ready state is missing")
+                        || String(describing: error).contains("lease has expired")
+                        || String(describing: error).contains("does not match runtime state")
+                )
+            }
+            #expect(applier.withdrawalCount == 1)
+            #expect(applier.applications.isEmpty)
+        }
     }
 
     @Test
@@ -540,6 +1391,7 @@ struct KubeProxyCompilerTests {
             #expect(String(describing: error).contains("runtime state is missing"))
         }
         #expect(applier.appliedPodCIDRs.isEmpty)
+        #expect(applier.withdrawalCount == 1)
     }
 
     @Test
@@ -568,6 +1420,7 @@ struct KubeProxyCompilerTests {
             #expect(String(describing: error).contains("ready state is missing"))
         }
         #expect(applier.appliedPodCIDRs.isEmpty)
+        #expect(applier.withdrawalCount == 1)
     }
 
     @Test
@@ -604,6 +1457,7 @@ struct KubeProxyCompilerTests {
             #expect(String(describing: error).contains("ready state is invalid"))
         }
         #expect(applier.appliedPodCIDRs.isEmpty)
+        #expect(applier.withdrawalCount == 2)
     }
 
     @Test
@@ -632,6 +1486,7 @@ struct KubeProxyCompilerTests {
             #expect(String(describing: error).contains("ready state lease has expired"))
         }
         #expect(applier.appliedPodCIDRs.isEmpty)
+        #expect(applier.withdrawalCount == 1)
 
         paths = try writePodNetworkStates(
             in: directory,
@@ -646,6 +1501,7 @@ struct KubeProxyCompilerTests {
             #expect(String(describing: error).contains("ready state does not match runtime state"))
         }
         #expect(applier.appliedPodCIDRs.isEmpty)
+        #expect(applier.withdrawalCount == 2)
     }
 
     @Test
@@ -668,7 +1524,8 @@ struct KubeProxyCompilerTests {
                 configPath: configURL.path,
                 anchorsPath: anchorsURL.path,
                 pfctlPath: pfctl.path
-            )
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
         let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
 
@@ -700,7 +1557,8 @@ struct KubeProxyCompilerTests {
                 configPath: configURL.path,
                 anchorsPath: anchorsURL.path,
                 pfctlPath: pfctl.path
-            )
+            ),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
         let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
 
@@ -869,17 +1727,52 @@ struct KubeProxyCompilerTests {
         )
     }
 
+    private func makeDualStackSnapshot() -> KubeProxySnapshot {
+        KubeProxySnapshot(
+            services: [
+                makeService(
+                    clusterIPs: ["10.96.0.42", "fd42:10:96::42"],
+                    ipFamilies: ["IPv4", "IPv6"]
+                )
+            ],
+            endpointSlices: [
+                makeEndpointSlice(
+                    endpoints: [
+                        KubeProxyEndpoint(
+                            addresses: ["10.250.25.10"],
+                            conditions: .init(ready: true),
+                            nodeName: "node-a"
+                        )
+                    ]
+                ),
+                makeEndpointSlice(
+                    name: "echo-v6",
+                    addressType: "IPv6",
+                    endpoints: [
+                        KubeProxyEndpoint(
+                            addresses: ["fd42:10:244:19::10"],
+                            conditions: .init(ready: true),
+                            nodeName: "node-a"
+                        )
+                    ]
+                ),
+            ]
+        )
+    }
+
     private func makeService(
         serviceType: String = "ClusterIP",
-        internalTrafficPolicy: KubeProxyInternalTrafficPolicy? = nil
+        internalTrafficPolicy: KubeProxyInternalTrafficPolicy? = nil,
+        clusterIPs: [String] = ["10.96.0.42"],
+        ipFamilies: [String] = ["IPv4"]
     ) -> KubeProxyService {
         KubeProxyService(
             metadata: KubeProxyObjectMeta(namespace: "default", name: "echo", uid: "svc-echo"),
             spec: KubeProxyServiceSpec(
                 type: serviceType,
-                clusterIP: "10.96.0.42",
-                clusterIPs: ["10.96.0.42"],
-                ipFamilies: ["IPv4"],
+                clusterIP: clusterIPs.first,
+                clusterIPs: clusterIPs,
+                ipFamilies: ipFamilies,
                 internalTrafficPolicy: internalTrafficPolicy,
                 ports: [
                     KubeProxyServicePort(
@@ -896,6 +1789,7 @@ struct KubeProxyCompilerTests {
     private func makeEndpointSlice(
         name: String = "echo-abc",
         port: Int = 8080,
+        addressType: String = "IPv4",
         endpoints: [KubeProxyEndpoint]
     ) -> KubeProxyEndpointSlice {
         KubeProxyEndpointSlice(
@@ -904,6 +1798,7 @@ struct KubeProxyCompilerTests {
                 name: name,
                 labels: ["kubernetes.io/service-name": "echo"]
             ),
+            addressType: addressType,
             endpoints: endpoints,
             ports: [
                 KubeProxyEndpointPort(name: "http", protocolName: .tcp, port: port)
@@ -911,10 +1806,15 @@ struct KubeProxyCompilerTests {
         )
     }
 
-    private func makeControllerConfig(runtimeStatePath: String, readyStatePath: String) -> KubeProxyMacOSConfig {
+    private func makeControllerConfig(
+        runtimeStatePath: String,
+        readyStatePath: String,
+        dualStackEnabled: Bool = false
+    ) -> KubeProxyMacOSConfig {
         KubeProxyMacOSConfig(
             kubeconfig: "/tmp/kubeconfig",
             nodeName: "node-a",
+            dualStackEnabled: dualStackEnabled,
             pf: KubeProxyPFConfig(
                 vmnetCIDR: "192.168.64.0/24",
                 runtimeStatePath: runtimeStatePath,
@@ -942,6 +1842,46 @@ struct KubeProxyCompilerTests {
             "networkName": "kubernetes-pod",
             "podCIDR": readyPodCIDR,
             "runtimeGeneration": readyGeneration,
+            "expiresAtUnixSeconds": readyExpiresAtUnixSeconds,
+        ])
+        try runtimeData.write(to: runtimeURL, options: .atomic)
+        try readyData.write(to: readyURL, options: .atomic)
+        return (runtimeURL, readyURL)
+    }
+
+    private func writeDualStackPodNetworkStates(
+        in directory: URL,
+        ipv4Ready: Bool = true,
+        ipv6Ready: Bool = true,
+        readyGeneration: UInt64 = 1,
+        readyExpiresAtUnixSeconds: Int64 = Int64(Date().timeIntervalSince1970.rounded(.down)) + 300
+    ) throws -> (runtime: URL, ready: URL) {
+        let runtimeURL = directory.appendingPathComponent("runtime-v2.json")
+        let readyURL = directory.appendingPathComponent("ready-v2.json")
+        let podCIDRs: [String: Any] = [
+            "ipv4": "10.250.25.42/24",
+            "ipv6": "fd42:10:244:19::42/64",
+        ]
+        let runtimeData = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 2,
+            "networkName": "kubernetes-pod",
+            "podCIDR": "10.250.25.0/24",
+            "podCIDRs": podCIDRs,
+            "generation": 1,
+            "updatedAt": "2026-08-02T00:00:00Z",
+        ])
+        let readyData = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 2,
+            "networkName": "kubernetes-pod",
+            "podCIDR": "10.250.25.0/24",
+            "podCIDRs": [
+                "ipv4": "10.250.25.0/24",
+                "ipv6": "fd42:10:244:19::/64",
+            ],
+            "ipv4Ready": ipv4Ready,
+            "ipv6Ready": ipv6Ready,
+            "runtimeGeneration": readyGeneration,
+            "mtu": 1450,
             "expiresAtUnixSeconds": readyExpiresAtUnixSeconds,
         ])
         try runtimeData.write(to: runtimeURL, options: .atomic)
@@ -1013,10 +1953,37 @@ private struct StaticEgressInterfaceResolver: KubeProxyEgressInterfaceResolving 
     }
 }
 
+private struct FailingSnapshotReader: KubeProxyKubernetesReading {
+    func snapshot() async throws -> KubeProxySnapshot {
+        throw KubeProxyMacOSError.applyFailed("snapshot unavailable")
+    }
+}
+
+private final class LegacyOnlyRuleApplier: KubeProxyRuleApplying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var podCIDRs: [String] = []
+
+    var appliedPodCIDRs: [String] {
+        lock.withLock { podCIDRs }
+    }
+
+    func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        localPodCIDR: String,
+        masqueradePodTraffic: Bool
+    ) throws {
+        lock.withLock {
+            podCIDRs.append(localPodCIDR)
+        }
+    }
+}
+
 private final class RecordingRuleApplier: KubeProxyRuleApplying, @unchecked Sendable {
     private let lock = NSLock()
     private var podCIDRs: [String] = []
     private var masqueradePodTrafficValues: [Bool] = []
+    private var recordedWithdrawalCount = 0
+    private var recordedIPv6WithdrawalCount = 0
 
     var appliedPodCIDRs: [String] {
         lock.withLock { podCIDRs }
@@ -1024,6 +1991,14 @@ private final class RecordingRuleApplier: KubeProxyRuleApplying, @unchecked Send
 
     var appliedMasqueradePodTraffic: [Bool] {
         lock.withLock { masqueradePodTrafficValues }
+    }
+
+    var withdrawalCount: Int {
+        lock.withLock { recordedWithdrawalCount }
+    }
+
+    var ipv6WithdrawalCount: Int {
+        lock.withLock { recordedIPv6WithdrawalCount }
     }
 
     func apply(
@@ -1034,6 +2009,72 @@ private final class RecordingRuleApplier: KubeProxyRuleApplying, @unchecked Send
         lock.withLock {
             podCIDRs.append(localPodCIDR)
             masqueradePodTrafficValues.append(masqueradePodTraffic)
+        }
+    }
+
+    func withdraw() throws {
+        lock.withLock {
+            recordedWithdrawalCount += 1
+        }
+    }
+
+    func withdrawIPv6() throws {
+        lock.withLock {
+            recordedIPv6WithdrawalCount += 1
+        }
+    }
+}
+
+private final class RecordingFamilyRuleApplier: KubeProxyRuleApplying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedRuleSets: [KubeProxyRuleSet] = []
+    private var recordedApplications: [KubeProxyFamilyRuleApplication] = []
+    private var recordedWithdrawalCount = 0
+    private var recordedIPv6WithdrawalCount = 0
+
+    var ruleSets: [KubeProxyRuleSet] {
+        lock.withLock { recordedRuleSets }
+    }
+
+    var applications: [KubeProxyFamilyRuleApplication] {
+        lock.withLock { recordedApplications }
+    }
+
+    var withdrawalCount: Int {
+        lock.withLock { recordedWithdrawalCount }
+    }
+
+    var ipv6WithdrawalCount: Int {
+        lock.withLock { recordedIPv6WithdrawalCount }
+    }
+
+    func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        localPodCIDR: String,
+        masqueradePodTraffic: Bool
+    ) throws {
+        throw KubeProxyMacOSError.unsupported("legacy apply was not expected")
+    }
+
+    func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        podNetwork: KubeProxyFamilyRuleApplication
+    ) throws {
+        lock.withLock {
+            recordedRuleSets.append(ruleSet)
+            recordedApplications.append(podNetwork)
+        }
+    }
+
+    func withdraw() throws {
+        lock.withLock {
+            recordedWithdrawalCount += 1
+        }
+    }
+
+    func withdrawIPv6() throws {
+        lock.withLock {
+            recordedIPv6WithdrawalCount += 1
         }
     }
 }

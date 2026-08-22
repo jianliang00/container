@@ -147,11 +147,18 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 return Runtime_V1_UpdateRuntimeConfigResponse()
             }
 
-            let podCIDR: String
+            let podCIDRs: PodNetworkCIDRs
             do {
-                podCIDR = try canonicalIPv4PodCIDRList(configuredPodCIDRs)
+                podCIDRs = try canonicalPodNetworkCIDRs(
+                    configuredPodCIDRs,
+                    dualStackEnabled: podNetwork.dualStackEnabled
+                )
             } catch {
-                throw CRIShimError.invalidArgument("pod CIDRs must contain exactly one valid IPv4 CIDR")
+                let requirement =
+                    podNetwork.dualStackEnabled
+                    ? "exactly one valid IPv4 CIDR and one valid IPv6 CIDR"
+                    : "exactly one valid IPv4 CIDR"
+                throw CRIShimError.invalidArgument("pod CIDRs must contain \(requirement)")
             }
 
             guard let networkName = podNetwork.networkName?.trimmed,
@@ -165,11 +172,19 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             do {
                 try await podNetworkStateStore.updateRuntimeState(
                     networkName: networkName,
-                    podCIDR: podCIDR,
+                    podCIDRs: podCIDRs,
                     path: runtimeStatePath
                 )
-            } catch PodNetworkStateError.invalidIPv4PodCIDR {
-                throw CRIShimError.invalidArgument("pod CIDRs must contain exactly one valid IPv4 CIDR")
+            } catch let error as PodNetworkStateError
+                where error == .invalidIPv4PodCIDR
+                || error == .invalidIPv6PodCIDR
+                || error == .invalidPodCIDRList
+            {
+                let requirement =
+                    podNetwork.dualStackEnabled
+                    ? "exactly one valid IPv4 CIDR and one valid IPv6 CIDR"
+                    : "exactly one valid IPv4 CIDR"
+                throw CRIShimError.invalidArgument("pod CIDRs must contain \(requirement)")
             } catch {
                 throw CRIShimError.internalError("failed to persist pod network runtime state")
             }
@@ -384,7 +399,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             var response = Runtime_V1_PodSandboxStatusResponse()
             let snapshot = await sandboxSnapshot(for: metadata)
             let workloadSnapshots = workloadSnapshotsByID(snapshot)
-            response.status = makeCRIPodSandboxStatus(metadata, sandboxSnapshot: snapshot)
+            response.status = makeCRIPodSandboxStatus(
+                metadata,
+                sandboxSnapshot: snapshot,
+                dualStackEnabled: config.podNetwork?.dualStackEnabled == true
+            )
             response.containersStatuses = try metadataStore.listContainers()
                 .filter { $0.sandboxID == sandboxID }
                 .sorted(by: { lhs, rhs in

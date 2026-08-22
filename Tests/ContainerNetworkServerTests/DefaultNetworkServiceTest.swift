@@ -75,14 +75,130 @@ struct DefaultNetworkServiceTest {
         #expect(try await service.lookup(hostname: "test-host") == nil)
     }
 
-    private func makeService() async throws -> DefaultNetworkService {
-        try await DefaultNetworkService(
+    @Test func explicitIPv6NetworkProjectsStableAddressAndGateway() async throws {
+        let service = try await makeService(
+            status: NetworkStatus(
+                ipv4Subnet: try CIDRv4("192.168.64.0/24"),
+                ipv4Gateway: try IPv4Address("192.168.64.1"),
+                ipv6Subnet: try CIDRv6("fd42:10:244:22::/64"),
+                ipv6Gateway: try IPv6Address("fd42:10:244:22::1")
+            )
+        )
+        let session = XPCServerSession()
+        let macAddress = try MACAddress("f2:00:00:00:00:01")
+
+        let allocated = try await service.allocate(
+            hostname: "dual-stack-host",
+            macAddress: macAddress,
+            session: session
+        ).attachment
+        let lookedUp = try #require(try await service.lookup(hostname: "dual-stack-host"))
+        let expectedIPv6Address = try CIDRv6("fd42:10:244:22:f000:ff:fe00:1/64")
+        let expectedIPv6Gateway = try IPv6Address("fd42:10:244:22::1")
+
+        #expect(allocated == lookedUp)
+        #expect(allocated.ipv6Address == expectedIPv6Address)
+        #expect(allocated.ipv6Gateway == expectedIPv6Gateway)
+    }
+
+    @Test func automaticIPv6PrefixDoesNotCreateGuestIPv6Intent() async throws {
+        let service = try await makeService(
+            status: NetworkStatus(
+                ipv4Subnet: try CIDRv4("192.168.64.0/24"),
+                ipv4Gateway: try IPv4Address("192.168.64.1"),
+                ipv6Subnet: try CIDRv6("fd42:25e3:5eb4:24a4::/64")
+            )
+        )
+
+        let attachment = try await service.allocate(
+            hostname: "legacy-host",
+            macAddress: try MACAddress("f2:00:00:00:00:01"),
+            session: XPCServerSession()
+        ).attachment
+
+        #expect(attachment.ipv6Address != nil)
+        #expect(attachment.ipv6Gateway == nil)
+    }
+
+    @Test func explicitIPv6NetworkRejectsDuplicateMACAddressesWithoutLeakingAllocation() async throws {
+        let service = try await makeService(
+            status: NetworkStatus(
+                ipv4Subnet: try CIDRv4("192.168.64.0/24"),
+                ipv4Gateway: try IPv4Address("192.168.64.1"),
+                ipv6Subnet: try CIDRv6("fd42:10:244:22::/64"),
+                ipv6Gateway: try IPv6Address("fd42:10:244:22::1")
+            )
+        )
+        let duplicate = try MACAddress("f2:00:00:00:00:01")
+        _ = try await service.allocate(
+            hostname: "first-host",
+            macAddress: duplicate,
+            session: XPCServerSession()
+        )
+
+        await #expect(throws: (any Error).self) {
+            try await service.allocate(
+                hostname: "conflicting-host",
+                macAddress: duplicate,
+                session: XPCServerSession()
+            )
+        }
+        #expect(try await service.lookup(hostname: "conflicting-host") == nil)
+    }
+
+    @Test func explicitIPv6NetworkRejectsPrefixThatCannotUseEUI64Allocation() async throws {
+        let service = try await makeService(
+            status: NetworkStatus(
+                ipv4Subnet: try CIDRv4("192.168.64.0/24"),
+                ipv4Gateway: try IPv4Address("192.168.64.1"),
+                ipv6Subnet: try CIDRv6("fd42:10:244:22::/80"),
+                ipv6Gateway: try IPv6Address("fd42:10:244:22::1")
+            )
+        )
+
+        await #expect(throws: (any Error).self) {
+            try await service.allocate(
+                hostname: "invalid-prefix-host",
+                macAddress: try MACAddress("f2:00:00:00:00:01"),
+                session: XPCServerSession()
+            )
+        }
+        #expect(try await service.lookup(hostname: "invalid-prefix-host") == nil)
+    }
+
+    @Test func explicitIPv6NetworkRejectsGatewayOutsideSubnet() async throws {
+        let service = try await makeService(
+            status: NetworkStatus(
+                ipv4Subnet: try CIDRv4("192.168.64.0/24"),
+                ipv4Gateway: try IPv4Address("192.168.64.1"),
+                ipv6Subnet: try CIDRv6("fd42:10:244:22::/64"),
+                ipv6Gateway: try IPv6Address("fd42:10:244:23::1")
+            )
+        )
+
+        await #expect(throws: (any Error).self) {
+            try await service.allocate(
+                hostname: "invalid-gateway-host",
+                macAddress: try MACAddress("f2:00:00:00:00:01"),
+                session: XPCServerSession()
+            )
+        }
+        #expect(try await service.lookup(hostname: "invalid-gateway-host") == nil)
+    }
+
+    private func makeService(
+        status: NetworkStatus? = nil
+    ) async throws -> DefaultNetworkService {
+        let status =
+            try status
+            ?? NetworkStatus(
+                ipv4Subnet: CIDRv4("192.168.64.0/24"),
+                ipv4Gateway: IPv4Address("192.168.64.1"),
+                ipv6Subnet: nil
+            )
+        return try await DefaultNetworkService(
             network: TestNetwork(
-                status: NetworkStatus(
-                    ipv4Subnet: try CIDRv4("192.168.64.0/24"),
-                    ipv4Gateway: try IPv4Address("192.168.64.1"),
-                    ipv6Subnet: nil
-                )
+                status: status
             ),
             log: Logger(label: "DefaultNetworkServiceTest")
         )

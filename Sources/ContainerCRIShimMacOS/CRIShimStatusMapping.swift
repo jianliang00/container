@@ -52,10 +52,14 @@ func makeCRIPodSandboxStatus(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_P
 
 func makeCRIPodSandboxStatus(
     _ metadata: CRIShimSandboxMetadata,
-    sandboxSnapshot: SandboxSnapshot?
+    sandboxSnapshot: SandboxSnapshot?,
+    dualStackEnabled: Bool = false
 ) -> Runtime_V1_PodSandboxStatus {
     var status = makeCRIPodSandboxStatus(metadata.applying(sandboxSnapshot: sandboxSnapshot))
-    if let network = makeCRIPodSandboxNetworkStatus(sandboxSnapshot) {
+    if let network = makeCRIPodSandboxNetworkStatus(
+        sandboxSnapshot,
+        dualStackEnabled: dualStackEnabled
+    ) {
         status.network = network
     }
     return status
@@ -262,12 +266,26 @@ private func makeCRIImageSpec(_ reference: String) -> Runtime_V1_ImageSpec {
     return image
 }
 
-private func makeCRIPodSandboxNetworkStatus(_ sandboxSnapshot: SandboxSnapshot?) -> Runtime_V1_PodSandboxNetworkStatus? {
-    guard let sandboxSnapshot else {
+private func makeCRIPodSandboxNetworkStatus(
+    _ sandboxSnapshot: SandboxSnapshot?,
+    dualStackEnabled: Bool
+) -> Runtime_V1_PodSandboxNetworkStatus? {
+    guard let attachments = sandboxSnapshot?.networks, let primaryAttachment = attachments.first else {
         return nil
     }
-    let ips = sandboxSnapshot.networks.map(\.ipv4Address.address.description)
-    return makeCRIPodSandboxNetworkStatus(ips: ips)
+    guard dualStackEnabled else {
+        return makeCRIPodSandboxNetworkStatus(
+            ips: attachments.map(\.ipv4Address.address.description)
+        )
+    }
+
+    var primaryIPs = [primaryAttachment.ipv4Address.address.description]
+    if primaryAttachment.ipv6Gateway != nil,
+        let ipv6Address = primaryAttachment.ipv6Address?.address.description
+    {
+        primaryIPs.append(ipv6Address)
+    }
+    return makeCRIPodSandboxNetworkStatus(ips: primaryIPs)
 }
 
 private func makeCRIPodSandboxNetworkStatus(ips rawIPs: [String]) -> Runtime_V1_PodSandboxNetworkStatus? {

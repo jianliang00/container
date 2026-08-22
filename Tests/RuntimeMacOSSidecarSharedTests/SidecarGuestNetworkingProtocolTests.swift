@@ -21,7 +21,7 @@ import Testing
 
 struct SidecarGuestNetworkingProtocolTests {
     @Test
-    func interfaceConfigurationRoundTripPreservesMTU() throws {
+    func interfaceConfigurationRoundTripPreservesDualStackAndMTU() throws {
         let interface = MacOSGuestNetworkInterfaceConfiguration(
             networkID: "default",
             hostname: "guest-1",
@@ -29,6 +29,9 @@ struct SidecarGuestNetworkingProtocolTests {
             ipv4Address: "192.168.64.2",
             ipv4PrefixLength: 24,
             ipv4Gateway: "192.168.64.1",
+            ipv6Address: "fd42:10:244:22::2",
+            ipv6PrefixLength: 64,
+            ipv6Gateway: "fd42:10:244:22::1",
             mtu: 1_450
         )
 
@@ -38,6 +41,9 @@ struct SidecarGuestNetworkingProtocolTests {
         )
 
         #expect(decoded == interface)
+        #expect(decoded.ipv6Address == "fd42:10:244:22::2")
+        #expect(decoded.ipv6PrefixLength == 64)
+        #expect(decoded.ipv6Gateway == "fd42:10:244:22::1")
         #expect(decoded.mtu == 1_450)
     }
 
@@ -49,6 +55,9 @@ struct SidecarGuestNetworkingProtocolTests {
 
         let decoded = try JSONDecoder().decode(MacOSGuestNetworkInterfaceConfiguration.self, from: data)
 
+        #expect(decoded.ipv6Address == nil)
+        #expect(decoded.ipv6PrefixLength == nil)
+        #expect(decoded.ipv6Gateway == nil)
         #expect(decoded.mtu == nil)
     }
 
@@ -59,6 +68,7 @@ struct SidecarGuestNetworkingProtocolTests {
             interfaceName: "en0",
             macAddress: "02:42:ac:11:00:02",
             ipv4Address: "192.168.64.2/24",
+            ipv6Address: "fd42:10:244:22::2/64",
             effectiveMTU: 1_450
         )
 
@@ -68,6 +78,7 @@ struct SidecarGuestNetworkingProtocolTests {
         )
 
         #expect(decoded == interface)
+        #expect(decoded.ipv6Address == "fd42:10:244:22::2/64")
         #expect(decoded.effectiveMTU == 1_450)
     }
 
@@ -79,6 +90,7 @@ struct SidecarGuestNetworkingProtocolTests {
 
         let decoded = try JSONDecoder().decode(MacOSGuestAppliedNetworkInterface.self, from: data)
 
+        #expect(decoded.ipv6Address == nil)
         #expect(decoded.effectiveMTU == nil)
     }
 

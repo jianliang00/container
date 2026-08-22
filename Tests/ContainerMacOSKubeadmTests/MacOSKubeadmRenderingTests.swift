@@ -31,16 +31,62 @@ struct MacOSKubeadmRenderingTests {
         )
         #expect(object["nodeName"] as? String == "macos-ci-1")
         #expect(object["containerServiceUserID"] as? Int == 501)
+        #expect(object["dualStackEnabled"] as? Bool == false)
         #expect(object["underlayInterface"] == nil)
     }
 
-    @Test func flannelConfigurationDefaultsContainerServiceUserIDToRoot() throws {
+    @Test func fullModeConfigurationsDefaultDualStackOff() throws {
         let rendered = MacOSKubeadmRenderer.flannelVXLANConfiguration(nodeName: "macos-ci-1")
 
         let object = try #require(
             JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
         )
         #expect(object["containerServiceUserID"] as? Int == 0)
+        #expect(object["dualStackEnabled"] as? Bool == false)
+
+        let criShim = MacOSKubeadmRenderer.criShimConfiguration(
+            sandboxImage: "localhost/macos-sandbox:test"
+        )
+        let criShimObject = try #require(
+            JSONSerialization.jsonObject(with: Data(criShim.utf8)) as? [String: Any]
+        )
+        let podNetwork = try #require(criShimObject["podNetwork"] as? [String: Any])
+        #expect(podNetwork["dualStackEnabled"] as? Bool == false)
+    }
+
+    @Test func fullModeConfigurationsRenderMatchingDualStackGate() throws {
+        let criShim = MacOSKubeadmRenderer.criShimConfiguration(
+            sandboxImage: "localhost/macos-sandbox:test",
+            dualStackEnabled: true
+        )
+        let criShimObject = try #require(
+            JSONSerialization.jsonObject(with: Data(criShim.utf8)) as? [String: Any]
+        )
+        let podNetwork = try #require(criShimObject["podNetwork"] as? [String: Any])
+
+        let flannel = MacOSKubeadmRenderer.flannelVXLANConfiguration(
+            nodeName: "macos-ci-1",
+            dualStackEnabled: true
+        )
+        let flannelObject = try #require(
+            JSONSerialization.jsonObject(with: Data(flannel.utf8)) as? [String: Any]
+        )
+
+        #expect(podNetwork["dualStackEnabled"] as? Bool == true)
+        #expect(flannelObject["dualStackEnabled"] as? Bool == true)
+    }
+
+    @Test func compatCRIConfigurationKeepsPodNetworkingDisabled() throws {
+        let rendered = MacOSKubeadmRenderer.criShimConfiguration(
+            sandboxImage: "localhost/macos-sandbox:test",
+            networkMode: .compat
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+
+        #expect(object["podNetwork"] == nil)
+        #expect(!rendered.contains("dualStackEnabled"))
     }
 
     @Test func kubeProxyConfigurationUsesAutomaticEgressResolution() throws {
@@ -51,5 +97,18 @@ struct MacOSKubeadmRenderingTests {
         let pf = try #require(object["pf"] as? [String: Any])
 
         #expect(pf["egressInterface"] == nil)
+        #expect(object["dualStackEnabled"] as? Bool == false)
+    }
+
+    @Test func kubeProxyConfigurationCanEnableDualStack() throws {
+        let rendered = MacOSKubeadmRenderer.kubeProxyConfiguration(
+            nodeName: "macos-ci-1",
+            dualStackEnabled: true
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+
+        #expect(object["dualStackEnabled"] as? Bool == true)
     }
 }

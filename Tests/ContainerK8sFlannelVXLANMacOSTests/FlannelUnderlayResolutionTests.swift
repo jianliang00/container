@@ -116,10 +116,52 @@ struct FlannelUnderlayResolutionTests {
         }
     }
 
-    private static func ifconfig(name: String, address: String, mtu: Int) -> String {
-        """
-        \(name): flags=8863<UP,BROADCAST,RUNNING> mtu \(mtu)
-        \tinet \(address) netmask 0xffffff00 broadcast 192.0.2.255
-        """
+    @Test
+    func discoversUsableIPv6UnderlayAndValidatesItsRoute() throws {
+        let manager = FlannelSystemManager { executable, arguments in
+            switch (executable, arguments) {
+            case ("/sbin/ifconfig", ["en7"]):
+                Self.ifconfig(
+                    name: "en7",
+                    address: "192.0.2.24",
+                    ipv6Address: "2001:db8:200:109d::24",
+                    mtu: 1_500
+                )
+            case ("/sbin/route", ["-n", "get", "-inet6", "2001:db8:200:109d::8"]):
+                "route to: 2001:db8:200:109d::8\n  interface: en7\n"
+            default:
+                throw FlannelVXLANError.runtime("unexpected command")
+            }
+        }
+
+        let underlay = try manager.inspectUnderlayInterface("en7")
+        try manager.validateIPv6UnderlayRoute(destination: "2001:db8:200:109d::8", interface: "en7")
+
+        #expect(underlay.ipv6Address == "2001:db8:200:109d::24")
+    }
+
+    @Test
+    func ignoresLinkLocalIPv6UnderlayAddress() throws {
+        let manager = FlannelSystemManager { _, _ in
+            Self.ifconfig(name: "en7", address: "192.0.2.24", ipv6Address: "fe80::1%en7", mtu: 1_500)
+        }
+
+        let underlay = try manager.inspectUnderlayInterface("en7")
+
+        #expect(underlay.ipv6Address == nil)
+    }
+
+    private static func ifconfig(
+        name: String,
+        address: String,
+        ipv6Address: String? = nil,
+        mtu: Int
+    ) -> String {
+        let ipv6 = ipv6Address.map { "\tinet6 \($0) prefixlen 64" } ?? ""
+        return """
+            \(name): flags=8863<UP,BROADCAST,RUNNING> mtu \(mtu)
+            \tinet \(address) netmask 0xffffff00 broadcast 192.0.2.255
+            \(ipv6)
+            """
     }
 }

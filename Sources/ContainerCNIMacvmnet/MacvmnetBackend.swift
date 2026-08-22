@@ -269,19 +269,24 @@ extension CNIResult {
             )
         ]
 
-        if let ipv6Address = attachment.ipv6Address {
+        if let ipv6Address = attachment.ipv6Address,
+            let ipv6Gateway = attachment.ipv6Gateway
+        {
             ips.append(
                 CNIIPConfig(
                     interface: 0,
                     address: ipv6Address.description,
-                    gateway: nil
+                    gateway: ipv6Gateway.description
                 )
             )
         }
 
-        let routes = [
+        var routes = [
             CNIRoute(dst: "0.0.0.0/0", gw: attachment.ipv4Gateway.description)
         ]
+        if attachment.ipv6Address != nil, let ipv6Gateway = attachment.ipv6Gateway {
+            routes.append(CNIRoute(dst: "::/0", gw: ipv6Gateway.description))
+        }
 
         let dns = attachment.dns.map {
             CNIDNS(

@@ -16,6 +16,12 @@
 
 import Foundation
 
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
+
 public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
     public static let defaultOwnershipStatePath = "/var/lib/container/flannel-vxlan/ownership.json"
     public static let defaultControlSocketPath = "/var/run/container-flannel-vxlan-macos.sock"
@@ -29,6 +35,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
     public var networkConfigKey: String
     public var annotationPrefix: String
     public var vtepMACPath: String
+    public var dualStackEnabled: Bool
     public var runtimeStatePath: String
     public var readyStatePath: String
     public var ownershipStatePath: String
@@ -45,6 +52,13 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             .path
     }
 
+    public var vtepMACIPv6Path: String {
+        URL(fileURLWithPath: vtepMACPath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("vtep-mac-v6")
+            .path
+    }
+
     private enum CodingKeys: String, CodingKey {
         case kubeconfig
         case nodeKubeconfig
@@ -55,6 +69,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
         case networkConfigKey
         case annotationPrefix
         case vtepMACPath
+        case dualStackEnabled
         case runtimeStatePath
         case readyStatePath
         case ownershipStatePath
@@ -75,6 +90,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
         networkConfigKey: String = "net-conf.json",
         annotationPrefix: String = "flannel.alpha.coreos.com",
         vtepMACPath: String = "/var/lib/container/flannel-vxlan/vtep-mac",
+        dualStackEnabled: Bool = false,
         runtimeStatePath: String = "/var/lib/container/cri-shim-macos/pod-network.json",
         readyStatePath: String = "/var/lib/container/flannel-vxlan/ready.json",
         ownershipStatePath: String = FlannelVXLANMacOSConfig.defaultOwnershipStatePath,
@@ -93,6 +109,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
         self.networkConfigKey = networkConfigKey
         self.annotationPrefix = annotationPrefix
         self.vtepMACPath = vtepMACPath
+        self.dualStackEnabled = dualStackEnabled
         self.runtimeStatePath = runtimeStatePath
         self.readyStatePath = readyStatePath
         self.ownershipStatePath = ownershipStatePath
@@ -117,6 +134,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             annotationPrefix: try container.decodeIfPresent(String.self, forKey: .annotationPrefix) ?? "flannel.alpha.coreos.com",
             vtepMACPath: try container.decodeIfPresent(String.self, forKey: .vtepMACPath)
                 ?? "/var/lib/container/flannel-vxlan/vtep-mac",
+            dualStackEnabled: try container.decodeIfPresent(Bool.self, forKey: .dualStackEnabled) ?? false,
             runtimeStatePath: try container.decodeIfPresent(String.self, forKey: .runtimeStatePath)
                 ?? "/var/lib/container/cri-shim-macos/pod-network.json",
             readyStatePath: try container.decodeIfPresent(String.self, forKey: .readyStatePath)
@@ -226,17 +244,20 @@ public enum FlannelVXLANError: Error, Sendable, Equatable, CustomStringConvertib
 
 public struct FlannelNetworkConfig: Codable, Sendable, Hashable {
     public var network: String
+    public var ipv6Network: String?
     public var enableIPv4: Bool
     public var enableIPv6: Bool
     public var backend: FlannelVXLANBackendConfig
 
     public init(
         network: String,
+        ipv6Network: String? = nil,
         enableIPv4: Bool = true,
         enableIPv6: Bool = false,
         backend: FlannelVXLANBackendConfig
     ) {
         self.network = network
+        self.ipv6Network = ipv6Network
         self.enableIPv4 = enableIPv4
         self.enableIPv6 = enableIPv6
         self.backend = backend
@@ -410,6 +431,18 @@ public struct FlannelNodeStatus: Codable, Sendable, Hashable {
         }?.address
     }
 
+    public var internalIPv6: String? {
+        addresses?.lazy.compactMap { address -> String? in
+            guard address.type == "InternalIP",
+                let parsed = FlannelIPv6.parseAddress(address.address),
+                parsed.isUsableUnderlayAddress
+            else {
+                return nil
+            }
+            return parsed.string
+        }.first
+    }
+
     public var isReady: Bool? {
         guard let condition = conditions?.first(where: { $0.type == "Ready" }) else {
             return nil
@@ -512,6 +545,55 @@ public struct FlannelPeer: Codable, Sendable, Hashable, Comparable {
     }
 }
 
+public struct FlannelLocalNodeIPv6Network: Codable, Sendable, Hashable {
+    public var nodeName: String
+    public var podCIDR: String
+    public var subnetBase: String
+    public var internalIPv6: String?
+
+    public init(nodeName: String, podCIDR: String, subnetBase: String, internalIPv6: String? = nil) {
+        self.nodeName = nodeName
+        self.podCIDR = podCIDR
+        self.subnetBase = subnetBase
+        self.internalIPv6 = internalIPv6
+    }
+}
+
+public struct FlannelIPv6Peer: Codable, Sendable, Hashable, Comparable {
+    public var nodeName: String
+    public var operatingSystem: String?
+    public var podCIDR: String
+    public var subnetBase: String
+    public var publicIPv6: String
+    public var vni: Int
+    public var vtepMAC: String
+
+    public init(
+        nodeName: String,
+        operatingSystem: String? = nil,
+        podCIDR: String,
+        subnetBase: String,
+        publicIPv6: String,
+        vni: Int,
+        vtepMAC: String
+    ) {
+        self.nodeName = nodeName
+        self.operatingSystem = operatingSystem
+        self.podCIDR = podCIDR
+        self.subnetBase = subnetBase
+        self.publicIPv6 = publicIPv6
+        self.vni = vni
+        self.vtepMAC = vtepMAC
+    }
+
+    public static func < (lhs: FlannelIPv6Peer, rhs: FlannelIPv6Peer) -> Bool {
+        if lhs.podCIDR != rhs.podCIDR {
+            return lhs.podCIDR < rhs.podCIDR
+        }
+        return lhs.nodeName < rhs.nodeName
+    }
+}
+
 public enum FlannelCompileIssueSeverity: String, Codable, Sendable, Hashable, Comparable {
     case pending
     case warning
@@ -548,16 +630,44 @@ public struct FlannelCompileIssue: Codable, Sendable, Hashable, Comparable {
 public struct FlannelPeerCompilation: Codable, Sendable, Hashable {
     public var localNetwork: FlannelLocalNodeNetwork?
     public var peers: [FlannelPeer]
+    public var localIPv6Network: FlannelLocalNodeIPv6Network?
+    public var ipv6Peers: [FlannelIPv6Peer]
     public var issues: [FlannelCompileIssue]
+
+    private enum CodingKeys: String, CodingKey {
+        case localNetwork
+        case peers
+        case localIPv6Network
+        case ipv6Peers
+        case issues
+    }
 
     public init(
         localNetwork: FlannelLocalNodeNetwork? = nil,
         peers: [FlannelPeer] = [],
+        localIPv6Network: FlannelLocalNodeIPv6Network? = nil,
+        ipv6Peers: [FlannelIPv6Peer] = [],
         issues: [FlannelCompileIssue] = []
     ) {
         self.localNetwork = localNetwork
         self.peers = peers
+        self.localIPv6Network = localIPv6Network
+        self.ipv6Peers = ipv6Peers
         self.issues = issues
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            localNetwork: try container.decodeIfPresent(FlannelLocalNodeNetwork.self, forKey: .localNetwork),
+            peers: try container.decodeIfPresent([FlannelPeer].self, forKey: .peers) ?? [],
+            localIPv6Network: try container.decodeIfPresent(
+                FlannelLocalNodeIPv6Network.self,
+                forKey: .localIPv6Network
+            ),
+            ipv6Peers: try container.decodeIfPresent([FlannelIPv6Peer].self, forKey: .ipv6Peers) ?? [],
+            issues: try container.decodeIfPresent([FlannelCompileIssue].self, forKey: .issues) ?? []
+        )
     }
 }
 
@@ -680,5 +790,142 @@ enum FlannelIPv4 {
         [24, 16, 8, 0]
             .map { String((address >> UInt32($0)) & 0xff) }
             .joined(separator: ".")
+    }
+}
+
+enum FlannelIPv6 {
+    struct Address: Sendable, Hashable {
+        fileprivate var bytes: [UInt8]
+
+        var string: String {
+            FlannelIPv6.format(bytes) ?? "<invalid>"
+        }
+
+        var isUnspecified: Bool {
+            bytes.allSatisfy { $0 == 0 }
+        }
+
+        var isMulticast: Bool {
+            bytes.first == 0xff
+        }
+
+        var isLoopback: Bool {
+            bytes.count == 16 && bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+        }
+
+        var isLinkLocal: Bool {
+            bytes.count == 16 && bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80
+        }
+
+        var isIPv4Mapped: Bool {
+            bytes.count == 16
+                && bytes.prefix(10).allSatisfy { $0 == 0 }
+                && bytes[10] == 0xff
+                && bytes[11] == 0xff
+        }
+
+        var isUsableUnderlayAddress: Bool {
+            !isUnspecified && !isMulticast && !isLoopback && !isLinkLocal && !isIPv4Mapped
+        }
+    }
+
+    struct CIDR: Sendable, Hashable {
+        var network: Address
+        var prefixLength: Int
+
+        var string: String {
+            "\(network.string)/\(prefixLength)"
+        }
+
+        var baseAddress: String {
+            network.string
+        }
+
+        func contains(_ other: CIDR) -> Bool {
+            prefixLength <= other.prefixLength
+                && FlannelIPv6.prefixMatches(network.bytes, other.network.bytes, prefixLength: prefixLength)
+        }
+
+        func overlaps(_ other: CIDR) -> Bool {
+            FlannelIPv6.prefixMatches(
+                network.bytes,
+                other.network.bytes,
+                prefixLength: min(prefixLength, other.prefixLength)
+            )
+        }
+    }
+
+    static func parseCIDR(_ value: String) -> CIDR? {
+        let components = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 2,
+            let address = parseAddress(String(components[0])),
+            let prefixLength = Int(components[1]),
+            (0...128).contains(prefixLength)
+        else {
+            return nil
+        }
+        return CIDR(
+            network: Address(bytes: masked(address.bytes, prefixLength: prefixLength)),
+            prefixLength: prefixLength
+        )
+    }
+
+    static func parseAddress(_ value: String) -> Address? {
+        var address = in6_addr()
+        let parsed = value.withCString { inet_pton(AF_INET6, $0, &address) }
+        guard parsed == 1 else {
+            return nil
+        }
+        return Address(bytes: withUnsafeBytes(of: &address) { Array($0) })
+    }
+
+    private static func masked(_ bytes: [UInt8], prefixLength: Int) -> [UInt8] {
+        var result = bytes
+        let completeBytes = prefixLength / 8
+        let remainingBits = prefixLength % 8
+        if remainingBits > 0 {
+            result[completeBytes] &= UInt8.max << UInt8(8 - remainingBits)
+        }
+        let firstClearedByte = completeBytes + (remainingBits > 0 ? 1 : 0)
+        if firstClearedByte < result.count {
+            for index in firstClearedByte..<result.count {
+                result[index] = 0
+            }
+        }
+        return result
+    }
+
+    private static func prefixMatches(_ lhs: [UInt8], _ rhs: [UInt8], prefixLength: Int) -> Bool {
+        guard lhs.count == 16, rhs.count == 16 else {
+            return false
+        }
+        let completeBytes = prefixLength / 8
+        guard lhs.prefix(completeBytes).elementsEqual(rhs.prefix(completeBytes)) else {
+            return false
+        }
+        let remainingBits = prefixLength % 8
+        guard remainingBits > 0 else {
+            return true
+        }
+        let mask = UInt8.max << UInt8(8 - remainingBits)
+        return lhs[completeBytes] & mask == rhs[completeBytes] & mask
+    }
+
+    private static func format(_ bytes: [UInt8]) -> String? {
+        guard bytes.count == 16 else {
+            return nil
+        }
+        var address = in6_addr()
+        withUnsafeMutableBytes(of: &address) { destination in
+            destination.copyBytes(from: bytes)
+        }
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count)) != nil else {
+            return nil
+        }
+        return String(
+            decoding: buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) },
+            as: UTF8.self
+        )
     }
 }

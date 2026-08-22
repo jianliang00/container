@@ -23,8 +23,14 @@ public struct FlannelVXLANReconcileResult: Sendable, Equatable {
     public var interfaceName: String
     public var mtu: Int
     public var peers: [FlannelPeer]
+    public var localIPv6Network: FlannelLocalNodeIPv6Network?
+    public var ipv6InterfaceName: String?
+    public var ipv6Peers: [FlannelIPv6Peer]
+    public var ipv4Ready: Bool
+    public var ipv6Ready: Bool?
     public var issues: [FlannelCompileIssue]
     public var statistics: FlannelTunnelStatistics
+    public var ipv6Statistics: FlannelTunnelStatistics?
 
     public init(
         localNetwork: FlannelLocalNodeNetwork,
@@ -32,33 +38,51 @@ public struct FlannelVXLANReconcileResult: Sendable, Equatable {
         interfaceName: String,
         mtu: Int,
         peers: [FlannelPeer],
+        localIPv6Network: FlannelLocalNodeIPv6Network? = nil,
+        ipv6InterfaceName: String? = nil,
+        ipv6Peers: [FlannelIPv6Peer] = [],
+        ipv4Ready: Bool = true,
+        ipv6Ready: Bool? = nil,
         issues: [FlannelCompileIssue],
-        statistics: FlannelTunnelStatistics
+        statistics: FlannelTunnelStatistics,
+        ipv6Statistics: FlannelTunnelStatistics? = nil
     ) {
         self.localNetwork = localNetwork
         self.underlay = underlay
         self.interfaceName = interfaceName
         self.mtu = mtu
         self.peers = peers
+        self.localIPv6Network = localIPv6Network
+        self.ipv6InterfaceName = ipv6InterfaceName
+        self.ipv6Peers = ipv6Peers
+        self.ipv4Ready = ipv4Ready
+        self.ipv6Ready = ipv6Ready
         self.issues = issues
         self.statistics = statistics
+        self.ipv6Statistics = ipv6Statistics
     }
 }
 
 public struct FlannelCleanupResult: Sendable, Equatable {
     public var removedRoutes: [String]
+    public var removedIPv6Routes: [String]
     public var stoppedTunnel: Bool
+    public var stoppedIPv6Tunnel: Bool
     public var removedNodeAnnotations: Bool
     public var nodeAnnotationAttempts: Int
 
     public init(
         removedRoutes: [String],
+        removedIPv6Routes: [String] = [],
         stoppedTunnel: Bool,
+        stoppedIPv6Tunnel: Bool = false,
         removedNodeAnnotations: Bool,
         nodeAnnotationAttempts: Int
     ) {
         self.removedRoutes = removedRoutes
+        self.removedIPv6Routes = removedIPv6Routes
         self.stoppedTunnel = stoppedTunnel
+        self.stoppedIPv6Tunnel = stoppedIPv6Tunnel
         self.removedNodeAnnotations = removedNodeAnnotations
         self.nodeAnnotationAttempts = nodeAnnotationAttempts
     }
@@ -66,6 +90,8 @@ public struct FlannelCleanupResult: Sendable, Equatable {
 
 public actor FlannelVXLANController {
     public typealias TunnelFactory = @Sendable (FlannelTunnelConfiguration) throws -> any FlannelTunnelControlling
+    public typealias IPv6TunnelFactory =
+        @Sendable (FlannelIPv6TunnelConfiguration) throws -> any FlannelIPv6TunnelControlling
 
     private let config: FlannelVXLANMacOSConfig
     private let kubernetes: any FlannelKubernetesReading & FlannelKubernetesWriting
@@ -73,15 +99,30 @@ public actor FlannelVXLANController {
     private let system: any FlannelSystemManaging
     private let podNetworkStateStore: PodNetworkStateStore
     private let vtepMACStore: any FlannelVTEPMACStoring
+    private let vtepMACIPv6Store: any FlannelVTEPMACStoring
     private let ownershipStateStore: any FlannelOwnershipStateStoring
     private let networkOwnershipStateStore: any FlannelHostOnlyNetworkOwnershipStoring
     private let makeTunnel: TunnelFactory
+    private let makeIPv6Tunnel: IPv6TunnelFactory
     private let now: @Sendable () -> Date
     private let cleanupRetryDelay: Duration
 
     private var tunnel: (any FlannelTunnelControlling)?
     private var tunnelConfiguration: FlannelTunnelConfiguration?
     private var installedRoutes: Set<String> = []
+    private var ipv6Tunnel: (any FlannelIPv6TunnelControlling)?
+    private var ipv6TunnelConfiguration: FlannelIPv6TunnelConfiguration?
+    private var installedIPv6Routes: Set<String> = []
+
+    private struct IPv6ReconcileContext {
+        var localNetwork: FlannelLocalNodeIPv6Network
+        var localCIDR: FlannelIPv6.CIDR
+    }
+
+    private struct IPv6DataplaneResult {
+        var publicIPv6: String
+        var vtepMAC: String
+    }
 
     public init(
         config: FlannelVXLANMacOSConfig,
@@ -90,11 +131,13 @@ public actor FlannelVXLANController {
         system: any FlannelSystemManaging = FlannelSystemManager(),
         podNetworkStateStore: PodNetworkStateStore = PodNetworkStateStore(),
         vtepMACStore: (any FlannelVTEPMACStoring)? = nil,
+        vtepMACIPv6Store: (any FlannelVTEPMACStoring)? = nil,
         ownershipStateStore: (any FlannelOwnershipStateStoring)? = nil,
         networkOwnershipStateStore: (any FlannelHostOnlyNetworkOwnershipStoring)? = nil,
-        now: @escaping @Sendable () -> Date = Date.init,
+        now: @escaping @Sendable () -> Date = { Date() },
         cleanupRetryDelay: Duration = .milliseconds(250),
-        makeTunnel: @escaping TunnelFactory = { try FlannelVXLANTunnel(configuration: $0) }
+        makeTunnel: @escaping TunnelFactory = { try FlannelVXLANTunnel(configuration: $0) },
+        makeIPv6Tunnel: @escaping IPv6TunnelFactory = { try FlannelIPv6VXLANTunnel(configuration: $0) }
     ) throws {
         try config.validate()
         self.config = config
@@ -103,6 +146,7 @@ public actor FlannelVXLANController {
         self.system = system
         self.podNetworkStateStore = podNetworkStateStore
         self.vtepMACStore = vtepMACStore ?? FlannelVTEPMACStore(path: config.vtepMACPath)
+        self.vtepMACIPv6Store = vtepMACIPv6Store ?? FlannelVTEPMACStore(path: config.vtepMACIPv6Path)
         self.ownershipStateStore = ownershipStateStore ?? FlannelOwnershipStateStore(path: config.ownershipStatePath)
         self.networkOwnershipStateStore =
             networkOwnershipStateStore
@@ -110,6 +154,7 @@ public actor FlannelVXLANController {
         self.now = now
         self.cleanupRetryDelay = cleanupRetryDelay
         self.makeTunnel = makeTunnel
+        self.makeIPv6Tunnel = makeIPv6Tunnel
     }
 
     @discardableResult
@@ -168,6 +213,13 @@ public actor FlannelVXLANController {
                 "cleanup refused because tunnel interface \(persistedState.interfaceName) is still active; stop the launchd job and retry"
             )
         }
+        if ipv6Tunnel == nil, let interface = persistedState?.ipv6InterfaceName,
+            try system.interfaceExists(interface)
+        {
+            throw FlannelVXLANError.runtime(
+                "cleanup refused because IPv6 tunnel interface \(interface) is still active; stop the launchd job and retry"
+            )
+        }
 
         do {
             try clearReadyState()
@@ -190,8 +242,11 @@ public actor FlannelVXLANController {
         }
 
         let interface = tunnel?.interfaceName ?? persistedState?.interfaceName
+        let ipv6Interface = ipv6Tunnel?.interfaceName ?? persistedState?.ipv6InterfaceName
         let routes = installedRoutes.union(persistedState?.routePodCIDRs ?? [])
+        let ipv6Routes = installedIPv6Routes.union(persistedState?.ipv6RoutePodCIDRs ?? [])
         var removedRoutes: [String] = []
+        var removedIPv6Routes: [String] = []
         if let interface {
             for podCIDR in routes.sorted() {
                 do {
@@ -205,21 +260,43 @@ public actor FlannelVXLANController {
         } else if !routes.isEmpty {
             failures.append("remove routes: cleanup state does not identify their tunnel interface")
         }
+        if let ipv6Interface {
+            for podCIDR in ipv6Routes.sorted() {
+                do {
+                    try system.removeIPv6Route(podCIDR: podCIDR, interface: ipv6Interface)
+                    installedIPv6Routes.remove(podCIDR)
+                    removedIPv6Routes.append(podCIDR)
+                } catch {
+                    failures.append("remove IPv6 route \(podCIDR) from \(ipv6Interface): \(error)")
+                }
+            }
+        } else if !ipv6Routes.isEmpty {
+            failures.append("remove IPv6 routes: cleanup state does not identify their tunnel interface")
+        }
         guard failures.isEmpty else {
             throw FlannelVXLANError.runtime("cleanup incomplete: \(failures.joined(separator: "; "))")
         }
 
         let stoppedTunnel = tunnel != nil
+        let stoppedIPv6Tunnel = ipv6Tunnel != nil
         let stoppingTunnel = tunnel
+        let stoppingIPv6Tunnel = ipv6Tunnel
         stoppingTunnel?.stop()
+        stoppingIPv6Tunnel?.stop()
         if stoppingTunnel?.isRunning == true {
             failures.append("stop tunnel \(stoppingTunnel?.interfaceName ?? "<unknown>"): tunnel is still running")
+        }
+        if stoppingIPv6Tunnel?.isRunning == true {
+            failures.append(
+                "stop IPv6 tunnel \(stoppingIPv6Tunnel?.interfaceName ?? "<unknown>"): tunnel is still running"
+            )
         }
 
         guard failures.isEmpty else {
             throw FlannelVXLANError.runtime("cleanup incomplete: \(failures.joined(separator: "; "))")
         }
         stoppingTunnel?.destroy()
+        stoppingIPv6Tunnel?.destroy()
 
         if let interface {
             do {
@@ -230,6 +307,15 @@ public actor FlannelVXLANController {
                 failures.append("inspect tunnel \(interface) after stop: \(error)")
             }
         }
+        if let ipv6Interface {
+            do {
+                if try system.interfaceExists(ipv6Interface) {
+                    failures.append("remove IPv6 tunnel \(ipv6Interface): interface still exists after stop")
+                }
+            } catch {
+                failures.append("inspect IPv6 tunnel \(ipv6Interface) after stop: \(error)")
+            }
+        }
 
         guard failures.isEmpty else {
             throw FlannelVXLANError.runtime("cleanup incomplete: \(failures.joined(separator: "; "))")
@@ -237,6 +323,8 @@ public actor FlannelVXLANController {
 
         tunnel = nil
         tunnelConfiguration = nil
+        ipv6Tunnel = nil
+        ipv6TunnelConfiguration = nil
 
         do {
             try ownershipStateStore.remove()
@@ -249,13 +337,21 @@ public actor FlannelVXLANController {
 
         return FlannelCleanupResult(
             removedRoutes: removedRoutes,
+            removedIPv6Routes: removedIPv6Routes,
             stoppedTunnel: stoppedTunnel,
+            stoppedIPv6Tunnel: stoppedIPv6Tunnel,
             removedNodeAnnotations: removedNodeAnnotations,
             nodeAnnotationAttempts: nodeAnnotationAttempts
         )
     }
 
     private func reconcile() async throws -> FlannelVXLANReconcileResult {
+        let persistedOwnership = try ownershipStateStore.load()
+        if !config.dualStackEnabled, persistedOwnership?.ipv6InterfaceName != nil {
+            throw FlannelVXLANError.runtime(
+                "dual-stack is disabled but persisted IPv6 tunnel ownership exists; run cleanup before migrating to IPv4-only mode"
+            )
+        }
         guard let runtimeState = try await podNetworkStateStore.loadRuntimeState(path: config.runtimeStatePath) else {
             throw FlannelVXLANError.runtime("waiting for kubelet to publish the local PodCIDR")
         }
@@ -272,12 +368,28 @@ public actor FlannelVXLANController {
         async let nodesRequest = kubernetes.nodes()
         let (configMap, nodes) = try await (configMapRequest, nodesRequest)
 
-        let networkConfig = try FlannelConfigParser.parse(configMap: configMap, key: config.networkConfigKey)
+        let networkConfig: FlannelNetworkConfig
+        do {
+            networkConfig = try FlannelConfigParser.parse(configMap: configMap, key: config.networkConfigKey)
+        } catch {
+            let validationError = error
+            if config.dualStackEnabled {
+                try await withdrawIPv6ForInvalidIntent(
+                    validationError: validationError,
+                    persistedOwnership: persistedOwnership
+                )
+            }
+            throw validationError
+        }
         try networkConfig.backend.validateWindowsCompatibility()
+        var compilationConfig = networkConfig
+        if !config.dualStackEnabled {
+            compilationConfig.enableIPv6 = false
+        }
         let compilation = try FlannelPeerCompiler.compile(
             nodes: nodes,
             localNodeName: config.nodeName,
-            networkConfig: networkConfig,
+            networkConfig: compilationConfig,
             annotationPrefix: config.annotationPrefix
         )
         guard let localNetwork = compilation.localNetwork,
@@ -289,6 +401,35 @@ public actor FlannelVXLANController {
             throw FlannelVXLANError.runtime(
                 "kubelet PodCIDR \(runtimeState.podCIDR) does not match Node PodCIDR \(localNetwork.podCIDR)"
             )
+        }
+        let ipv6Context: IPv6ReconcileContext?
+        do {
+            ipv6Context = try validatedIPv6Context(
+                runtimeState: runtimeState,
+                networkConfig: networkConfig,
+                compilation: compilation
+            )
+        } catch {
+            let validationError = error
+            try await withdrawIPv6ForInvalidIntent(
+                validationError: validationError,
+                persistedOwnership: persistedOwnership
+            )
+            throw validationError
+        }
+        let persistedIPv6Ownership =
+            ipv6Context != nil && persistedOwnership?.ipv6InterfaceName != nil
+            ? persistedOwnership
+            : nil
+        var unresolvedPersistedIPv6Ownership = persistedIPv6Ownership
+        if let persistedIPv6Ownership,
+            let ipv6Tunnel,
+            let ipv6TunnelConfiguration,
+            ipv6Tunnel.interfaceName == persistedIPv6Ownership.ipv6InterfaceName,
+            ipv6TunnelConfiguration.localPodCIDR == persistedIPv6Ownership.localIPv6PodCIDR
+        {
+            installedIPv6Routes.formUnion(persistedIPv6Ownership.ipv6RoutePodCIDRs ?? [])
+            unresolvedPersistedIPv6Ownership = nil
         }
 
         let underlay: FlannelUnderlayInterface
@@ -311,13 +452,25 @@ public actor FlannelVXLANController {
         }
 
         let knownNetworkOwnership = try networkOwnershipStateStore.load()
-        let networkResult = try await networkManager.ensureHostOnlyNetwork(
-            name: config.networkName,
-            podCIDR: localNetwork.podCIDR,
-            plugin: config.networkPlugin,
-            variant: config.networkVariant,
-            knownOwnership: knownNetworkOwnership
-        )
+        let networkResult: FlannelHostOnlyNetworkReconcileResult
+        if let ipv6Context {
+            networkResult = try await networkManager.ensureHostOnlyNetwork(
+                name: config.networkName,
+                podCIDR: localNetwork.podCIDR,
+                ipv6PodCIDR: ipv6Context.localNetwork.podCIDR,
+                plugin: config.networkPlugin,
+                variant: config.networkVariant,
+                knownOwnership: knownNetworkOwnership
+            )
+        } else {
+            networkResult = try await networkManager.ensureHostOnlyNetwork(
+                name: config.networkName,
+                podCIDR: localNetwork.podCIDR,
+                plugin: config.networkPlugin,
+                variant: config.networkVariant,
+                knownOwnership: knownNetworkOwnership
+            )
+        }
         if let ownership = networkResult.ownership {
             try networkOwnershipStateStore.save(ownership)
         } else if knownNetworkOwnership != nil {
@@ -341,31 +494,124 @@ public actor FlannelVXLANController {
 
         try tunnel.setPeers(compilation.peers)
         try reconcileRoutes(desired: Set(compilation.peers.map(\.podCIDR)), interface: tunnel.interfaceName)
-        try ownershipStateStore.save(
-            FlannelOwnershipState(
-                interfaceName: tunnel.interfaceName,
-                localPodCIDR: localNetwork.podCIDR,
-                routePodCIDRs: installedRoutes.sorted()
-            ))
+        try saveOwnershipState(
+            localNetwork: localNetwork,
+            preservingIPv6Ownership: persistedIPv6Ownership
+        )
 
-        let annotationPatch = try FlannelKubernetesClient.leaseAnnotationPatch(
+        var issues = compilation.issues
+        var ipv6Ready: Bool? = config.dualStackEnabled ? false : nil
+        var ipv6Dataplane: IPv6DataplaneResult?
+        if let ipv6Context {
+            if ipv6Context.localNetwork.internalIPv6 == nil {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "local/internal-ipv6",
+                        severity: .warning,
+                        message: "Node has no usable InternalIPv6; using IPv6 address from underlay interface \(underlay.name)"
+                    ))
+            }
+            if let unresolvedOwnership = unresolvedPersistedIPv6Ownership {
+                do {
+                    try deactivateIPv6Dataplane(persistedOwnership: unresolvedOwnership)
+                    unresolvedPersistedIPv6Ownership = nil
+                } catch {
+                    let cleanupError = error
+                    issues.append(
+                        FlannelCompileIssue(
+                            id: "local/ipv6-dataplane",
+                            severity: .error,
+                            message: "IPv6 dataplane is degraded while recovering persisted ownership: \(cleanupError)"
+                        ))
+                    issues.append(
+                        FlannelCompileIssue(
+                            id: "local/ipv6-dataplane-cleanup",
+                            severity: .error,
+                            message: "IPv6 dataplane cleanup is incomplete: \(cleanupError)"
+                        ))
+                }
+            }
+            if unresolvedPersistedIPv6Ownership == nil {
+                do {
+                    ipv6Dataplane = try reconcileIPv6Dataplane(
+                        context: ipv6Context,
+                        underlay: underlay,
+                        networkConfig: networkConfig,
+                        peers: compilation.ipv6Peers,
+                        mtu: mtu
+                    )
+                    ipv6Ready = true
+                } catch {
+                    let dataplaneError = error
+                    issues.append(
+                        FlannelCompileIssue(
+                            id: "local/ipv6-dataplane",
+                            severity: .error,
+                            message: "IPv6 dataplane is degraded: \(dataplaneError)"
+                        ))
+                    let cleanupOwnership =
+                        try snapshotActiveIPv6Ownership(localNetwork: localNetwork)
+                        ?? persistedIPv6Ownership
+                    do {
+                        try deactivateIPv6Dataplane()
+                    } catch {
+                        unresolvedPersistedIPv6Ownership = cleanupOwnership
+                        issues.append(
+                            FlannelCompileIssue(
+                                id: "local/ipv6-dataplane-cleanup",
+                                severity: .error,
+                                message: "IPv6 dataplane cleanup is incomplete: \(error)"
+                            ))
+                    }
+                }
+            }
+            try saveOwnershipState(
+                localNetwork: localNetwork,
+                preservingIPv6Ownership: unresolvedPersistedIPv6Ownership
+            )
+        }
+
+        var annotationPatch = try FlannelKubernetesClient.leaseAnnotationPatch(
             annotationPrefix: config.annotationPrefix,
             publicIP: underlay.ipv4Address,
             vni: networkConfig.backend.vni,
-            vtepMAC: vtepMAC
+            vtepMAC: vtepMAC,
+            publicIPv6: ipv6Dataplane?.publicIPv6,
+            vtepMACIPv6: ipv6Dataplane?.vtepMAC
         )
+        if ipv6Dataplane == nil {
+            let keys = try FlannelAnnotationKeys(prefix: config.annotationPrefix)
+            annotationPatch.removals.formUnion([keys.publicIPv6, keys.backendV6Data])
+        }
         _ = try await kubernetes.patchOwnNodeAnnotations(annotationPatch)
 
         let readyAtUnixSeconds = Int64(now().timeIntervalSince1970.rounded(.down))
         let leaseDurationSeconds = Int64(max(15, config.syncPeriodSeconds * 4))
-        try await podNetworkStateStore.writeReadyState(
-            PodNetworkReadyState(
+        let readyState: PodNetworkReadyState
+        if let ipv6Context {
+            readyState = PodNetworkReadyState(
+                networkName: config.networkName,
+                podCIDRs: PodNetworkCIDRs(
+                    ipv4: localNetwork.podCIDR,
+                    ipv6: ipv6Context.localNetwork.podCIDR
+                ),
+                runtimeGeneration: runtimeState.generation,
+                mtu: UInt32(mtu),
+                expiresAtUnixSeconds: readyAtUnixSeconds + leaseDurationSeconds,
+                ipv4Ready: true,
+                ipv6Ready: ipv6Ready
+            )
+        } else {
+            readyState = PodNetworkReadyState(
                 networkName: config.networkName,
                 podCIDR: localNetwork.podCIDR,
                 runtimeGeneration: runtimeState.generation,
                 mtu: UInt32(mtu),
                 expiresAtUnixSeconds: readyAtUnixSeconds + leaseDurationSeconds
-            ),
+            )
+        }
+        try await podNetworkStateStore.writeReadyState(
+            readyState,
             path: config.readyStatePath
         )
         return FlannelVXLANReconcileResult(
@@ -374,9 +620,111 @@ public actor FlannelVXLANController {
             interfaceName: tunnel.interfaceName,
             mtu: mtu,
             peers: compilation.peers,
-            issues: compilation.issues,
-            statistics: tunnel.statistics()
+            localIPv6Network: ipv6Context?.localNetwork,
+            ipv6InterfaceName: ipv6Tunnel?.interfaceName,
+            ipv6Peers: compilation.ipv6Peers,
+            ipv4Ready: true,
+            ipv6Ready: ipv6Ready,
+            issues: issues.sorted(),
+            statistics: tunnel.statistics(),
+            ipv6Statistics: ipv6Tunnel?.statistics()
         )
+    }
+
+    private func validatedIPv6Context(
+        runtimeState: PodNetworkRuntimeState,
+        networkConfig: FlannelNetworkConfig,
+        compilation: FlannelPeerCompilation
+    ) throws -> IPv6ReconcileContext? {
+        guard config.dualStackEnabled else {
+            return nil
+        }
+        guard networkConfig.enableIPv6 else {
+            throw FlannelVXLANError.invalidNetworkConfig(
+                "dual-stack is enabled locally but Flannel EnableIPv6 is false"
+            )
+        }
+        guard let runtimeValue = runtimeState.podCIDRs.ipv6,
+            let runtimeCIDR = FlannelIPv6.parseCIDR(runtimeValue),
+            runtimeCIDR.prefixLength > 0,
+            runtimeCIDR.network.isUsableUnderlayAddress
+        else {
+            throw FlannelVXLANError.runtime("waiting for kubelet to publish a valid local IPv6 PodCIDR")
+        }
+        guard let localNetwork = compilation.localIPv6Network,
+            let localCIDR = FlannelIPv6.parseCIDR(localNetwork.podCIDR),
+            localCIDR.prefixLength > 0,
+            localCIDR.network.isUsableUnderlayAddress
+        else {
+            throw FlannelVXLANError.runtime("waiting for Node \(config.nodeName) to publish its IPv6 PodCIDR")
+        }
+        guard runtimeCIDR == localCIDR else {
+            throw FlannelVXLANError.runtime(
+                "kubelet IPv6 PodCIDR \(runtimeValue) does not match Node IPv6 PodCIDR \(localNetwork.podCIDR)"
+            )
+        }
+        return IPv6ReconcileContext(localNetwork: localNetwork, localCIDR: localCIDR)
+    }
+
+    private func reconcileIPv6Dataplane(
+        context: IPv6ReconcileContext,
+        underlay: FlannelUnderlayInterface,
+        networkConfig: FlannelNetworkConfig,
+        peers: [FlannelIPv6Peer],
+        mtu: Int
+    ) throws -> IPv6DataplaneResult {
+        guard let rawUnderlayIPv6 = underlay.ipv6Address,
+            let underlayIPv6 = FlannelIPv6.parseAddress(rawUnderlayIPv6),
+            underlayIPv6.isUsableUnderlayAddress
+        else {
+            throw FlannelVXLANError.runtime("underlay interface \(underlay.name) has no usable IPv6 address")
+        }
+        if let rawNodeIPv6 = context.localNetwork.internalIPv6 {
+            guard let nodeIPv6 = FlannelIPv6.parseAddress(rawNodeIPv6),
+                nodeIPv6.isUsableUnderlayAddress,
+                nodeIPv6 == underlayIPv6
+            else {
+                throw FlannelVXLANError.runtime(
+                    "Node InternalIPv6 \(rawNodeIPv6) does not match \(underlay.name) address \(underlayIPv6.string)"
+                )
+            }
+        }
+        guard (1_280...9_000).contains(mtu) else {
+            throw FlannelVXLANError.invalidNetworkConfig(
+                "calculated IPv6 inner MTU \(mtu) is outside 1280...9000"
+            )
+        }
+        let maximumIPv6InnerMTU = underlay.mtu - 70
+        guard mtu <= maximumIPv6InnerMTU else {
+            let maximumBackendMTU = underlay.mtu - 20
+            throw FlannelVXLANError.invalidNetworkConfig(
+                "calculated inner MTU \(mtu) exceeds the IPv6 VXLAN limit \(maximumIPv6InnerMTU) for underlay MTU \(underlay.mtu); set Backend.MTU to \(maximumBackendMTU) or lower so the shared inner MTU accounts for 70-byte IPv6 VXLAN overhead"
+            )
+        }
+        for publicIPv6 in Set(peers.map(\.publicIPv6)).sorted() {
+            try system.validateIPv6UnderlayRoute(destination: publicIPv6, interface: underlay.name)
+        }
+
+        try system.enableIPv6Forwarding()
+        let vtepMAC = try vtepMACIPv6Store.loadOrCreate()
+        let desiredConfiguration = FlannelIPv6TunnelConfiguration(
+            vni: networkConfig.backend.vni,
+            port: networkConfig.backend.port,
+            mtu: mtu,
+            bindIPv6: underlayIPv6.string,
+            localPodCIDR: context.localCIDR.string,
+            localVTEPMAC: vtepMAC
+        )
+        try replaceIPv6TunnelIfNeeded(configuration: desiredConfiguration)
+        guard let ipv6Tunnel else {
+            throw FlannelVXLANError.runtime("IPv6 tunnel was not created")
+        }
+        try ipv6Tunnel.setPeers(peers)
+        try reconcileIPv6Routes(
+            desired: Set(peers.map(\.podCIDR)),
+            interface: ipv6Tunnel.interfaceName
+        )
+        return IPv6DataplaneResult(publicIPv6: underlayIPv6.string, vtepMAC: vtepMAC)
     }
 
     private func replaceTunnelIfNeeded(configuration: FlannelTunnelConfiguration) throws {
@@ -409,6 +757,41 @@ public actor FlannelVXLANController {
         tunnelConfiguration = configuration
     }
 
+    private func replaceIPv6TunnelIfNeeded(configuration: FlannelIPv6TunnelConfiguration) throws {
+        guard
+            ipv6Tunnel == nil || ipv6TunnelConfiguration != configuration || ipv6Tunnel?.isRunning == false
+        else {
+            return
+        }
+        try removeAllIPv6Routes()
+        ipv6Tunnel?.stop()
+        guard ipv6Tunnel?.isRunning != true else {
+            throw FlannelVXLANError.runtime("failed to stop the existing IPv6 tunnel")
+        }
+        ipv6Tunnel?.destroy()
+        ipv6Tunnel = nil
+        ipv6TunnelConfiguration = nil
+
+        let created = try makeIPv6Tunnel(configuration)
+        do {
+            guard let localCIDR = FlannelIPv6.parseCIDR(configuration.localPodCIDR) else {
+                throw FlannelVXLANError.invalidConfiguration("local PodCIDR is not valid IPv6")
+            }
+            try system.configureIPv6TunnelInterface(
+                created.interfaceName,
+                localAddress: localCIDR.baseAddress,
+                mtu: configuration.mtu
+            )
+            try created.start()
+        } catch {
+            created.stop()
+            created.destroy()
+            throw error
+        }
+        ipv6Tunnel = created
+        ipv6TunnelConfiguration = configuration
+    }
+
     private func reconcileRoutes(desired: Set<String>, interface: String) throws {
         for podCIDR in installedRoutes.subtracting(desired).sorted() {
             try system.removeRoute(podCIDR: podCIDR, interface: interface)
@@ -417,6 +800,17 @@ public actor FlannelVXLANController {
         for podCIDR in desired.sorted() {
             try system.ensureRoute(podCIDR: podCIDR, interface: interface)
             installedRoutes.insert(podCIDR)
+        }
+    }
+
+    private func reconcileIPv6Routes(desired: Set<String>, interface: String) throws {
+        for podCIDR in installedIPv6Routes.subtracting(desired).sorted() {
+            try system.removeIPv6Route(podCIDR: podCIDR, interface: interface)
+            installedIPv6Routes.remove(podCIDR)
+        }
+        for podCIDR in desired.sorted() {
+            try system.ensureIPv6Route(podCIDR: podCIDR, interface: interface)
+            installedIPv6Routes.insert(podCIDR)
         }
     }
 
@@ -432,6 +826,208 @@ public actor FlannelVXLANController {
         }
     }
 
+    private func removeAllIPv6Routes(interface explicitInterface: String? = nil) throws {
+        guard let interface = explicitInterface ?? ipv6Tunnel?.interfaceName else {
+            guard installedIPv6Routes.isEmpty else {
+                throw FlannelVXLANError.runtime("cannot remove IPv6 routes without a tunnel interface")
+            }
+            return
+        }
+        for podCIDR in installedIPv6Routes.sorted() {
+            try system.removeIPv6Route(podCIDR: podCIDR, interface: interface)
+            installedIPv6Routes.remove(podCIDR)
+        }
+    }
+
+    private func deactivateIPv6Dataplane(
+        persistedOwnership: FlannelOwnershipState? = nil
+    ) throws {
+        let activeInterface = ipv6Tunnel?.interfaceName
+        let persistedInterface = persistedOwnership?.ipv6InterfaceName
+        if let activeInterface, let persistedInterface, activeInterface != persistedInterface {
+            throw FlannelVXLANError.runtime(
+                "active IPv6 tunnel \(activeInterface) does not match persisted ownership \(persistedInterface)"
+            )
+        }
+        installedIPv6Routes.formUnion(persistedOwnership?.ipv6RoutePodCIDRs ?? [])
+        let ownedInterface = activeInterface ?? persistedInterface
+        try removeAllIPv6Routes(interface: ownedInterface)
+
+        guard let stoppingTunnel = ipv6Tunnel else {
+            if let ownedInterface, try system.interfaceExists(ownedInterface) {
+                throw FlannelVXLANError.runtime(
+                    "persisted IPv6 tunnel interface \(ownedInterface) is active but is not controlled by this process"
+                )
+            }
+            ipv6TunnelConfiguration = nil
+            return
+        }
+        stoppingTunnel.stop()
+        guard !stoppingTunnel.isRunning else {
+            throw FlannelVXLANError.runtime(
+                "IPv6 tunnel \(stoppingTunnel.interfaceName) is still running after stop"
+            )
+        }
+        let stoppedInterface = stoppingTunnel.interfaceName
+        stoppingTunnel.destroy()
+        ipv6Tunnel = nil
+        ipv6TunnelConfiguration = nil
+        if try system.interfaceExists(stoppedInterface) {
+            throw FlannelVXLANError.runtime(
+                "IPv6 tunnel interface \(stoppedInterface) still exists after destroy"
+            )
+        }
+    }
+
+    private func withdrawIPv6ForInvalidIntent(
+        validationError: Error,
+        persistedOwnership: FlannelOwnershipState?
+    ) async throws {
+        var failures: [String] = []
+        var deactivated = false
+        var annotationsRemoved = false
+
+        do {
+            try deactivateIPv6Dataplane(persistedOwnership: persistedOwnership)
+            deactivated = true
+        } catch {
+            failures.append("withdraw IPv6 routes and tunnel: \(error)")
+        }
+
+        do {
+            let keys = try FlannelAnnotationKeys(prefix: config.annotationPrefix)
+            _ = try await kubernetes.patchOwnNodeAnnotations(
+                FlannelNodeAnnotationPatch(removals: [keys.publicIPv6, keys.backendV6Data])
+            )
+            annotationsRemoved = true
+        } catch {
+            failures.append("remove IPv6 Node annotations: \(error)")
+        }
+
+        do {
+            try persistOwnershipAfterIPv6Withdrawal(
+                persistedOwnership: persistedOwnership,
+                withdrawalCompleted: deactivated && annotationsRemoved
+            )
+        } catch {
+            failures.append("persist IPv6 withdrawal ownership: \(error)")
+        }
+
+        guard failures.isEmpty else {
+            throw FlannelVXLANError.runtime(
+                "IPv6 intent validation failed: \(validationError); IPv6 family withdrawal incomplete: "
+                    + failures.joined(separator: "; ")
+                    + "; IPv4 dataplane was retained"
+            )
+        }
+    }
+
+    private func persistOwnershipAfterIPv6Withdrawal(
+        persistedOwnership: FlannelOwnershipState?,
+        withdrawalCompleted: Bool
+    ) throws {
+        guard let interfaceName = tunnel?.interfaceName ?? persistedOwnership?.interfaceName,
+            let localPodCIDR = tunnelConfiguration?.localPodCIDR ?? persistedOwnership?.localPodCIDR
+        else {
+            return
+        }
+
+        let routePodCIDRs = installedRoutes.union(persistedOwnership?.routePodCIDRs ?? []).sorted()
+        let ipv6InterfaceName: String?
+        let localIPv6PodCIDR: String?
+        let ipv6RoutePodCIDRs: [String]?
+        if withdrawalCompleted {
+            ipv6InterfaceName = nil
+            localIPv6PodCIDR = nil
+            ipv6RoutePodCIDRs = nil
+        } else {
+            ipv6InterfaceName = ipv6Tunnel?.interfaceName ?? persistedOwnership?.ipv6InterfaceName
+            localIPv6PodCIDR = ipv6TunnelConfiguration?.localPodCIDR ?? persistedOwnership?.localIPv6PodCIDR
+            if ipv6InterfaceName != nil, localIPv6PodCIDR != nil {
+                ipv6RoutePodCIDRs =
+                    installedIPv6Routes
+                    .union(persistedOwnership?.ipv6RoutePodCIDRs ?? [])
+                    .sorted()
+            } else {
+                ipv6RoutePodCIDRs = nil
+            }
+        }
+
+        try ownershipStateStore.save(
+            FlannelOwnershipState(
+                interfaceName: interfaceName,
+                localPodCIDR: localPodCIDR,
+                routePodCIDRs: routePodCIDRs,
+                ipv6InterfaceName: ipv6InterfaceName,
+                localIPv6PodCIDR: localIPv6PodCIDR,
+                ipv6RoutePodCIDRs: ipv6RoutePodCIDRs
+            ))
+    }
+
+    private func saveOwnershipState(
+        localNetwork: FlannelLocalNodeNetwork,
+        preservingIPv6Ownership persistedOwnership: FlannelOwnershipState? = nil
+    ) throws {
+        guard let tunnel else {
+            throw FlannelVXLANError.runtime("cannot persist ownership without an IPv4 tunnel")
+        }
+        var ipv6InterfaceName: String?
+        var localIPv6PodCIDR: String?
+        var ipv6RoutePodCIDRs: [String]?
+        switch (ipv6Tunnel, ipv6TunnelConfiguration) {
+        case (nil, nil):
+            ipv6InterfaceName = nil
+            localIPv6PodCIDR = nil
+            ipv6RoutePodCIDRs = nil
+        case (.some(let ipv6Tunnel), .some(let configuration)):
+            ipv6InterfaceName = ipv6Tunnel.interfaceName
+            localIPv6PodCIDR = configuration.localPodCIDR
+            ipv6RoutePodCIDRs = installedIPv6Routes.sorted()
+        default:
+            throw FlannelVXLANError.runtime("IPv6 tunnel ownership state is incomplete")
+        }
+        if let persistedInterface = persistedOwnership?.ipv6InterfaceName,
+            let persistedLocalPodCIDR = persistedOwnership?.localIPv6PodCIDR,
+            let persistedRoutes = persistedOwnership?.ipv6RoutePodCIDRs
+        {
+            ipv6InterfaceName = persistedInterface
+            localIPv6PodCIDR = persistedLocalPodCIDR
+            ipv6RoutePodCIDRs = persistedRoutes
+        }
+        try ownershipStateStore.save(
+            FlannelOwnershipState(
+                interfaceName: tunnel.interfaceName,
+                localPodCIDR: localNetwork.podCIDR,
+                routePodCIDRs: installedRoutes.sorted(),
+                ipv6InterfaceName: ipv6InterfaceName,
+                localIPv6PodCIDR: localIPv6PodCIDR,
+                ipv6RoutePodCIDRs: ipv6RoutePodCIDRs
+            ))
+    }
+
+    private func snapshotActiveIPv6Ownership(
+        localNetwork: FlannelLocalNodeNetwork
+    ) throws -> FlannelOwnershipState? {
+        switch (ipv6Tunnel, ipv6TunnelConfiguration) {
+        case (nil, nil):
+            return nil
+        case (.some(let ipv6Tunnel), .some(let configuration)):
+            guard let tunnel else {
+                throw FlannelVXLANError.runtime("cannot snapshot IPv6 ownership without an IPv4 tunnel")
+            }
+            return FlannelOwnershipState(
+                interfaceName: tunnel.interfaceName,
+                localPodCIDR: localNetwork.podCIDR,
+                routePodCIDRs: installedRoutes.sorted(),
+                ipv6InterfaceName: ipv6Tunnel.interfaceName,
+                localIPv6PodCIDR: configuration.localPodCIDR,
+                ipv6RoutePodCIDRs: installedIPv6Routes.sorted()
+            )
+        default:
+            throw FlannelVXLANError.runtime("IPv6 tunnel ownership state is incomplete")
+        }
+    }
+
     private static let nodeAnnotationCleanupAttempts = 3
 
     private func removeNodeAnnotationsWithRetry() async throws -> Int {
@@ -441,6 +1037,8 @@ public actor FlannelVXLANController {
             keys.backendType,
             keys.publicIP,
             keys.backendData,
+            keys.publicIPv6,
+            keys.backendV6Data,
         ])
         var lastError: Error?
         for attempt in 1...Self.nodeAnnotationCleanupAttempts {

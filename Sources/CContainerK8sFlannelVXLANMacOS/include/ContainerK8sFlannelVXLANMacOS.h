@@ -26,6 +26,7 @@ extern "C" {
 #endif
 
 typedef struct container_vxlan_tunnel container_vxlan_tunnel_t;
+typedef struct container_vxlan_tunnel_v6 container_vxlan_tunnel_v6_t;
 
 // IPv4 fields are in network byte order.
 typedef struct container_vxlan_tunnel_config {
@@ -46,6 +47,33 @@ typedef struct container_vxlan_peer {
     uint8_t vtep_mac[6];
 } container_vxlan_peer_t;
 
+// All IPv6 address fields contain 16 bytes in network byte order. The prefix
+// length must be in 1...128. Callers must set abi_version and struct_size before
+// passing these structures to the API.
+typedef struct container_vxlan_tunnel_config_v6 {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    uint32_t vni;
+    uint16_t port;
+    uint16_t mtu;
+    uint8_t bind_ip[16];
+    uint8_t local_network[16];
+    uint8_t prefix_length;
+    uint8_t local_vtep_mac[6];
+} container_vxlan_tunnel_config_v6_t;
+
+// All IPv6 address fields contain 16 bytes in network byte order. The prefix
+// length must be in 1...128. Callers must set abi_version and struct_size before
+// passing these structures to the API.
+typedef struct container_vxlan_peer_v6 {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    uint8_t pod_network[16];
+    uint8_t prefix_length;
+    uint8_t public_ip[16];
+    uint8_t vtep_mac[6];
+} container_vxlan_peer_v6_t;
+
 typedef struct container_vxlan_tunnel_stats {
     uint64_t transmitted_packets;
     uint64_t transmitted_bytes;
@@ -60,6 +88,8 @@ typedef struct container_vxlan_tunnel_stats {
 enum {
     CONTAINER_VXLAN_HEADER_LENGTH = 8,
     CONTAINER_VXLAN_ETHERNET_HEADER_LENGTH = 14,
+    CONTAINER_VXLAN_IPV6_ADDRESS_LENGTH = 16,
+    CONTAINER_VXLAN_V6_ABI_VERSION = 1,
 };
 
 typedef enum container_vxlan_wire_status {
@@ -85,6 +115,15 @@ typedef struct container_vxlan_decoded_packet {
     bool source_cidr_mismatch;
 } container_vxlan_decoded_packet_t;
 
+typedef struct container_vxlan_encoded_packet_v6 {
+    size_t datagram_length;
+    size_t inner_packet_length;
+    // IPv6 address contains 16 bytes in network byte order; port is in host
+    // byte order.
+    uint8_t destination_ip[16];
+    uint16_t destination_port;
+} container_vxlan_encoded_packet_v6_t;
+
 // Pure wire codec used by the live tunnel data path. The encoder selects the
 // peer whose PodCIDR contains the inner IPv4 destination.
 container_vxlan_wire_status_t container_vxlan_encode_ipv4(
@@ -107,6 +146,35 @@ container_vxlan_wire_status_t container_vxlan_decode_ipv4(
     const container_vxlan_peer_t *peers,
     size_t peer_count,
     uint32_t outer_source_ip,
+    const uint8_t *datagram,
+    size_t datagram_length,
+    uint8_t *inner_packet,
+    size_t inner_packet_capacity,
+    container_vxlan_decoded_packet_t *decoded
+);
+
+// Pure IPv6 wire codec used by the independent IPv6 live tunnel. The encoder
+// authenticates the inner source against the local network and selects a peer
+// whose PodCIDR contains the inner destination.
+container_vxlan_wire_status_t container_vxlan_encode_ipv6(
+    const container_vxlan_tunnel_config_v6_t *config,
+    const container_vxlan_peer_v6_t *peers,
+    size_t peer_count,
+    const uint8_t *inner_packet,
+    size_t inner_packet_available,
+    uint8_t *datagram,
+    size_t datagram_capacity,
+    container_vxlan_encoded_packet_v6_t *encoded
+);
+
+// outer_source_ip contains 16 bytes in network byte order. The decoder
+// authenticates the outer IPv6 address and Ethernet source VTEP MAC, then
+// verifies the inner source and destination before returning the IPv6 packet.
+container_vxlan_wire_status_t container_vxlan_decode_ipv6(
+    const container_vxlan_tunnel_config_v6_t *config,
+    const container_vxlan_peer_v6_t *peers,
+    size_t peer_count,
+    const uint8_t outer_source_ip[16],
     const uint8_t *datagram,
     size_t datagram_length,
     uint8_t *inner_packet,
@@ -146,6 +214,44 @@ bool container_vxlan_tunnel_is_running(const container_vxlan_tunnel_t *tunnel);
 
 void container_vxlan_tunnel_stop(container_vxlan_tunnel_t *tunnel);
 void container_vxlan_tunnel_destroy(container_vxlan_tunnel_t *tunnel);
+
+int container_vxlan_tunnel_v6_create(
+    const container_vxlan_tunnel_config_v6_t *config,
+    container_vxlan_tunnel_v6_t **tunnel,
+    char *interface_name,
+    size_t interface_name_capacity,
+    char *error_message,
+    size_t error_message_capacity
+);
+
+int container_vxlan_tunnel_v6_set_peers(
+    container_vxlan_tunnel_v6_t *tunnel,
+    const container_vxlan_peer_v6_t *peers,
+    size_t peer_count,
+    char *error_message,
+    size_t error_message_capacity
+);
+
+int container_vxlan_tunnel_v6_start(
+    container_vxlan_tunnel_v6_t *tunnel,
+    char *error_message,
+    size_t error_message_capacity
+);
+
+void container_vxlan_tunnel_v6_get_stats(
+    const container_vxlan_tunnel_v6_t *tunnel,
+    container_vxlan_tunnel_stats_t *stats
+);
+
+bool container_vxlan_tunnel_v6_is_running(const container_vxlan_tunnel_v6_t *tunnel);
+
+void container_vxlan_tunnel_v6_stop(container_vxlan_tunnel_v6_t *tunnel);
+void container_vxlan_tunnel_v6_destroy(container_vxlan_tunnel_v6_t *tunnel);
+
+#if defined(CONTAINER_VXLAN_TEST_HOOKS)
+int container_vxlan_debug_v6_idle_stop(void);
+int container_vxlan_debug_v6_inbound_start_failure(void);
+#endif
 
 #ifdef __cplusplus
 }

@@ -37,6 +37,7 @@
     },
     "podNetwork": {
         "enabled": true,
+        "dualStackEnabled": false,
         "networkName": "kubernetes-pod",
         "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
         "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"

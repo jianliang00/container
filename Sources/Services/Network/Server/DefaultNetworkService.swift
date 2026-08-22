@@ -69,14 +69,26 @@ public actor DefaultNetworkService: NetworkService {
         guard let status = await network.status else {
             throw ContainerizationError(.invalidState, message: "network \(network.id) must be running")
         }
+        try validateIPv6Status(status)
 
+        let previousIndex = try await allocator.lookup(hostname: hostname)
         let index = try await allocateIndex(hostname: hostname)
         let macAddress =
             macAddresses[index]
             ?? macAddress
             ?? MACAddress((UInt64.random(in: 0...UInt64.max) & 0x0cff_ffff_ffff) | 0xf200_0000_0000)
-        let ipv6Address = try status.ipv6Subnet
-            .map { try CIDRv6(macAddress.ipv6Address(network: $0.lower), prefix: $0.prefix) }
+        if status.ipv6Gateway != nil,
+            macAddresses.contains(where: { $0.key != index && $0.value == macAddress })
+        {
+            if previousIndex == nil {
+                _ = try? await allocator.deallocate(hostname: hostname)
+            }
+            throw ContainerizationError(
+                .invalidState,
+                message: "MAC address \(macAddress) would duplicate an IPv6 attachment on network \(network.id)"
+            )
+        }
+        let ipv6Address = try makeIPv6Address(status: status, macAddress: macAddress)
         let ip = IPv4Address(index)
         let attachment = Attachment(
             network: network.id,
@@ -84,6 +96,7 @@ public actor DefaultNetworkService: NetworkService {
             ipv4Address: try CIDRv4(ip, prefix: status.ipv4Subnet.prefix),
             ipv4Gateway: status.ipv4Gateway,
             ipv6Address: ipv6Address,
+            ipv6Gateway: status.ipv6Gateway,
             macAddress: macAddress,
             variant: network.variant
         )
@@ -208,14 +221,14 @@ public actor DefaultNetworkService: NetworkService {
         let address = IPv4Address(index)
         let subnet = status.ipv4Subnet
         let ipv4Address = try CIDRv4(address, prefix: subnet.prefix)
-        let ipv6Address = try status.ipv6Subnet
-            .map { try CIDRv6(macAddress.ipv6Address(network: $0.lower), prefix: $0.prefix) }
+        let ipv6Address = try makeIPv6Address(status: status, macAddress: macAddress)
         let attachment = Attachment(
             network: network.id,
             hostname: hostname,
             ipv4Address: ipv4Address,
             ipv4Gateway: status.ipv4Gateway,
             ipv6Address: ipv6Address,
+            ipv6Gateway: status.ipv6Gateway,
             macAddress: macAddress,
             variant: network.variant
         )
@@ -227,5 +240,58 @@ public actor DefaultNetworkService: NetworkService {
             ])
 
         return attachment
+    }
+
+    private func makeIPv6Address(
+        status: NetworkStatus,
+        macAddress: MACAddress
+    ) throws -> CIDRv6? {
+        try validateIPv6Status(status)
+        guard let subnet = status.ipv6Subnet else {
+            return nil
+        }
+        guard subnet.prefix.length == 64 else {
+            return nil
+        }
+        return try CIDRv6(
+            macAddress.ipv6Address(network: subnet.lower),
+            prefix: subnet.prefix
+        )
+    }
+
+    private func validateIPv6Status(_ status: NetworkStatus) throws {
+        guard let subnet = status.ipv6Subnet else {
+            guard status.ipv6Gateway == nil else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "network \(network.id) has an IPv6 gateway without an IPv6 subnet"
+                )
+            }
+            return
+        }
+        guard subnet.prefix.length == 64 else {
+            guard status.ipv6Gateway == nil else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "network \(network.id) requires a /64 IPv6 subnet for EUI-64 allocation"
+                )
+            }
+            return
+        }
+        guard let gateway = status.ipv6Gateway else {
+            return
+        }
+        guard !subnet.lower.isUnspecified,
+            !subnet.lower.isLoopback,
+            !subnet.lower.isMulticast,
+            !subnet.lower.isLinkLocal,
+            subnet.contains(gateway),
+            gateway != subnet.lower
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "network \(network.id) has an IPv6 gateway outside its usable subnet"
+            )
+        }
     }
 }

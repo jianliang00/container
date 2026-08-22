@@ -21,6 +21,7 @@ import Testing
 struct MacOSKubeadmPlanTests {
     @Test func joinPlanRendersExpectedNodeConfiguration() throws {
         let options = try makeOptions(startServices: false)
+        #expect(!options.enableDualStack)
         let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
 
         #expect(
@@ -39,6 +40,7 @@ struct MacOSKubeadmPlanTests {
                 }
                 return path == "/tmp/macos-node/etc/kubernetes/kube-proxy.conf"
                     && contents.contains(#""nodeName": "macos-ci-1""#)
+                    && contents.contains(#""dualStackEnabled": false"#)
                     && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
                     && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
             })
@@ -91,6 +93,7 @@ struct MacOSKubeadmPlanTests {
                 return path == "/tmp/macos-node/etc/kubernetes/container-cri-shim-macos-config.json"
                     && contents.contains(#""network": "kubernetes-pod""#)
                     && !contents.contains(#""networkMTU""#)
+                    && contents.contains(#""dualStackEnabled": false"#)
                     && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
                     && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
             })
@@ -103,6 +106,7 @@ struct MacOSKubeadmPlanTests {
                 return path == "/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf"
                     && contents.contains(#""nodeKubeconfig": "/etc/kubernetes/kubelet.conf""#)
                     && contents.contains(#""nodeName": "macos-ci-1""#)
+                    && contents.contains(#""dualStackEnabled": false"#)
                     && contents.contains(#""networkName": "kubernetes-pod""#)
                     && contents.contains(#""networkVariant": "reserved""#)
                     && !contents.contains("underlayInterface")
@@ -117,6 +121,34 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains("name: macos")
                     && contents.contains("node.kubernetes.io/macos-network: \"full\"")
             })
+    }
+
+    @Test func dualStackJoinPlanEnablesAllPodNetworkConsumersTogether() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let renderedConfigurations = Dictionary(
+            uniqueKeysWithValues: plan.steps.compactMap { step -> (String, String)? in
+                guard case .writeFile(let path, let contents, _, _) = step.action else {
+                    return nil
+                }
+                return (path, contents)
+            }
+        )
+        let criShim = try #require(
+            renderedConfigurations["/tmp/macos-node/etc/kubernetes/container-cri-shim-macos-config.json"]
+        )
+        let flannel = try #require(
+            renderedConfigurations["/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf"]
+        )
+        let kubeProxy = try #require(
+            renderedConfigurations["/tmp/macos-node/etc/kubernetes/kube-proxy.conf"]
+        )
+
+        #expect(criShim.contains(#""dualStackEnabled": true"#))
+        #expect(flannel.contains(#""dualStackEnabled": true"#))
+        #expect(kubeProxy.contains(#""dualStackEnabled": true"#))
     }
 
     @Test func compatJoinPlanOmitsPodNetworkingArtifacts() throws {
@@ -149,8 +181,26 @@ struct MacOSKubeadmPlanTests {
         #expect(descriptions.contains("disable previous flannel VXLAN launchd job"))
         #expect(descriptions.contains("stop previous kube-proxy launchd job if present"))
         #expect(descriptions.contains("disable previous kube-proxy launchd job"))
+        #expect(descriptions.contains("withdraw previous kube-proxy PF configuration"))
         #expect(descriptions.contains("flush previous kube-proxy PF anchor"))
+        #expect(descriptions.contains("flush previous kube-proxy IPv6 PF anchor"))
         #expect(descriptions.contains("purge owned pod network"))
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "withdraw previous kube-proxy PF configuration",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-kube-proxy-macos",
+                    "--config",
+                    "/tmp/macos-node/etc/kubernetes/kube-proxy.conf",
+                    "--withdraw",
+                ] && !bestEffort
+            }
+        )
 
         for path in [
             "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist",
@@ -214,6 +264,18 @@ struct MacOSKubeadmPlanTests {
             })
     }
 
+    @Test func compatJoinPlanRejectsDualStack() throws {
+        var options = try makeOptions(startServices: false)
+        options.networkMode = .compat
+        options.enableDualStack = true
+        options.kubeProxyToken = nil
+        options.flannelToken = nil
+
+        #expect(throws: MacOSKubeadmError.invalidInput("--enable-dual-stack requires --network-mode full")) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
     @Test func compatJoinPlanDoesNotMutateServicesWhenServicesAreNotStarted() throws {
         var options = try makeOptions(startServices: false)
         options.networkMode = .compat
@@ -227,7 +289,9 @@ struct MacOSKubeadmPlanTests {
         #expect(!descriptions.contains("disable previous flannel VXLAN launchd job"))
         #expect(!descriptions.contains("stop previous kube-proxy launchd job if present"))
         #expect(!descriptions.contains("disable previous kube-proxy launchd job"))
+        #expect(!descriptions.contains("withdraw previous kube-proxy PF configuration"))
         #expect(!descriptions.contains("flush previous kube-proxy PF anchor"))
+        #expect(!descriptions.contains("flush previous kube-proxy IPv6 PF anchor"))
         #expect(!descriptions.contains("purge owned pod network"))
         #expect(!descriptions.contains("start container core services"))
         #expect(!descriptions.contains("start CRI shim launchd job"))
@@ -340,31 +404,31 @@ struct MacOSKubeadmPlanTests {
         let configObject = try #require(JSONSerialization.jsonObject(with: Data(config.utf8)) as? [String: Any])
         let runtimeHandlers = try #require(configObject["runtimeHandlers"] as? [String: Any])
         let macosCompat = try #require(runtimeHandlers["macos-compat"] as? [String: Any])
-        let macos15_2 = try #require(runtimeHandlers["macos-15-2"] as? [String: Any])
-        let macos15_4 = try #require(runtimeHandlers["macos-15-4"] as? [String: Any])
+        let macos15Point2 = try #require(runtimeHandlers["macos-15-2"] as? [String: Any])
+        let macos15Point4 = try #require(runtimeHandlers["macos-15-4"] as? [String: Any])
         #expect(macosCompat["networkBackend"] as? String == "virtualizationNAT")
-        #expect(macos15_2["sandboxImage"] as? String == "ghcr.io/jianliang00/macos-base:15.2")
-        #expect(macos15_2["networkBackend"] as? String == "virtualizationNAT")
-        #expect(macos15_4["sandboxImage"] as? String == "ghcr.io/jianliang00/macos-base:15.4")
-        #expect(macos15_4["networkBackend"] as? String == "virtualizationNAT")
+        #expect(macos15Point2["sandboxImage"] as? String == "ghcr.io/jianliang00/macos-base:15.2")
+        #expect(macos15Point2["networkBackend"] as? String == "virtualizationNAT")
+        #expect(macos15Point4["sandboxImage"] as? String == "ghcr.io/jianliang00/macos-base:15.4")
+        #expect(macos15Point4["networkBackend"] as? String == "virtualizationNAT")
 
-        let runtimeClass15_2 = try #require(
+        let runtimeClass15Point2 = try #require(
             writes.first {
                 $0.path == "/tmp/macos-node/usr/local/share/container-macos-node/manifests/runtimeclass-macos-15-2.yaml"
             }?.contents
         )
-        #expect(runtimeClass15_2.contains("name: macos-15-2"))
-        #expect(runtimeClass15_2.contains("handler: macos-15-2"))
-        #expect(runtimeClass15_2.contains("node.kubernetes.io/macos-network: \"compat\""))
+        #expect(runtimeClass15Point2.contains("name: macos-15-2"))
+        #expect(runtimeClass15Point2.contains("handler: macos-15-2"))
+        #expect(runtimeClass15Point2.contains("node.kubernetes.io/macos-network: \"compat\""))
 
-        let runtimeClass15_4 = try #require(
+        let runtimeClass15Point4 = try #require(
             writes.first {
                 $0.path == "/tmp/macos-node/usr/local/share/container-macos-node/manifests/runtimeclass-macos-15-4.yaml"
             }?.contents
         )
-        #expect(runtimeClass15_4.contains("name: macos-15-4"))
-        #expect(runtimeClass15_4.contains("handler: macos-15-4"))
-        #expect(runtimeClass15_4.contains("node.kubernetes.io/macos-network: \"compat\""))
+        #expect(runtimeClass15Point4.contains("name: macos-15-4"))
+        #expect(runtimeClass15Point4.contains("handler: macos-15-4"))
+        #expect(runtimeClass15Point4.contains("node.kubernetes.io/macos-network: \"compat\""))
     }
 
     @Test func joinPlanRejectsDuplicateRuntimeClassNames() throws {
@@ -802,6 +866,36 @@ struct MacOSKubeadmPlanTests {
                 ] && !bestEffort
             }
         )
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "withdraw kube-proxy PF configuration",
+                    case .runCommand(let arguments, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return arguments == [
+                    "/usr/local/bin/container-kube-proxy-macos",
+                    "--config",
+                    "/etc/kubernetes/kube-proxy.conf",
+                    "--withdraw",
+                ] && !bestEffort
+            }
+        )
+        for (message, anchorName) in [
+            ("flush kube-proxy PF anchor if present", "com.apple.container.kube-proxy"),
+            ("flush kube-proxy IPv6 PF anchor if present", "com.apple.container.kube-proxy.ipv6"),
+        ] {
+            #expect(
+                plan.steps.contains { step in
+                    guard step.message == message,
+                        case .runCommand(let arguments, let bestEffort) = step.action
+                    else {
+                        return false
+                    }
+                    return arguments == ["/sbin/pfctl", "-a", anchorName, "-F", "all"] && bestEffort
+                }
+            )
+        }
     }
 
     @Test func resetPurgeStateRemovesRuntimeStateRecursively() throws {

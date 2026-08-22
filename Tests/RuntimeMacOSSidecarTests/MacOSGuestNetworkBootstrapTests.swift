@@ -60,6 +60,9 @@ struct MacOSGuestNetworkBootstrapTests {
         #expect(request.interfaces[0].ipv4Address == "192.168.64.2")
         #expect(request.interfaces[0].ipv4PrefixLength == 24)
         #expect(request.interfaces[0].ipv4Gateway == "192.168.64.1")
+        #expect(request.interfaces[0].ipv6Address == nil)
+        #expect(request.interfaces[0].ipv6PrefixLength == nil)
+        #expect(request.interfaces[0].ipv6Gateway == nil)
         #expect(request.interfaces[0].mtu == 1_450)
         #expect(request.dns?.nameservers == ["9.9.9.9"])
         #expect(request.dns?.domain == "cluster.local")
@@ -212,6 +215,103 @@ struct MacOSGuestNetworkBootstrapTests {
 
         #expect(request == nil)
     }
+
+    @Test
+    func vmnetSharedBuildsExplicitIPv6GuestNetworkRequest() throws {
+        let config = makeConfiguration(backend: .vmnetShared)
+        let lease = try makeLease(
+            backend: .vmnetShared,
+            hostname: "guest-1",
+            ipv6Address: try CIDRv6("fd42:10:244:22::2/64"),
+            ipv6Gateway: try IPv6Address("fd42:10:244:22::1")
+        )
+
+        let maybeRequest = try MacOSGuestNetworkBootstrap.makeRequest(containerConfig: config, lease: lease)
+        let request = try #require(maybeRequest)
+
+        #expect(request.interfaces[0].ipv6Address == "fd42:10:244:22::2")
+        #expect(request.interfaces[0].ipv6PrefixLength == 64)
+        #expect(request.interfaces[0].ipv6Gateway == "fd42:10:244:22::1")
+    }
+
+    @Test
+    func vmnetGeneratedIPv6AddressWithoutGatewayRemainsIPv4Only() throws {
+        let config = makeConfiguration(backend: .vmnetShared)
+        let lease = try makeLease(
+            backend: .vmnetShared,
+            hostname: "guest-1",
+            ipv6Address: try CIDRv6("fd42:25e3:5eb4:24a4::2/64")
+        )
+
+        let maybeRequest = try MacOSGuestNetworkBootstrap.makeRequest(containerConfig: config, lease: lease)
+        let request = try #require(maybeRequest)
+
+        #expect(request.interfaces[0].ipv6Address == nil)
+        #expect(request.interfaces[0].ipv6PrefixLength == nil)
+        #expect(request.interfaces[0].ipv6Gateway == nil)
+    }
+
+    @Test
+    func rejectsIPv6GatewayWithoutAddress() throws {
+        let config = makeConfiguration(backend: .vmnetShared)
+        let lease = try makeLease(
+            backend: .vmnetShared,
+            hostname: "guest-1",
+            ipv6Gateway: try IPv6Address("fd42:10:244:22::1")
+        )
+
+        #expect(throws: (any Error).self) {
+            try MacOSGuestNetworkBootstrap.makeRequest(containerConfig: config, lease: lease)
+        }
+    }
+
+    @Test
+    func validatesExactGuestIPv6Result() throws {
+        let request = MacOSGuestNetworkConfigurationRequest(
+            interfaces: [
+                .init(
+                    networkID: "default",
+                    hostname: "guest-1",
+                    macAddress: "02:42:ac:11:00:02",
+                    ipv4Address: "192.168.64.2",
+                    ipv4PrefixLength: 24,
+                    ipv4Gateway: "192.168.64.1",
+                    ipv6Address: "fd42:10:244:22::2",
+                    ipv6PrefixLength: 64,
+                    ipv6Gateway: "fd42:10:244:22::1"
+                )
+            ],
+            dns: nil
+        )
+        let result = MacOSGuestNetworkConfigurationResult(
+            interfaces: [
+                .init(
+                    networkID: "default",
+                    interfaceName: "en0",
+                    macAddress: "02:42:ac:11:00:02",
+                    ipv4Address: "192.168.64.2/24",
+                    ipv6Address: "fd42:10:244:22::2/64"
+                )
+            ],
+            dnsApplied: false
+        )
+
+        try MacOSGuestNetworkBootstrap.validateResult(result, for: request)
+
+        let legacyResult = MacOSGuestNetworkConfigurationResult(
+            interfaces: [
+                makeAppliedGuestNetworkInterface(
+                    networkID: "default",
+                    macAddress: "02:42:ac:11:00:02",
+                    effectiveMTU: nil
+                )
+            ],
+            dnsApplied: false
+        )
+        #expect(throws: (any Error).self) {
+            try MacOSGuestNetworkBootstrap.validateResult(legacyResult, for: request)
+        }
+    }
 }
 
 private func makeConfiguration(
@@ -334,6 +434,8 @@ private func makeAppliedGuestNetworkInterface(
 private func makeLease(
     backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend,
     hostname: String,
+    ipv6Address: CIDRv6? = nil,
+    ipv6Gateway: IPv6Address? = nil,
     mtu: UInt32? = nil,
     dns: ContainerResource.Attachment.DNSConfiguration? = nil
 ) throws -> MacOSGuestNetworkLease {
@@ -342,7 +444,8 @@ private func makeLease(
         hostname: hostname,
         ipv4Address: try CIDRv4("192.168.64.2/24"),
         ipv4Gateway: try IPv4Address("192.168.64.1"),
-        ipv6Address: nil,
+        ipv6Address: ipv6Address,
+        ipv6Gateway: ipv6Gateway,
         macAddress: try MACAddress("02:42:ac:11:00:02"),
         mtu: mtu,
         dns: dns

@@ -39,18 +39,47 @@ public struct KubeProxyController<Reader: KubeProxyKubernetesReading, Applier: K
 
     @discardableResult
     public func runOnce(generation: Int = 0) async throws -> KubeProxyRunResult {
-        let podNetwork = try KubeProxyPodNetworkStateResolver.resolve(config: config.pf)
+        let podNetwork: KubeProxyPodNetworkResolution
+        do {
+            podNetwork = try KubeProxyPodNetworkStateResolver.resolve(config: config)
+        } catch {
+            do {
+                try applier.withdraw()
+            } catch let withdrawError {
+                throw KubeProxyMacOSError.applyFailed(
+                    "pod network readiness failed (\(error)); fail-closed PF withdrawal also failed (\(withdrawError))"
+                )
+            }
+            throw error
+        }
+        if config.dualStackEnabled, !podNetwork.ipv6Ready {
+            try applier.withdrawIPv6()
+        }
         let snapshot = try await reader.snapshot()
-        let ruleSet = KubeProxyCompiler.compile(
+        let compiledRuleSet = KubeProxyCompiler.compile(
             snapshot: snapshot,
             nodeName: config.nodeName,
             generation: generation
         )
+        var enabledFamilies: Set<KubeProxyAddressFamily> = [.ipv4]
+        if config.dualStackEnabled, podNetwork.ipv6Ready {
+            enabledFamilies.insert(.ipv6)
+        }
+        let ruleSet = compiledRuleSet.selecting(families: enabledFamilies)
         try applier.apply(
             ruleSet,
-            localPodCIDR: podNetwork.podCIDR,
-            masqueradePodTraffic: podNetwork.masqueradePodTraffic
+            podNetwork: KubeProxyFamilyRuleApplication(
+                ipv4PodCIDR: podNetwork.ipv4PodCIDR,
+                ipv6PodCIDR: podNetwork.ipv6PodCIDR,
+                ipv4Ready: podNetwork.ipv4Ready,
+                ipv6Ready: podNetwork.ipv6Ready,
+                dualStackEnabled: config.dualStackEnabled,
+                masqueradeIPv4PodTraffic: podNetwork.masqueradeIPv4PodTraffic
+            )
         )
+        guard !config.dualStackEnabled || podNetwork.ipv6Ready else {
+            throw KubeProxyMacOSError.applyFailed("pod network IPv6 family is not ready")
+        }
         return KubeProxyRunResult(ruleSet: ruleSet, applied: true)
     }
 

@@ -28,13 +28,22 @@ public struct NetworkStatus: Codable, Sendable {
     /// The IPv6 subnet assigned to the network, if IPv6 is enabled.
     public let ipv6Subnet: CIDRv6?
 
+    /// The IPv6 gateway address when IPv6 was explicitly configured.
+    ///
+    /// vmnet can report an automatically generated IPv6 prefix even when the
+    /// network was created without IPv6 intent. Keeping the gateway optional
+    /// prevents that prefix from being treated as a configured data plane.
+    public let ipv6Gateway: IPv6Address?
+
     public init(
         ipv4Subnet: CIDRv4,
         ipv4Gateway: IPv4Address,
-        ipv6Subnet: CIDRv6?
+        ipv6Subnet: CIDRv6?,
+        ipv6Gateway: IPv6Address? = nil
     ) {
         self.ipv4Subnet = ipv4Subnet
         self.ipv4Gateway = ipv4Gateway
         self.ipv6Subnet = ipv6Subnet
+        self.ipv6Gateway = ipv6Gateway
     }
 }

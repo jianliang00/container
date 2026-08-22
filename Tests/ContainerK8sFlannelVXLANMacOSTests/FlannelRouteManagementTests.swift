@@ -204,6 +204,55 @@ struct FlannelRouteManagementTests {
         #expect(script.commands.isEmpty)
     }
 
+    @Test
+    func addsAndRemovesExactIPv6PodCIDRRoute() throws {
+        let addScript = IPv6RouteCommandScript([
+            .netstat(Self.ipv6Routes()),
+            .add(),
+            .netstat(Self.ipv6Routes(interface: "utun6")),
+        ])
+        let addManager = FlannelSystemManager(commandRunner: addScript.run)
+
+        try addManager.ensureIPv6Route(podCIDR: "fd42:10:244:8::17/64", interface: "utun6")
+
+        #expect(addScript.isExhausted)
+
+        let deleteScript = IPv6RouteCommandScript([
+            .netstat(Self.ipv6Routes(interface: "utun6")),
+            .delete(),
+            .netstat(Self.ipv6Routes()),
+        ])
+        let deleteManager = FlannelSystemManager(commandRunner: deleteScript.run)
+
+        try deleteManager.removeIPv6Route(podCIDR: "fd42:10:244:8::/64", interface: "utun6")
+
+        #expect(deleteScript.isExhausted)
+    }
+
+    @Test
+    func refusesIPv6RouteOwnedByAnotherInterfaceAndDefaultRoute() {
+        let script = IPv6RouteCommandScript([
+            .netstat(Self.ipv6Routes(interface: "en0"))
+        ])
+        let manager = FlannelSystemManager(commandRunner: script.run)
+
+        #expect(throws: FlannelVXLANError.self) {
+            try manager.ensureIPv6Route(podCIDR: "fd42:10:244:8::/64", interface: "utun6")
+        }
+        #expect(throws: FlannelVXLANError.self) {
+            try manager.ensureIPv6Route(podCIDR: "::/0", interface: "utun6")
+        }
+        #expect(script.isExhausted)
+    }
+
+    private static func ipv6Routes(interface: String? = nil) -> String {
+        var output = "Routing tables\n\nInternet6:\nDestination Gateway Flags Netif Expire\n"
+        if let interface {
+            output += "fd42:10:244:8::/64 link#42 UCS \(interface)\n"
+        }
+        return output
+    }
+
     private static func defaultRoute(interface: String) -> String {
         """
            route to: 10.250.8.0
@@ -229,6 +278,58 @@ struct FlannelRouteManagementTests {
                mask: 255.255.0.0
           interface: \(interface)
         """
+    }
+}
+
+private final class IPv6RouteCommandScript: @unchecked Sendable {
+    struct Step: Sendable {
+        var executable: String
+        var arguments: [String]
+        var output: String
+
+        static func netstat(_ output: String) -> Self {
+            Self(executable: "/usr/sbin/netstat", arguments: ["-rn", "-f", "inet6"], output: output)
+        }
+
+        static func add() -> Self {
+            Self(
+                executable: "/sbin/route",
+                arguments: ["-n", "add", "-inet6", "-net", "fd42:10:244:8::/64", "-interface", "utun6"],
+                output: ""
+            )
+        }
+
+        static func delete() -> Self {
+            Self(
+                executable: "/sbin/route",
+                arguments: ["-n", "delete", "-inet6", "-net", "fd42:10:244:8::/64", "-interface", "utun6"],
+                output: ""
+            )
+        }
+    }
+
+    private let lock = NSLock()
+    private var steps: [Step]
+
+    init(_ steps: [Step]) {
+        self.steps = steps
+    }
+
+    var isExhausted: Bool {
+        lock.withLock { steps.isEmpty }
+    }
+
+    func run(_ executable: String, _ arguments: [String]) throws -> String {
+        try lock.withLock {
+            guard let step = steps.first else {
+                throw FlannelVXLANError.runtime("unexpected IPv6 route command")
+            }
+            steps.removeFirst()
+            guard executable == step.executable, arguments == step.arguments else {
+                throw FlannelVXLANError.runtime("unexpected IPv6 route command: \(executable) \(arguments)")
+            }
+            return step.output
+        }
     }
 }
 

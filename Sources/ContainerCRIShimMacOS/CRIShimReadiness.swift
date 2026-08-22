@@ -267,6 +267,10 @@ func evaluatePodNetworkReadiness(
             return podNetworkFailure(reason: "PodNetworkRuntimeStateMismatch", message: error.description)
         case .readyStateMissing, .readyStateMismatch:
             return podNetworkFailure(reason: "PodNetworkReadyStateMismatch", message: error.description)
+        case .ipv4NotReady:
+            return podNetworkFailure(reason: "PodNetworkIPv4NotReady", message: error.description)
+        case .ipv6NotReady:
+            return podNetworkFailure(reason: "PodNetworkIPv6NotReady", message: error.description)
         case .readyStateExpired:
             return podNetworkFailure(reason: "PodNetworkReadyStateExpired", message: error.description)
         case .mtuOutOfRange:
@@ -297,13 +301,55 @@ func evaluatePodNetworkReadiness(
     guard let configuredSubnet = network.configuration.ipv4Subnet,
         let configuredPodCIDR = try? canonicalIPv4PodCIDR(configuredSubnet.description),
         let runningPodCIDR = try? canonicalIPv4PodCIDR(network.status.ipv4Subnet.description),
-        configuredPodCIDR == readyLease.podCIDR,
-        runningPodCIDR == readyLease.podCIDR
+        configuredPodCIDR == readyLease.podCIDRs.ipv4,
+        runningPodCIDR == readyLease.podCIDRs.ipv4
     else {
         return podNetworkFailure(
             reason: "PodNetworkSubnetMismatch",
             message: "dedicated pod network subnet does not match the runtime pod CIDR"
         )
+    }
+
+    if config.dualStackEnabled {
+        guard let expectedIPv6PodCIDR = readyLease.podCIDRs.ipv6,
+            let configuredSubnet = network.configuration.ipv6Subnet,
+            let runningSubnet = network.status.ipv6Subnet,
+            configuredSubnet.prefix.length == 64,
+            runningSubnet.prefix.length == 64,
+            configuredSubnet.address == configuredSubnet.lower,
+            runningSubnet.address == runningSubnet.lower,
+            !configuredSubnet.lower.isUnspecified,
+            !configuredSubnet.lower.isLoopback,
+            !configuredSubnet.lower.isMulticast,
+            !configuredSubnet.lower.isLinkLocal,
+            !runningSubnet.lower.isUnspecified,
+            !runningSubnet.lower.isLoopback,
+            !runningSubnet.lower.isMulticast,
+            !runningSubnet.lower.isLinkLocal,
+            configuredSubnet.description == expectedIPv6PodCIDR,
+            runningSubnet.description == expectedIPv6PodCIDR
+        else {
+            return podNetworkFailure(
+                reason: "PodNetworkIPv6SubnetMismatch",
+                message: "dedicated pod network IPv6 subnet does not match the runtime pod CIDR"
+            )
+        }
+
+        guard let gateway = network.status.ipv6Gateway,
+            configuredSubnet.contains(gateway),
+            runningSubnet.contains(gateway),
+            !gateway.isUnspecified,
+            !gateway.isLoopback,
+            !gateway.isMulticast,
+            !gateway.isLinkLocal,
+            gateway != runningSubnet.lower,
+            gateway.value == runningSubnet.lower.value + 1
+        else {
+            return podNetworkFailure(
+                reason: "PodNetworkIPv6GatewayMismatch",
+                message: "dedicated pod network IPv6 gateway does not match subnet.lower + 1"
+            )
+        }
     }
 
     return CRIShimRuntimeConditionSnapshot(

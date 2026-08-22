@@ -23,6 +23,9 @@ public struct MacOSGuestNetworkInterfaceConfiguration: Codable, Sendable, Equata
     public let ipv4Address: String
     public let ipv4PrefixLength: UInt8
     public let ipv4Gateway: String
+    public let ipv6Address: String?
+    public let ipv6PrefixLength: UInt8?
+    public let ipv6Gateway: String?
     public let mtu: UInt32?
 
     public init(
@@ -32,6 +35,9 @@ public struct MacOSGuestNetworkInterfaceConfiguration: Codable, Sendable, Equata
         ipv4Address: String,
         ipv4PrefixLength: UInt8,
         ipv4Gateway: String,
+        ipv6Address: String? = nil,
+        ipv6PrefixLength: UInt8? = nil,
+        ipv6Gateway: String? = nil,
         mtu: UInt32? = nil
     ) {
         self.networkID = networkID
@@ -40,6 +46,9 @@ public struct MacOSGuestNetworkInterfaceConfiguration: Codable, Sendable, Equata
         self.ipv4Address = ipv4Address
         self.ipv4PrefixLength = ipv4PrefixLength
         self.ipv4Gateway = ipv4Gateway
+        self.ipv6Address = ipv6Address
+        self.ipv6PrefixLength = ipv6PrefixLength
+        self.ipv6Gateway = ipv6Gateway
         self.mtu = mtu
     }
 }
@@ -84,6 +93,7 @@ public struct MacOSGuestAppliedNetworkInterface: Codable, Sendable, Equatable {
     public let interfaceName: String
     public let macAddress: String
     public let ipv4Address: String
+    public let ipv6Address: String?
     public let effectiveMTU: UInt32?
 
     public init(
@@ -91,12 +101,14 @@ public struct MacOSGuestAppliedNetworkInterface: Codable, Sendable, Equatable {
         interfaceName: String,
         macAddress: String,
         ipv4Address: String,
+        ipv6Address: String? = nil,
         effectiveMTU: UInt32? = nil
     ) {
         self.networkID = networkID
         self.interfaceName = interfaceName
         self.macAddress = macAddress
         self.ipv4Address = ipv4Address
+        self.ipv6Address = ipv6Address
         self.effectiveMTU = effectiveMTU
     }
 }

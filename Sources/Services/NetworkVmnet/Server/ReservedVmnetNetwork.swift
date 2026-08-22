@@ -71,7 +71,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
 
     public nonisolated func withAdditionalData(_ handler: (XPCMessage?) throws -> Void) throws {
         try stateMutex.withLock { state in
-            try handler(state.network.map { try Self.serialize_network_ref(ref: $0) })
+            try handler(state.network.map { try Self.serializeNetworkRef(ref: $0) })
         }
     }
 
@@ -86,13 +86,14 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
             state.status = NetworkStatus(
                 ipv4Subnet: networkInfo.ipv4Subnet,
                 ipv4Gateway: networkInfo.ipv4Gateway,
-                ipv6Subnet: networkInfo.ipv6Subnet
+                ipv6Subnet: networkInfo.ipv6Subnet,
+                ipv6Gateway: configuration.ipv6Subnet.map { IPv6Address($0.lower.value + 1) }
             )
             state.network = networkInfo.network
         }
     }
 
-    private static func serialize_network_ref(ref: vmnet_network_ref) throws -> XPCMessage {
+    private static func serializeNetworkRef(ref: vmnet_network_ref) throws -> XPCMessage {
         var status: vmnet_return_t = .VMNET_SUCCESS
         guard let refObject = vmnet_network_copy_serialization(ref, &status) else {
             throw ContainerizationError(.invalidArgument, message: "cannot serialize vmnet_network_ref to XPC object, status \(status)")
@@ -141,14 +142,28 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
 
         // set the IPv6 network prefix
         if let ipv6Subnet {
-            let gateway = IPv6Address(ipv6Subnet.lower.value + 1)
-            var gatewayAddr = in6_addr()
-            inet_pton(AF_INET6, gateway.description, &gatewayAddr)
+            guard ipv6Subnet.prefix.length == 64,
+                !ipv6Subnet.lower.isUnspecified,
+                !ipv6Subnet.lower.isLoopback,
+                !ipv6Subnet.lower.isMulticast,
+                !ipv6Subnet.lower.isLinkLocal
+            else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "explicit vmnet IPv6 subnet must be a usable /64 network"
+                )
+            }
+            var prefixAddr = in6_addr()
+            inet_pton(AF_INET6, ipv6Subnet.lower.description, &prefixAddr)
             log.info(
                 "configuring vmnet IPv6 prefix",
                 metadata: ["cidr": "\(ipv6Subnet)"]
             )
-            let status = vmnet_network_configuration_set_ipv6_prefix(vmnetConfiguration, &gatewayAddr, ipv6Subnet.prefix.length)
+            let status = vmnet_network_configuration_set_ipv6_prefix(
+                vmnetConfiguration,
+                &prefixAddr,
+                ipv6Subnet.prefix.length
+            )
             guard status == .VMNET_SUCCESS else {
                 throw ContainerizationError(.internalError, message: "failed to set prefix \(ipv6Subnet) for IPv6 network \(configuration.id)")
             }

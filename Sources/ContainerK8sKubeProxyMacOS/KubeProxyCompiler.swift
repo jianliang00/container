@@ -18,6 +18,11 @@ import Darwin
 import Foundation
 
 public enum KubeProxyCompiler {
+    private struct ServiceClusterIP: Hashable {
+        var family: KubeProxyAddressFamily
+        var address: String
+    }
+
     public static func compile(
         snapshot: KubeProxySnapshot,
         nodeName: String,
@@ -45,57 +50,69 @@ public enum KubeProxyCompiler {
                 continue
             }
 
-            guard let clusterIP = ipv4ClusterIP(spec) else {
-                issues.append(KubeProxyCompileIssue(id: "service/\(serviceID)/cluster-ip", message: "skipped Service \(serviceID) without an IPv4 ClusterIP"))
+            let clusterIPs = serviceClusterIPs(spec)
+            guard !clusterIPs.isEmpty else {
+                issues.append(
+                    KubeProxyCompileIssue(
+                        id: "service/\(serviceID)/cluster-ip",
+                        message: "skipped Service \(serviceID) without a valid IPv4 or IPv6 ClusterIP"
+                    )
+                )
                 continue
             }
-
-            let serviceSlices = (endpointSlicesByService[serviceName] ?? [])
-                .filter { $0.metadata.namespace == namespace && $0.addressType == "IPv4" }
 
             for servicePort in spec.ports {
                 guard validPort(servicePort.port) else {
                     issues.append(KubeProxyCompileIssue(id: "service/\(serviceID)/port", message: "skipped invalid Service port \(servicePort.port)"))
                     continue
                 }
-                let protocolName = servicePort.protocolName ?? .tcp
-                let backendResult = resolveBackends(
-                    servicePort: servicePort,
-                    protocolName: protocolName,
-                    endpointSlices: serviceSlices,
-                    nodeName: nodeName,
-                    internalTrafficPolicy: spec.internalTrafficPolicy ?? .cluster,
-                    serviceID: serviceID
-                )
-                issues.append(contentsOf: backendResult.issues)
+                for clusterIP in clusterIPs {
+                    let serviceSlices = (endpointSlicesByService[serviceName] ?? [])
+                        .filter {
+                            $0.metadata.namespace == namespace
+                                && KubeProxyAddressFamily(rawValue: $0.addressType) == clusterIP.family
+                        }
+                    let protocolName = servicePort.protocolName ?? .tcp
+                    let backendResult = resolveBackends(
+                        servicePort: servicePort,
+                        protocolName: protocolName,
+                        family: clusterIP.family,
+                        endpointSlices: serviceSlices,
+                        nodeName: nodeName,
+                        internalTrafficPolicy: spec.internalTrafficPolicy ?? .cluster,
+                        serviceID: serviceID
+                    )
+                    issues.append(contentsOf: backendResult.issues)
 
-                let backends = Array(Set(backendResult.backends)).sorted()
-                guard !backends.isEmpty else {
-                    continue
-                }
+                    let backends = Array(Set(backendResult.backends)).sorted()
+                    guard !backends.isEmpty else {
+                        continue
+                    }
 
-                let distinctPorts = Set(backends.map(\.port))
-                guard distinctPorts.count == 1 else {
-                    issues.append(
-                        KubeProxyCompileIssue(
-                            id: "service/\(serviceID)/\(servicePort.name ?? "\(servicePort.port)")/heterogeneous-backend-ports",
-                            message: "skipped Service \(serviceID) port \(servicePort.port) because PF backend groups require one backend port"
+                    let distinctPorts = Set(backends.map(\.port))
+                    guard distinctPorts.count == 1 else {
+                        issues.append(
+                            KubeProxyCompileIssue(
+                                id: "service/\(serviceID)/\(servicePort.name ?? "\(servicePort.port)")/heterogeneous-backend-ports",
+                                message: "skipped Service \(serviceID) port \(servicePort.port) because PF backend groups require one backend port"
+                            )
+                        )
+                        continue
+                    }
+
+                    rules.append(
+                        KubeProxyServiceRule(
+                            namespace: namespace,
+                            serviceName: serviceName,
+                            portName: servicePort.name,
+                            protocolName: protocolName,
+                            family: clusterIP.family,
+                            clusterIP: clusterIP.address,
+                            servicePort: servicePort.port,
+                            backends: backends
                         )
                     )
-                    continue
                 }
-
-                rules.append(
-                    KubeProxyServiceRule(
-                        namespace: namespace,
-                        serviceName: serviceName,
-                        portName: servicePort.name,
-                        protocolName: protocolName,
-                        clusterIP: clusterIP,
-                        servicePort: servicePort.port,
-                        backends: backends
-                    )
-                )
             }
         }
 
@@ -111,16 +128,25 @@ public enum KubeProxyCompiler {
         }
     }
 
-    private static func ipv4ClusterIP(_ spec: KubeProxyServiceSpec) -> String? {
+    private static func serviceClusterIPs(_ spec: KubeProxyServiceSpec) -> [ServiceClusterIP] {
         let candidates = (spec.clusterIPs ?? []) + [spec.clusterIP].compactMap { $0 }
-        return candidates.first { candidate in
-            candidate != "None" && isIPv4Literal(candidate)
+        var seen: Set<ServiceClusterIP> = []
+        return candidates.compactMap { candidate in
+            guard candidate != "None", let family = addressFamily(of: candidate) else {
+                return nil
+            }
+            let clusterIP = ServiceClusterIP(family: family, address: candidate)
+            guard seen.insert(clusterIP).inserted else {
+                return nil
+            }
+            return clusterIP
         }
     }
 
     private static func resolveBackends(
         servicePort: KubeProxyServicePort,
         protocolName: KubeProxyProtocol,
+        family: KubeProxyAddressFamily,
         endpointSlices: [KubeProxyEndpointSlice],
         nodeName: String,
         internalTrafficPolicy: KubeProxyInternalTrafficPolicy,
@@ -162,8 +188,8 @@ public enum KubeProxyCompiler {
                 if internalTrafficPolicy == .local, endpoint.nodeName != nodeName {
                     continue
                 }
-                for address in endpoint.addresses where isIPv4Literal(address) {
-                    backends.append(KubeProxyBackend(ip: address, port: endpointPort))
+                for address in endpoint.addresses where addressFamily(of: address) == family {
+                    backends.append(KubeProxyBackend(family: family, ip: address, port: endpointPort))
                 }
             }
         }
@@ -203,11 +229,17 @@ public enum KubeProxyCompiler {
         port > 0 && port <= 65535
     }
 
-    private static func isIPv4Literal(_ value: String) -> Bool {
-        var address = in_addr()
-        return value.withCString { pointer in
-            inet_pton(AF_INET, pointer, &address) == 1
+    private static func addressFamily(of value: String) -> KubeProxyAddressFamily? {
+        var ipv4Address = in_addr()
+        if value.withCString({ inet_pton(AF_INET, $0, &ipv4Address) }) == 1 {
+            return .ipv4
         }
+
+        var ipv6Address = in6_addr()
+        if value.withCString({ inet_pton(AF_INET6, $0, &ipv6Address) }) == 1 {
+            return .ipv6
+        }
+        return nil
     }
 }
 

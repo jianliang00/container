@@ -53,6 +53,18 @@ public enum FlannelConfigParser {
         else {
             throw FlannelVXLANError.invalidNetworkConfig("Network must be a valid IPv4 CIDR")
         }
+        let ipv6Network: FlannelIPv6.CIDR?
+        if let ipv6NetworkValue = raw.ipv6Network {
+            guard let parsed = FlannelIPv6.parseCIDR(ipv6NetworkValue) else {
+                throw FlannelVXLANError.invalidNetworkConfig("IPv6Network must be a valid IPv6 CIDR")
+            }
+            ipv6Network = parsed
+        } else {
+            ipv6Network = nil
+        }
+        if raw.enableIPv6 ?? false, ipv6Network == nil {
+            throw FlannelVXLANError.invalidNetworkConfig("IPv6Network is required when EnableIPv6 is true")
+        }
         guard let rawBackend = raw.backend else {
             throw FlannelVXLANError.invalidNetworkConfig("Backend is required")
         }
@@ -91,6 +103,7 @@ public enum FlannelConfigParser {
         )
         return FlannelNetworkConfig(
             network: network.string,
+            ipv6Network: ipv6Network?.string,
             enableIPv4: true,
             enableIPv6: raw.enableIPv6 ?? false,
             backend: backend
@@ -100,12 +113,14 @@ public enum FlannelConfigParser {
 
 private struct RawNetworkConfig: Decodable {
     var network: String?
+    var ipv6Network: String?
     var enableIPv4: Bool?
     var enableIPv6: Bool?
     var backend: RawBackendConfig?
 
     enum CodingKeys: String, CodingKey {
         case network = "Network"
+        case ipv6Network = "IPv6Network"
         case enableIPv4 = "EnableIPv4"
         case enableIPv6 = "EnableIPv6"
         case backend = "Backend"

@@ -145,7 +145,8 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
         if cleanup {
             let result = try await controller.cleanup()
             print(
-                "cleanup complete routes=\(result.removedRoutes.count) tunnelStopped=\(result.stoppedTunnel) "
+                "cleanup complete routes=\(result.removedRoutes.count) ipv6Routes=\(result.removedIPv6Routes.count) "
+                    + "tunnelStopped=\(result.stoppedTunnel) ipv6TunnelStopped=\(result.stoppedIPv6Tunnel) "
                     + "annotationsRemoved=\(result.removedNodeAnnotations) attempts=\(result.nodeAnnotationAttempts)"
             )
             return
@@ -166,7 +167,11 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             print(
                 "ready node=\(result.localNetwork.nodeName) podCIDR=\(result.localNetwork.podCIDR) "
                     + "underlay=\(result.underlay.ipv4Address) interface=\(result.interfaceName) "
-                    + "mtu=\(result.mtu) peers=\(result.peers.count) issues=\(result.issues.count)"
+                    + "mtu=\(result.mtu) peers=\(result.peers.count) ipv4Ready=\(result.ipv4Ready) "
+                    + "ipv6Ready=\(result.ipv6Ready.map(String.init) ?? "disabled") "
+                    + "ipv6PodCIDR=\(result.localIPv6Network?.podCIDR ?? "<none>") "
+                    + "ipv6Interface=\(result.ipv6InterfaceName ?? "<none>") "
+                    + "ipv6Peers=\(result.ipv6Peers.count) issues=\(result.issues.count)"
             )
             try await controller.shutdown()
             return

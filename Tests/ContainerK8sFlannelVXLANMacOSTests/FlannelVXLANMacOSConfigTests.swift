@@ -28,6 +28,8 @@ struct FlannelVXLANMacOSConfigTests {
         let config = try JSONDecoder().decode(FlannelVXLANMacOSConfig.self, from: data)
 
         #expect(config.containerServiceUserID == 0)
+        #expect(!config.dualStackEnabled)
+        #expect(config.vtepMACIPv6Path == "/var/lib/container/flannel-vxlan/vtep-mac-v6")
         try config.validate()
     }
 
@@ -35,7 +37,9 @@ struct FlannelVXLANMacOSConfigTests {
         let original = FlannelVXLANMacOSConfig(
             kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
             nodeName: "mac-a",
-            containerServiceUserID: 501
+            containerServiceUserID: 501,
+            vtepMACPath: "/private/var/lib/container/flannel-vxlan/custom-vtep-mac",
+            dualStackEnabled: true
         )
 
         let decoded = try JSONDecoder().decode(
@@ -44,6 +48,8 @@ struct FlannelVXLANMacOSConfigTests {
         )
 
         #expect(decoded.containerServiceUserID == 501)
+        #expect(decoded.dualStackEnabled)
+        #expect(decoded.vtepMACIPv6Path == "/private/var/lib/container/flannel-vxlan/vtep-mac-v6")
         #expect(decoded == original)
         try decoded.validate()
     }

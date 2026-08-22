@@ -41,18 +41,48 @@ struct FlannelConfigParserTests {
             metadata: FlannelObjectMeta(namespace: "networking", name: "flannel"),
             data: [
                 "cluster-network.json":
-                    #"{"Network":"10.250.7.19/16","EnableIPv6":true,"Backend":{"VNI":4096,"Port":4789}}"#
+                    #"{"Network":"10.250.7.19/16","IPv6Network":"FD42:10:244:0:1234::/56","EnableIPv6":true,"Backend":{"VNI":4096,"Port":4789}}"#
             ]
         )
 
         let config = try FlannelConfigParser.parse(configMap: configMap, key: "cluster-network.json")
 
         #expect(config.network == "10.250.0.0/16")
+        #expect(config.ipv6Network == "fd42:10:244::/56")
         #expect(config.enableIPv6)
         #expect(config.backend.type == "vxlan")
         #expect(config.backend.directRouting == false)
         #expect(config.backend.gbp == false)
         #expect(config.backend.learning == false)
+    }
+
+    @Test
+    func acceptsOptionalIPv6NetworkWhenIPv6IsDisabled() throws {
+        let config = try FlannelConfigParser.parse(
+            #"{"Network":"10.250.0.0/16","IPv6Network":"fd42:10:244:12ff::1/56","Backend":{"VNI":4096,"Port":4789}}"#
+        )
+
+        #expect(!config.enableIPv6)
+        #expect(config.ipv6Network == "fd42:10:244:1200::/56")
+    }
+
+    @Test
+    func requiresValidIPv6NetworkWhenIPv6IsEnabled() {
+        #expect(
+            throws: FlannelVXLANError.invalidNetworkConfig(
+                "IPv6Network is required when EnableIPv6 is true"
+            )
+        ) {
+            try FlannelConfigParser.parse(
+                #"{"Network":"10.250.0.0/16","EnableIPv6":true,"Backend":{"VNI":4096,"Port":4789}}"#
+            )
+        }
+
+        #expect(throws: FlannelVXLANError.invalidNetworkConfig("IPv6Network must be a valid IPv6 CIDR")) {
+            try FlannelConfigParser.parse(
+                #"{"Network":"10.250.0.0/16","IPv6Network":"fd00::/129","EnableIPv6":true,"Backend":{"VNI":4096,"Port":4789}}"#
+            )
+        }
     }
 
     @Test

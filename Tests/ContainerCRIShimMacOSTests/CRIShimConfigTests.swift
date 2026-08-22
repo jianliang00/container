@@ -46,9 +46,25 @@ struct CRIShimConfigTests {
         #expect(config.networkPolicy?.enabled == true)
         #expect(config.kubeProxy?.enabled == true)
         #expect(config.podNetwork?.enabled == true)
+        #expect(config.podNetwork?.dualStackEnabled == false)
         #expect(config.podNetwork?.networkName == "kubernetes-pods")
         #expect(config.podNetwork?.runtimeStatePath == "/var/lib/container/pod-network/runtime.json")
         #expect(config.podNetwork?.readyStatePath == "/var/lib/container/pod-network/ready.json")
+    }
+
+    @Test
+    func podNetworkDualStackGateDefaultsOffAndDecodesExplicitTrue() throws {
+        let defaultConfig = try JSONDecoder().decode(
+            PodNetworkConfig.self,
+            from: Data(#"{"enabled":true}"#.utf8)
+        )
+        #expect(!defaultConfig.dualStackEnabled)
+
+        let enabledConfig = try JSONDecoder().decode(
+            PodNetworkConfig.self,
+            from: Data(#"{"enabled":true,"dualStackEnabled":true}"#.utf8)
+        )
+        #expect(enabledConfig.dualStackEnabled)
     }
 
     @Test

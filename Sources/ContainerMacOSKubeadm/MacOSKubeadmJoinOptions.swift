@@ -97,6 +97,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var sandboxImage: String
     public var runtimeClasses: [MacOSKubeadmRuntimeClassProfile]
     public var networkMode: MacOSKubeadmNetworkMode
+    public var enableDualStack: Bool
     public var containerServiceUserID: Int
     public var installRoot: String
     public var startServices: Bool
@@ -117,6 +118,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         sandboxImage: String = "localhost/macos-sandbox:latest",
         runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = [],
         networkMode: MacOSKubeadmNetworkMode = .full,
+        enableDualStack: Bool = false,
         containerServiceUserID: Int = 0,
         installRoot: String = "/",
         startServices: Bool = true,
@@ -136,6 +138,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.sandboxImage = sandboxImage
         self.runtimeClasses = runtimeClasses
         self.networkMode = networkMode
+        self.enableDualStack = enableDualStack
         self.containerServiceUserID = containerServiceUserID
         self.installRoot = installRoot
         self.startServices = startServices

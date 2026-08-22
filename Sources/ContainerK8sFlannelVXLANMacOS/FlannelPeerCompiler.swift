@@ -28,6 +28,19 @@ public enum FlannelPeerCompiler {
         guard let clusterNetwork = FlannelIPv4.parseCIDR(networkConfig.network) else {
             throw FlannelVXLANError.invalidNetworkConfig("Network must be a valid IPv4 CIDR")
         }
+        let clusterIPv6Network: FlannelIPv6.CIDR?
+        if networkConfig.enableIPv6 {
+            guard let value = networkConfig.ipv6Network,
+                let parsed = FlannelIPv6.parseCIDR(value)
+            else {
+                throw FlannelVXLANError.invalidNetworkConfig(
+                    "IPv6Network must be a valid IPv6 CIDR when EnableIPv6 is true"
+                )
+            }
+            clusterIPv6Network = parsed
+        } else {
+            clusterIPv6Network = nil
+        }
 
         var issues: [FlannelCompileIssue] = []
         let localNetwork = compileLocalNetwork(
@@ -173,7 +186,22 @@ public enum FlannelPeerCompiler {
             .map(\.peer)
             .filter { !rejectedNodes.contains($0.nodeName) }
             .sorted()
-        return FlannelPeerCompilation(localNetwork: localNetwork, peers: peers, issues: issues.sorted())
+        let ipv6Compilation = compileIPv6(
+            nodes: nodes,
+            localNodeName: localNodeName,
+            clusterNetwork: clusterIPv6Network,
+            networkConfig: networkConfig,
+            keys: keys,
+            decoder: decoder,
+            issues: &issues
+        )
+        return FlannelPeerCompilation(
+            localNetwork: localNetwork,
+            peers: peers,
+            localIPv6Network: ipv6Compilation.localNetwork,
+            ipv6Peers: ipv6Compilation.peers,
+            issues: issues.sorted()
+        )
     }
 
     private static func compileLocalNetwork(
@@ -223,6 +251,249 @@ public enum FlannelPeerCompiler {
             candidates.append(podCIDR)
         }
         return candidates.lazy.compactMap(FlannelIPv4.parseCIDR).first
+    }
+
+    private static func compileIPv6(
+        nodes: [FlannelNode],
+        localNodeName: String,
+        clusterNetwork: FlannelIPv6.CIDR?,
+        networkConfig: FlannelNetworkConfig,
+        keys: FlannelAnnotationKeys,
+        decoder: JSONDecoder,
+        issues: inout [FlannelCompileIssue]
+    ) -> (localNetwork: FlannelLocalNodeIPv6Network?, peers: [FlannelIPv6Peer]) {
+        guard let clusterNetwork else {
+            return (nil, [])
+        }
+
+        let localNetwork = compileLocalIPv6Network(
+            nodes: nodes,
+            localNodeName: localNodeName,
+            clusterNetwork: clusterNetwork,
+            issues: &issues
+        )
+        var candidates: [(peer: FlannelIPv6Peer, cidr: FlannelIPv6.CIDR)] = []
+
+        for node in nodes.sorted(by: nodeOrder) {
+            guard node.metadata.name != localNodeName else {
+                continue
+            }
+            let annotations = node.metadata.annotations ?? [:]
+            guard annotations[keys.kubeSubnetManager] == "true",
+                let nodeName = node.metadata.name,
+                !nodeName.isEmpty
+            else {
+                continue
+            }
+
+            if node.metadata.labels?["kubernetes.io/os"]?.lowercased() == "windows" {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/ipv6-unsupported",
+                        severity: .warning,
+                        message: "ignored IPv6 for Windows Node \(nodeName) because Flannel VXLAN dual-stack is unsupported on Windows"
+                    ))
+                continue
+            }
+            guard annotations[keys.backendType] == "vxlan" else {
+                continue
+            }
+
+            let podCIDRs = ipv6PodCIDRs(for: node)
+            guard podCIDRs.count == 1, let podCIDR = podCIDRs.first else {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/ipv6-pod-cidr",
+                        severity: .error,
+                        message: podCIDRs.isEmpty
+                            ? "ignored Node \(nodeName) without a valid IPv6 PodCIDR"
+                            : "ignored Node \(nodeName) with multiple IPv6 PodCIDRs"
+                    ))
+                continue
+            }
+            guard clusterNetwork.contains(podCIDR) else {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/ipv6-pod-cidr",
+                        severity: .error,
+                        message: "ignored Node \(nodeName) because IPv6 PodCIDR \(podCIDR.string) is outside \(clusterNetwork.string)"
+                    ))
+                continue
+            }
+            if let localCIDR = localNetwork.flatMap({ FlannelIPv6.parseCIDR($0.podCIDR) }),
+                localCIDR.overlaps(podCIDR)
+            {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/ipv6-pod-cidr-overlap",
+                        severity: .error,
+                        message: "ignored Node \(nodeName) because IPv6 PodCIDR \(podCIDR.string) overlaps the local IPv6 PodCIDR"
+                    ))
+                continue
+            }
+            guard let rawPublicIPv6 = annotations[keys.publicIPv6],
+                let publicIPv6 = FlannelIPv6.parseAddress(rawPublicIPv6),
+                publicIPv6.isUsableUnderlayAddress
+            else {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/public-ipv6",
+                        severity: .error,
+                        message: "ignored Node \(nodeName) without a usable Flannel public IPv6 address"
+                    ))
+                continue
+            }
+            guard let backendData = annotations[keys.backendV6Data], !backendData.isEmpty else {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/backend-v6-data",
+                        severity: .pending,
+                        message: "waiting for Node \(nodeName) to publish IPv6 VXLAN backend data"
+                    ))
+                continue
+            }
+
+            let leaseData: FlannelBackendLeaseData
+            do {
+                leaseData = try decoder.decode(FlannelBackendLeaseData.self, from: Data(backendData.utf8))
+            } catch {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/backend-v6-data",
+                        severity: .error,
+                        message: "ignored Node \(nodeName) with invalid IPv6 VXLAN backend data: \(error)"
+                    ))
+                continue
+            }
+            guard leaseData.vni == networkConfig.backend.vni else {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/ipv6-vni",
+                        severity: .error,
+                        message: "ignored Node \(nodeName) with IPv6 VNI \(leaseData.vni); expected \(networkConfig.backend.vni)"
+                    ))
+                continue
+            }
+            guard !leaseData.vtepMAC.isEmpty else {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/ipv6-vtep-mac",
+                        severity: .pending,
+                        message: "waiting for Node \(nodeName) to publish its IPv6 VXLAN VTEP MAC"
+                    ))
+                continue
+            }
+            guard let vtepMAC = FlannelVTEPMAC.normalize(leaseData.vtepMAC) else {
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "node/\(nodeName)/ipv6-vtep-mac",
+                        severity: .error,
+                        message: "ignored Node \(nodeName) with an invalid IPv6 VXLAN VTEP MAC"
+                    ))
+                continue
+            }
+
+            candidates.append(
+                (
+                    peer: FlannelIPv6Peer(
+                        nodeName: nodeName,
+                        operatingSystem: node.metadata.labels?["kubernetes.io/os"],
+                        podCIDR: podCIDR.string,
+                        subnetBase: podCIDR.baseAddress,
+                        publicIPv6: publicIPv6.string,
+                        vni: leaseData.vni,
+                        vtepMAC: vtepMAC
+                    ),
+                    cidr: podCIDR
+                ))
+        }
+
+        let rejectedNodes = overlappingIPv6Nodes(in: candidates, issues: &issues)
+        return (
+            localNetwork,
+            candidates.map(\.peer).filter { !rejectedNodes.contains($0.nodeName) }.sorted()
+        )
+    }
+
+    private static func compileLocalIPv6Network(
+        nodes: [FlannelNode],
+        localNodeName: String,
+        clusterNetwork: FlannelIPv6.CIDR,
+        issues: inout [FlannelCompileIssue]
+    ) -> FlannelLocalNodeIPv6Network? {
+        guard let node = nodes.first(where: { $0.metadata.name == localNodeName }) else {
+            issues.append(
+                FlannelCompileIssue(
+                    id: "node/\(localNodeName)/ipv6-missing",
+                    severity: .error,
+                    message: "local Node \(localNodeName) was not returned by the Kubernetes API for IPv6"
+                ))
+            return nil
+        }
+        let podCIDRs = ipv6PodCIDRs(for: node)
+        guard podCIDRs.count == 1, let podCIDR = podCIDRs.first else {
+            issues.append(
+                FlannelCompileIssue(
+                    id: "node/\(localNodeName)/ipv6-pod-cidr",
+                    severity: podCIDRs.isEmpty ? .pending : .error,
+                    message: podCIDRs.isEmpty
+                        ? "waiting for local Node \(localNodeName) to receive an IPv6 PodCIDR"
+                        : "local Node \(localNodeName) has multiple IPv6 PodCIDRs"
+                ))
+            return nil
+        }
+        guard clusterNetwork.contains(podCIDR) else {
+            issues.append(
+                FlannelCompileIssue(
+                    id: "node/\(localNodeName)/ipv6-pod-cidr",
+                    severity: .error,
+                    message: "local IPv6 PodCIDR \(podCIDR.string) is outside \(clusterNetwork.string)"
+                ))
+            return nil
+        }
+        return FlannelLocalNodeIPv6Network(
+            nodeName: localNodeName,
+            podCIDR: podCIDR.string,
+            subnetBase: podCIDR.baseAddress,
+            internalIPv6: node.status?.internalIPv6
+        )
+    }
+
+    private static func ipv6PodCIDRs(for node: FlannelNode) -> [FlannelIPv6.CIDR] {
+        var candidates = node.spec.podCIDRs ?? []
+        if let podCIDR = node.spec.podCIDR, !candidates.contains(podCIDR) {
+            candidates.append(podCIDR)
+        }
+        return Array(Set(candidates.compactMap(FlannelIPv6.parseCIDR))).sorted { $0.string < $1.string }
+    }
+
+    private static func overlappingIPv6Nodes(
+        in candidates: [(peer: FlannelIPv6Peer, cidr: FlannelIPv6.CIDR)],
+        issues: inout [FlannelCompileIssue]
+    ) -> Set<String> {
+        var rejected: Set<String> = []
+        guard candidates.count > 1 else {
+            return rejected
+        }
+
+        for leftIndex in 0..<(candidates.count - 1) {
+            for rightIndex in (leftIndex + 1)..<candidates.count {
+                let left = candidates[leftIndex]
+                let right = candidates[rightIndex]
+                guard left.cidr.overlaps(right.cidr) else {
+                    continue
+                }
+                rejected.insert(left.peer.nodeName)
+                rejected.insert(right.peer.nodeName)
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "nodes/\(left.peer.nodeName),\(right.peer.nodeName)/ipv6-pod-cidr-overlap",
+                        severity: .error,
+                        message: "ignored Nodes \(left.peer.nodeName) and \(right.peer.nodeName) with overlapping IPv6 PodCIDRs"
+                    ))
+            }
+        }
+        return rejected
     }
 
     private static func overlappingNodes(

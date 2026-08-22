@@ -21,6 +21,53 @@ import Testing
 
 struct KubeProxyPodIngressInterfaceResolverTests {
     @Test
+    func readsBridgeTypeFromInterfaceDataInsteadOfLinkAddress() {
+        #expect(
+            linkInterfaceType(
+                socketType: UInt8(IFT_ETHER),
+                interfaceDataType: UInt8(IFT_BRIDGE)
+            ) == UInt8(IFT_BRIDGE)
+        )
+    }
+
+    @Test
+    func doesNotTrustBridgeTypeFromLinkAddress() {
+        #expect(
+            linkInterfaceType(
+                socketType: UInt8(IFT_BRIDGE),
+                interfaceDataType: UInt8(IFT_ETHER)
+            ) == UInt8(IFT_ETHER)
+        )
+    }
+
+    @Test
+    func requiresInterfaceDataForLinkType() {
+        #expect(linkInterfaceType(socketType: UInt8(IFT_BRIDGE), interfaceDataType: nil) == nil)
+    }
+
+    private func linkInterfaceType(socketType: UInt8, interfaceDataType: UInt8?) -> UInt8? {
+        var linkAddress = sockaddr_dl()
+        linkAddress.sdl_family = UInt8(AF_LINK)
+        linkAddress.sdl_type = socketType
+        var address = ifaddrs()
+
+        return withUnsafeMutablePointer(to: &linkAddress) { linkAddressPointer in
+            address.ifa_addr = UnsafeMutableRawPointer(linkAddressPointer)
+                .assumingMemoryBound(to: sockaddr.self)
+            guard let interfaceDataType else {
+                address.ifa_data = nil
+                return KubeProxyDefaultPodIngressInterfaceResolver.linkInterfaceType(address)
+            }
+            var interfaceData = if_data()
+            interfaceData.ifi_type = interfaceDataType
+            return withUnsafeMutablePointer(to: &interfaceData) { interfaceDataPointer in
+                address.ifa_data = UnsafeMutableRawPointer(interfaceDataPointer)
+                return KubeProxyDefaultPodIngressInterfaceResolver.linkInterfaceType(address)
+            }
+        }
+    }
+
+    @Test
     func resolvesExactDirectIPv4PodCIDRBridgeRoute() throws {
         let resolver = KubeProxyDefaultPodIngressInterfaceResolver(
             commandRunner: { executable, arguments in
@@ -155,13 +202,13 @@ struct KubeProxyPodIngressInterfaceResolverTests {
     }
 
     @Test
-    func rejectsNonBridgePodCIDRInterface() {
+    func rejectsNonBridgeTypeEvenWhenInterfaceNameLooksLikeBridge() {
         let resolver = KubeProxyDefaultPodIngressInterfaceResolver(
             commandRunner: { _, _ in
                 """
                 destination: 10.250.34.0
                        mask: 255.255.255.0
-                  interface: en0
+                  interface: bridge100
                       flags: <UP,DONE,CLONING>
                 """
             },

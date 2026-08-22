@@ -290,13 +290,11 @@ public struct KubeProxyDefaultPodIngressInterfaceResolver: KubeProxyPodIngressIn
             defer { current = address.pointee.ifa_next }
             guard
                 kubeProxyString(decodingCString: address.pointee.ifa_name) == interfaceName,
-                let socketAddress = address.pointee.ifa_addr,
-                Int32(socketAddress.pointee.sa_family) == AF_LINK
+                let type = Self.linkInterfaceType(address.pointee)
             else {
                 continue
             }
-            let linkAddress = UnsafeRawPointer(socketAddress).assumingMemoryBound(to: sockaddr_dl.self)
-            types.append(linkAddress.pointee.sdl_type)
+            types.append(type)
         }
         guard types.count == 1, let type = types.first else {
             throw KubeProxyMacOSError.applyFailed(
@@ -304,6 +302,17 @@ public struct KubeProxyDefaultPodIngressInterfaceResolver: KubeProxyPodIngressIn
             )
         }
         return type
+    }
+
+    static func linkInterfaceType(_ address: ifaddrs) -> UInt8? {
+        guard
+            let socketAddress = address.ifa_addr,
+            Int32(socketAddress.pointee.sa_family) == AF_LINK,
+            let interfaceData = address.ifa_data
+        else {
+            return nil
+        }
+        return interfaceData.assumingMemoryBound(to: if_data.self).pointee.ifi_type
     }
 
     private static func runProcess(_ executable: String, _ arguments: [String]) throws -> String {

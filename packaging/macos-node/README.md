@@ -128,6 +128,30 @@ live sandbox attachment still refers to the owned Pod network. Network
 ownership is checked again immediately before deletion, after the VXLAN data
 plane has been withdrawn.
 
+Join renders the complete desired node configuration. Rerunning it on a node
+with explicit network settings must repeat those settings; join does not merge
+generated files from an earlier run. A dual-stack node can pin both kubelet
+InternalIP addresses, the Flannel ConfigMap, and the underlay interface:
+
+```sh
+sudo container-macos-kubeadm join 10.0.0.10:6443 \
+  --token abcdef.0123456789abcdef \
+  --discovery-token-ca-cert-hash sha256:<hash> \
+  --node-name macos-node-1 \
+  --network-mode full \
+  --enable-dual-stack \
+  --node-ip 10.0.1.21 \
+  --node-ip fd00:10:0:1::21 \
+  --flannel-config-map-namespace kube-flannel \
+  --flannel-config-map-name kube-flannel-cfg-macos \
+  --flannel-underlay-interface en0
+```
+
+When `--node-ip` is specified for dual stack, pass the IPv4 address first and
+the IPv6 address second. Omitting all `--node-ip` options preserves kubelet's
+automatic address selection. Omitting `--flannel-underlay-interface` preserves
+Flannel's automatic interface selection.
+
 To expose more than one macOS sandbox image on the same node, repeat
 `--runtime-class <name>=<sandbox-image>` during join. Each additional
 RuntimeClass uses the selected node network mode.
@@ -147,6 +171,10 @@ RuntimeClass. Each additional profile also renders a
 `runtimeclass-<name>.yaml` manifest under the package manifest directory. Pods
 select the desired sandbox image with `spec.runtimeClassName`, for example
 `macos-15-2`.
+
+Use `--gui-runtime-class <name>=<sandbox-image>` instead of `--runtime-class`
+for an additional handler that presents the sandbox GUI. GUI enablement is an
+explicit per-handler property; RuntimeClass names do not change it implicitly.
 
 After joining a node, apply the RuntimeClass manifests that should be exposed
 to the cluster from an admin workstation. The built-in default manifests are

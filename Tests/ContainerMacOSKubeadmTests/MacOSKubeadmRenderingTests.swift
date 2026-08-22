@@ -86,6 +86,87 @@ struct MacOSKubeadmRenderingTests {
         #expect(object["underlayInterface"] == nil)
     }
 
+    @Test func flannelConfigurationRendersExplicitNetworkSourceAndUnderlay() throws {
+        let rendered = MacOSKubeadmRenderer.flannelVXLANConfiguration(
+            nodeName: "macos-ci-1",
+            dualStackEnabled: true,
+            configMapNamespace: "kube-flannel-macos",
+            configMapName: "kube-flannel-cfg-macos-ds-mac-canary-a",
+            underlayInterface: "en0"
+        )
+
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        #expect(object["configMapNamespace"] as? String == "kube-flannel-macos")
+        #expect(object["configMapName"] as? String == "kube-flannel-cfg-macos-ds-mac-canary-a")
+        #expect(object["underlayInterface"] as? String == "en0")
+    }
+
+    @Test func CRIConfigurationCanEnableGUIForOneRuntimeClass() throws {
+        let rendered = MacOSKubeadmRenderer.criShimConfiguration(
+            sandboxImage: "localhost/macos-sandbox:test",
+            runtimeClasses: [
+                MacOSKubeadmRuntimeClassProfile(
+                    name: "macos-gui",
+                    sandboxImage: "localhost/macos-sandbox:gui",
+                    networkMode: .full,
+                    guiEnabled: true
+                )
+            ]
+        )
+
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        let defaults = try #require(object["defaults"] as? [String: Any])
+        let handlers = try #require(object["runtimeHandlers"] as? [String: Any])
+        let defaultHandler = try #require(handlers["macos"] as? [String: Any])
+        let guiHandler = try #require(handlers["macos-gui"] as? [String: Any])
+
+        #expect(defaults["guiEnabled"] as? Bool == false)
+        #expect(defaultHandler["guiEnabled"] as? Bool == false)
+        #expect(guiHandler["guiEnabled"] as? Bool == true)
+    }
+
+    @Test func kubeletPlistRendersDualNodeIPsAsOneArgument() throws {
+        let rendered = MacOSKubeadmRenderer.kubeletPlist(
+            nodeName: "macos-ci-1",
+            sandboxImage: "localhost/macos-sandbox:test",
+            nodeIPAddresses: [
+                "203.0.113.208",
+                "2001:db8:100:c:203:0:113:208",
+            ]
+        )
+        let object = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(rendered.utf8),
+                format: nil
+            ) as? [String: Any]
+        )
+        let arguments = try #require(object["ProgramArguments"] as? [String])
+        let nodeIPIndex = try #require(arguments.firstIndex(of: "--node-ip"))
+
+        #expect(arguments.filter { $0 == "--node-ip" }.count == 1)
+        #expect(arguments[nodeIPIndex + 1] == "203.0.113.208,2001:db8:100:c:203:0:113:208")
+    }
+
+    @Test func kubeletPlistOmitsNodeIPByDefault() throws {
+        let rendered = MacOSKubeadmRenderer.kubeletPlist(
+            nodeName: "macos-ci-1",
+            sandboxImage: "localhost/macos-sandbox:test"
+        )
+        let object = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(rendered.utf8),
+                format: nil
+            ) as? [String: Any]
+        )
+        let arguments = try #require(object["ProgramArguments"] as? [String])
+
+        #expect(!arguments.contains("--node-ip"))
+    }
+
     @Test func fullModeConfigurationsDefaultDualStackOff() throws {
         let rendered = MacOSKubeadmRenderer.flannelVXLANConfiguration(nodeName: "macos-ci-1")
 

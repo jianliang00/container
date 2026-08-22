@@ -57,6 +57,9 @@ extension MacOSKubeadm {
         @Option(help: "Additional RuntimeClass in name=sandbox-image format. May be repeated; each entry uses the selected --network-mode.")
         var runtimeClass: [String] = []
 
+        @Option(help: "Additional GUI-enabled RuntimeClass in name=sandbox-image format. May be repeated; each entry uses the selected --network-mode.")
+        var guiRuntimeClass: [String] = []
+
         @Option(help: "Node network mode: full or compat.")
         var networkMode: String = MacOSKubeadmNetworkMode.full.rawValue
 
@@ -80,6 +83,30 @@ extension MacOSKubeadm {
             help: "IPv6 source-NAT address. Required when the selected egress interface has multiple usable IPv6 addresses."
         )
         var ipv6EgressSourceAddress: String?
+
+        @Option(
+            name: .customLong("node-ip"),
+            help: "Node IP address advertised by kubelet. May be repeated as IPv4 then IPv6 with --enable-dual-stack."
+        )
+        var nodeIPAddresses: [String] = []
+
+        @Option(
+            name: .customLong("flannel-config-map-namespace"),
+            help: "Namespace containing the Flannel network configuration ConfigMap."
+        )
+        var flannelConfigMapNamespace: String = "kube-flannel"
+
+        @Option(
+            name: .customLong("flannel-config-map-name"),
+            help: "Name of the Flannel network configuration ConfigMap."
+        )
+        var flannelConfigMapName: String = "kube-flannel-cfg"
+
+        @Option(
+            name: .customLong("flannel-underlay-interface"),
+            help: "Host interface used for Flannel VXLAN underlay traffic."
+        )
+        var flannelUnderlayInterface: String?
 
         @Option(help: "UID whose bootstrap domain runs container core services. Defaults to SUDO_UID when available, otherwise 0.")
         var containerServiceUser: Int?
@@ -106,6 +133,9 @@ extension MacOSKubeadm {
             let resolvedRuntimeClasses = try runtimeClass.map {
                 try parseRuntimeClass($0, networkMode: resolvedNetworkMode)
             }
+            let resolvedGUIRuntimeClasses = try guiRuntimeClass.map {
+                try parseRuntimeClass($0, networkMode: resolvedNetworkMode, guiEnabled: true)
+            }
 
             let options = MacOSKubeadmJoinOptions(
                 apiServer: apiServer,
@@ -113,12 +143,16 @@ extension MacOSKubeadm {
                 token: token,
                 discoveryTokenCACertHashes: discoveryTokenCACertHash,
                 sandboxImage: sandboxImage,
-                runtimeClasses: resolvedRuntimeClasses,
+                runtimeClasses: resolvedRuntimeClasses + resolvedGUIRuntimeClasses,
                 networkMode: resolvedNetworkMode,
                 enableDualStack: enableDualStack,
                 masqueradeIPv6PodTraffic: disableIPv6Masquerade ? false : nil,
                 ipv6EgressInterface: ipv6EgressInterface,
                 ipv6EgressSourceAddress: ipv6EgressSourceAddress,
+                nodeIPAddresses: nodeIPAddresses,
+                flannelConfigMapNamespace: flannelConfigMapNamespace,
+                flannelConfigMapName: flannelConfigMapName,
+                flannelUnderlayInterface: flannelUnderlayInterface,
                 containerServiceUserID: resolvedContainerServiceUser,
                 installRoot: installRoot,
                 startServices: !skipStart,
@@ -126,6 +160,7 @@ extension MacOSKubeadm {
                 debug: debug
             )
             try options.validateIPv6EgressConfiguration()
+            try options.validateNodeNetworkConfiguration()
 
             let log = MacOSKubeadmLog(debugEnabled: debug)
             let runner = MacOSKubeadmJoinRunner()
@@ -154,7 +189,8 @@ extension MacOSKubeadm {
 
         private func parseRuntimeClass(
             _ value: String,
-            networkMode: MacOSKubeadmNetworkMode
+            networkMode: MacOSKubeadmNetworkMode,
+            guiEnabled: Bool = false
         ) throws -> MacOSKubeadmRuntimeClassProfile {
             let parts = value.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             guard parts.count == 2 else {
@@ -171,7 +207,8 @@ extension MacOSKubeadm {
             return MacOSKubeadmRuntimeClassProfile(
                 name: name,
                 sandboxImage: image,
-                networkMode: networkMode
+                networkMode: networkMode,
+                guiEnabled: guiEnabled
             )
         }
 

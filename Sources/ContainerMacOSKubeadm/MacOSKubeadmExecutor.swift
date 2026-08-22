@@ -56,6 +56,7 @@ public struct MacOSKubeadmJoinRunner {
     private func runPreflight(options: MacOSKubeadmJoinOptions, log: MacOSKubeadmLog) throws {
         log.info("running preflight checks")
         try options.validateIPv6EgressConfiguration()
+        try options.validateNodeNetworkConfiguration()
         try MacOSKubeadmContainerSystem.validateExistingConfiguration(
             requestedUserID: options.containerServiceUserID,
             bootstrapPlistPath: options.rooted(MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath),

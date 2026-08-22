@@ -252,7 +252,10 @@ public enum MacOSKubeadmPlanner {
                         contents: MacOSKubeadmRenderer.flannelVXLANConfiguration(
                             nodeName: options.nodeName,
                             containerServiceUserID: options.containerServiceUserID,
-                            dualStackEnabled: options.enableDualStack
+                            dualStackEnabled: options.enableDualStack,
+                            configMapNamespace: options.flannelConfigMapNamespace,
+                            configMapName: options.flannelConfigMapName,
+                            underlayInterface: options.flannelUnderlayInterface
                         ),
                         mode: 0o644,
                         sensitive: false
@@ -338,7 +341,8 @@ public enum MacOSKubeadmPlanner {
                     contents: MacOSKubeadmRenderer.kubeletPlist(
                         nodeName: options.nodeName,
                         sandboxImage: options.sandboxImage,
-                        networkMode: options.networkMode
+                        networkMode: options.networkMode,
+                        nodeIPAddresses: options.nodeIPAddresses
                     ),
                     mode: 0o644,
                     sensitive: false
@@ -520,6 +524,7 @@ public enum MacOSKubeadmPlanner {
             throw MacOSKubeadmError.invalidInput("--apiserver must use HTTPS")
         }
         try options.validateIPv6EgressConfiguration()
+        try options.validateNodeNetworkConfiguration()
         guard !options.enableDualStack || options.networkMode == .full else {
             throw MacOSKubeadmError.invalidInput("--enable-dual-stack requires --network-mode full")
         }

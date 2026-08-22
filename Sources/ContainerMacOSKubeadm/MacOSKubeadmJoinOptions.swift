@@ -66,17 +66,20 @@ public struct MacOSKubeadmRuntimeClassProfile: Sendable, Equatable {
     public var handler: String
     public var sandboxImage: String
     public var networkMode: MacOSKubeadmNetworkMode
+    public var guiEnabled: Bool
 
     public init(
         name: String,
         handler: String? = nil,
         sandboxImage: String,
-        networkMode: MacOSKubeadmNetworkMode
+        networkMode: MacOSKubeadmNetworkMode,
+        guiEnabled: Bool = false
     ) {
         self.name = name
         self.handler = handler ?? name
         self.sandboxImage = sandboxImage
         self.networkMode = networkMode
+        self.guiEnabled = guiEnabled
     }
 
     public var manifestFileName: String {
@@ -102,6 +105,10 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var masqueradeIPv6PodTraffic: Bool?
     public var ipv6EgressInterface: String?
     public var ipv6EgressSourceAddress: String?
+    public var nodeIPAddresses: [String]
+    public var flannelConfigMapNamespace: String
+    public var flannelConfigMapName: String
+    public var flannelUnderlayInterface: String?
     public var containerServiceUserID: Int
     public var installRoot: String
     public var startServices: Bool
@@ -126,6 +133,10 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         masqueradeIPv6PodTraffic: Bool? = nil,
         ipv6EgressInterface: String? = nil,
         ipv6EgressSourceAddress: String? = nil,
+        nodeIPAddresses: [String] = [],
+        flannelConfigMapNamespace: String = "kube-flannel",
+        flannelConfigMapName: String = "kube-flannel-cfg",
+        flannelUnderlayInterface: String? = nil,
         containerServiceUserID: Int = 0,
         installRoot: String = "/",
         startServices: Bool = true,
@@ -149,6 +160,10 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.masqueradeIPv6PodTraffic = masqueradeIPv6PodTraffic
         self.ipv6EgressInterface = ipv6EgressInterface
         self.ipv6EgressSourceAddress = ipv6EgressSourceAddress
+        self.nodeIPAddresses = nodeIPAddresses
+        self.flannelConfigMapNamespace = flannelConfigMapNamespace
+        self.flannelConfigMapName = flannelConfigMapName
+        self.flannelUnderlayInterface = flannelUnderlayInterface
         self.containerServiceUserID = containerServiceUserID
         self.installRoot = installRoot
         self.startServices = startServices
@@ -158,6 +173,76 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
 }
 
 extension MacOSKubeadmJoinOptions {
+    public func validateNodeNetworkConfiguration() throws {
+        let hasCustomFlannelConfiguration =
+            flannelConfigMapNamespace != "kube-flannel"
+            || flannelConfigMapName != "kube-flannel-cfg"
+            || flannelUnderlayInterface != nil
+        guard !hasCustomFlannelConfiguration || networkMode.usesPodNetworking else {
+            throw MacOSKubeadmError.invalidInput(
+                "Flannel options require --network-mode full"
+            )
+        }
+
+        guard isDNSLabel(flannelConfigMapNamespace) else {
+            throw MacOSKubeadmError.invalidInput(
+                "--flannel-config-map-namespace must be a valid DNS label"
+            )
+        }
+        guard isDNSSubdomain(flannelConfigMapName) else {
+            throw MacOSKubeadmError.invalidInput(
+                "--flannel-config-map-name must be a valid DNS subdomain"
+            )
+        }
+        if let flannelUnderlayInterface {
+            guard isValidInterfaceName(flannelUnderlayInterface) else {
+                throw MacOSKubeadmError.invalidInput(
+                    "--flannel-underlay-interface must be a valid interface name"
+                )
+            }
+        }
+
+        let parsedNodeIPs = try nodeIPAddresses.map { value in
+            guard let parsed = parseNodeIPAddress(value) else {
+                throw MacOSKubeadmError.invalidInput(
+                    "--node-ip must be a valid usable unicast IP address"
+                )
+            }
+            return parsed
+        }
+        guard Set(parsedNodeIPs).count == parsedNodeIPs.count else {
+            throw MacOSKubeadmError.invalidInput("--node-ip values must be unique")
+        }
+
+        if enableDualStack {
+            guard parsedNodeIPs.isEmpty || parsedNodeIPs.count == 2 else {
+                throw MacOSKubeadmError.invalidInput(
+                    "dual-stack --node-ip requires one IPv4 address followed by one IPv6 address"
+                )
+            }
+            if parsedNodeIPs.count == 2 {
+                guard parsedNodeIPs[0].isIPv4, parsedNodeIPs[1].isIPv6 else {
+                    throw MacOSKubeadmError.invalidInput(
+                        "dual-stack --node-ip values must be ordered IPv4,IPv6"
+                    )
+                }
+            }
+        } else {
+            guard parsedNodeIPs.count <= 1 else {
+                throw MacOSKubeadmError.invalidInput(
+                    "multiple --node-ip values require --enable-dual-stack"
+                )
+            }
+            if networkMode.usesPodNetworking, let nodeIP = parsedNodeIPs.first {
+                guard nodeIP.isIPv4 else {
+                    throw MacOSKubeadmError.invalidInput(
+                        "full-mode IPv4 Pod networking requires an IPv4 --node-ip"
+                    )
+                }
+            }
+        }
+    }
+
     public func validateIPv6EgressConfiguration() throws {
         let hasExplicitConfiguration =
             masqueradeIPv6PodTraffic != nil
@@ -182,12 +267,7 @@ extension MacOSKubeadmJoinOptions {
             )
         }
         if let ipv6EgressInterface {
-            guard ipv6EgressInterface.utf8.count < Int(IFNAMSIZ),
-                ipv6EgressInterface.range(
-                    of: #"^[A-Za-z0-9._-]+$"#,
-                    options: .regularExpression
-                ) != nil
-            else {
+            guard isValidInterfaceName(ipv6EgressInterface) else {
                 throw MacOSKubeadmError.invalidInput(
                     "--ipv6-egress-interface must be a valid interface name"
                 )
@@ -246,6 +326,85 @@ private func parseIPv6EgressSourceAddress(_ value: String) -> in6_addr? {
         return nil
     }
     return address
+}
+
+private enum ParsedNodeIPAddress: Hashable {
+    case ipv4([UInt8])
+    case ipv6([UInt8])
+
+    var isIPv4: Bool {
+        if case .ipv4 = self {
+            return true
+        }
+        return false
+    }
+
+    var isIPv6: Bool {
+        if case .ipv6 = self {
+            return true
+        }
+        return false
+    }
+}
+
+private func parseNodeIPAddress(_ value: String) -> ParsedNodeIPAddress? {
+    guard !value.isEmpty,
+        value == value.trimmingCharacters(in: .whitespacesAndNewlines),
+        !value.contains("%")
+    else {
+        return nil
+    }
+
+    var ipv4 = in_addr()
+    if value.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
+        var address = ipv4
+        let bytes = withUnsafeBytes(of: &address) { Array($0) }
+        guard isUsableIPv4NodeAddress(bytes) else {
+            return nil
+        }
+        return .ipv4(bytes)
+    }
+
+    guard let ipv6 = parseIPv6EgressSourceAddress(value), isUsableIPv6EgressSourceAddress(ipv6) else {
+        return nil
+    }
+    var address = ipv6
+    return .ipv6(withUnsafeBytes(of: &address) { Array($0) })
+}
+
+private func isUsableIPv4NodeAddress(_ bytes: [UInt8]) -> Bool {
+    guard bytes.count == 4 else {
+        return false
+    }
+    return bytes != [0, 0, 0, 0]
+        && bytes != [255, 255, 255, 255]
+        && bytes[0] != 127
+        && !(bytes[0] == 169 && bytes[1] == 254)
+        && !(224...239).contains(bytes[0])
+}
+
+private func isValidInterfaceName(_ value: String) -> Bool {
+    value.utf8.count < Int(IFNAMSIZ)
+        && value.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil
+}
+
+private func isDNSLabel(_ value: String) -> Bool {
+    guard !value.isEmpty, value.utf8.count <= 63 else {
+        return false
+    }
+    return value.range(
+        of: #"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"#,
+        options: .regularExpression
+    ) != nil
+}
+
+private func isDNSSubdomain(_ value: String) -> Bool {
+    guard !value.isEmpty, value.utf8.count <= 253 else {
+        return false
+    }
+    return value.split(separator: ".", omittingEmptySubsequences: false).allSatisfy {
+        isDNSLabel(String($0))
+    }
 }
 
 private func isUsableIPv6EgressSourceAddress(_ address: in6_addr) -> Bool {

@@ -234,7 +234,7 @@ public enum MacOSKubeadmRenderer {
                             "sandboxImage": \(jsonString(profile.sandboxImage)),
                             "network": \(jsonString(profile.networkMode.networkName)),
                             "networkBackend": \(jsonString(profile.networkMode.networkBackend)),
-                            "guiEnabled": false
+                            "guiEnabled": \(profile.guiEnabled)
                         }
         """
     }
@@ -265,29 +265,40 @@ public enum MacOSKubeadmRenderer {
     public static func flannelVXLANConfiguration(
         nodeName: String,
         containerServiceUserID: Int = 0,
-        dualStackEnabled: Bool = false
+        dualStackEnabled: Bool = false,
+        configMapNamespace: String = "kube-flannel",
+        configMapName: String = "kube-flannel-cfg",
+        underlayInterface: String? = nil
     ) -> String {
-        """
-        {
-            "kubeconfig": "/etc/kubernetes/flannel-macos.kubeconfig",
-            "nodeKubeconfig": "/etc/kubernetes/kubelet.conf",
-            "nodeName": \(jsonString(nodeName)),
-            "containerServiceUserID": \(containerServiceUserID),
-            "dualStackEnabled": \(dualStackEnabled),
-            "configMapNamespace": "kube-flannel",
-            "configMapName": "kube-flannel-cfg",
-            "networkConfigKey": "net-conf.json",
-            "annotationPrefix": "flannel.alpha.coreos.com",
-            "vtepMACPath": "/var/lib/container/flannel-vxlan/vtep-mac",
-            "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
-            "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json",
-            "networkName": "kubernetes-pod",
-            "networkPlugin": "container-network-vmnet",
-            "networkVariant": "reserved",
-            "syncPeriodSeconds": 5
-        }
+        let underlayConfiguration =
+            underlayInterface.map {
+                """
 
-        """
+                    "underlayInterface": \(jsonString($0)),
+                """
+            } ?? ""
+
+        return """
+            {
+                "kubeconfig": "/etc/kubernetes/flannel-macos.kubeconfig",
+                "nodeKubeconfig": "/etc/kubernetes/kubelet.conf",
+                "nodeName": \(jsonString(nodeName)),
+                "containerServiceUserID": \(containerServiceUserID),
+                "dualStackEnabled": \(dualStackEnabled),
+                "configMapNamespace": \(jsonString(configMapNamespace)),
+                "configMapName": \(jsonString(configMapName)),
+                "networkConfigKey": "net-conf.json",
+                "annotationPrefix": "flannel.alpha.coreos.com",
+                "vtepMACPath": "/var/lib/container/flannel-vxlan/vtep-mac",
+                "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
+                "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json",
+                "networkName": "kubernetes-pod",
+                "networkPlugin": "container-network-vmnet",
+                "networkVariant": "reserved",\(underlayConfiguration)
+                "syncPeriodSeconds": 5
+            }
+
+            """
     }
 
     public static func kubeProxyConfiguration(
@@ -433,7 +444,8 @@ public enum MacOSKubeadmRenderer {
     public static func kubeletPlist(
         nodeName: String,
         sandboxImage: String,
-        networkMode: MacOSKubeadmNetworkMode = .full
+        networkMode: MacOSKubeadmNetworkMode = .full,
+        nodeIPAddresses: [String] = []
     ) -> String {
         let nodeLabels = [
             "kubernetes.io/os=darwin",
@@ -451,27 +463,37 @@ public enum MacOSKubeadmRenderer {
             ].joined(separator: ",")
         }
 
+        var programArguments = [
+            "/usr/local/bin/kubelet",
+            "--config",
+            "/etc/kubernetes/kubelet-config.yaml",
+            "--kubeconfig",
+            "/etc/kubernetes/kubelet.conf",
+            "--bootstrap-kubeconfig",
+            "/etc/kubernetes/bootstrap-kubelet.kubeconfig",
+            "--hostname-override",
+            nodeName,
+        ]
+        if !nodeIPAddresses.isEmpty {
+            programArguments.append(contentsOf: [
+                "--node-ip",
+                nodeIPAddresses.joined(separator: ","),
+            ])
+        }
+        programArguments.append(contentsOf: [
+            "--node-labels",
+            nodeLabels,
+            "--register-with-taints",
+            nodeTaints,
+            "--root-dir",
+            "/var/lib/kubelet",
+            "--pod-infra-container-image",
+            sandboxImage,
+        ])
+
         return launchdPlist(
             label: "com.apple.container.kubelet",
-            programArguments: [
-                "/usr/local/bin/kubelet",
-                "--config",
-                "/etc/kubernetes/kubelet-config.yaml",
-                "--kubeconfig",
-                "/etc/kubernetes/kubelet.conf",
-                "--bootstrap-kubeconfig",
-                "/etc/kubernetes/bootstrap-kubelet.kubeconfig",
-                "--hostname-override",
-                nodeName,
-                "--node-labels",
-                nodeLabels,
-                "--register-with-taints",
-                nodeTaints,
-                "--root-dir",
-                "/var/lib/kubelet",
-                "--pod-infra-container-image",
-                sandboxImage,
-            ],
+            programArguments: programArguments,
             logPath: "/var/log/kubelet.log"
         )
     }

@@ -162,6 +162,184 @@ struct MacOSKubeadmPlanTests {
         #expect(kubeProxy.contains(#""masqueradeIPv6PodTraffic": true"#))
     }
 
+    @Test func dualStackJoinPlanRendersExplicitNodeContract() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+        options.nodeIPAddresses = [
+            "203.0.113.208",
+            "2001:db8:100:c:203:0:113:208",
+        ]
+        options.flannelConfigMapNamespace = "kube-flannel"
+        options.flannelConfigMapName = "kube-flannel-cfg-macos-ds-mac-canary-a"
+        options.flannelUnderlayInterface = "en0"
+        options.runtimeClasses = [
+            MacOSKubeadmRuntimeClassProfile(
+                name: "macos-gui",
+                sandboxImage: "localhost/macos-sandbox:test",
+                networkMode: .full,
+                guiEnabled: true
+            )
+        ]
+
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let renderedConfigurations = Dictionary(
+            uniqueKeysWithValues: plan.steps.compactMap { step -> (String, String)? in
+                guard case .writeFile(let path, let contents, _, _) = step.action else {
+                    return nil
+                }
+                return (path, contents)
+            }
+        )
+
+        let flannel = try #require(
+            renderedConfigurations["/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf"]
+        )
+        let flannelObject = try #require(
+            JSONSerialization.jsonObject(with: Data(flannel.utf8)) as? [String: Any]
+        )
+        #expect(flannelObject["configMapNamespace"] as? String == "kube-flannel")
+        #expect(flannelObject["configMapName"] as? String == "kube-flannel-cfg-macos-ds-mac-canary-a")
+        #expect(flannelObject["underlayInterface"] as? String == "en0")
+
+        let criShim = try #require(
+            renderedConfigurations["/tmp/macos-node/etc/kubernetes/container-cri-shim-macos-config.json"]
+        )
+        let criShimObject = try #require(
+            JSONSerialization.jsonObject(with: Data(criShim.utf8)) as? [String: Any]
+        )
+        let handlers = try #require(criShimObject["runtimeHandlers"] as? [String: Any])
+        let guiHandler = try #require(handlers["macos-gui"] as? [String: Any])
+        #expect(guiHandler["guiEnabled"] as? Bool == true)
+
+        let kubeletPlist = try #require(
+            renderedConfigurations["/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kubelet.plist"]
+        )
+        let kubeletObject = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(kubeletPlist.utf8),
+                format: nil
+            ) as? [String: Any]
+        )
+        let kubeletArguments = try #require(kubeletObject["ProgramArguments"] as? [String])
+        let nodeIPIndex = try #require(kubeletArguments.firstIndex(of: "--node-ip"))
+        #expect(kubeletArguments.filter { $0 == "--node-ip" }.count == 1)
+        #expect(kubeletArguments[nodeIPIndex + 1] == "203.0.113.208,2001:db8:100:c:203:0:113:208")
+    }
+
+    @Test func dualStackExplicitNodeIPsRequireBothFamiliesInOrder() throws {
+        var missingIPv6 = try makeOptions(startServices: false)
+        missingIPv6.enableDualStack = true
+        missingIPv6.nodeIPAddresses = ["203.0.113.208"]
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "dual-stack --node-ip requires one IPv4 address followed by one IPv6 address"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: missingIPv6)
+        }
+
+        var reversed = try makeOptions(startServices: false)
+        reversed.enableDualStack = true
+        reversed.nodeIPAddresses = [
+            "2001:db8:100:c:203:0:113:208",
+            "203.0.113.208",
+        ]
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "dual-stack --node-ip values must be ordered IPv4,IPv6"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: reversed)
+        }
+    }
+
+    @Test func nodeIPValidationRejectsInvalidOrIncompatibleAddresses() throws {
+        var invalid = try makeOptions(startServices: false)
+        invalid.nodeIPAddresses = ["not-an-ip"]
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--node-ip must be a valid usable unicast IP address"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: invalid)
+        }
+
+        var duplicate = try makeOptions(startServices: false)
+        duplicate.enableDualStack = true
+        duplicate.nodeIPAddresses = ["203.0.113.208", "203.0.113.208"]
+        #expect(throws: MacOSKubeadmError.invalidInput("--node-ip values must be unique")) {
+            try MacOSKubeadmPlanner.joinPlan(options: duplicate)
+        }
+
+        var multipleWithoutDualStack = try makeOptions(startServices: false)
+        multipleWithoutDualStack.nodeIPAddresses = [
+            "203.0.113.208",
+            "2001:db8:100:c:203:0:113:208",
+        ]
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "multiple --node-ip values require --enable-dual-stack"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: multipleWithoutDualStack)
+        }
+
+        var fullModeIPv6Only = try makeOptions(startServices: false)
+        fullModeIPv6Only.nodeIPAddresses = ["2001:db8:100:c:203:0:113:208"]
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "full-mode IPv4 Pod networking requires an IPv4 --node-ip"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: fullModeIPv6Only)
+        }
+    }
+
+    @Test func flannelJoinOptionsRequireValidFullModeValues() throws {
+        var invalidNamespace = try makeOptions(startServices: false)
+        invalidNamespace.flannelConfigMapNamespace = "Kube_Flannel"
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--flannel-config-map-namespace must be a valid DNS label"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: invalidNamespace)
+        }
+
+        var invalidName = try makeOptions(startServices: false)
+        invalidName.flannelConfigMapName = "kube-flannel..macos"
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--flannel-config-map-name must be a valid DNS subdomain"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: invalidName)
+        }
+
+        var invalidInterface = try makeOptions(startServices: false)
+        invalidInterface.flannelUnderlayInterface = "en0;route"
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--flannel-underlay-interface must be a valid interface name"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: invalidInterface)
+        }
+
+        var compat = try makeOptions(startServices: false)
+        compat.networkMode = .compat
+        compat.kubeProxyToken = nil
+        compat.flannelToken = nil
+        compat.flannelConfigMapName = "kube-flannel-cfg-macos"
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "Flannel options require --network-mode full"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: compat)
+        }
+    }
+
     @Test func dualStackJoinPlanRendersExplicitIPv6NATSource() throws {
         var options = try makeOptions(startServices: false)
         options.enableDualStack = true

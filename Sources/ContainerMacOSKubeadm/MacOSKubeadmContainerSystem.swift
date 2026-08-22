@@ -1282,6 +1282,7 @@ struct MacOSKubeadmContainerSystemExecutorDependencies {
     var managerUserID: () throws -> Int
     var runCommand: ([String]) throws -> String
     var managedServices: () throws -> [String]
+    var serviceIsLoaded: (String) throws -> Bool
     var writeCompletion: (MacOSKubeadmContainerSystemCompletion, String) throws -> Void
 
     static var live: Self {
@@ -1325,6 +1326,24 @@ struct MacOSKubeadmContainerSystemExecutorDependencies {
                     }
                     .filter { $0.hasPrefix("com.apple.container.") }
                     .sorted()
+            },
+            serviceIsLoaded: { serviceTarget in
+                let result = try MacOSKubeadmContainerSystemOperationDependencies.runProcess(
+                    ["/bin/launchctl", "print", serviceTarget],
+                    timeout: 10
+                )
+                switch result.status {
+                case 0:
+                    return true
+                case 112, 113:
+                    return false
+                default:
+                    throw MacOSKubeadmError.commandFailed(
+                        command: "/bin/launchctl print \(serviceTarget)",
+                        status: result.status,
+                        output: result.output
+                    )
+                }
             },
             writeCompletion: { completion, path in
                 let encoder = JSONEncoder()
@@ -1419,10 +1438,17 @@ public struct MacOSKubeadmContainerSystemExecutor {
                 log.debug(output)
             }
             if operation == .stop {
-                let remaining = try dependencies.managedServices()
+                let serviceDomain = try serviceDomain(
+                    managerName: managerName,
+                    userID: userID
+                )
+                let candidates = try dependencies.managedServices()
+                let remaining = try candidates.filter { label in
+                    try dependencies.serviceIsLoaded("\(serviceDomain)/\(label)")
+                }
                 guard remaining.isEmpty else {
                     throw MacOSKubeadmError.preflightFailed(
-                        "container system stop left managed launchd services loaded: \(remaining.joined(separator: ", "))"
+                        "container system stop left managed launchd services loaded in \(serviceDomain): \(remaining.joined(separator: ", "))"
                     )
                 }
             }
@@ -1460,6 +1486,21 @@ public struct MacOSKubeadmContainerSystemExecutor {
                 completionPath
             )
             throw error
+        }
+    }
+
+    private func serviceDomain(managerName: String, userID: Int) throws -> String {
+        switch managerName {
+        case "System":
+            return "system"
+        case "Background":
+            return "user/\(userID)"
+        case "Aqua":
+            return "gui/\(userID)"
+        default:
+            throw MacOSKubeadmError.invalidInput(
+                "unsupported launchd manager for container system verification: \(managerName)"
+            )
         }
     }
 }

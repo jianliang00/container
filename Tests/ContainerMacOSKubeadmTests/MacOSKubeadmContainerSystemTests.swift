@@ -384,6 +384,7 @@ struct MacOSKubeadmContainerSystemTests {
                     return ""
                 },
                 managedServices: { [] },
+                serviceIsLoaded: { _ in false },
                 writeCompletion: { value, _ in completion = value }
             )
 
@@ -416,6 +417,7 @@ struct MacOSKubeadmContainerSystemTests {
                 return "started"
             },
             managedServices: { [] },
+            serviceIsLoaded: { _ in false },
             writeCompletion: { value, _ in completion = value }
         )
 
@@ -446,6 +448,7 @@ struct MacOSKubeadmContainerSystemTests {
                 return ""
             },
             managedServices: { [] },
+            serviceIsLoaded: { _ in false },
             writeCompletion: { value, _ in completion = value }
         )
 
@@ -473,14 +476,59 @@ struct MacOSKubeadmContainerSystemTests {
         }
     }
 
+    @Test func stopExecutorScopesManagedServiceChecksToExactDomain() throws {
+        let scenarios: [(userID: Int, managerName: String, serviceDomain: String)] = [
+            (0, "System", "system"),
+            (501, "Background", "user/501"),
+            (501, "Aqua", "gui/501"),
+        ]
+
+        for scenario in scenarios {
+            var inspectedServiceTarget: String?
+            var completion: MacOSKubeadmContainerSystemCompletion?
+            let dependencies = MacOSKubeadmContainerSystemExecutorDependencies(
+                effectiveUserID: { uid_t(scenario.userID) },
+                managerName: { scenario.managerName },
+                managerUserID: { scenario.userID },
+                runCommand: { _ in "" },
+                managedServices: { ["com.apple.container.apiserver"] },
+                serviceIsLoaded: { serviceTarget in
+                    inspectedServiceTarget = serviceTarget
+                    return false
+                },
+                writeCompletion: { value, _ in completion = value }
+            )
+
+            try MacOSKubeadmContainerSystemExecutor(dependencies: dependencies).run(
+                userID: scenario.userID,
+                operation: .stop,
+                operationID: "request-1",
+                completionPath: "/tmp/completion",
+                expectedManagerName: scenario.managerName,
+                log: MacOSKubeadmLog(debugEnabled: false)
+            )
+
+            #expect(
+                inspectedServiceTarget
+                    == "\(scenario.serviceDomain)/com.apple.container.apiserver"
+            )
+            #expect(completion?.status == 0)
+        }
+    }
+
     @Test func stopExecutorFailsWhenManagedServicesRemain() throws {
         var completion: MacOSKubeadmContainerSystemCompletion?
+        var inspectedServiceTarget: String?
         let dependencies = MacOSKubeadmContainerSystemExecutorDependencies(
             effectiveUserID: { 501 },
             managerName: { "Background" },
             managerUserID: { 501 },
             runCommand: { _ in "" },
             managedServices: { ["com.apple.container.apiserver"] },
+            serviceIsLoaded: { serviceTarget in
+                inspectedServiceTarget = serviceTarget
+                return true
+            },
             writeCompletion: { value, _ in completion = value }
         )
 
@@ -493,6 +541,7 @@ struct MacOSKubeadmContainerSystemTests {
                 log: MacOSKubeadmLog(debugEnabled: false)
             )
         }
+        #expect(inspectedServiceTarget == "user/501/com.apple.container.apiserver")
         #expect(completion?.status == 1)
         #expect(completion?.error?.contains("com.apple.container.apiserver") == true)
     }
@@ -511,6 +560,7 @@ struct MacOSKubeadmContainerSystemTests {
                 )
             },
             managedServices: { [] },
+            serviceIsLoaded: { _ in false },
             writeCompletion: { value, _ in completion = value }
         )
 

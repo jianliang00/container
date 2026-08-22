@@ -21,6 +21,12 @@ import ContainerizationExtras
 import Logging
 
 public actor DefaultNetworkService: NetworkService {
+    private enum ActivationState {
+        case inactive
+        case activating(id: UInt64, task: Task<Void, Error>)
+        case active
+    }
+
     private let network: any Network
     private let log: Logger
     private var allocator: AttachmentAllocator
@@ -28,6 +34,10 @@ public actor DefaultNetworkService: NetworkService {
     private var allocationsBySession: [XPCServerSession: [String: UInt32]]
     private var ownersByHostname: [String: Set<XPCServerSession>]
     private var releaseWaitersByHostname: [String: [CheckedContinuation<Void, Never>]]
+    private var activatedSessions: Set<XPCServerSession>
+    private var activationState: ActivationState
+    private var activationWaiterCount: Int
+    private var nextActivationTransitionID: UInt64
 
     /// Set up a network service for the specified network.
     public init(
@@ -47,6 +57,10 @@ public actor DefaultNetworkService: NetworkService {
         self.allocationsBySession = [:]
         self.ownersByHostname = [:]
         self.releaseWaitersByHostname = [:]
+        self.activatedSessions = []
+        self.activationState = .inactive
+        self.activationWaiterCount = 0
+        self.nextActivationTransitionID = 0
     }
 
     @Sendable
@@ -133,36 +147,111 @@ public actor DefaultNetworkService: NetworkService {
         return (attachment: attachment, additionalData: additionalData)
     }
 
-    private func releaseSession(_ session: XPCServerSession) async {
-        guard let allocations = allocationsBySession.removeValue(forKey: session) else {
+    @Sendable
+    public func activate(session: XPCServerSession) async throws {
+        guard allocationsBySession[session] != nil else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "network activation requires an allocation on the same session"
+            )
+        }
+        guard !activatedSessions.contains(session) else {
             return
         }
-        for (hostname, index) in allocations {
-            guard var owners = ownersByHostname[hostname] else {
-                continue
-            }
-            owners.remove(session)
-            guard owners.isEmpty else {
-                ownersByHostname[hostname] = owners
-                continue
+        activationWaiterCount += 1
+        defer {
+            activationWaiterCount -= 1
+            resetActivationIfUnused()
+        }
+
+        while true {
+            guard allocationsBySession[session] != nil else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "network allocation was released before activation completed"
+                )
             }
 
-            ownersByHostname.removeValue(forKey: hostname)
-            releaseWaitersByHostname[hostname] = []
-            do {
-                _ = try await allocator.deallocate(hostname: hostname)
-            } catch {
-                log.error(
-                    "failed to release attachment",
-                    metadata: [
-                        "hostname": "\(hostname)",
-                        "error": "\(error)",
-                    ])
+            switch activationState {
+            case .inactive:
+                let (id, task) = startActivation()
+                try await completeActivation(id: id, task: task)
+            case .activating(let id, let task):
+                try await completeActivation(id: id, task: task)
+            case .active:
+                activatedSessions.insert(session)
+                return
             }
-            macAddresses.removeValue(forKey: index)
-            finishRelease(hostname: hostname)
         }
-        log.info("released session", metadata: ["allocations": "\(allocations.count)"])
+    }
+
+    private func releaseSession(_ session: XPCServerSession) async {
+        activatedSessions.remove(session)
+        resetActivationIfUnused()
+        if let allocations = allocationsBySession.removeValue(forKey: session) {
+            for (hostname, index) in allocations {
+                guard var owners = ownersByHostname[hostname] else {
+                    continue
+                }
+                owners.remove(session)
+                guard owners.isEmpty else {
+                    ownersByHostname[hostname] = owners
+                    continue
+                }
+
+                ownersByHostname.removeValue(forKey: hostname)
+                releaseWaitersByHostname[hostname] = []
+                do {
+                    _ = try await allocator.deallocate(hostname: hostname)
+                } catch {
+                    log.error(
+                        "failed to release attachment",
+                        metadata: [
+                            "hostname": "\(hostname)",
+                            "error": "\(error)",
+                        ])
+                }
+                macAddresses.removeValue(forKey: index)
+                finishRelease(hostname: hostname)
+            }
+            log.info("released session", metadata: ["allocations": "\(allocations.count)"])
+        }
+        resetActivationIfUnused()
+    }
+
+    private func startActivation() -> (UInt64, Task<Void, Error>) {
+        nextActivationTransitionID &+= 1
+        let id = nextActivationTransitionID
+        let network = network
+        let task = Task { try await network.activate() }
+        activationState = .activating(id: id, task: task)
+        return (id, task)
+    }
+
+    private func completeActivation(id: UInt64, task: Task<Void, Error>) async throws {
+        do {
+            try await task.value
+            if case .activating(let currentID, _) = activationState, currentID == id {
+                activationState = .active
+            }
+        } catch {
+            if case .activating(let currentID, _) = activationState, currentID == id {
+                activationState = .inactive
+            }
+            throw error
+        }
+    }
+
+    private func resetActivationIfUnused() {
+        guard activatedSessions.isEmpty, activationWaiterCount == 0 else {
+            return
+        }
+        if case .active = activationState {
+            // Flannel owns the host gateway for the network lifetime. Reset
+            // only the readiness cache so the next VM attachment revalidates
+            // the bridge and gateway after vmnet may have recreated them.
+            activationState = .inactive
+        }
     }
 
     private func allocateIndex(hostname: String) async throws -> UInt32 {

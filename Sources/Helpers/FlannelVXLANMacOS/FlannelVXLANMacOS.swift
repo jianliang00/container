@@ -105,8 +105,12 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 print("withdrawal acknowledged: \(outcome.message)")
                 return
             } catch let controlError {
-                let hasDataplaneState = [config.ownershipStatePath, config.readyStatePath]
-                    .contains { FileManager.default.fileExists(atPath: $0) }
+                let hasDataplaneState = [
+                    config.ownershipStatePath,
+                    config.hostIPv6GatewayOwnershipStatePath,
+                    config.readyStatePath,
+                ]
+                .contains { FileManager.default.fileExists(atPath: $0) }
                 let hasNodeCredential = FileManager.default.fileExists(atPath: config.nodeKubeconfig)
                 guard hasDataplaneState || hasNodeCredential else {
                     print("no running or owned Flannel dataplane requires withdrawal")
@@ -197,6 +201,7 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
         return [
             ownershipURL.path,
             ownershipURL.deletingLastPathComponent().appendingPathComponent("network-ownership.json").path,
+            ownershipURL.deletingLastPathComponent().appendingPathComponent("host-ipv6-gateway-ownership.json").path,
             ownershipURL.deletingLastPathComponent().appendingPathComponent("ready.json").path,
         ]
     }

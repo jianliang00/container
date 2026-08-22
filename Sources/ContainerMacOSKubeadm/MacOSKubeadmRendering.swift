@@ -287,26 +287,46 @@ public enum MacOSKubeadmRenderer {
 
     public static func kubeProxyConfiguration(
         nodeName: String,
-        dualStackEnabled: Bool = false
+        dualStackEnabled: Bool = false,
+        masqueradeIPv6PodTraffic: Bool? = nil,
+        ipv6EgressInterface: String? = nil,
+        ipv6EgressSourceAddress: String? = nil
     ) -> String {
-        """
-        {
-            "kubeconfig": "/etc/kubernetes/kube-proxy.kubeconfig",
-            "nodeName": "\(nodeName)",
-            "syncPeriodSeconds": 5,
-            "dualStackEnabled": \(dualStackEnabled),
-            "pf": {
-                "anchorName": "com.apple.container.kube-proxy",
-                "configPath": "/etc/pf.conf",
-                "anchorsPath": "/etc/pf.anchors",
-                "pfctlPath": "/sbin/pfctl",
-                "vmnetCIDR": "192.168.64.0/24",
-                "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
-                "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
-            }
+        let shouldMasqueradeIPv6PodTraffic = dualStackEnabled && (masqueradeIPv6PodTraffic ?? true)
+        var ipv6EgressLines = [
+            "            \"masqueradeIPv6PodTraffic\": \(shouldMasqueradeIPv6PodTraffic),"
+        ]
+        if let ipv6EgressInterface {
+            ipv6EgressLines.append(
+                "            \"ipv6EgressInterface\": \(jsonString(ipv6EgressInterface)),"
+            )
         }
+        if let ipv6EgressSourceAddress {
+            ipv6EgressLines.append(
+                "            \"ipv6EgressSourceAddress\": \(jsonString(ipv6EgressSourceAddress)),"
+            )
+        }
+        let ipv6EgressConfiguration = ipv6EgressLines.joined(separator: "\n")
 
-        """
+        return """
+            {
+                "kubeconfig": "/etc/kubernetes/kube-proxy.kubeconfig",
+                "nodeName": "\(nodeName)",
+                "syncPeriodSeconds": 5,
+                "dualStackEnabled": \(dualStackEnabled),
+                "pf": {
+                    "anchorName": "com.apple.container.kube-proxy",
+                    "configPath": "/etc/pf.conf",
+                    "anchorsPath": "/etc/pf.anchors",
+                    "pfctlPath": "/sbin/pfctl",
+            \(ipv6EgressConfiguration)
+                    "vmnetCIDR": "192.168.64.0/24",
+                    "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
+                    "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
+                }
+            }
+
+            """
     }
 
     public static func runtimeClassManifest(networkMode: MacOSKubeadmNetworkMode = .full) -> String {

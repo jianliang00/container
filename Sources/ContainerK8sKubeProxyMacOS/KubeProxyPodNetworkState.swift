@@ -105,6 +105,7 @@ struct KubeProxyPodNetworkResolution: Equatable {
     var ipv4Ready: Bool
     var ipv6Ready: Bool
     var masqueradeIPv4PodTraffic: Bool
+    var masqueradeIPv6PodTraffic: Bool
 
     var podCIDR: String { ipv4PodCIDR }
     var masqueradePodTraffic: Bool { masqueradeIPv4PodTraffic }
@@ -119,6 +120,7 @@ enum KubeProxyPodNetworkStateResolver {
         try resolve(
             pfConfig: config.pf,
             dualStackEnabled: config.dualStackEnabled,
+            masqueradeIPv6PodTraffic: config.pf.resolvedMasqueradeIPv6PodTraffic,
             fileManager: fileManager,
             decoder: decoder
         )
@@ -132,6 +134,7 @@ enum KubeProxyPodNetworkStateResolver {
         try resolve(
             pfConfig: config,
             dualStackEnabled: false,
+            masqueradeIPv6PodTraffic: false,
             fileManager: fileManager,
             decoder: decoder
         )
@@ -140,6 +143,7 @@ enum KubeProxyPodNetworkStateResolver {
     private static func resolve(
         pfConfig config: KubeProxyPFConfig,
         dualStackEnabled: Bool,
+        masqueradeIPv6PodTraffic: Bool,
         fileManager: FileManager,
         decoder: JSONDecoder
     ) throws -> KubeProxyPodNetworkResolution {
@@ -160,7 +164,8 @@ enum KubeProxyPodNetworkStateResolver {
                 ipv6PodCIDR: nil,
                 ipv4Ready: true,
                 ipv6Ready: false,
-                masqueradeIPv4PodTraffic: true
+                masqueradeIPv4PodTraffic: true,
+                masqueradeIPv6PodTraffic: false
             )
         }
 
@@ -225,7 +230,8 @@ enum KubeProxyPodNetworkStateResolver {
             ipv6PodCIDR: runtimeIPv6PodCIDR,
             ipv4Ready: true,
             ipv6Ready: ipv6Ready,
-            masqueradeIPv4PodTraffic: true
+            masqueradeIPv4PodTraffic: true,
+            masqueradeIPv6PodTraffic: dualStackEnabled && masqueradeIPv6PodTraffic
         )
     }
 

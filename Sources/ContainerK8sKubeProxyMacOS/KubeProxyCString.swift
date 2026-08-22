@@ -14,13 +14,10 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-public enum NetworkRoutes: String {
-    /// Return the current status of the network.
-    case status = "com.apple.container.network/status"
-    /// Allocates parameters for attaching a sandbox to the network.
-    case allocate = "com.apple.container.network/allocate"
-    /// Activates attachment-dependent network resources.
-    case activate = "com.apple.container.network/activate"
-    /// Retrieves the allocation for a hostname.
-    case lookup = "com.apple.container.network/lookup"
+import Darwin
+
+func kubeProxyString(decodingCString pointer: UnsafePointer<CChar>) -> String {
+    let bytes = UnsafeBufferPointer(start: pointer, count: strlen(pointer))
+        .map { UInt8(bitPattern: $0) }
+    return String(decoding: bytes, as: UTF8.self)
 }

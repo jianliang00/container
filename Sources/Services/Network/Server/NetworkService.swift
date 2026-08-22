@@ -30,6 +30,9 @@ public protocol NetworkService: Sendable {
         session: XPCServerSession
     ) async throws -> (attachment: Attachment, additionalData: XPCMessage?)
 
+    /// Activate resources that require the session's live attachment.
+    func activate(session: XPCServerSession) async throws
+
     /// Return the attachment for a hostname if it is registered with the network.
     func lookup(hostname: String) async throws -> Attachment?
 }

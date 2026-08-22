@@ -28,13 +28,45 @@ import vmnet
 /// Creates a vmnet network with reservation APIs.
 @available(macOS 26, *)
 public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
+    private enum Transition {
+        case starting
+        case stopping
+    }
+
+    final class ManagedVmnetCFReference: @unchecked Sendable {
+        typealias Releaser = @Sendable (OpaquePointer) -> Void
+
+        let value: OpaquePointer
+        private let releaser: Releaser
+
+        init(
+            _ value: OpaquePointer,
+            releaser: @escaping Releaser = ManagedVmnetCFReference.release
+        ) {
+            self.value = value
+            self.releaser = releaser
+        }
+
+        deinit {
+            releaser(value)
+        }
+
+        private static func release(_ value: OpaquePointer) {
+            // vmnet's create APIs follow the CF_RETURNS_RETAINED rule. Swift
+            // marks CFRelease unavailable, so balance that ownership through
+            // the equivalent Unmanaged release operation.
+            Unmanaged<AnyObject>.fromOpaque(UnsafeMutableRawPointer(value)).release()
+        }
+    }
+
     private struct State {
         var status: NetworkStatus?
-        var network: vmnet_network_ref?
+        var network: ManagedVmnetCFReference?
+        var transition: Transition?
     }
 
     private struct NetworkInfo {
-        let network: vmnet_network_ref
+        let network: ManagedVmnetCFReference
         let ipv4Subnet: CIDRv4
         let ipv4Gateway: IPv4Address
         let ipv6Subnet: CIDRv6
@@ -42,13 +74,26 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
 
     private let configuration: NetworkConfiguration
     private let stateMutex: Mutex<State>
+    private let hostIPv6GatewayWaiter: VmnetHostIPv6GatewayWaiter
     private let log: Logger
 
     /// Configure a bridge network that allows external system access using
     /// network address translation.
-    public init(
+    public convenience init(
         configuration: NetworkConfiguration,
         log: Logger
+    ) throws {
+        try self.init(
+            configuration: configuration,
+            log: log,
+            hostIPv6GatewayReadinessChecker: SystemVmnetHostIPv6GatewayReadinessChecker()
+        )
+    }
+
+    init(
+        configuration: NetworkConfiguration,
+        log: Logger,
+        hostIPv6GatewayReadinessChecker: any VmnetHostIPv6GatewayReadinessChecking
     ) throws {
         guard configuration.mode == .nat || configuration.mode == .hostOnly else {
             throw ContainerizationError(.unsupported, message: "invalid network mode \(configuration.mode)")
@@ -57,6 +102,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         log.info("creating vmnet network")
         self.configuration = configuration
         self.log = log
+        self.hostIPv6GatewayWaiter = VmnetHostIPv6GatewayWaiter(checker: hostIPv6GatewayReadinessChecker)
         stateMutex = Mutex(State())
         log.info("created vmnet network")
     }
@@ -71,25 +117,83 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
 
     public nonisolated func withAdditionalData(_ handler: (XPCMessage?) throws -> Void) throws {
         try stateMutex.withLock { state in
-            try handler(state.network.map { try Self.serializeNetworkRef(ref: $0) })
+            try handler(state.network.map { try Self.serializeNetworkRef(ref: $0.value) })
         }
     }
 
     public func start() async throws {
         try stateMutex.withLock { state in
-            guard state.status == nil else {
-                throw ContainerizationError(.invalidArgument, message: "cannot start network \(configuration.id): already started")
+            guard state.status == nil, state.transition == nil else {
+                throw ContainerizationError(.invalidArgument, message: "cannot start network \(configuration.id): already started or transitioning")
+            }
+            state.transition = .starting
+        }
+
+        do {
+            let networkInfo = try startNetwork(configuration: configuration, log: log)
+            if let requestedIPv6Subnet = configuration.ipv6Subnet {
+                guard requestedIPv6Subnet == networkInfo.ipv6Subnet else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "vmnet returned IPv6 subnet \(networkInfo.ipv6Subnet), expected \(requestedIPv6Subnet)"
+                    )
+                }
             }
 
-            let networkInfo = try startNetwork(configuration: configuration, log: log)
+            stateMutex.withLock { state in
+                state.status = NetworkStatus(
+                    ipv4Subnet: networkInfo.ipv4Subnet,
+                    ipv4Gateway: networkInfo.ipv4Gateway,
+                    ipv6Subnet: networkInfo.ipv6Subnet,
+                    ipv6Gateway: configuration.ipv6Subnet.map { IPv6Address($0.lower.value + 1) }
+                )
+                state.network = networkInfo.network
+                state.transition = nil
+            }
+        } catch {
+            stateMutex.withLock { $0.transition = nil }
+            throw error
+        }
+    }
 
-            state.status = NetworkStatus(
-                ipv4Subnet: networkInfo.ipv4Subnet,
-                ipv4Gateway: networkInfo.ipv4Gateway,
-                ipv6Subnet: networkInfo.ipv6Subnet,
-                ipv6Gateway: configuration.ipv6Subnet.map { IPv6Address($0.lower.value + 1) }
-            )
-            state.network = networkInfo.network
+    public func activate() async throws {
+        guard configuration.mode == .hostOnly, configuration.ipv6Subnet != nil else {
+            return
+        }
+        let status = try stateMutex.withLock { state -> NetworkStatus in
+            guard state.network != nil, let status = state.status, status.ipv6Gateway != nil else {
+                throw ContainerizationError(.invalidState, message: "cannot activate network \(configuration.id) before it is started")
+            }
+            return status
+        }
+
+        guard let ipv6Gateway = status.ipv6Gateway, let ipv6Subnet = status.ipv6Subnet else {
+            throw ContainerizationError(.invalidState, message: "network \(configuration.id) has no explicit IPv6 gateway")
+        }
+        try await hostIPv6GatewayWaiter.wait(
+            ipv4Gateway: status.ipv4Gateway,
+            ipv6Gateway: ipv6Gateway,
+            prefixLength: ipv6Subnet.prefix.length
+        )
+    }
+
+    public func stop() async throws {
+        let shouldStop = try stateMutex.withLock { state -> Bool in
+            guard state.transition == nil else {
+                throw ContainerizationError(.invalidState, message: "cannot stop network \(configuration.id) while it is transitioning")
+            }
+            guard state.status != nil || state.network != nil else {
+                return false
+            }
+            state.transition = .stopping
+            return true
+        }
+        guard shouldStop else { return }
+
+        stateMutex.withLock { state in
+            state.status = nil
+            state.network = nil
+            state.transition = nil
         }
     }
 
@@ -116,8 +220,9 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         guard let vmnetConfiguration = vmnet_network_configuration_create(mode, &status), status == .VMNET_SUCCESS else {
             throw ContainerizationError(.unsupported, message: "failed to create vmnet config with status \(status)")
         }
+        let managedConfiguration = ManagedVmnetCFReference(vmnetConfiguration)
 
-        vmnet_network_configuration_disable_dhcp(vmnetConfiguration)
+        vmnet_network_configuration_disable_dhcp(managedConfiguration.value)
 
         let ipv4Subnet = configuration.ipv4Subnet
         let ipv6Subnet = configuration.ipv6Subnet
@@ -134,7 +239,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
                 "configuring vmnet IPv4 subnet",
                 metadata: ["cidr": "\(ipv4Subnet)"]
             )
-            let status = vmnet_network_configuration_set_ipv4_subnet(vmnetConfiguration, &gatewayAddr, &maskAddr)
+            let status = vmnet_network_configuration_set_ipv4_subnet(managedConfiguration.value, &gatewayAddr, &maskAddr)
             guard status == .VMNET_SUCCESS else {
                 throw ContainerizationError(.internalError, message: "failed to set subnet \(ipv4Subnet) for IPv4 network \(configuration.id)")
             }
@@ -160,7 +265,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
                 metadata: ["cidr": "\(ipv6Subnet)"]
             )
             let status = vmnet_network_configuration_set_ipv6_prefix(
-                vmnetConfiguration,
+                managedConfiguration.value,
                 &prefixAddr,
                 ipv6Subnet.prefix.length
             )
@@ -170,9 +275,10 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         }
 
         // reserve the network
-        guard let network = vmnet_network_create(vmnetConfiguration, &status), status == .VMNET_SUCCESS else {
+        guard let network = vmnet_network_create(managedConfiguration.value, &status), status == .VMNET_SUCCESS else {
             throw ContainerizationError(.unsupported, message: "failed to create vmnet network with status \(status)")
         }
+        let managedNetwork = ManagedVmnetCFReference(network)
 
         // retrieve the subnet since the caller may not have provided one
         var subnetAddr = in_addr()
@@ -208,7 +314,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         )
 
         return NetworkInfo(
-            network: network,
+            network: managedNetwork,
             ipv4Subnet: runningSubnet,
             ipv4Gateway: runningGateway,
             ipv6Subnet: runningV6Subnet,

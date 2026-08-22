@@ -149,6 +149,135 @@ struct MacOSKubeadmPlanTests {
         #expect(criShim.contains(#""dualStackEnabled": true"#))
         #expect(flannel.contains(#""dualStackEnabled": true"#))
         #expect(kubeProxy.contains(#""dualStackEnabled": true"#))
+        #expect(kubeProxy.contains(#""masqueradeIPv6PodTraffic": true"#))
+    }
+
+    @Test func dualStackJoinPlanRendersExplicitIPv6NATSource() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+        options.masqueradeIPv6PodTraffic = true
+        options.ipv6EgressInterface = "en7"
+        options.ipv6EgressSourceAddress = "2001:db8:100:c::7"
+
+        let pf = try renderedKubeProxyPF(options: options)
+
+        #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == true)
+        #expect(pf["ipv6EgressInterface"] as? String == "en7")
+        #expect(pf["ipv6EgressSourceAddress"] as? String == "2001:db8:100:c::7")
+    }
+
+    @Test func dualStackJoinPlanCanDisableIPv6Masquerade() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+        options.masqueradeIPv6PodTraffic = false
+
+        let pf = try renderedKubeProxyPF(options: options)
+
+        #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == false)
+        #expect(pf["ipv6EgressInterface"] == nil)
+        #expect(pf["ipv6EgressSourceAddress"] == nil)
+    }
+
+    @Test func dualStackJoinPlanLeavesUnspecifiedIPv6NATSourceForRuntimeValidation() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+        options.ipv6EgressInterface = "en7"
+
+        let pf = try renderedKubeProxyPF(options: options)
+
+        #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == true)
+        #expect(pf["ipv6EgressInterface"] as? String == "en7")
+        #expect(pf["ipv6EgressSourceAddress"] == nil)
+    }
+
+    @Test func IPv6EgressOptionsRequireDualStack() throws {
+        for scenario in 0..<3 {
+            var options = try makeOptions(startServices: false)
+            switch scenario {
+            case 0:
+                options.masqueradeIPv6PodTraffic = false
+            case 1:
+                options.ipv6EgressInterface = "en7"
+            default:
+                options.ipv6EgressSourceAddress = "2001:db8:100:c::7"
+            }
+
+            #expect(throws: MacOSKubeadmError.invalidInput("IPv6 egress options require --enable-dual-stack")) {
+                try MacOSKubeadmPlanner.joinPlan(options: options)
+            }
+        }
+    }
+
+    @Test func compatJoinPlanRejectsIPv6EgressOptions() throws {
+        var options = try makeOptions(startServices: false)
+        options.networkMode = .compat
+        options.enableDualStack = true
+        options.ipv6EgressInterface = "en7"
+        options.kubeProxyToken = nil
+        options.flannelToken = nil
+
+        #expect(throws: MacOSKubeadmError.invalidInput("IPv6 egress options require --network-mode full")) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
+    @Test func routedIPv6EgressRejectsNATSourceOptions() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+        options.masqueradeIPv6PodTraffic = false
+        options.ipv6EgressSourceAddress = "2001:db8:100:c::7"
+
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--disable-ipv6-masquerade cannot be combined with --ipv6-egress-interface or --ipv6-egress-source-address"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
+    @Test func IPv6EgressInterfaceMustHaveValidFormat() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+        options.ipv6EgressInterface = "en7; pass all"
+
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--ipv6-egress-interface must be a valid interface name"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
+    @Test func IPv6EgressSourceMustHaveValidFormat() throws {
+        var options = try makeOptions(startServices: false)
+        options.enableDualStack = true
+        options.ipv6EgressSourceAddress = "192.0.2.7"
+
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--ipv6-egress-source-address must be a valid IPv6 address"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
+    @Test func IPv6EgressSourceMustBeUsableUnicastAddress() throws {
+        for sourceAddress in ["::", "::1", "fe80::7", "ff02::1", "::ffff:192.0.2.7"] {
+            var options = try makeOptions(startServices: false)
+            options.enableDualStack = true
+            options.ipv6EgressSourceAddress = sourceAddress
+
+            #expect(
+                throws: MacOSKubeadmError.invalidInput(
+                    "--ipv6-egress-source-address must be a usable unicast IPv6 address"
+                )
+            ) {
+                try MacOSKubeadmPlanner.joinPlan(options: options)
+            }
+        }
     }
 
     @Test func compatJoinPlanOmitsPodNetworkingArtifacts() throws {
@@ -1071,5 +1200,23 @@ struct MacOSKubeadmPlanTests {
             startServices: startServices,
             dryRun: true
         )
+    }
+
+    private func renderedKubeProxyPF(options: MacOSKubeadmJoinOptions) throws -> [String: Any] {
+        let plan = try MacOSKubeadmPlanner.joinPlan(options: options)
+        let kubeProxy = try #require(
+            plan.steps.compactMap { step -> String? in
+                guard case .writeFile(let path, let contents, _, _) = step.action,
+                    path == "/tmp/macos-node/etc/kubernetes/kube-proxy.conf"
+                else {
+                    return nil
+                }
+                return contents
+            }.first
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(kubeProxy.utf8)) as? [String: Any]
+        )
+        return try #require(object["pf"] as? [String: Any])
     }
 }

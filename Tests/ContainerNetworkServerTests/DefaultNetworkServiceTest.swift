@@ -120,6 +120,177 @@ struct DefaultNetworkServiceTest {
         #expect(attachment.ipv6Gateway == nil)
     }
 
+    @Test func activationRequiresAllocationOnSameSession() async throws {
+        let service = try await makeService()
+
+        await #expect(throws: (any Error).self) {
+            try await service.activate(session: XPCServerSession())
+        }
+    }
+
+    @Test func activationIsSharedWhileAttachedAndRevalidatedAfterLastDisconnect() async throws {
+        let network = try TestNetwork(
+            status: NetworkStatus(
+                ipv4Subnet: CIDRv4("192.168.64.0/24"),
+                ipv4Gateway: IPv4Address("192.168.64.1"),
+                ipv6Subnet: CIDRv6("fd42:10:244:22::/64"),
+                ipv6Gateway: IPv6Address("fd42:10:244:22::1")
+            ))
+        let service = try await DefaultNetworkService(
+            network: network,
+            log: Logger(label: "DefaultNetworkServiceTest")
+        )
+        let firstSession = XPCServerSession()
+        let secondSession = XPCServerSession()
+        for (index, session) in [firstSession, secondSession].enumerated() {
+            _ = try await service.allocate(
+                hostname: "dual-stack-\(index)",
+                macAddress: try MACAddress("f2:00:00:00:00:0\(index + 1)"),
+                session: session
+            )
+            try await service.activate(session: session)
+        }
+        #expect(await network.activationCount == 1)
+
+        await firstSession.fireDisconnect()
+        #expect(await network.activationCount == 1)
+        await secondSession.fireDisconnect()
+
+        let nextSession = XPCServerSession()
+        _ = try await service.allocate(
+            hostname: "dual-stack-next",
+            macAddress: try MACAddress("f2:00:00:00:00:03"),
+            session: nextSession
+        )
+        try await service.activate(session: nextSession)
+
+        #expect(await network.activationCount == 2)
+    }
+
+    @Test func concurrentActivationsShareOneNetworkTransition() async throws {
+        let gate = ActivationGate()
+        let network = try ControlledActivationNetwork(gate: gate)
+        let service = try await DefaultNetworkService(
+            network: network,
+            log: Logger(label: "DefaultNetworkServiceTest")
+        )
+        let firstSession = XPCServerSession()
+        let secondSession = XPCServerSession()
+        _ = try await service.allocate(
+            hostname: "concurrent-a",
+            macAddress: try MACAddress("f2:00:00:00:00:01"),
+            session: firstSession
+        )
+        _ = try await service.allocate(
+            hostname: "concurrent-b",
+            macAddress: try MACAddress("f2:00:00:00:00:02"),
+            session: secondSession
+        )
+
+        let first = Task { try await service.activate(session: firstSession) }
+        await waitForActivationCount(network, 1)
+        let second = Task { try await service.activate(session: secondSession) }
+        for _ in 0..<10 { await Task.yield() }
+        #expect(await network.activationCount == 1)
+
+        await gate.open()
+        try await first.value
+        try await second.value
+        #expect(await network.activationCount == 1)
+    }
+
+    @Test func disconnectedConcurrentWaiterDoesNotRestartSharedActivation() async throws {
+        let gate = ActivationGate()
+        let network = try ControlledActivationNetwork(gate: gate)
+        let service = try await DefaultNetworkService(
+            network: network,
+            log: Logger(label: "DefaultNetworkServiceTest")
+        )
+        let disconnectedSession = XPCServerSession()
+        let survivingSession = XPCServerSession()
+        _ = try await service.allocate(
+            hostname: "disconnecting-concurrent",
+            macAddress: try MACAddress("f2:00:00:00:00:01"),
+            session: disconnectedSession
+        )
+        _ = try await service.allocate(
+            hostname: "surviving-concurrent",
+            macAddress: try MACAddress("f2:00:00:00:00:02"),
+            session: survivingSession
+        )
+
+        let disconnected = Task(priority: .high) {
+            try await service.activate(session: disconnectedSession)
+        }
+        await waitForActivationCount(network, 1)
+        let surviving = Task(priority: .low) {
+            try await service.activate(session: survivingSession)
+        }
+        for _ in 0..<10 { await Task.yield() }
+
+        await disconnectedSession.fireDisconnect()
+        await gate.open()
+        await #expect(throws: (any Error).self) {
+            try await disconnected.value
+        }
+        try await surviving.value
+
+        #expect(await network.activationCount == 1)
+    }
+
+    @Test func failedActivationCanBeRetried() async throws {
+        let network = try ControlledActivationNetwork(failuresRemaining: 1)
+        let service = try await DefaultNetworkService(
+            network: network,
+            log: Logger(label: "DefaultNetworkServiceTest")
+        )
+        let session = XPCServerSession()
+        _ = try await service.allocate(
+            hostname: "retry",
+            macAddress: try MACAddress("f2:00:00:00:00:01"),
+            session: session
+        )
+
+        await #expect(throws: ControlledActivationError.self) {
+            try await service.activate(session: session)
+        }
+        try await service.activate(session: session)
+
+        #expect(await network.activationCount == 2)
+    }
+
+    @Test func disconnectDuringActivationDoesNotLeaveCachedReadyState() async throws {
+        let gate = ActivationGate()
+        let network = try ControlledActivationNetwork(gate: gate)
+        let service = try await DefaultNetworkService(
+            network: network,
+            log: Logger(label: "DefaultNetworkServiceTest")
+        )
+        let disconnectedSession = XPCServerSession()
+        _ = try await service.allocate(
+            hostname: "disconnecting",
+            macAddress: try MACAddress("f2:00:00:00:00:01"),
+            session: disconnectedSession
+        )
+        let activation = Task { try await service.activate(session: disconnectedSession) }
+        await waitForActivationCount(network, 1)
+
+        await disconnectedSession.fireDisconnect()
+        await gate.open()
+        await #expect(throws: (any Error).self) {
+            try await activation.value
+        }
+
+        let replacementSession = XPCServerSession()
+        _ = try await service.allocate(
+            hostname: "replacement",
+            macAddress: try MACAddress("f2:00:00:00:00:02"),
+            session: replacementSession
+        )
+        try await service.activate(session: replacementSession)
+        #expect(await network.activationCount == 2)
+    }
+
     @Test func explicitIPv6NetworkRejectsDuplicateMACAddressesWithoutLeakingAllocation() async throws {
         let service = try await makeService(
             status: NetworkStatus(
@@ -205,10 +376,22 @@ struct DefaultNetworkServiceTest {
     }
 }
 
+private func waitForActivationCount(
+    _ network: ControlledActivationNetwork,
+    _ expected: Int
+) async {
+    for _ in 0..<1_000 {
+        if await network.activationCount >= expected { return }
+        await Task.yield()
+    }
+    Issue.record("network activation did not start")
+}
+
 private actor TestNetwork: Network {
     nonisolated let id = "test-network"
     nonisolated let variant: String? = nil
     let status: NetworkStatus?
+    private(set) var activationCount = 0
 
     init(status: NetworkStatus) {
         self.status = status
@@ -219,4 +402,73 @@ private actor TestNetwork: Network {
     }
 
     func start() async throws {}
+
+    func activate() async throws {
+        activationCount += 1
+    }
+}
+
+private enum ControlledActivationError: Error {
+    case injectedFailure
+}
+
+private actor ActivationGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
+    }
+}
+
+private actor ControlledActivationNetwork: Network {
+    nonisolated let id = "controlled-network"
+    nonisolated let variant: String? = nil
+    let status: NetworkStatus?
+    private(set) var activationCount = 0
+    private var failuresRemaining: Int
+    private let gate: ActivationGate?
+
+    init(
+        gate: ActivationGate? = nil,
+        failuresRemaining: Int = 0
+    ) throws {
+        self.gate = gate
+        self.failuresRemaining = failuresRemaining
+        self.status = try NetworkStatus(
+            ipv4Subnet: CIDRv4("192.168.64.0/24"),
+            ipv4Gateway: IPv4Address("192.168.64.1"),
+            ipv6Subnet: CIDRv6("fd42:10:244:22::/64"),
+            ipv6Gateway: IPv6Address("fd42:10:244:22::1")
+        )
+    }
+
+    nonisolated func withAdditionalData(_ handler: (XPCMessage?) throws -> Void) throws {
+        try handler(nil)
+    }
+
+    func start() async throws {}
+
+    func activate() async throws {
+        activationCount += 1
+        if failuresRemaining > 0 {
+            failuresRemaining -= 1
+            throw ControlledActivationError.injectedFailure
+        }
+        if let gate {
+            await gate.wait()
+        }
+    }
 }

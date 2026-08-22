@@ -58,6 +58,12 @@ public actor NetworkHarness: Sendable {
     }
 
     @Sendable
+    public func activate(_ message: XPCMessage, _ session: XPCServerSession) async throws -> XPCMessage {
+        try await service.activate(session: session)
+        return message.reply()
+    }
+
+    @Sendable
     public func lookup(_ message: XPCMessage) async throws -> XPCMessage {
         let hostname = try message.hostname()
         let reply = message.reply()

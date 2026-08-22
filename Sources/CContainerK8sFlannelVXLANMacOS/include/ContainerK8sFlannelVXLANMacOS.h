@@ -249,6 +249,28 @@ bool container_vxlan_tunnel_v6_is_running(const container_vxlan_tunnel_v6_t *tun
 void container_vxlan_tunnel_v6_stop(container_vxlan_tunnel_v6_t *tunnel);
 void container_vxlan_tunnel_v6_destroy(container_vxlan_tunnel_v6_t *tunnel);
 
+// Configure the deterministic IPv6 gateway on a materialized vmnet bridge.
+// These functions return zero on success or an errno value on failure.
+int container_flannel_ipv6_gateway_add(
+    const char *interface_name,
+    const uint8_t address[CONTAINER_VXLAN_IPV6_ADDRESS_LENGTH],
+    uint8_t prefix_length
+);
+
+int container_flannel_ipv6_gateway_remove(
+    const char *interface_name,
+    const uint8_t address[CONTAINER_VXLAN_IPV6_ADDRESS_LENGTH]
+);
+
+int container_flannel_ipv6_gateway_flags(
+    const char *interface_name,
+    const uint8_t address[CONTAINER_VXLAN_IPV6_ADDRESS_LENGTH],
+    uint32_t *flags
+);
+
+bool container_flannel_ipv6_gateway_is_tentative(uint32_t flags);
+bool container_flannel_ipv6_gateway_is_duplicated(uint32_t flags);
+
 #if defined(CONTAINER_VXLAN_TEST_HOOKS)
 int container_vxlan_debug_v6_idle_stop(void);
 int container_vxlan_debug_v6_inbound_start_failure(void);

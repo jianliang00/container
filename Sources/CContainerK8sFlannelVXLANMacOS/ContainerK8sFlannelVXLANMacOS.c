@@ -22,6 +22,8 @@
 #include <net/if.h>
 #include <net/if_utun.h>
 #include <netinet/in.h>
+#include <netinet6/in6_var.h>
+#include <netinet6/nd6.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -44,6 +46,101 @@
 #define MAXIMUM_TUNNEL_MTU 9000U
 #define SOCKET_BUFFER_SIZE (8 * 1024 * 1024)
 #define SOCKET_RECEIVE_TIMEOUT_SECONDS 1
+
+static int ipv6_gateway_socket(void) {
+    return socket(AF_INET6, SOCK_DGRAM, 0);
+}
+
+static void ipv6_gateway_sockaddr(struct sockaddr_in6 *destination, const uint8_t address[16]) {
+    memset(destination, 0, sizeof(*destination));
+    destination->sin6_len = sizeof(*destination);
+    destination->sin6_family = AF_INET6;
+    memcpy(&destination->sin6_addr, address, 16);
+}
+
+int container_flannel_ipv6_gateway_add(
+    const char *interface_name,
+    const uint8_t address[CONTAINER_VXLAN_IPV6_ADDRESS_LENGTH],
+    uint8_t prefix_length
+) {
+    if (interface_name == NULL || address == NULL || prefix_length > 128 || strlen(interface_name) >= IFNAMSIZ) {
+        return EINVAL;
+    }
+    int fd = ipv6_gateway_socket();
+    if (fd < 0) {
+        return errno;
+    }
+    struct in6_aliasreq request = {0};
+    strlcpy(request.ifra_name, interface_name, sizeof(request.ifra_name));
+    ipv6_gateway_sockaddr(&request.ifra_addr, address);
+    request.ifra_prefixmask.sin6_len = sizeof(request.ifra_prefixmask);
+    request.ifra_prefixmask.sin6_family = AF_INET6;
+    uint8_t *mask = (uint8_t *)&request.ifra_prefixmask.sin6_addr;
+    size_t complete_bytes = prefix_length / 8U;
+    uint8_t remaining_bits = prefix_length % 8U;
+    memset(mask, 0xff, complete_bytes);
+    if (remaining_bits != 0) {
+        mask[complete_bytes] = (uint8_t)(0xffU << (8U - remaining_bits));
+    }
+    request.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
+    request.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
+    int result = ioctl(fd, SIOCAIFADDR_IN6, &request);
+    int error = result == 0 ? 0 : errno;
+    close(fd);
+    return error;
+}
+
+int container_flannel_ipv6_gateway_remove(
+    const char *interface_name,
+    const uint8_t address[CONTAINER_VXLAN_IPV6_ADDRESS_LENGTH]
+) {
+    if (interface_name == NULL || address == NULL || strlen(interface_name) >= IFNAMSIZ) {
+        return EINVAL;
+    }
+    int fd = ipv6_gateway_socket();
+    if (fd < 0) {
+        return errno;
+    }
+    struct in6_ifreq request = {0};
+    strlcpy(request.ifr_name, interface_name, sizeof(request.ifr_name));
+    ipv6_gateway_sockaddr(&request.ifr_ifru.ifru_addr, address);
+    int result = ioctl(fd, SIOCDIFADDR_IN6, &request);
+    int error = result == 0 ? 0 : errno;
+    close(fd);
+    return error;
+}
+
+int container_flannel_ipv6_gateway_flags(
+    const char *interface_name,
+    const uint8_t address[CONTAINER_VXLAN_IPV6_ADDRESS_LENGTH],
+    uint32_t *flags
+) {
+    if (interface_name == NULL || address == NULL || flags == NULL || strlen(interface_name) >= IFNAMSIZ) {
+        return EINVAL;
+    }
+    int fd = ipv6_gateway_socket();
+    if (fd < 0) {
+        return errno;
+    }
+    struct in6_ifreq request = {0};
+    strlcpy(request.ifr_name, interface_name, sizeof(request.ifr_name));
+    ipv6_gateway_sockaddr(&request.ifr_ifru.ifru_addr, address);
+    int result = ioctl(fd, SIOCGIFAFLAG_IN6, &request);
+    int error = result == 0 ? 0 : errno;
+    if (result == 0) {
+        *flags = (uint32_t)request.ifr_ifru.ifru_flags6;
+    }
+    close(fd);
+    return error;
+}
+
+bool container_flannel_ipv6_gateway_is_tentative(uint32_t flags) {
+    return (flags & IN6_IFF_TENTATIVE) != 0;
+}
+
+bool container_flannel_ipv6_gateway_is_duplicated(uint32_t flags) {
+    return (flags & IN6_IFF_DUPLICATED) != 0;
+}
 
 struct container_vxlan_tunnel {
     container_vxlan_tunnel_config_t config;

@@ -18,6 +18,42 @@
 import ContainerizationError
 import Foundation
 
+final class XPCClientCompletionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    private var timeoutTask: Task<Void, Never>?
+
+    func installTimeoutTask(_ task: Task<Void, Never>) {
+        let shouldCancel = lock.withLock {
+            guard !completed else {
+                return true
+            }
+            precondition(timeoutTask == nil, "XPC response timeout task was installed more than once")
+            timeoutTask = task
+            return false
+        }
+
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    func complete() -> Bool {
+        let completion: (shouldComplete: Bool, timeoutTask: Task<Void, Never>?) = lock.withLock {
+            guard !completed else {
+                return (false, nil)
+            }
+            completed = true
+            let timeoutTask = self.timeoutTask
+            self.timeoutTask = nil
+            return (true, timeoutTask)
+        }
+
+        completion.timeoutTask?.cancel()
+        return completion.shouldComplete
+    }
+}
+
 public final class XPCClient: Sendable {
     /// The maximum amount of time to wait for a request to a recently
     /// registered XPC service. Once a service has launched, XPC
@@ -102,29 +138,12 @@ extension XPCClient {
         return try await withCheckedThrowingContinuation { cont in
             // The XPC reply callback may never fire on timeout, so we gate completion
             // manually instead of relying on task-group cancellation semantics.
-            final class CompletionState: @unchecked Sendable {
-                let lock = NSLock()
-                var completed = false
-                var timeoutTask: Task<Void, Never>?
-            }
-            let state = CompletionState()
+            let state = XPCClientCompletionState()
 
             let finish: @Sendable (Result<XPCMessage, Error>) -> Void = { result in
-                var shouldResume = false
-                var task: Task<Void, Never>?
-                state.lock.lock()
-                if !state.completed {
-                    state.completed = true
-                    shouldResume = true
-                    task = state.timeoutTask
-                    state.timeoutTask = nil
-                }
-                state.lock.unlock()
-
-                guard shouldResume else {
+                guard state.complete() else {
                     return
                 }
-                task?.cancel()
                 cont.resume(with: result)
             }
 
@@ -140,7 +159,7 @@ extension XPCClient {
                 return
             }
 
-            state.timeoutTask = Task {
+            let timeoutTask = Task {
                 do {
                     try await Task.sleep(for: responseTimeout)
                 } catch {
@@ -153,6 +172,7 @@ extension XPCClient {
                             message: "XPC timeout for request to \(self.service)/\(route)"
                         )))
             }
+            state.installTimeoutTask(timeoutTask)
         }
     }
 

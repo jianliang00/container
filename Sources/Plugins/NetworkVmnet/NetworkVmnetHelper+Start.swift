@@ -24,6 +24,8 @@ import ContainerResource
 import ContainerXPC
 import ContainerizationError
 import ContainerizationExtras
+import ContainerizationOS
+import Darwin
 import Foundation
 import Logging
 
@@ -96,21 +98,29 @@ extension NetworkVmnetHelper {
                     variant: self.variant,
                     log: log
                 )
-                try await network.start()
-                let service = try await DefaultNetworkService(network: network, log: log)
-                let harness = NetworkHarness(service: service)
-                let xpc = XPCServer(
-                    identifier: serviceIdentifier,
-                    routes: [
-                        NetworkRoutes.status.rawValue: XPCServer.route(harness.status),
-                        NetworkRoutes.allocate.rawValue: harness.allocate,
-                        NetworkRoutes.lookup.rawValue: XPCServer.route(harness.lookup),
-                    ],
-                    log: log
-                )
-
-                log.info("starting XPC server")
-                try await xpc.listen()
+                let signalHandler = AsyncSignalHandler.create(notify: [SIGINT, SIGTERM])
+                let signalStream = signalHandler.signals
+                defer { signalHandler.cancel() }
+                do {
+                    try await Self.serve(
+                        network: network,
+                        serviceIdentifier: serviceIdentifier,
+                        signalStream: signalStream,
+                        log: log
+                    )
+                } catch {
+                    let operationError = error
+                    do {
+                        try await network.stop()
+                    } catch {
+                        throw ContainerizationError(
+                            .internalError,
+                            message: "network operation failed: \(operationError); network cleanup failed: \(error)"
+                        )
+                    }
+                    throw operationError
+                }
+                try await network.stop()
             } catch {
                 log.error(
                     "helper failed",
@@ -134,6 +144,42 @@ extension NetworkVmnetHelper {
                     )
                 }
                 return try ReservedVmnetNetwork(configuration: configuration, log: log)
+            }
+        }
+
+        private static func serve(
+            network: any Network,
+            serviceIdentifier: String,
+            signalStream: AsyncStream<Int32>,
+            log: Logger
+        ) async throws {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await network.start()
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    let service = try await DefaultNetworkService(network: network, log: log)
+                    let harness = NetworkHarness(service: service)
+                    let xpc = XPCServer(
+                        identifier: serviceIdentifier,
+                        routes: [
+                            NetworkRoutes.status.rawValue: XPCServer.route(harness.status),
+                            NetworkRoutes.allocate.rawValue: harness.allocate,
+                            NetworkRoutes.activate.rawValue: harness.activate,
+                            NetworkRoutes.lookup.rawValue: XPCServer.route(harness.lookup),
+                        ],
+                        log: log
+                    )
+
+                    log.info("starting XPC server")
+                    try await xpc.listen()
+                }
+                group.addTask {
+                    _ = await signalStream.first { _ in true }
+                }
+                defer { group.cancelAll() }
+                _ = try await group.next()
             }
         }
     }

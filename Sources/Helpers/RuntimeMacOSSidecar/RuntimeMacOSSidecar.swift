@@ -424,6 +424,7 @@ actor MacOSSidecarService {
     private var networkLease: MacOSGuestNetworkLease?
     private var ownedVMNetNetworks: [ManagedVMNetNetwork] = []
     private var networkSessions: [XPCClientSession] = []
+    private var networkActivations: [PreparedMacOSNetworkActivation] = []
     private var state: State = .created
 
     init(rootURL: URL, log: Logging.Logger) {
@@ -476,6 +477,7 @@ actor MacOSSidecarService {
                 ])
             let agentPort = config.macosGuest?.agentPort ?? 27000
             try await startVirtualMachine(vm)
+            try await activatePreparedNetworks()
             try await validateSocketDeviceAvailable(on: vm)
             try await waitForGuestAgentDuringBootstrap(port: agentPort)
             try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
@@ -757,6 +759,7 @@ actor MacOSSidecarService {
         networkLease = preparedNetwork.lease
         ownedVMNetNetworks = preparedNetwork.ownedNetworks
         networkSessions = preparedNetwork.sessions
+        networkActivations = preparedNetwork.activations
         if let lease = preparedNetwork.lease {
             try MacOSGuestNetworkLeaseStore.save(lease, in: rootURL)
         } else {
@@ -777,6 +780,7 @@ actor MacOSSidecarService {
     private func discardPreparedNetworkResources() {
         let lease = networkLease ?? (try? MacOSGuestNetworkLeaseStore.load(from: rootURL)) ?? nil
         networkLease = nil
+        networkActivations = []
         for session in networkSessions {
             session.close()
         }
@@ -786,6 +790,13 @@ actor MacOSSidecarService {
             return
         }
         log.info("discarded prepared macOS guest network resources", metadata: ["interfaces": "\(lease.interfaces.count)"])
+    }
+
+    private func activatePreparedNetworks() async throws {
+        for activation in networkActivations {
+            log.info("activating macOS guest network data plane", metadata: ["network": "\(activation.network)"])
+            try await activation.activate()
+        }
     }
 
     private func createDirectorySharingDevices(

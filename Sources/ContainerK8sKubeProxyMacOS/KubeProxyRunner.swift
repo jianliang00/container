@@ -74,7 +74,8 @@ public struct KubeProxyController<Reader: KubeProxyKubernetesReading, Applier: K
                 ipv4Ready: podNetwork.ipv4Ready,
                 ipv6Ready: podNetwork.ipv6Ready,
                 dualStackEnabled: config.dualStackEnabled,
-                masqueradeIPv4PodTraffic: podNetwork.masqueradeIPv4PodTraffic
+                masqueradeIPv4PodTraffic: podNetwork.masqueradeIPv4PodTraffic,
+                masqueradeIPv6PodTraffic: podNetwork.masqueradeIPv6PodTraffic
             )
         )
         guard !config.dualStackEnabled || podNetwork.ipv6Ready else {
@@ -83,12 +84,22 @@ public struct KubeProxyController<Reader: KubeProxyKubernetesReading, Applier: K
         return KubeProxyRunResult(ruleSet: ruleSet, applied: true)
     }
 
-    public func runForever() async throws -> Never {
+    public func runForever(
+        onError: @escaping @Sendable (Error) -> Void = { error in
+            fputs("container-kube-proxy-macos: \(error)\n", stderr)
+        }
+    ) async throws -> Never {
         var generation = 1
         while true {
             try Task.checkCancellation()
-            _ = try await runOnce(generation: generation)
-            generation += 1
+            do {
+                _ = try await runOnce(generation: generation)
+                generation += 1
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                onError(error)
+            }
             try await Task.sleep(for: .seconds(config.syncPeriodSeconds))
         }
     }

@@ -36,4 +36,16 @@ public protocol Network: Sendable {
 
     /// Start the network.
     func start() async throws
+
+    /// Activate data-plane resources that require a live attachment.
+    func activate() async throws
+
+    /// Stop the network and release implementation-owned host resources.
+    func stop() async throws
+}
+
+extension Network {
+    public func activate() async throws {}
+
+    public func stop() async throws {}
 }

@@ -88,6 +88,9 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
     public var anchorsPath: String
     public var pfctlPath: String
     public var egressInterface: String?
+    public var masqueradeIPv6PodTraffic: Bool?
+    public var ipv6EgressInterface: String?
+    public var ipv6EgressSourceAddress: String?
     public var vmnetCIDR: String?
     public var runtimeStatePath: String?
     public var readyStatePath: String?
@@ -98,6 +101,9 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         anchorsPath: String = "/etc/pf.anchors",
         pfctlPath: String = "/sbin/pfctl",
         egressInterface: String? = nil,
+        masqueradeIPv6PodTraffic: Bool? = nil,
+        ipv6EgressInterface: String? = nil,
+        ipv6EgressSourceAddress: String? = nil,
         vmnetCIDR: String? = "192.168.64.0/24",
         runtimeStatePath: String? = nil,
         readyStatePath: String? = nil
@@ -107,6 +113,9 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         self.anchorsPath = anchorsPath
         self.pfctlPath = pfctlPath
         self.egressInterface = egressInterface
+        self.masqueradeIPv6PodTraffic = masqueradeIPv6PodTraffic
+        self.ipv6EgressInterface = ipv6EgressInterface
+        self.ipv6EgressSourceAddress = ipv6EgressSourceAddress
         self.vmnetCIDR = vmnetCIDR
         self.runtimeStatePath = runtimeStatePath
         self.readyStatePath = readyStatePath
@@ -118,6 +127,19 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         }
         return value
     }
+    public var configuredIPv6EgressInterface: String? {
+        guard let value = ipv6EgressInterface?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+    public var configuredIPv6EgressSourceAddress: String? {
+        guard let value = ipv6EgressSourceAddress?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+    public var resolvedMasqueradeIPv6PodTraffic: Bool { masqueradeIPv6PodTraffic ?? true }
     public var resolvedVmnetCIDR: String { vmnetCIDR ?? "192.168.64.0/24" }
     public var ipv6AnchorName: String { "\(anchorName).ipv6" }
 
@@ -137,6 +159,26 @@ public struct KubeProxyPFConfig: Codable, Sendable, Equatable {
         if let configuredEgressInterface {
             guard configuredEgressInterface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
                 throw KubeProxyMacOSError.invalidConfiguration("pf.egressInterface is not a valid interface name")
+            }
+        }
+        guard
+            masqueradeIPv6PodTraffic != false
+                || (ipv6EgressInterface == nil && ipv6EgressSourceAddress == nil)
+        else {
+            throw KubeProxyMacOSError.invalidConfiguration(
+                "pf.masqueradeIPv6PodTraffic=false cannot be combined with pf.ipv6EgressInterface or pf.ipv6EgressSourceAddress"
+            )
+        }
+        if let configuredIPv6EgressInterface {
+            guard configuredIPv6EgressInterface.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+                throw KubeProxyMacOSError.invalidConfiguration("pf.ipv6EgressInterface is not a valid interface name")
+            }
+        }
+        if let configuredIPv6EgressSourceAddress {
+            guard KubeProxyIPv6CIDR.canonicalize("\(configuredIPv6EgressSourceAddress)/128") != nil else {
+                throw KubeProxyMacOSError.invalidConfiguration(
+                    "pf.ipv6EgressSourceAddress is not a valid IPv6 address"
+                )
             }
         }
         guard KubeProxyIPv4CIDR.canonicalize(resolvedVmnetCIDR) != nil else {
@@ -346,6 +388,13 @@ public struct KubeProxyEndpointSlice: Codable, Sendable, Hashable {
     public var endpoints: [KubeProxyEndpoint]
     public var ports: [KubeProxyEndpointPort]
 
+    private enum CodingKeys: String, CodingKey {
+        case metadata
+        case addressType
+        case endpoints
+        case ports
+    }
+
     public init(
         metadata: KubeProxyObjectMeta,
         addressType: String = "IPv4",
@@ -356,6 +405,16 @@ public struct KubeProxyEndpointSlice: Codable, Sendable, Hashable {
         self.addressType = addressType
         self.endpoints = endpoints
         self.ports = ports
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            metadata: try container.decode(KubeProxyObjectMeta.self, forKey: .metadata),
+            addressType: try container.decode(String.self, forKey: .addressType),
+            endpoints: try container.decodeIfPresent([KubeProxyEndpoint].self, forKey: .endpoints) ?? [],
+            ports: try container.decodeIfPresent([KubeProxyEndpointPort].self, forKey: .ports) ?? []
+        )
     }
 }
 

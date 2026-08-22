@@ -83,6 +83,18 @@ extension NetworkClient {
         return (attachment, additionalData)
     }
 
+    /// Activate attachment-dependent resources over an allocation's session.
+    ///
+    /// The session must already own an allocation and remain open until its
+    /// attachment is no longer live.
+    public func activate(on session: XPCClientSession) async throws {
+        let request = XPCMessage(route: NetworkRoutes.activate.rawValue)
+        // The server allows up to twelve seconds for the first vmnet bridge
+        // and root-managed gateway to converge. Keep enough margin for the
+        // readiness syscalls and XPC scheduling under host load.
+        _ = try await session.send(request, responseTimeout: .seconds(30))
+    }
+
     public func lookup(hostname: String) async throws -> Attachment? {
         let request = XPCMessage(route: NetworkRoutes.lookup.rawValue)
         request.set(key: NetworkKeys.hostname.rawValue, value: hostname)

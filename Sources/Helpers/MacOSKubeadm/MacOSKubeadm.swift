@@ -62,6 +62,24 @@ extension MacOSKubeadm {
         @Flag(help: "Enable dual-stack Pod networking. Supported only with --network-mode full.")
         var enableDualStack: Bool = false
 
+        @Flag(
+            name: .customLong("disable-ipv6-masquerade"),
+            help: "Use routed IPv6 Pod source addresses instead of IPv6 source NAT. Requires --enable-dual-stack."
+        )
+        var disableIPv6Masquerade: Bool = false
+
+        @Option(
+            name: .customLong("ipv6-egress-interface"),
+            help: "IPv6 source-NAT egress interface. Requires --enable-dual-stack and IPv6 masquerade."
+        )
+        var ipv6EgressInterface: String?
+
+        @Option(
+            name: .customLong("ipv6-egress-source-address"),
+            help: "IPv6 source-NAT address. Required when the selected egress interface has multiple usable IPv6 addresses."
+        )
+        var ipv6EgressSourceAddress: String?
+
         @Option(help: "UID whose bootstrap domain runs container core services. Defaults to SUDO_UID when available, otherwise 0.")
         var containerServiceUser: Int?
 
@@ -97,12 +115,16 @@ extension MacOSKubeadm {
                 runtimeClasses: resolvedRuntimeClasses,
                 networkMode: resolvedNetworkMode,
                 enableDualStack: enableDualStack,
+                masqueradeIPv6PodTraffic: disableIPv6Masquerade ? false : nil,
+                ipv6EgressInterface: ipv6EgressInterface,
+                ipv6EgressSourceAddress: ipv6EgressSourceAddress,
                 containerServiceUserID: resolvedContainerServiceUser,
                 installRoot: installRoot,
                 startServices: !skipStart,
                 dryRun: dryRun,
                 debug: debug
             )
+            try options.validateIPv6EgressConfiguration()
 
             let log = MacOSKubeadmLog(debugEnabled: debug)
             let runner = MacOSKubeadmJoinRunner()

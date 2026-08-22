@@ -102,6 +102,8 @@ public actor FlannelVXLANController {
     private let vtepMACIPv6Store: any FlannelVTEPMACStoring
     private let ownershipStateStore: any FlannelOwnershipStateStoring
     private let networkOwnershipStateStore: any FlannelHostOnlyNetworkOwnershipStoring
+    private let hostIPv6GatewayManager: any FlannelHostIPv6GatewayManaging
+    private let hostIPv6GatewayOwnershipStore: any FlannelHostIPv6GatewayOwnershipStoring
     private let makeTunnel: TunnelFactory
     private let makeIPv6Tunnel: IPv6TunnelFactory
     private let now: @Sendable () -> Date
@@ -124,6 +126,12 @@ public actor FlannelVXLANController {
         var vtepMAC: String
     }
 
+    private struct IPv6FamilyWithdrawalResult {
+        var dataplaneDeactivated: Bool
+        var dataplaneFailure: String?
+        var failures: [String]
+    }
+
     public init(
         config: FlannelVXLANMacOSConfig,
         kubernetes: any FlannelKubernetesReading & FlannelKubernetesWriting,
@@ -134,6 +142,8 @@ public actor FlannelVXLANController {
         vtepMACIPv6Store: (any FlannelVTEPMACStoring)? = nil,
         ownershipStateStore: (any FlannelOwnershipStateStoring)? = nil,
         networkOwnershipStateStore: (any FlannelHostOnlyNetworkOwnershipStoring)? = nil,
+        hostIPv6GatewayManager: (any FlannelHostIPv6GatewayManaging)? = nil,
+        hostIPv6GatewayOwnershipStore: (any FlannelHostIPv6GatewayOwnershipStoring)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         cleanupRetryDelay: Duration = .milliseconds(250),
         makeTunnel: @escaping TunnelFactory = { try FlannelVXLANTunnel(configuration: $0) },
@@ -151,6 +161,13 @@ public actor FlannelVXLANController {
         self.networkOwnershipStateStore =
             networkOwnershipStateStore
             ?? FlannelHostOnlyNetworkOwnershipStore(path: config.networkOwnershipStatePath)
+        let resolvedHostIPv6GatewayOwnershipStore =
+            hostIPv6GatewayOwnershipStore
+            ?? FlannelHostIPv6GatewayOwnershipStore(path: config.hostIPv6GatewayOwnershipStatePath)
+        self.hostIPv6GatewayOwnershipStore = resolvedHostIPv6GatewayOwnershipStore
+        self.hostIPv6GatewayManager =
+            hostIPv6GatewayManager
+            ?? SystemFlannelHostIPv6GatewayManager(ownershipStore: resolvedHostIPv6GatewayOwnershipStore)
         self.now = now
         self.cleanupRetryDelay = cleanupRetryDelay
         self.makeTunnel = makeTunnel
@@ -205,6 +222,14 @@ public actor FlannelVXLANController {
             persistedState = try ownershipStateStore.load()
         } catch {
             throw FlannelVXLANError.runtime("cleanup refused because dataplane ownership cannot be read: \(error)")
+        }
+        let persistedHostIPv6GatewayOwnership: FlannelHostIPv6GatewayOwnership?
+        do {
+            persistedHostIPv6GatewayOwnership = try hostIPv6GatewayOwnershipStore.load()
+        } catch {
+            throw FlannelVXLANError.runtime(
+                "cleanup refused because host IPv6 gateway ownership cannot be read: \(error)"
+            )
         }
         if tunnel == nil, let persistedState,
             try system.interfaceExists(persistedState.interfaceName)
@@ -326,6 +351,15 @@ public actor FlannelVXLANController {
         ipv6Tunnel = nil
         ipv6TunnelConfiguration = nil
 
+        if let persistedHostIPv6GatewayOwnership {
+            do {
+                try hostIPv6GatewayManager.remove(ownership: persistedHostIPv6GatewayOwnership)
+                try hostIPv6GatewayOwnershipStore.remove()
+            } catch {
+                failures.append("remove host IPv6 gateway: \(error)")
+            }
+        }
+
         do {
             try ownershipStateStore.remove()
         } catch {
@@ -347,9 +381,15 @@ public actor FlannelVXLANController {
 
     private func reconcile() async throws -> FlannelVXLANReconcileResult {
         let persistedOwnership = try ownershipStateStore.load()
+        let persistedHostIPv6GatewayOwnership = try hostIPv6GatewayOwnershipStore.load()
         if !config.dualStackEnabled, persistedOwnership?.ipv6InterfaceName != nil {
             throw FlannelVXLANError.runtime(
                 "dual-stack is disabled but persisted IPv6 tunnel ownership exists; run cleanup before migrating to IPv4-only mode"
+            )
+        }
+        if !config.dualStackEnabled, persistedHostIPv6GatewayOwnership != nil {
+            throw FlannelVXLANError.runtime(
+                "dual-stack is disabled but persisted host IPv6 gateway ownership exists; run cleanup before migrating to IPv4-only mode"
             )
         }
         guard let runtimeState = try await podNetworkStateStore.loadRuntimeState(path: config.runtimeStatePath) else {
@@ -476,6 +516,53 @@ public actor FlannelVXLANController {
         } else if knownNetworkOwnership != nil {
             try networkOwnershipStateStore.remove()
         }
+        var hostIPv6GatewayIssues: [FlannelCompileIssue] = []
+        var hostIPv6GatewayHardFailure = false
+        if ipv6Context != nil {
+            if let networkOwnership = networkResult.ownership {
+                do {
+                    let gatewayResult = try hostIPv6GatewayManager.reconcile(
+                        networkOwnership: networkOwnership,
+                        knownOwnership: persistedHostIPv6GatewayOwnership
+                    )
+                    switch gatewayResult {
+                    case .bridgePending:
+                        hostIPv6GatewayIssues.append(
+                            FlannelCompileIssue(
+                                id: "local/host-ipv6-gateway",
+                                severity: .warning,
+                                message: "host IPv6 gateway is waiting for the first vmnet bridge attachment"
+                            ))
+                    case .dadPending(let ownership):
+                        try hostIPv6GatewayOwnershipStore.save(ownership)
+                        hostIPv6GatewayIssues.append(
+                            FlannelCompileIssue(
+                                id: "local/host-ipv6-gateway",
+                                severity: .warning,
+                                message: "host IPv6 gateway is waiting for duplicate address detection"
+                            ))
+                    case .ready(let ownership):
+                        try hostIPv6GatewayOwnershipStore.save(ownership)
+                    }
+                } catch {
+                    hostIPv6GatewayHardFailure = true
+                    hostIPv6GatewayIssues.append(
+                        FlannelCompileIssue(
+                            id: "local/host-ipv6-gateway",
+                            severity: .error,
+                            message: "host IPv6 gateway reconciliation failed: \(error)"
+                        ))
+                }
+            } else {
+                hostIPv6GatewayHardFailure = true
+                hostIPv6GatewayIssues.append(
+                    FlannelCompileIssue(
+                        id: "local/host-ipv6-gateway",
+                        severity: .error,
+                        message: "host IPv6 gateway requires an owned host-only Pod network"
+                    ))
+            }
+        }
         try system.enableIPv4Forwarding()
 
         let vtepMAC = try vtepMACStore.loadOrCreate()
@@ -499,10 +586,12 @@ public actor FlannelVXLANController {
             preservingIPv6Ownership: persistedIPv6Ownership
         )
 
-        var issues = compilation.issues
+        var issues = compilation.issues + hostIPv6GatewayIssues
         var ipv6Ready: Bool? = config.dualStackEnabled ? false : nil
         var ipv6Dataplane: IPv6DataplaneResult?
         if let ipv6Context {
+            var ipv6FamilyHardFailure = hostIPv6GatewayHardFailure
+            var priorDataplaneWithdrawalFailure: String?
             if ipv6Context.localNetwork.internalIPv6 == nil {
                 issues.append(
                     FlannelCompileIssue(
@@ -511,27 +600,23 @@ public actor FlannelVXLANController {
                         message: "Node has no usable InternalIPv6; using IPv6 address from underlay interface \(underlay.name)"
                     ))
             }
-            if let unresolvedOwnership = unresolvedPersistedIPv6Ownership {
+            if !ipv6FamilyHardFailure, let unresolvedOwnership = unresolvedPersistedIPv6Ownership {
                 do {
                     try deactivateIPv6Dataplane(persistedOwnership: unresolvedOwnership)
                     unresolvedPersistedIPv6Ownership = nil
                 } catch {
+                    ipv6FamilyHardFailure = true
                     let cleanupError = error
+                    priorDataplaneWithdrawalFailure = "withdraw IPv6 routes and tunnel: \(cleanupError)"
                     issues.append(
                         FlannelCompileIssue(
                             id: "local/ipv6-dataplane",
                             severity: .error,
                             message: "IPv6 dataplane is degraded while recovering persisted ownership: \(cleanupError)"
                         ))
-                    issues.append(
-                        FlannelCompileIssue(
-                            id: "local/ipv6-dataplane-cleanup",
-                            severity: .error,
-                            message: "IPv6 dataplane cleanup is incomplete: \(cleanupError)"
-                        ))
                 }
             }
-            if unresolvedPersistedIPv6Ownership == nil {
+            if !ipv6FamilyHardFailure, unresolvedPersistedIPv6Ownership == nil {
                 do {
                     ipv6Dataplane = try reconcileIPv6Dataplane(
                         context: ipv6Context,
@@ -542,6 +627,7 @@ public actor FlannelVXLANController {
                     )
                     ipv6Ready = true
                 } catch {
+                    ipv6FamilyHardFailure = true
                     let dataplaneError = error
                     issues.append(
                         FlannelCompileIssue(
@@ -549,20 +635,46 @@ public actor FlannelVXLANController {
                             severity: .error,
                             message: "IPv6 dataplane is degraded: \(dataplaneError)"
                         ))
-                    let cleanupOwnership =
+                }
+            }
+            if ipv6FamilyHardFailure {
+                var cleanupOwnership = unresolvedPersistedIPv6Ownership ?? persistedIPv6Ownership
+                do {
+                    cleanupOwnership =
                         try snapshotActiveIPv6Ownership(localNetwork: localNetwork)
-                        ?? persistedIPv6Ownership
-                    do {
-                        try deactivateIPv6Dataplane()
-                    } catch {
-                        unresolvedPersistedIPv6Ownership = cleanupOwnership
+                        ?? cleanupOwnership
+                } catch {
+                    issues.append(
+                        FlannelCompileIssue(
+                            id: "local/ipv6-dataplane-cleanup",
+                            severity: .error,
+                            message: "IPv6 dataplane ownership snapshot failed before family withdrawal: \(error)"
+                        ))
+                }
+                let withdrawal = withdrawIPv6FamilyResources(
+                    persistedOwnership: cleanupOwnership,
+                    priorDataplaneFailure: priorDataplaneWithdrawalFailure
+                )
+                unresolvedPersistedIPv6Ownership = withdrawal.dataplaneDeactivated ? nil : cleanupOwnership
+                ipv6Dataplane = nil
+                ipv6Ready = false
+                if !withdrawal.failures.isEmpty {
+                    if let dataplaneFailure = withdrawal.dataplaneFailure {
                         issues.append(
                             FlannelCompileIssue(
                                 id: "local/ipv6-dataplane-cleanup",
                                 severity: .error,
-                                message: "IPv6 dataplane cleanup is incomplete: \(error)"
+                                message: "IPv6 dataplane cleanup is incomplete: \(dataplaneFailure)"
                             ))
                     }
+                    issues.append(
+                        FlannelCompileIssue(
+                            id: "local/ipv6-family-withdrawal",
+                            severity: .error,
+                            message: "IPv6 family withdrawal is incomplete: "
+                                + withdrawal.failures.joined(separator: "; ")
+                                + "; IPv4 dataplane was retained"
+                        ))
                 }
             }
             try saveOwnershipState(
@@ -576,10 +688,10 @@ public actor FlannelVXLANController {
             publicIP: underlay.ipv4Address,
             vni: networkConfig.backend.vni,
             vtepMAC: vtepMAC,
-            publicIPv6: ipv6Dataplane?.publicIPv6,
-            vtepMACIPv6: ipv6Dataplane?.vtepMAC
+            publicIPv6: ipv6Ready == true ? ipv6Dataplane?.publicIPv6 : nil,
+            vtepMACIPv6: ipv6Ready == true ? ipv6Dataplane?.vtepMAC : nil
         )
-        if ipv6Dataplane == nil {
+        if ipv6Ready != true {
             let keys = try FlannelAnnotationKeys(prefix: config.annotationPrefix)
             annotationPatch.removals.formUnion([keys.publicIPv6, keys.backendV6Data])
         }
@@ -879,20 +991,53 @@ public actor FlannelVXLANController {
         }
     }
 
+    private func withdrawIPv6FamilyResources(
+        persistedOwnership: FlannelOwnershipState?,
+        priorDataplaneFailure: String? = nil
+    ) -> IPv6FamilyWithdrawalResult {
+        var failures: [String] = []
+        var dataplaneDeactivated = false
+        var dataplaneFailure = priorDataplaneFailure
+
+        if let priorDataplaneFailure {
+            failures.append(priorDataplaneFailure)
+        } else {
+            do {
+                try deactivateIPv6Dataplane(persistedOwnership: persistedOwnership)
+                dataplaneDeactivated = true
+            } catch {
+                let message = "withdraw IPv6 routes and tunnel: \(error)"
+                dataplaneFailure = message
+                failures.append(message)
+            }
+        }
+
+        do {
+            // Re-read after dataplane reconciliation because gateway reconciliation may have
+            // persisted write-ahead ownership after this controller's initial snapshot.
+            if let currentGatewayOwnership = try hostIPv6GatewayOwnershipStore.load() {
+                try hostIPv6GatewayManager.remove(ownership: currentGatewayOwnership)
+                try hostIPv6GatewayOwnershipStore.remove()
+            }
+        } catch {
+            failures.append("remove owned host IPv6 gateway: \(error)")
+        }
+
+        return IPv6FamilyWithdrawalResult(
+            dataplaneDeactivated: dataplaneDeactivated,
+            dataplaneFailure: dataplaneFailure,
+            failures: failures
+        )
+    }
+
     private func withdrawIPv6ForInvalidIntent(
         validationError: Error,
         persistedOwnership: FlannelOwnershipState?
     ) async throws {
         var failures: [String] = []
-        var deactivated = false
         var annotationsRemoved = false
-
-        do {
-            try deactivateIPv6Dataplane(persistedOwnership: persistedOwnership)
-            deactivated = true
-        } catch {
-            failures.append("withdraw IPv6 routes and tunnel: \(error)")
-        }
+        let withdrawal = withdrawIPv6FamilyResources(persistedOwnership: persistedOwnership)
+        failures.append(contentsOf: withdrawal.failures)
 
         do {
             let keys = try FlannelAnnotationKeys(prefix: config.annotationPrefix)
@@ -907,7 +1052,7 @@ public actor FlannelVXLANController {
         do {
             try persistOwnershipAfterIPv6Withdrawal(
                 persistedOwnership: persistedOwnership,
-                withdrawalCompleted: deactivated && annotationsRemoved
+                withdrawalCompleted: withdrawal.dataplaneDeactivated && annotationsRemoved
             )
         } catch {
             failures.append("persist IPv6 withdrawal ownership: \(error)")

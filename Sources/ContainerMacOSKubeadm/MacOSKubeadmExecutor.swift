@@ -55,6 +55,7 @@ public struct MacOSKubeadmJoinRunner {
 
     private func runPreflight(options: MacOSKubeadmJoinOptions, log: MacOSKubeadmLog) throws {
         log.info("running preflight checks")
+        try options.validateIPv6EgressConfiguration()
 
         if !options.dryRun && geteuid() != 0 {
             throw MacOSKubeadmError.preflightFailed("join must run as root; rerun with sudo or pass --dry-run")

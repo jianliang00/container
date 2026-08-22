@@ -264,7 +264,10 @@ public enum MacOSKubeadmPlanner {
                         path: options.rooted("/etc/kubernetes/kube-proxy.conf"),
                         contents: MacOSKubeadmRenderer.kubeProxyConfiguration(
                             nodeName: options.nodeName,
-                            dualStackEnabled: options.enableDualStack
+                            dualStackEnabled: options.enableDualStack,
+                            masqueradeIPv6PodTraffic: options.masqueradeIPv6PodTraffic,
+                            ipv6EgressInterface: options.ipv6EgressInterface,
+                            ipv6EgressSourceAddress: options.ipv6EgressSourceAddress
                         ),
                         mode: 0o644,
                         sensitive: false
@@ -491,6 +494,7 @@ public enum MacOSKubeadmPlanner {
         guard options.apiServer.scheme?.lowercased() == "https", options.apiServer.host != nil else {
             throw MacOSKubeadmError.invalidInput("--apiserver must use HTTPS")
         }
+        try options.validateIPv6EgressConfiguration()
         guard !options.enableDualStack || options.networkMode == .full else {
             throw MacOSKubeadmError.invalidInput("--enable-dual-stack requires --network-mode full")
         }

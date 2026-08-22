@@ -93,6 +93,25 @@ struct FlannelHostOnlyNetworkPurgerTests {
     }
 
     @Test
+    func missingNetworkOwnershipWithHostGatewayStateIsFailClosed() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.gatewayOwnershipStore.save(fixture.gatewayOwnership())
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.checkPurge()
+        }
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.purge()
+        }
+
+        #expect(await fixture.attachmentInspector.inspectionCalls == 0)
+        #expect(await fixture.networkManager.validationCalls == 0)
+        #expect(fixture.gatewayManager.removed.isEmpty)
+        #expect(try fixture.gatewayOwnershipStore.load() != nil)
+    }
+
+    @Test
     func readOnlyCheckAllowsActiveDataplaneButPurgeRequiresWithdrawal() async throws {
         let fixture = PurgerFixture()
         defer { fixture.removeFiles() }
@@ -165,6 +184,51 @@ struct FlannelHostOnlyNetworkPurgerTests {
         #expect(await fixture.networkManager.purgeCalls.isEmpty)
         #expect(try fixture.networkOwnershipStore.load() != nil)
     }
+
+    @Test
+    func purgeRemovesExactHostGatewayOwnershipBeforeOwnedNetwork() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveNetworkOwnership(ipv6PodCIDR: "fd42:10:244:22::/64")
+        let gatewayOwnership = fixture.gatewayOwnership()
+        try fixture.gatewayOwnershipStore.save(gatewayOwnership)
+
+        let result = try await fixture.purger.purge()
+
+        #expect(result.removed)
+        #expect(fixture.gatewayManager.removed == [gatewayOwnership])
+        #expect(try fixture.gatewayOwnershipStore.load() == nil)
+        #expect(await fixture.networkManager.purgeCalls.count == 1)
+    }
+
+    @Test
+    func checkAndPurgeRefuseMismatchedHostGatewayCIDROwnership() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveNetworkOwnership(ipv6PodCIDR: "fd42:10:244:22::/64")
+        try fixture.gatewayOwnershipStore.save(
+            FlannelHostIPv6GatewayOwnership(
+                networkName: "kubernetes-pod",
+                networkOwnershipID: "b7656446-13bc-482b-b02c-22eb6e066a59",
+                ipv4PodCIDR: "10.250.23.0/24",
+                ipv6PodCIDR: "fd42:10:244:23::/64",
+                interfaceName: "bridge101",
+                ipv4Gateway: "10.250.23.1",
+                ipv6Gateway: "fd42:10:244:23::1"
+            ))
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.checkPurge()
+        }
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.purge()
+        }
+
+        #expect(fixture.gatewayManager.removed.isEmpty)
+        #expect(await fixture.networkManager.validationCalls == 0)
+        #expect(await fixture.networkManager.purgeCalls.isEmpty)
+        #expect(try fixture.gatewayOwnershipStore.load() != nil)
+    }
 }
 
 private func makeContainerSnapshot(
@@ -209,8 +273,10 @@ private struct PurgerFixture {
     let root: URL
     let dataplaneStore: FlannelOwnershipStateStore
     let networkOwnershipStore: FlannelHostOnlyNetworkOwnershipStore
+    let gatewayOwnershipStore: FlannelHostIPv6GatewayOwnershipStore
     let networkManager = PurgerTestNetworkManager()
     let attachmentInspector = PurgerTestAttachmentInspector()
+    let gatewayManager = PurgerTestGatewayManager()
 
     init() {
         root = FileManager.default.temporaryDirectory
@@ -219,6 +285,9 @@ private struct PurgerFixture {
         networkOwnershipStore = FlannelHostOnlyNetworkOwnershipStore(
             url: root.appendingPathComponent("network-ownership.json")
         )
+        gatewayOwnershipStore = FlannelHostIPv6GatewayOwnershipStore(
+            url: root.appendingPathComponent("host-ipv6-gateway-ownership.json")
+        )
     }
 
     var purger: FlannelHostOnlyNetworkPurger {
@@ -226,15 +295,18 @@ private struct PurgerFixture {
             networkManager: networkManager,
             attachmentInspector: attachmentInspector,
             dataplaneOwnershipStore: dataplaneStore,
-            networkOwnershipStore: networkOwnershipStore
+            networkOwnershipStore: networkOwnershipStore,
+            hostIPv6GatewayManager: gatewayManager,
+            hostIPv6GatewayOwnershipStore: gatewayOwnershipStore
         )
     }
 
-    func saveNetworkOwnership() throws {
+    func saveNetworkOwnership(ipv6PodCIDR: String? = nil) throws {
         try networkOwnershipStore.save(
             FlannelHostOnlyNetworkOwnership(
                 name: "kubernetes-pod",
                 podCIDR: "10.250.22.0/24",
+                ipv6PodCIDR: ipv6PodCIDR,
                 plugin: "container-network-vmnet",
                 variant: "reserved",
                 ownershipID: "b7656446-13bc-482b-b02c-22eb6e066a59"
@@ -242,8 +314,40 @@ private struct PurgerFixture {
         )
     }
 
+    func gatewayOwnership() -> FlannelHostIPv6GatewayOwnership {
+        FlannelHostIPv6GatewayOwnership(
+            networkName: "kubernetes-pod",
+            networkOwnershipID: "b7656446-13bc-482b-b02c-22eb6e066a59",
+            ipv4PodCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64",
+            interfaceName: "bridge100",
+            ipv4Gateway: "10.250.22.1",
+            ipv6Gateway: "fd42:10:244:22::1"
+        )
+    }
+
     func removeFiles() {
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+private final class PurgerTestGatewayManager: FlannelHostIPv6GatewayManaging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var removedValues: [FlannelHostIPv6GatewayOwnership] = []
+
+    var removed: [FlannelHostIPv6GatewayOwnership] {
+        lock.withLock { removedValues }
+    }
+
+    func reconcile(
+        networkOwnership _: FlannelHostOnlyNetworkOwnership,
+        knownOwnership _: FlannelHostIPv6GatewayOwnership?
+    ) throws -> FlannelHostIPv6GatewayReconcileResult {
+        throw FlannelVXLANError.runtime("unexpected gateway reconciliation")
+    }
+
+    func remove(ownership: FlannelHostIPv6GatewayOwnership) throws {
+        lock.withLock { removedValues.append(ownership) }
     }
 }
 

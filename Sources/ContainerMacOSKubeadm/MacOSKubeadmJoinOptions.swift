@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Darwin
 import Foundation
 
 public enum MacOSKubeadmNetworkMode: String, CaseIterable, Sendable, Equatable {
@@ -98,6 +99,9 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var runtimeClasses: [MacOSKubeadmRuntimeClassProfile]
     public var networkMode: MacOSKubeadmNetworkMode
     public var enableDualStack: Bool
+    public var masqueradeIPv6PodTraffic: Bool?
+    public var ipv6EgressInterface: String?
+    public var ipv6EgressSourceAddress: String?
     public var containerServiceUserID: Int
     public var installRoot: String
     public var startServices: Bool
@@ -119,6 +123,9 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = [],
         networkMode: MacOSKubeadmNetworkMode = .full,
         enableDualStack: Bool = false,
+        masqueradeIPv6PodTraffic: Bool? = nil,
+        ipv6EgressInterface: String? = nil,
+        ipv6EgressSourceAddress: String? = nil,
         containerServiceUserID: Int = 0,
         installRoot: String = "/",
         startServices: Bool = true,
@@ -139,6 +146,9 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.runtimeClasses = runtimeClasses
         self.networkMode = networkMode
         self.enableDualStack = enableDualStack
+        self.masqueradeIPv6PodTraffic = masqueradeIPv6PodTraffic
+        self.ipv6EgressInterface = ipv6EgressInterface
+        self.ipv6EgressSourceAddress = ipv6EgressSourceAddress
         self.containerServiceUserID = containerServiceUserID
         self.installRoot = installRoot
         self.startServices = startServices
@@ -148,6 +158,55 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
 }
 
 extension MacOSKubeadmJoinOptions {
+    public func validateIPv6EgressConfiguration() throws {
+        let hasExplicitConfiguration =
+            masqueradeIPv6PodTraffic != nil
+            || ipv6EgressInterface != nil
+            || ipv6EgressSourceAddress != nil
+        guard !hasExplicitConfiguration || enableDualStack else {
+            throw MacOSKubeadmError.invalidInput(
+                "IPv6 egress options require --enable-dual-stack"
+            )
+        }
+        guard !hasExplicitConfiguration || networkMode == .full else {
+            throw MacOSKubeadmError.invalidInput(
+                "IPv6 egress options require --network-mode full"
+            )
+        }
+        guard
+            masqueradeIPv6PodTraffic != false
+                || (ipv6EgressInterface == nil && ipv6EgressSourceAddress == nil)
+        else {
+            throw MacOSKubeadmError.invalidInput(
+                "--disable-ipv6-masquerade cannot be combined with --ipv6-egress-interface or --ipv6-egress-source-address"
+            )
+        }
+        if let ipv6EgressInterface {
+            guard ipv6EgressInterface.utf8.count < Int(IFNAMSIZ),
+                ipv6EgressInterface.range(
+                    of: #"^[A-Za-z0-9._-]+$"#,
+                    options: .regularExpression
+                ) != nil
+            else {
+                throw MacOSKubeadmError.invalidInput(
+                    "--ipv6-egress-interface must be a valid interface name"
+                )
+            }
+        }
+        if let ipv6EgressSourceAddress {
+            guard let address = parseIPv6EgressSourceAddress(ipv6EgressSourceAddress) else {
+                throw MacOSKubeadmError.invalidInput(
+                    "--ipv6-egress-source-address must be a valid IPv6 address"
+                )
+            }
+            guard isUsableIPv6EgressSourceAddress(address) else {
+                throw MacOSKubeadmError.invalidInput(
+                    "--ipv6-egress-source-address must be a usable unicast IPv6 address"
+                )
+            }
+        }
+    }
+
     public var defaultRuntimeClass: MacOSKubeadmRuntimeClassProfile {
         MacOSKubeadmRuntimeClassProfile(
             name: networkMode.runtimeClassName,
@@ -176,4 +235,25 @@ extension MacOSKubeadmJoinOptions {
         }
         return rootPrefix + absolutePath
     }
+}
+
+private func parseIPv6EgressSourceAddress(_ value: String) -> in6_addr? {
+    guard !value.contains("%") else {
+        return nil
+    }
+    var address = in6_addr()
+    guard value.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else {
+        return nil
+    }
+    return address
+}
+
+private func isUsableIPv6EgressSourceAddress(_ address: in6_addr) -> Bool {
+    var address = address
+    let bytes = withUnsafeBytes(of: &address) { Array($0) }
+    return !bytes.allSatisfy { $0 == 0 }
+        && bytes != Array(repeating: 0, count: 15) + [1]
+        && !(bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80)
+        && bytes[0] != 0xff
+        && !(bytes.prefix(10).allSatisfy { $0 == 0 } && bytes[10] == 0xff && bytes[11] == 0xff)
 }

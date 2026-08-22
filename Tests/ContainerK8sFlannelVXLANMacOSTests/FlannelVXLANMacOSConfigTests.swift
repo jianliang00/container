@@ -30,6 +30,10 @@ struct FlannelVXLANMacOSConfigTests {
         #expect(config.containerServiceUserID == 0)
         #expect(!config.dualStackEnabled)
         #expect(config.vtepMACIPv6Path == "/var/lib/container/flannel-vxlan/vtep-mac-v6")
+        #expect(
+            config.hostIPv6GatewayOwnershipStatePath
+                == "/var/lib/container/flannel-vxlan/host-ipv6-gateway-ownership.json"
+        )
         try config.validate()
     }
 
@@ -66,6 +70,19 @@ struct FlannelVXLANMacOSConfigTests {
                 "containerServiceUserID must be non-negative"
             )
         ) {
+            try config.validate()
+        }
+    }
+
+    @Test func dualStackRejectsSyncPeriodLongerThanFirstPodActivationBudget() {
+        let config = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a",
+            dualStackEnabled: true,
+            syncPeriodSeconds: 6
+        )
+
+        #expect(throws: FlannelVXLANError.self) {
             try config.validate()
         }
     }

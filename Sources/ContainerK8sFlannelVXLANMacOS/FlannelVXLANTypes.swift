@@ -52,6 +52,13 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             .path
     }
 
+    public var hostIPv6GatewayOwnershipStatePath: String {
+        URL(fileURLWithPath: ownershipStatePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("host-ipv6-gateway-ownership.json")
+            .path
+    }
+
     public var vtepMACIPv6Path: String {
         URL(fileURLWithPath: vtepMACPath)
             .deletingLastPathComponent()
@@ -191,6 +198,11 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
         }
         guard (1...300).contains(syncPeriodSeconds) else {
             throw FlannelVXLANError.invalidConfiguration("syncPeriodSeconds must be between 1 and 300")
+        }
+        if dualStackEnabled, syncPeriodSeconds > 5 {
+            throw FlannelVXLANError.invalidConfiguration(
+                "dual-stack syncPeriodSeconds must be at most 5 so the first VM can wait for its host IPv6 gateway"
+            )
         }
         guard !networkName.contains("/"), !networkName.contains(where: { $0.isWhitespace }) else {
             throw FlannelVXLANError.invalidConfiguration("networkName must not contain slashes or whitespace")

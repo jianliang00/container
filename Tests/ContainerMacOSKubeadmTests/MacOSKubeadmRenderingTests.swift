@@ -97,6 +97,9 @@ struct MacOSKubeadmRenderingTests {
         let pf = try #require(object["pf"] as? [String: Any])
 
         #expect(pf["egressInterface"] == nil)
+        #expect(pf["ipv6EgressInterface"] == nil)
+        #expect(pf["ipv6EgressSourceAddress"] == nil)
+        #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == false)
         #expect(object["dualStackEnabled"] as? Bool == false)
     }
 
@@ -108,7 +111,45 @@ struct MacOSKubeadmRenderingTests {
         let object = try #require(
             JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
         )
+        let pf = try #require(object["pf"] as? [String: Any])
 
         #expect(object["dualStackEnabled"] as? Bool == true)
+        #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == true)
+        #expect(pf["ipv6EgressInterface"] == nil)
+        #expect(pf["ipv6EgressSourceAddress"] == nil)
+    }
+
+    @Test func kubeProxyConfigurationCanUseExplicitIPv6NATSource() throws {
+        let rendered = MacOSKubeadmRenderer.kubeProxyConfiguration(
+            nodeName: "macos-ci-1",
+            dualStackEnabled: true,
+            masqueradeIPv6PodTraffic: true,
+            ipv6EgressInterface: "en7",
+            ipv6EgressSourceAddress: "2001:db8:100:c::7"
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        let pf = try #require(object["pf"] as? [String: Any])
+
+        #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == true)
+        #expect(pf["ipv6EgressInterface"] as? String == "en7")
+        #expect(pf["ipv6EgressSourceAddress"] as? String == "2001:db8:100:c::7")
+    }
+
+    @Test func kubeProxyConfigurationCanUseRoutedIPv6Egress() throws {
+        let rendered = MacOSKubeadmRenderer.kubeProxyConfiguration(
+            nodeName: "macos-ci-1",
+            dualStackEnabled: true,
+            masqueradeIPv6PodTraffic: false
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        let pf = try #require(object["pf"] as? [String: Any])
+
+        #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == false)
+        #expect(pf["ipv6EgressInterface"] == nil)
+        #expect(pf["ipv6EgressSourceAddress"] == nil)
     }
 }

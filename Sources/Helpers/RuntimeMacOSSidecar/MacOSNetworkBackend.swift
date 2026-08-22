@@ -28,6 +28,17 @@ struct PreparedMacOSNetwork {
     let lease: MacOSGuestNetworkLease?
     let ownedNetworks: [ManagedVMNetNetwork]
     let sessions: [XPCClientSession]
+    let activations: [PreparedMacOSNetworkActivation]
+}
+
+struct PreparedMacOSNetworkActivation: Sendable {
+    let network: String
+    let client: NetworkClient
+    let session: XPCClientSession
+
+    func activate() async throws {
+        try await client.activate(on: session)
+    }
 }
 
 final class ManagedVMNetNetwork: @unchecked Sendable {
@@ -79,7 +90,8 @@ struct VirtualizationNATNetworkBackend: MacOSNetworkBackend {
             devices: [device],
             lease: nil,
             ownedNetworks: [],
-            sessions: []
+            sessions: [],
+            activations: []
         )
     }
 }
@@ -156,6 +168,7 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
         var ownedNetworks: [ManagedVMNetNetwork] = []
         var preparedDevices: [VZNetworkDeviceConfiguration] = []
         var sessions: [XPCClientSession] = []
+        var activations: [PreparedMacOSNetworkActivation] = []
         var networkRefs: [String: ManagedVMNetNetwork] = [:]
         var retainsNetworkSessions = false
         defer {
@@ -224,6 +237,15 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                 )
 
                 liveAttachments.append(attachment)
+                if attachment.ipv6Gateway != nil {
+                    activations.append(
+                        PreparedMacOSNetworkActivation(
+                            network: request.network,
+                            client: client,
+                            session: session
+                        )
+                    )
+                }
                 preparedDevices.append(
                     try createDeviceConfiguration(
                         attachment: attachment,
@@ -244,7 +266,8 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                     attachments: liveAttachments
                 ),
                 ownedNetworks: ownedNetworks,
-                sessions: sessions
+                sessions: sessions,
+                activations: activations
             )
         } catch {
             log.warning(

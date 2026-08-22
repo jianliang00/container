@@ -52,6 +52,7 @@ struct FlannelVXLANControllerTests {
         #expect(networkCalls.count == 2)
         #expect(networkCalls.first?.name == "kubernetes-pod")
         #expect(networkCalls.first?.podCIDR == "10.250.22.0/24")
+        #expect(fixture.hostIPv6GatewayManager.reconcileCount == 0)
 
         let patches = await fixture.kubernetes.patches
         let keys = try FlannelAnnotationKeys(prefix: fixture.config.annotationPrefix)
@@ -112,6 +113,12 @@ struct FlannelVXLANControllerTests {
         #expect(result.ipv6Peers.map(\.nodeName) == ["linux-a"])
         #expect(
             result.issues.contains {
+                $0.id == "local/host-ipv6-gateway" && $0.severity == .warning
+            }
+        )
+        #expect(fixture.hostIPv6GatewayManager.reconcileCount == 1)
+        #expect(
+            result.issues.contains {
                 $0.id == "node/windows-a/ipv6-unsupported" && $0.severity == .warning
             }
         )
@@ -163,6 +170,128 @@ struct FlannelVXLANControllerTests {
         #expect(cleanup.removedIPv6Routes == ["fd42:10:244:2::/64"])
         #expect(cleanup.stoppedIPv6Tunnel)
         #expect(fixture.ipv6TunnelBox.tunnel.wasDestroyed)
+    }
+
+    @Test
+    func keepsBootstrapReadyWhileGatewayDADIsPending() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .dadPending
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+
+        let controller = try fixture.makeController()
+        let result = try await controller.runOnce()
+
+        #expect(result.ipv6Ready == true)
+        #expect(
+            result.issues.contains {
+                $0.id == "local/host-ipv6-gateway" && $0.severity == .warning
+            }
+        )
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load()?.phase == .owned)
+
+        _ = try await controller.shutdown()
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() == nil)
+        #expect(fixture.hostIPv6GatewayManager.removeCount == 1)
+    }
+
+    @Test
+    func marksIPv6NotReadyAndWithdrawsAnnotationOnGatewayHardFailure() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .failureAfterWriteAhead
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+
+        let result = try await fixture.makeController().runOnce()
+
+        #expect(result.ipv4Ready)
+        #expect(result.ipv6Ready == false)
+        #expect(result.ipv6InterfaceName == nil)
+        #expect(fixture.ipv6TunnelBox.createdConfigurations.isEmpty)
+        #expect(fixture.system.ensuredIPv6Routes.isEmpty)
+        #expect(fixture.hostIPv6GatewayManager.removeAttemptCount == 1)
+        #expect(fixture.hostIPv6GatewayManager.removeCount == 1)
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() == nil)
+        #expect(
+            result.issues.contains {
+                $0.id == "local/host-ipv6-gateway" && $0.severity == .error
+            }
+        )
+        let keys = try FlannelAnnotationKeys(prefix: fixture.config.annotationPrefix)
+        let patch = try #require(await fixture.kubernetes.patches.last)
+        #expect(patch.values[keys.publicIPv6] == nil)
+        #expect(patch.removals.contains(keys.publicIPv6))
+        let ready = try #require(
+            await fixture.stateStore.loadReadyState(path: fixture.config.readyStatePath)
+        )
+        #expect(ready.ipv6Ready == false)
+    }
+
+    @Test
+    func gatewayHardFailureWithdrawsExistingIPv6Dataplane() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .ready
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+        let ready = try await controller.runOnce()
+        #expect(ready.ipv6Ready == true)
+        #expect(ready.ipv6InterfaceName == "utun43")
+        fixture.hostIPv6GatewayManager.mode = .failureAfterWriteAhead
+
+        let degraded = try await controller.runOnce()
+
+        #expect(degraded.ipv4Ready)
+        #expect(degraded.ipv6Ready == false)
+        #expect(degraded.ipv6InterfaceName == nil)
+        #expect(fixture.tunnelBox.tunnel.isRunning)
+        #expect(fixture.ipv6TunnelBox.createdConfigurations.count == 1)
+        #expect(fixture.ipv6TunnelBox.tunnel.wasDestroyed)
+        #expect(
+            fixture.system.removedIPv6Routes.map { "\($0.podCIDR)|\($0.interface)" }
+                == ["fd42:10:244:2::/64|utun43"]
+        )
+        #expect(fixture.hostIPv6GatewayManager.removeAttemptCount == 1)
+        #expect(fixture.hostIPv6GatewayManager.removeCount == 1)
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() == nil)
+        let ownership = try #require(
+            try FlannelOwnershipStateStore(path: fixture.config.ownershipStatePath).load()
+        )
+        #expect(ownership.schemaVersion == 1)
+        #expect(ownership.ipv6InterfaceName == nil)
+        #expect(ownership.ipv6RoutePodCIDRs == nil)
+    }
+
+    @Test
+    func ipv4OnlyRestartRefusesPersistedHostIPv6GatewayOwnership() async throws {
+        let fixture = try ControllerFixture()
+        try fixture.hostIPv6GatewayOwnershipStore.save(
+            FlannelHostIPv6GatewayOwnership(
+                networkName: "kubernetes-pod",
+                networkOwnershipID: "b7656446-13bc-482b-b02c-22eb6e066a59",
+                ipv4PodCIDR: "10.250.22.0/24",
+                ipv6PodCIDR: "fd42:10:244:22::/64",
+                interfaceName: "bridge100",
+                ipv4Gateway: "10.250.22.1",
+                ipv6Gateway: "fd42:10:244:22::1"
+            ))
+        try await fixture.writeRuntimeState(podCIDR: "10.250.22.0/24")
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.makeController().runOnce()
+        }
+
+        #expect(fixture.hostIPv6GatewayManager.reconcileCount == 0)
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() != nil)
+        #expect(
+            try await fixture.stateStore.loadReadyState(path: fixture.config.readyStatePath) == nil
+        )
     }
 
     @Test
@@ -313,6 +442,71 @@ struct FlannelVXLANControllerTests {
     }
 
     @Test
+    func invalidIPv6IntentRemovesOwnedHostGateway() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .ready
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+        _ = try await controller.runOnce()
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() != nil)
+        try await fixture.writeRuntimeState(podCIDR: "10.250.22.0/24")
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await controller.runOnce()
+        }
+
+        #expect(fixture.tunnelBox.tunnel.isRunning)
+        #expect(fixture.ipv6TunnelBox.tunnel.wasDestroyed)
+        #expect(fixture.hostIPv6GatewayManager.removeAttemptCount == 1)
+        #expect(fixture.hostIPv6GatewayManager.removeCount == 1)
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() == nil)
+        let ownership = try #require(
+            try FlannelOwnershipStateStore(path: fixture.config.ownershipStatePath).load()
+        )
+        #expect(ownership.schemaVersion == 1)
+        #expect(ownership.ipv6InterfaceName == nil)
+        #expect(ownership.ipv6RoutePodCIDRs == nil)
+    }
+
+    @Test
+    func invalidIPv6IntentRetainsGatewayOwnershipAndRetriesRemoval() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .ready
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+        _ = try await controller.runOnce()
+        fixture.hostIPv6GatewayManager.failNextRemovals(1)
+        try await fixture.writeRuntimeState(podCIDR: "10.250.22.0/24")
+
+        do {
+            _ = try await controller.runOnce()
+            Issue.record("invalid IPv6 intent unexpectedly completed after gateway removal failure")
+        } catch {
+            let message = String(describing: error)
+            #expect(message.contains("remove owned host IPv6 gateway"))
+            #expect(message.contains("IPv6 family withdrawal incomplete"))
+        }
+
+        #expect(fixture.hostIPv6GatewayManager.removeAttemptCount == 1)
+        #expect(fixture.hostIPv6GatewayManager.removeCount == 0)
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() != nil)
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await controller.runOnce()
+        }
+
+        #expect(fixture.hostIPv6GatewayManager.removeAttemptCount == 2)
+        #expect(fixture.hostIPv6GatewayManager.removeCount == 1)
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() == nil)
+    }
+
+    @Test
     func invalidIPv6IntentRetainsCleanupOwnershipWhenWithdrawalFails() async throws {
         let fixture = try ControllerFixture(dualStackEnabled: true)
         try await fixture.writeRuntimeState(
@@ -391,6 +585,7 @@ struct FlannelVXLANControllerTests {
     @Test
     func rollsBackFailedIPv6TunnelWithoutStoppingIPv4() async throws {
         let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .ready
         try await fixture.writeRuntimeState(
             podCIDR: "10.250.22.0/24",
             ipv6PodCIDR: "fd42:10:244:22::/64"
@@ -402,8 +597,12 @@ struct FlannelVXLANControllerTests {
 
         #expect(result.ipv4Ready)
         #expect(result.ipv6Ready == false)
+        #expect(result.ipv6InterfaceName == nil)
         #expect(fixture.tunnelBox.tunnel.isRunning)
         #expect(fixture.ipv6TunnelBox.tunnel.wasDestroyed)
+        #expect(fixture.hostIPv6GatewayManager.removeAttemptCount == 1)
+        #expect(fixture.hostIPv6GatewayManager.removeCount == 1)
+        #expect(try fixture.hostIPv6GatewayOwnershipStore.load() == nil)
         let ownership = try #require(
             try FlannelOwnershipStateStore(path: fixture.config.ownershipStatePath).load()
         )
@@ -428,6 +627,7 @@ struct FlannelVXLANControllerTests {
         #expect(result.ipv4Ready)
         #expect(result.ipv6Ready == false)
         #expect(result.issues.contains { $0.id == "local/ipv6-dataplane-cleanup" })
+        #expect(result.issues.contains { $0.id == "local/ipv6-family-withdrawal" })
         #expect(fixture.ipv6TunnelBox.tunnel.isRunning)
         #expect(!fixture.ipv6TunnelBox.tunnel.wasDestroyed)
         let ownership = try #require(
@@ -466,6 +666,7 @@ struct FlannelVXLANControllerTests {
         #expect(result.ipv4Ready)
         #expect(result.ipv6Ready == false)
         #expect(result.issues.contains { $0.id == "local/ipv6-dataplane-cleanup" })
+        #expect(result.issues.contains { $0.id == "local/ipv6-family-withdrawal" })
         #expect(restartedIPv4TunnelBox.tunnel.isRunning)
         #expect(restartedIPv6TunnelBox.createdConfigurations.count == 1)
         #expect(restartedIPv6TunnelBox.tunnel.isRunning)
@@ -509,6 +710,7 @@ struct FlannelVXLANControllerTests {
         #expect(result.ipv4Ready)
         #expect(result.ipv6Ready == false)
         #expect(result.issues.contains { $0.id == "local/ipv6-dataplane-cleanup" })
+        #expect(result.issues.contains { $0.id == "local/ipv6-family-withdrawal" })
         #expect(restartedIPv4TunnelBox.tunnel.isRunning)
         #expect(restartedIPv6TunnelBox.createdConfigurations.isEmpty)
         #expect(fixture.system.removedRoutes.isEmpty)
@@ -545,6 +747,7 @@ struct FlannelVXLANControllerTests {
         #expect(result.ipv4Ready)
         #expect(result.ipv6Ready == false)
         #expect(result.issues.contains { $0.id == "local/ipv6-dataplane-cleanup" })
+        #expect(result.issues.contains { $0.id == "local/ipv6-family-withdrawal" })
         #expect(restartedIPv4TunnelBox.tunnel.isRunning)
         #expect(restartedIPv6TunnelBox.createdConfigurations.isEmpty)
         #expect(fixture.system.removedRoutes.isEmpty)
@@ -557,6 +760,24 @@ struct FlannelVXLANControllerTests {
         #expect(ownership.ipv6InterfaceName == "utun43")
         #expect(ownership.localIPv6PodCIDR == "fd42:10:244:22::/64")
         #expect(ownership.ipv6RoutePodCIDRs == ["fd42:10:244:2::/64"])
+
+        let recovered = try await restartedController.runOnce()
+
+        #expect(recovered.ipv4Ready)
+        #expect(recovered.ipv6Ready == true)
+        #expect(recovered.ipv6InterfaceName == "utun44")
+        #expect(restartedIPv6TunnelBox.createdConfigurations.count == 1)
+        #expect(
+            fixture.system.removedIPv6Routes.map { "\($0.podCIDR)|\($0.interface)" }
+                == ["fd42:10:244:2::/64|utun43"]
+        )
+        let recoveredOwnership = try #require(
+            try FlannelOwnershipStateStore(path: fixture.config.ownershipStatePath).load()
+        )
+        #expect(recoveredOwnership.schemaVersion == 2)
+        #expect(recoveredOwnership.ipv6InterfaceName == "utun44")
+        #expect(recoveredOwnership.localIPv6PodCIDR == "fd42:10:244:22::/64")
+        #expect(recoveredOwnership.ipv6RoutePodCIDRs == ["fd42:10:244:2::/64"])
     }
 
     @Test
@@ -576,6 +797,7 @@ struct FlannelVXLANControllerTests {
         #expect(firstDegraded.ipv4Ready)
         #expect(firstDegraded.ipv6Ready == false)
         #expect(firstDegraded.issues.contains { $0.id == "local/ipv6-dataplane-cleanup" })
+        #expect(firstDegraded.issues.contains { $0.id == "local/ipv6-family-withdrawal" })
         #expect(fixture.ipv6TunnelBox.tunnel.wasDestroyed)
         #expect(!fixture.ipv6TunnelBox.tunnel.isRunning)
         #expect(fixture.ipv6TunnelBox.createdConfigurations.count == 1)
@@ -593,6 +815,7 @@ struct FlannelVXLANControllerTests {
         #expect(secondDegraded.ipv4Ready)
         #expect(secondDegraded.ipv6Ready == false)
         #expect(secondDegraded.issues.contains { $0.id == "local/ipv6-dataplane-cleanup" })
+        #expect(secondDegraded.issues.contains { $0.id == "local/ipv6-family-withdrawal" })
         #expect(fixture.ipv6TunnelBox.createdConfigurations.count == 1)
         #expect(fixture.tunnelBox.tunnel.isRunning)
         #expect(fixture.system.removedRoutes.isEmpty)
@@ -1055,6 +1278,8 @@ private struct ControllerFixture {
     let system = MockFlannelSystemManager()
     let tunnelBox = MockTunnelBox()
     let ipv6TunnelBox = MockIPv6TunnelBox()
+    let hostIPv6GatewayManager: MockHostIPv6GatewayManager
+    let hostIPv6GatewayOwnershipStore: ControllerGatewayOwnershipStore
 
     init(
         dualStackEnabled: Bool = false,
@@ -1064,6 +1289,11 @@ private struct ControllerFixture {
         includeLinuxIPv6BackendData: Bool = true,
         dualStackBackendMTU: Int = 1_480
     ) throws {
+        let hostIPv6GatewayOwnershipStore = ControllerGatewayOwnershipStore()
+        self.hostIPv6GatewayOwnershipStore = hostIPv6GatewayOwnershipStore
+        self.hostIPv6GatewayManager = MockHostIPv6GatewayManager(
+            ownershipStore: hostIPv6GatewayOwnershipStore
+        )
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("flannel-controller-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1145,6 +1375,8 @@ private struct ControllerFixture {
             vtepMACStore: StaticVTEPMACStore(),
             vtepMACIPv6Store: StaticVTEPMACStore("02:aa:bb:cc:dd:ff"),
             ownershipStateStore: ownershipStateStore,
+            hostIPv6GatewayManager: hostIPv6GatewayManager,
+            hostIPv6GatewayOwnershipStore: hostIPv6GatewayOwnershipStore,
             now: { Date(timeIntervalSince1970: 1_700_000_000) },
             cleanupRetryDelay: .zero,
             makeTunnel: { configuration in
@@ -1154,6 +1386,113 @@ private struct ControllerFixture {
                 selectedIPv6TunnelBox.make(configuration)
             }
         )
+    }
+}
+
+private final class MockHostIPv6GatewayManager: FlannelHostIPv6GatewayManaging, @unchecked Sendable {
+    enum Mode {
+        case bridgePending
+        case dadPending
+        case ready
+        case failureAfterWriteAhead
+    }
+
+    private let lock = NSLock()
+    private let ownershipStore: any FlannelHostIPv6GatewayOwnershipStoring
+    private var modeValue: Mode = .bridgePending
+    private var reconcileCountValue = 0
+    private var removeAttemptCountValue = 0
+    private var removeFailuresRemaining = 0
+    private var removedValues: [FlannelHostIPv6GatewayOwnership] = []
+
+    init(ownershipStore: any FlannelHostIPv6GatewayOwnershipStoring) {
+        self.ownershipStore = ownershipStore
+    }
+
+    var mode: Mode {
+        get { lock.withLock { modeValue } }
+        set { lock.withLock { modeValue = newValue } }
+    }
+
+    var reconcileCount: Int {
+        lock.withLock { reconcileCountValue }
+    }
+
+    var removeCount: Int {
+        lock.withLock { removedValues.count }
+    }
+
+    var removeAttemptCount: Int {
+        lock.withLock { removeAttemptCountValue }
+    }
+
+    func failNextRemovals(_ count: Int) {
+        lock.withLock { removeFailuresRemaining = count }
+    }
+
+    func reconcile(
+        networkOwnership: FlannelHostOnlyNetworkOwnership,
+        knownOwnership _: FlannelHostIPv6GatewayOwnership?
+    ) throws -> FlannelHostIPv6GatewayReconcileResult {
+        let mode = lock.withLock {
+            reconcileCountValue += 1
+            return modeValue
+        }
+        switch mode {
+        case .bridgePending:
+            return .bridgePending
+        case .dadPending:
+            return .dadPending(try ownership(networkOwnership))
+        case .ready:
+            return .ready(try ownership(networkOwnership))
+        case .failureAfterWriteAhead:
+            try ownershipStore.save(try ownership(networkOwnership, phase: .adding))
+            throw FlannelVXLANError.runtime("injected host gateway failure after write-ahead ownership")
+        }
+    }
+
+    func remove(ownership: FlannelHostIPv6GatewayOwnership) throws {
+        try lock.withLock {
+            removeAttemptCountValue += 1
+            if removeFailuresRemaining > 0 {
+                removeFailuresRemaining -= 1
+                throw FlannelVXLANError.runtime("injected host gateway removal failure")
+            }
+            removedValues.append(ownership)
+        }
+    }
+
+    private func ownership(
+        _ networkOwnership: FlannelHostOnlyNetworkOwnership,
+        phase: FlannelHostIPv6GatewayOwnershipPhase = .owned
+    ) throws -> FlannelHostIPv6GatewayOwnership {
+        FlannelHostIPv6GatewayOwnership(
+            networkName: networkOwnership.name,
+            networkOwnershipID: networkOwnership.ownershipID,
+            ipv4PodCIDR: networkOwnership.podCIDR,
+            ipv6PodCIDR: try #require(networkOwnership.ipv6PodCIDR),
+            interfaceName: "bridge100",
+            ipv4Gateway: "10.250.22.1",
+            ipv6Gateway: "fd42:10:244:22::1",
+            phase: phase
+        )
+    }
+}
+
+private final class ControllerGatewayOwnershipStore: FlannelHostIPv6GatewayOwnershipStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: FlannelHostIPv6GatewayOwnership?
+
+    func load() throws -> FlannelHostIPv6GatewayOwnership? {
+        lock.withLock { value }
+    }
+
+    func save(_ ownership: FlannelHostIPv6GatewayOwnership) throws {
+        lock.withLock { value = ownership }
+    }
+
+    func remove() throws {
+        lock.withLock { value = nil }
     }
 }
 

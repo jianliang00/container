@@ -81,7 +81,9 @@ struct KubeProxyMacOS: AsyncParsableCommand {
         if dryRun {
             let applier = KubeProxyDryRunRuleApplier(
                 anchorName: config.pf.anchorName,
-                egressInterface: config.pf.configuredEgressInterface
+                egressInterface: config.pf.configuredEgressInterface,
+                ipv6EgressInterface: config.pf.configuredIPv6EgressInterface,
+                ipv6EgressSourceAddress: config.pf.configuredIPv6EgressSourceAddress
             ) { anchor in
                 print(anchor, terminator: "")
             }

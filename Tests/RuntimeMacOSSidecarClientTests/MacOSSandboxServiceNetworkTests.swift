@@ -74,6 +74,105 @@ struct MacOSSandboxServiceNetworkTests {
     }
 
     @Test
+    func rebootNodeRecoveryPersistsFenceRequestAndStopsSandbox() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-reboot-node")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recoveryStatePath = root.appendingPathComponent("node-state/vmnet-recovery.json").path
+        let recoveryRequestPath = root.appendingPathComponent("node-state/requests/fence.json").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: recoveryRequestPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        _ = try VMNetRecoveryStateStore(path: recoveryStatePath).recordHealthyObservation(
+            networkName: "default",
+            networkInstanceID: "instance-a",
+            bootSessionID: "boot-a"
+        )
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration(
+            vmnetDisconnectRecovery: .rebootNode,
+            vmnetRecoveryStatePath: recoveryStatePath,
+            vmnetRecoveryRequestPath: recoveryRequestPath,
+            vmnetRecoveryBootSessionID: "boot-a"
+        )
+        try await service.testingPrepareSandbox(config)
+
+        await service.handleSandboxNetworkInvalidation(
+            SandboxNetworkInvalidation(
+                network: "default",
+                hostname: "sandbox-host",
+                networkInstanceID: "instance-a"
+            )
+        )
+
+        let request = try #require(
+            try VMNetRecoveryRequestStore(path: recoveryRequestPath).load(
+                expectedWriterUID: Int(geteuid())
+            )
+        )
+        let state = try #require(try VMNetRecoveryStateStore(path: recoveryStatePath).load())
+        let snapshot = try await service.testingStateSnapshot()
+        #expect(request.networkInstanceID == "instance-a")
+        #expect(request.bootSessionID == "boot-a")
+        #expect(state.phase == .healthy)
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.failureReason == .networkInvalidated)
+    }
+
+    @Test
+    func networkInstanceChangeFencesAdmissionAndReleasesNewAllocation() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-instance-change")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recoveryStatePath = root.appendingPathComponent("node-state/vmnet-recovery.json").path
+        let recoveryRequestPath = root.appendingPathComponent("node-state/requests/fence.json").path
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: recoveryRequestPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let store = VMNetRecoveryStateStore(path: recoveryStatePath)
+        _ = try store.recordHealthyObservation(
+            networkName: "default",
+            networkInstanceID: "instance-a",
+            bootSessionID: "boot-a"
+        )
+
+        let key = RecordingSandboxNetworkControl.Key(network: "default", hostname: "sandbox-host")
+        let attachment = try makeAttachment(
+            network: key.network,
+            networkInstanceID: "instance-b",
+            hostname: key.hostname,
+            address: "192.168.64.2",
+            gateway: "192.168.64.1"
+        )
+        let recorder = RecordingSandboxNetworkControl(seededAttachments: [key: attachment])
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration(
+            vmnetDisconnectRecovery: .rebootNode,
+            vmnetRecoveryStatePath: recoveryStatePath,
+            vmnetRecoveryRequestPath: recoveryRequestPath,
+            vmnetRecoveryBootSessionID: "boot-a"
+        )
+
+        await #expect(throws: VMNetRecoveryStateError.self) {
+            _ = try await service.prepareSandboxNetworkState(containerConfig: config)
+        }
+
+        let state = try #require(try store.load())
+        let request = try #require(
+            try VMNetRecoveryRequestStore(path: recoveryRequestPath).load(
+                expectedWriterUID: Int(geteuid())
+            )
+        )
+        #expect(state.phase == .healthy)
+        #expect(state.networkInstanceID == "instance-a")
+        #expect(request.networkInstanceID == "instance-b")
+        #expect(await recorder.deallocateCalls() == [key])
+        #expect(try MacOSGuestNetworkLeaseStore.load(from: root) == nil)
+    }
+
+    @Test
     func monitorRecoveryRecordsDisconnectWithoutStoppingSandbox() async throws {
         let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-monitor")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -647,7 +746,10 @@ private func makeService(root: URL, recorder: RecordingSandboxNetworkControl) ->
 
 private func makeConfiguration(
     backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend = .vmnetShared,
-    vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled
+    vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled,
+    vmnetRecoveryStatePath: String? = nil,
+    vmnetRecoveryRequestPath: String? = nil,
+    vmnetRecoveryBootSessionID: String? = nil
 ) throws -> ContainerConfiguration {
     let image = ImageDescription(
         reference: "example/macos:latest",
@@ -694,13 +796,17 @@ private func makeConfiguration(
         guiEnabled: false,
         agentPort: 27000,
         networkBackend: backend,
-        vmnetDisconnectRecovery: vmnetDisconnectRecovery
+        vmnetDisconnectRecovery: vmnetDisconnectRecovery,
+        vmnetRecoveryStatePath: vmnetRecoveryStatePath,
+        vmnetRecoveryRequestPath: vmnetRecoveryRequestPath,
+        vmnetRecoveryBootSessionID: vmnetRecoveryBootSessionID
     )
     return config
 }
 
 private func makeAttachment(
     network: String,
+    networkInstanceID: String? = nil,
     hostname: String,
     address: String,
     gateway: String,
@@ -716,6 +822,7 @@ private func makeAttachment(
 
     return NetworkAttachment(
         network: network,
+        networkInstanceID: networkInstanceID,
         hostname: hostname,
         ipv4Address: try CIDRv4(
             IPv4Address(address),

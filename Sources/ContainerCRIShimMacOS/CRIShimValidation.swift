@@ -121,10 +121,47 @@ extension CRIShimConfig {
             if podNetwork.enabled == nil {
                 issues.append("podNetwork.enabled is required")
             }
+            if podNetwork.vmnetDisconnectRecovery == .rebootNode,
+                podNetwork.enabled != true
+            {
+                issues.append("podNetwork.vmnetDisconnectRecovery reboot-node requires podNetwork.enabled true")
+            }
             if podNetwork.enabled == true {
                 validateNonEmpty(podNetwork.networkName, name: "podNetwork.networkName", issues: &issues)
                 validatePath(podNetwork.runtimeStatePath, name: "podNetwork.runtimeStatePath", issues: &issues)
                 validatePath(podNetwork.readyStatePath, name: "podNetwork.readyStatePath", issues: &issues)
+                if podNetwork.vmnetDisconnectRecovery == .rebootNode {
+                    let recovery = resolvedVMNetRecoveryConfig
+                    validatePath(recovery.statePath, name: "podNetwork.vmnetRecovery.statePath", issues: &issues)
+                    validatePath(recovery.requestPath, name: "podNetwork.vmnetRecovery.requestPath", issues: &issues)
+                    if recovery.statePath?.trimmed == recovery.requestPath?.trimmed {
+                        issues.append("podNetwork.vmnetRecovery statePath and requestPath must be different")
+                    }
+                    if recovery.requestWriterUID < 0 || UInt32(exactly: recovery.requestWriterUID) == nil {
+                        issues.append("podNetwork.vmnetRecovery.requestWriterUID must be a valid uid")
+                    }
+                    if recovery.maxRebootAttempts <= 0 {
+                        issues.append("podNetwork.vmnetRecovery.maxRebootAttempts must be greater than zero")
+                    }
+                    if recovery.minimumRebootIntervalSeconds < 0 {
+                        issues.append("podNetwork.vmnetRecovery.minimumRebootIntervalSeconds must not be negative")
+                    }
+                    if recovery.attemptWindowSeconds <= 0 {
+                        issues.append("podNetwork.vmnetRecovery.attemptWindowSeconds must be greater than zero")
+                    }
+                    if recovery.maximumRequestAgeSeconds <= 0 {
+                        issues.append("podNetwork.vmnetRecovery.maximumRequestAgeSeconds must be greater than zero")
+                    }
+                    if recovery.verificationTimeoutSeconds <= 0 {
+                        issues.append("podNetwork.vmnetRecovery.verificationTimeoutSeconds must be greater than zero")
+                    }
+                    if recovery.pollIntervalSeconds <= 0 {
+                        issues.append("podNetwork.vmnetRecovery.pollIntervalSeconds must be greater than zero")
+                    }
+                    if recovery.healthyProbeFailureThreshold <= 0 {
+                        issues.append("podNetwork.vmnetRecovery.healthyProbeFailureThreshold must be greater than zero")
+                    }
+                }
             }
         }
 

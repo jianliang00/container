@@ -281,6 +281,7 @@ mkdir -p \
 stage_file "${BUILD_BIN_DIR}/container" "${PKGROOT}/usr/local/bin/container" 0755
 stage_file "${BUILD_BIN_DIR}/container-apiserver" "${PKGROOT}/usr/local/bin/container-apiserver" 0755
 stage_file "${BUILD_BIN_DIR}/container-cri-shim-macos" "${PKGROOT}/usr/local/bin/container-cri-shim-macos" 0755
+stage_file "${BUILD_BIN_DIR}/container-vmnet-recovery-macos" "${PKGROOT}/usr/local/bin/container-vmnet-recovery-macos" 0755
 stage_file "${BUILD_BIN_DIR}/container-cni-macvmnet" "${PKGROOT}/usr/local/bin/container-cni-macvmnet" 0755
 stage_file "${BUILD_BIN_DIR}/container-cni-macvmnet" "${PKGROOT}/opt/cni/bin/container-cni-macvmnet" 0755
 stage_file "${BUILD_BIN_DIR}/container-flannel-vxlan-macos" "${PKGROOT}/usr/local/bin/container-flannel-vxlan-macos" 0755
@@ -317,6 +318,7 @@ stage_file "${PACKAGING_DIR}/manifests/runtimeclass-macos-compat.yaml" "${PKGROO
 stage_file "${PACKAGING_DIR}/manifests/macos-node-bootstrap-rbac.yaml" "${PKGROOT}/usr/local/share/container-macos-node/manifests/macos-node-bootstrap-rbac.yaml" 0644
 
 stage_file "${PACKAGING_DIR}/launchd/com.apple.container.cri-shim-macos.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.cri-shim-macos.plist" 0644
+stage_file "${PACKAGING_DIR}/launchd/com.apple.container.vmnet-recovery-macos.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.vmnet-recovery-macos.plist" 0644
 stage_file "${PACKAGING_DIR}/launchd/com.apple.container.flannel-vxlan-macos.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.flannel-vxlan-macos.plist" 0644
 stage_file "${PACKAGING_DIR}/launchd/com.apple.container.kube-proxy-macos.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.kube-proxy-macos.plist" 0644
 stage_file "${PACKAGING_DIR}/launchd/com.apple.container.kubelet.plist" "${PKGROOT}/usr/local/share/container-macos-node/templates/launchd/com.apple.container.kubelet.plist" 0644
@@ -344,6 +346,7 @@ if [[ "$SKIP_CODESIGN" != true ]]; then
     codesign_path "${PKGROOT}/usr/local/bin/container" --identifier com.apple.container.cli
     codesign_path "${PKGROOT}/usr/local/bin/container-apiserver" --identifier com.apple.container.apiserver
     codesign_path "${PKGROOT}/usr/local/bin/container-cri-shim-macos" --prefix=com.apple.container.
+    codesign_path "${PKGROOT}/usr/local/bin/container-vmnet-recovery-macos" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-cni-macvmnet" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/opt/cni/bin/container-cni-macvmnet" --prefix=com.apple.container.
     codesign_path "${PKGROOT}/usr/local/bin/container-flannel-vxlan-macos" --prefix=com.apple.container.

@@ -63,6 +63,7 @@ let package = Package(
         .executable(name: "container-macos-image-prepare", targets: ["container-macos-image-prepare"]),
         .executable(name: "container-macos-vm-manager", targets: ["container-macos-vm-manager"]),
         .executable(name: "container-cri-shim-macos", targets: ["container-cri-shim-macos"]),
+        .executable(name: "container-vmnet-recovery-macos", targets: ["container-vmnet-recovery-macos"]),
         .executable(name: "container-cni-macvmnet", targets: ["container-cni-macvmnet"]),
         .executable(name: "container-k8s-networkpolicy-macos", targets: ["container-k8s-networkpolicy-macos"]),
         .executable(name: "container-kube-proxy-macos", targets: ["container-kube-proxy-macos"]),
@@ -239,6 +240,17 @@ let package = Package(
             ],
             path: "Sources/Helpers/CRIShimMacOS"
         ),
+        .executableTarget(
+            name: "container-vmnet-recovery-macos",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                "ContainerCRIShimMacOS",
+                "ContainerNetworkClient",
+                "ContainerResource",
+            ],
+            path: "Sources/Helpers/VMNetRecoveryMacOS"
+        ),
         .testTarget(
             name: "ContainerCRIShimMacOSTests",
             dependencies: [
@@ -251,6 +263,16 @@ let package = Package(
                 "ContainerKit",
                 "ContainerK8sNetworkPolicyMacOS",
             ]
+        ),
+        .testTarget(
+            name: "VMNetRecoveryMacOSTests",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+                "ContainerCRIShimMacOS",
+                "ContainerResource",
+                .target(name: "container-vmnet-recovery-macos", condition: .when(platforms: [.macOS])),
+            ],
+            path: "Tests/VMNetRecoveryMacOSTests"
         ),
         .target(
             name: "ContainerCNIMacvmnet",

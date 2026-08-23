@@ -158,6 +158,30 @@ struct CRIShimCoreMappingTests {
     }
 
     @Test
+    func mapsVMNetRecoveryContractIntoRuntimeConfiguration() throws {
+        let configuration = try makeCRIShimSandboxConfiguration(
+            id: "sandbox-1",
+            request: Runtime_V1_RunPodSandboxRequest(),
+            handler: resolvedRuntimeHandler,
+            sandboxImage: CRIShimImageRecord(
+                reference: "example.com/macos/sandbox:latest",
+                digest: "sha256:sandbox",
+                size: 1
+            ),
+            vmnetDisconnectRecovery: .rebootNode,
+            vmnetRecoveryStatePath: "/var/lib/container/vmnet-recovery/state.json",
+            vmnetRecoveryRequestPath: "/var/lib/container/vmnet-recovery/requests/fence.json",
+            vmnetRecoveryBootSessionID: "boot-a"
+        )
+
+        let options = try #require(configuration.macosGuest)
+        #expect(options.vmnetDisconnectRecovery == .rebootNode)
+        #expect(options.vmnetRecoveryStatePath == "/var/lib/container/vmnet-recovery/state.json")
+        #expect(options.vmnetRecoveryRequestPath == "/var/lib/container/vmnet-recovery/requests/fence.json")
+        #expect(options.vmnetRecoveryBootSessionID == "boot-a")
+    }
+
+    @Test
     func mapsSandboxDNSConfigurationToMacOSGuest() throws {
         var request = Runtime_V1_RunPodSandboxRequest()
         request.config.dnsConfig.servers = ["10.96.0.10"]

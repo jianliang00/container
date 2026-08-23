@@ -65,6 +65,7 @@ public enum MacOSKubeadmVMNetDisconnectRecovery: String, CaseIterable, Sendable,
     case disabled
     case monitor
     case stopSandbox = "stop-sandbox"
+    case rebootNode = "reboot-node"
 }
 
 public struct MacOSKubeadmRuntimeClassProfile: Sendable, Equatable {

@@ -38,6 +38,8 @@ public struct Attachment: Codable, Sendable, Equatable {
     }
     /// The network ID associated with the attachment.
     public let network: String
+    /// Unique identifier for the network-helper generation that issued this attachment.
+    public let networkInstanceID: String?
     /// The hostname associated with the attachment.
     public let hostname: String
     /// The CIDR address describing the interface IPv4 address, with the prefix length of the subnet.
@@ -61,6 +63,7 @@ public struct Attachment: Codable, Sendable, Equatable {
 
     public init(
         network: String,
+        networkInstanceID: String? = nil,
         hostname: String,
         ipv4Address: CIDRv4,
         ipv4Gateway: IPv4Address,
@@ -72,6 +75,7 @@ public struct Attachment: Codable, Sendable, Equatable {
         dns: DNSConfiguration? = nil
     ) {
         self.network = network
+        self.networkInstanceID = networkInstanceID
         self.hostname = hostname
         self.ipv4Address = ipv4Address
         self.ipv4Gateway = ipv4Gateway
@@ -85,6 +89,7 @@ public struct Attachment: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case network
+        case networkInstanceID
         case hostname
         case ipv4Address
         case ipv4Gateway
@@ -105,6 +110,7 @@ public struct Attachment: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         network = try container.decode(String.self, forKey: .network)
+        networkInstanceID = try container.decodeIfPresent(String.self, forKey: .networkInstanceID)
         hostname = try container.decode(String.self, forKey: .hostname)
         if let address = try? container.decode(CIDRv4.self, forKey: .ipv4Address) {
             ipv4Address = address
@@ -129,6 +135,7 @@ public struct Attachment: Codable, Sendable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         try container.encode(network, forKey: .network)
+        try container.encodeIfPresent(networkInstanceID, forKey: .networkInstanceID)
         try container.encode(hostname, forKey: .hostname)
         try container.encode(ipv4Address, forKey: .ipv4Address)
         try container.encode(ipv4Gateway, forKey: .ipv4Gateway)
@@ -145,6 +152,7 @@ extension Attachment {
     public func withMTU(_ mtu: UInt32?) -> Attachment {
         Attachment(
             network: network,
+            networkInstanceID: networkInstanceID,
             hostname: hostname,
             ipv4Address: ipv4Address,
             ipv4Gateway: ipv4Gateway,
@@ -160,6 +168,7 @@ extension Attachment {
     public func withDNS(_ dns: DNSConfiguration?) -> Attachment {
         Attachment(
             network: network,
+            networkInstanceID: networkInstanceID,
             hostname: hostname,
             ipv4Address: ipv4Address,
             ipv4Gateway: ipv4Gateway,

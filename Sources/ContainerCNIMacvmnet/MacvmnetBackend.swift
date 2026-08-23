@@ -144,12 +144,13 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
         let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
         let state = try await client.inspectSandboxNetwork()
         let attachment = try attachment(from: state, for: plan)
-        let currentResult = CNIResult(
-            attachment: attachment,
-            interfaceName: identity.ifName,
-            sandbox: plan.sandbox
-        )
-        guard previousResult == currentResult else {
+        guard
+            previousResult.matches(
+                attachment: attachment,
+                interfaceName: identity.ifName,
+                sandbox: plan.sandbox
+            )
+        else {
             throw CNIError.backendUnavailable(
                 "CHECK failed: current sandbox network state does not match the previous CNI result"
             )
@@ -298,6 +299,7 @@ extension CNIResult {
         }
 
         self.init(
+            networkInstanceID: attachment.networkInstanceID,
             interfaces: [interface],
             ips: ips,
             routes: routes,
@@ -310,11 +312,19 @@ extension CNIResult {
         interfaceName: String,
         sandbox: CNISandboxURI?
     ) -> Bool {
-        self
-            == CNIResult(
-                attachment: attachment,
-                interfaceName: interfaceName,
-                sandbox: sandbox
-            )
+        var previous = self
+        var current = CNIResult(
+            attachment: attachment,
+            interfaceName: interfaceName,
+            sandbox: sandbox
+        )
+        if let networkInstanceID = previous.networkInstanceID,
+            networkInstanceID != current.networkInstanceID
+        {
+            return false
+        }
+        previous.networkInstanceID = nil
+        current.networkInstanceID = nil
+        return previous == current
     }
 }

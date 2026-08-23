@@ -9,13 +9,14 @@ needed by the first rollout:
 
 - `container` and core container runtime helpers
 - `container-cri-shim-macos`
+- `container-vmnet-recovery-macos`
 - `container-cni-macvmnet`
 - `container-flannel-vxlan-macos`
 - `container-kube-proxy-macos`
 - `container-macos-kubeadm`
 - forked `kubelet`
 - kubelet, CRI, CNI, Flannel VXLAN, and kube-proxy config templates
-- launchd plists for container-system bootstrap, kubelet, CRI shim, Flannel VXLAN, and kube-proxy
+- launchd plists for container-system bootstrap, kubelet, CRI shim, vmnet recovery, Flannel VXLAN, and kube-proxy
 
 The package does not include cluster credentials, write active Kubernetes
 configuration under `/etc`, install launchd jobs, or enable PF. Its inert
@@ -265,10 +266,17 @@ Runtime logs are written to stable host paths:
 - container system boot bootstrap: `/var/log/container-macos-node-bootstrap.log`
 - `kubelet`: `/var/log/kubelet.log`
 - `container-cri-shim-macos`: `/var/log/container-cri-shim-macos.log`
+- `container-vmnet-recovery-macos`: `/var/log/container-vmnet-recovery-macos.log`
 - `container-flannel-vxlan-macos`: `/var/log/container-flannel-vxlan-macos.log`
 - `container-kube-proxy-macos`: `/var/log/container-kube-proxy-macos.log`
 - Pod log root: `/var/log/pods`
 - Container log symlinks: `/var/log/containers`
+
+When `vmnetDisconnectRecovery` is `reboot-node`, the root coordinator owns
+`/var/lib/container/vmnet-recovery/state.json`. A non-root container service
+user receives read-only access to that state and can only create
+`/var/lib/container/vmnet-recovery/requests/fence.json`; it cannot rewrite the
+reboot budget or delete a pending request.
 
 For process state, inspect the matching launchd labels:
 
@@ -276,6 +284,7 @@ For process state, inspect the matching launchd labels:
 sudo launchctl print system/com.apple.container.kubelet
 sudo launchctl print system/com.apple.container.macos-node-bootstrap
 sudo launchctl print system/com.apple.container.cri-shim-macos
+sudo launchctl print system/com.apple.container.vmnet-recovery-macos
 sudo launchctl print system/com.apple.container.flannel-vxlan-macos
 sudo launchctl print system/com.apple.container.kube-proxy-macos
 ```

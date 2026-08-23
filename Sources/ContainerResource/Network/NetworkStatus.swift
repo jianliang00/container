@@ -19,6 +19,10 @@ import ContainerizationExtras
 /// The runtime status of a network — the addresses assigned once the network
 /// plugin is active. Only present after the network has started.
 public struct NetworkStatus: Codable, Sendable {
+    /// Unique identifier for this running network-helper generation.
+    /// A nil value denotes a legacy helper that does not publish generations.
+    public let networkInstanceID: String?
+
     /// The IPv4 subnet assigned to the network.
     public let ipv4Subnet: CIDRv4
 
@@ -39,8 +43,10 @@ public struct NetworkStatus: Codable, Sendable {
         ipv4Subnet: CIDRv4,
         ipv4Gateway: IPv4Address,
         ipv6Subnet: CIDRv6?,
-        ipv6Gateway: IPv6Address? = nil
+        ipv6Gateway: IPv6Address? = nil,
+        networkInstanceID: String? = nil
     ) {
+        self.networkInstanceID = networkInstanceID
         self.ipv4Subnet = ipv4Subnet
         self.ipv4Gateway = ipv4Gateway
         self.ipv6Subnet = ipv6Subnet

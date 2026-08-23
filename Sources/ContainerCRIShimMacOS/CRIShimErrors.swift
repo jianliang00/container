@@ -20,6 +20,7 @@ public enum CRIShimErrorKind: String, Sendable, Codable, Equatable {
     case unsupported
     case invalidArgument
     case notFound
+    case unavailable
     case internalError
 }
 
@@ -37,6 +38,7 @@ public enum CRIShimError: Error, Sendable, Equatable, CustomStringConvertible {
     case unsupported(String)
     case invalidArgument(String)
     case notFound(String)
+    case unavailable(String)
     case internalError(String)
 
     public var description: String {
@@ -46,6 +48,8 @@ public enum CRIShimError: Error, Sendable, Equatable, CustomStringConvertible {
         case .invalidArgument(let message):
             return message
         case .notFound(let message):
+            return message
+        case .unavailable(let message):
             return message
         case .internalError(let message):
             return message
@@ -60,6 +64,8 @@ public enum CRIShimError: Error, Sendable, Equatable, CustomStringConvertible {
             return CRIShimErrorDisposition(kind: .invalidArgument, message: message)
         case .notFound(let message):
             return CRIShimErrorDisposition(kind: .notFound, message: message)
+        case .unavailable(let message):
+            return CRIShimErrorDisposition(kind: .unavailable, message: message)
         case .internalError(let message):
             return CRIShimErrorDisposition(kind: .internalError, message: message)
         }

@@ -54,6 +54,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let cniManager: any CRIShimCNIManaging
     private let logManager: any CRIShimLogManaging
     private let podNetworkStateStore: PodNetworkStateStore
+    private let vmnetRecoveryController: CRIShimVMNetRecoveryController
     private let streamingServer: CRIShimStreamingServer?
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
@@ -67,6 +68,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         cniManager: any CRIShimCNIManaging = ProcessCRIShimCNIManager(),
         logManager: (any CRIShimLogManaging)? = nil,
         podNetworkStateStore: PodNetworkStateStore = PodNetworkStateStore(),
+        vmnetRecoveryController: CRIShimVMNetRecoveryController? = nil,
         streamingServer: CRIShimStreamingServer? = nil,
         handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
     ) {
@@ -78,6 +80,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         self.imageManager = imageManager
         self.cniManager = cniManager
         self.podNetworkStateStore = podNetworkStateStore
+        self.vmnetRecoveryController = vmnetRecoveryController ?? CRIShimVMNetRecoveryController(config: config)
         self.logManager =
             logManager
             ?? CRIShimLogManager(
@@ -107,7 +110,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StatusResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.status.rawValue) {
-            let snapshot = await readinessChecker.snapshot(config: config)
+            let snapshot = vmnetRecoveryController.apply(
+                to: await readinessChecker.snapshot(config: config)
+            )
             var response = Runtime_V1_StatusResponse()
             var status = Runtime_V1_RuntimeStatus()
             status.conditions = [
@@ -197,6 +202,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RunPodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.runPodSandbox.rawValue) {
+            try vmnetRecoveryController.requireAdmission()
             try CRIShimUnsupportedFieldValidator.validate(request)
 
             var handler = try config.resolveRuntimeHandler(request.runtimeHandler)
@@ -221,13 +227,18 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 sandboxImage: sandboxImage,
                 metadata: metadata,
                 networkMTUOverride: networkMTUOverride,
-                vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled
+                vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled,
+                vmnetRecoveryStatePath: vmnetRecoveryController.statePath,
+                vmnetRecoveryRequestPath: vmnetRecoveryController.requestPath,
+                vmnetRecoveryBootSessionID: vmnetRecoveryController.bootSessionID
             )
 
             do {
+                try vmnetRecoveryController.requireAdmission()
                 try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
                 try metadataStore.upsertSandbox(metadata)
                 if handler.usesPodNetworking {
+                    try vmnetRecoveryController.requireAdmission()
                     let network = try await cniManager.add(
                         sandboxID: sandboxID,
                         networkName: handler.network,
@@ -1196,6 +1207,8 @@ public enum CRIShimGRPCStatusMapper {
                 .invalidArgument
             case .notFound:
                 .notFound
+            case .unavailable:
+                .unavailable
             case .internalError:
                 .internalError
             }

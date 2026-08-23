@@ -3996,7 +3996,21 @@ extension MacOSSandboxService {
             "vmnet helper disconnected network=\(invalidation.network) hostname=\(invalidation.hostname) recovery=\(recovery.rawValue)"
         log.warning("\(detail)")
         writeContainerLog(Data((detail + "\n").utf8))
-        guard recovery == .stopSandbox else {
+        if recovery == .rebootNode {
+            do {
+                try configuration?.macosGuest?.recordVMNetRecoveryFence(
+                    networkName: invalidation.network,
+                    networkInstanceID: invalidation.networkInstanceID,
+                    failureReason: "unexpected vmnet helper disconnect"
+                )
+            } catch {
+                log.error(
+                    "failed to persist node-wide vmnet recovery fence",
+                    metadata: ["error": "\(error)"]
+                )
+            }
+        }
+        guard recovery == .stopSandbox || recovery == .rebootNode else {
             return
         }
 

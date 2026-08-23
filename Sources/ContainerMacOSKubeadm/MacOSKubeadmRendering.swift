@@ -136,6 +136,7 @@ public enum MacOSKubeadmRenderer {
         networkMode: MacOSKubeadmNetworkMode = .full,
         dualStackEnabled: Bool = false,
         vmnetDisconnectRecovery: MacOSKubeadmVMNetDisconnectRecovery = .disabled,
+        containerServiceUserID: Int = 0,
         runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = []
     ) -> String {
         let sandboxImageJSON = jsonString(sandboxImage)
@@ -191,7 +192,19 @@ public enum MacOSKubeadmRenderer {
                         "vmnetDisconnectRecovery": "\(vmnetDisconnectRecovery.rawValue)",
                         "networkName": "kubernetes-pod",
                         "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
-                        "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
+                        "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json",
+                        "vmnetRecovery": {
+                            "statePath": "/var/lib/container/vmnet-recovery/state.json",
+                            "requestPath": "/var/lib/container/vmnet-recovery/requests/fence.json",
+                            "requestWriterUID": \(containerServiceUserID),
+                            "maxRebootAttempts": 2,
+                            "minimumRebootIntervalSeconds": 120,
+                            "attemptWindowSeconds": 3600,
+                            "maximumRequestAgeSeconds": 900,
+                            "verificationTimeoutSeconds": 300,
+                            "pollIntervalSeconds": 2,
+                            "healthyProbeFailureThreshold": 3
+                        }
                     }
                 }
 
@@ -398,6 +411,22 @@ public enum MacOSKubeadmRenderer {
                 "/etc/kubernetes/container-cri-shim-macos-config.json",
             ],
             logPath: "/var/log/container-cri-shim-macos.log"
+        )
+    }
+
+    public static func vmnetRecoveryPlist(containerServiceUserID: Int = 0) -> String {
+        launchdPlist(
+            label: "com.apple.container.vmnet-recovery-macos",
+            programArguments: [
+                "/bin/launchctl",
+                "asuser",
+                "\(containerServiceUserID)",
+                "/usr/local/bin/container-vmnet-recovery-macos",
+                "--config",
+                "/etc/kubernetes/container-cri-shim-macos-config.json",
+            ],
+            logPath: "/var/log/container-vmnet-recovery-macos.log",
+            throttleInterval: 10
         )
     }
 

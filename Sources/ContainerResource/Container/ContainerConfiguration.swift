@@ -188,6 +188,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             case disabled
             case monitor
             case stopSandbox = "stop-sandbox"
+            case rebootNode = "reboot-node"
         }
 
         public var snapshotEnabled: Bool
@@ -195,6 +196,9 @@ public struct ContainerConfiguration: Sendable, Codable {
         public var agentPort: UInt32
         public var networkBackend: NetworkBackend
         public var vmnetDisconnectRecovery: VMNetDisconnectRecovery
+        public var vmnetRecoveryStatePath: String?
+        public var vmnetRecoveryRequestPath: String?
+        public var vmnetRecoveryBootSessionID: String?
 
         enum CodingKeys: String, CodingKey {
             case snapshotEnabled
@@ -202,6 +206,9 @@ public struct ContainerConfiguration: Sendable, Codable {
             case agentPort
             case networkBackend
             case vmnetDisconnectRecovery
+            case vmnetRecoveryStatePath
+            case vmnetRecoveryRequestPath
+            case vmnetRecoveryBootSessionID
         }
 
         public init(
@@ -209,13 +216,19 @@ public struct ContainerConfiguration: Sendable, Codable {
             guiEnabled: Bool,
             agentPort: UInt32,
             networkBackend: NetworkBackend = .virtualizationNAT,
-            vmnetDisconnectRecovery: VMNetDisconnectRecovery = .disabled
+            vmnetDisconnectRecovery: VMNetDisconnectRecovery = .disabled,
+            vmnetRecoveryStatePath: String? = nil,
+            vmnetRecoveryRequestPath: String? = nil,
+            vmnetRecoveryBootSessionID: String? = nil
         ) {
             self.snapshotEnabled = snapshotEnabled
             self.guiEnabled = guiEnabled
             self.agentPort = agentPort
             self.networkBackend = networkBackend
             self.vmnetDisconnectRecovery = vmnetDisconnectRecovery
+            self.vmnetRecoveryStatePath = vmnetRecoveryStatePath
+            self.vmnetRecoveryRequestPath = vmnetRecoveryRequestPath
+            self.vmnetRecoveryBootSessionID = vmnetRecoveryBootSessionID
         }
 
         public init(from decoder: Decoder) throws {
@@ -226,6 +239,9 @@ public struct ContainerConfiguration: Sendable, Codable {
             networkBackend = try container.decodeIfPresent(NetworkBackend.self, forKey: .networkBackend) ?? .virtualizationNAT
             vmnetDisconnectRecovery =
                 try container.decodeIfPresent(VMNetDisconnectRecovery.self, forKey: .vmnetDisconnectRecovery) ?? .disabled
+            vmnetRecoveryStatePath = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryStatePath)
+            vmnetRecoveryRequestPath = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryRequestPath)
+            vmnetRecoveryBootSessionID = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryBootSessionID)
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -235,6 +251,9 @@ public struct ContainerConfiguration: Sendable, Codable {
             try container.encode(agentPort, forKey: .agentPort)
             try container.encode(networkBackend, forKey: .networkBackend)
             try container.encode(vmnetDisconnectRecovery, forKey: .vmnetDisconnectRecovery)
+            try container.encodeIfPresent(vmnetRecoveryStatePath, forKey: .vmnetRecoveryStatePath)
+            try container.encodeIfPresent(vmnetRecoveryRequestPath, forKey: .vmnetRecoveryRequestPath)
+            try container.encodeIfPresent(vmnetRecoveryBootSessionID, forKey: .vmnetRecoveryBootSessionID)
         }
     }
 

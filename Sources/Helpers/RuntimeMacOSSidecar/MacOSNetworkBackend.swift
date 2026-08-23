@@ -35,8 +35,14 @@ struct PreparedMacOSNetworkActivation: Sendable {
     let network: String
     let client: NetworkClient
     let session: XPCClientSession
+    let recoveryOptions: ContainerConfiguration.MacOSGuestOptions?
+    let networkInstanceID: String?
 
     func activate() async throws {
+        try recoveryOptions?.requireVMNetRecoveryAdmission(
+            networkName: network,
+            expectedNetworkInstanceID: networkInstanceID
+        )
         try await client.activate(on: session)
     }
 }
@@ -219,6 +225,9 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                     return nil
                 }
 
+                try containerConfig.macosGuest?.requireVMNetRecoveryAdmission(
+                    networkName: request.network
+                )
                 let client = NetworkClient(id: request.network, plugin: "container-network-vmnet")
                 let session = client.connect()
                 sessions.append(session)
@@ -226,6 +235,10 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                     hostname: leasedInterface.attachment.hostname,
                     macAddress: leasedInterface.attachment.macAddress,
                     on: session
+                )
+                try containerConfig.macosGuest?.validateObservedVMNetInstance(
+                    networkName: request.network,
+                    networkInstanceID: attachment.networkInstanceID
                 )
 
                 let managedNetwork = try resolveManagedNetwork(
@@ -242,7 +255,9 @@ struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
                         PreparedMacOSNetworkActivation(
                             network: request.network,
                             client: client,
-                            session: session
+                            session: session,
+                            recoveryOptions: containerConfig.macosGuest,
+                            networkInstanceID: attachment.networkInstanceID
                         )
                     )
                 }

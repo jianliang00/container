@@ -81,7 +81,8 @@ struct DefaultNetworkServiceTest {
                 ipv4Subnet: try CIDRv4("192.168.64.0/24"),
                 ipv4Gateway: try IPv4Address("192.168.64.1"),
                 ipv6Subnet: try CIDRv6("fd42:10:244:22::/64"),
-                ipv6Gateway: try IPv6Address("fd42:10:244:22::1")
+                ipv6Gateway: try IPv6Address("fd42:10:244:22::1"),
+                networkInstanceID: "instance-a"
             )
         )
         let session = XPCServerSession()
@@ -97,6 +98,7 @@ struct DefaultNetworkServiceTest {
         let expectedIPv6Gateway = try IPv6Address("fd42:10:244:22::1")
 
         #expect(allocated == lookedUp)
+        #expect(allocated.networkInstanceID == "instance-a")
         #expect(allocated.ipv6Address == expectedIPv6Address)
         #expect(allocated.ipv6Gateway == expectedIPv6Gateway)
     }

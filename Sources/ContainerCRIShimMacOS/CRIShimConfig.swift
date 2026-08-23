@@ -22,6 +22,10 @@ public enum CRIShimConfigDefaults {
     public static let systemConfigURL = URL(fileURLWithPath: "/etc/container/\(fileName)")
     public static let legacySystemConfigURL = URL(fileURLWithPath: "/etc/\(fileName)")
     public static let stateDirectoryURL = URL(fileURLWithPath: "/var/lib/container/cri-shim-macos")
+    public static let vmnetRecoveryStateURL = URL(fileURLWithPath: "/var/lib/container/vmnet-recovery/state.json")
+    public static let vmnetRecoveryRequestURL = URL(
+        fileURLWithPath: "/var/lib/container/vmnet-recovery/requests/fence.json"
+    )
     public static let userConfigURL = URL(
         fileURLWithPath: ("~/.config/container/\(fileName)" as NSString).expandingTildeInPath
     )
@@ -275,6 +279,7 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
     public var networkName: String?
     public var runtimeStatePath: String?
     public var readyStatePath: String?
+    public var vmnetRecovery: VMNetRecoveryConfig?
 
     public init(
         enabled: Bool? = nil,
@@ -282,7 +287,8 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
         vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled,
         networkName: String? = nil,
         runtimeStatePath: String? = nil,
-        readyStatePath: String? = nil
+        readyStatePath: String? = nil,
+        vmnetRecovery: VMNetRecoveryConfig? = nil
     ) {
         self.enabled = enabled
         self.dualStackEnabled = dualStackEnabled
@@ -290,6 +296,7 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
         self.networkName = networkName
         self.runtimeStatePath = runtimeStatePath
         self.readyStatePath = readyStatePath
+        self.vmnetRecovery = vmnetRecovery
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -299,6 +306,7 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
         case networkName
         case runtimeStatePath
         case readyStatePath
+        case vmnetRecovery
     }
 
     public init(from decoder: any Decoder) throws {
@@ -313,5 +321,103 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
         networkName = try container.decodeIfPresent(String.self, forKey: .networkName)
         runtimeStatePath = try container.decodeIfPresent(String.self, forKey: .runtimeStatePath)
         readyStatePath = try container.decodeIfPresent(String.self, forKey: .readyStatePath)
+        vmnetRecovery = try container.decodeIfPresent(VMNetRecoveryConfig.self, forKey: .vmnetRecovery)
+    }
+}
+
+public struct VMNetRecoveryConfig: Codable, Equatable, Sendable {
+    public static let defaultMaxRebootAttempts = 2
+    public static let defaultMinimumRebootIntervalSeconds = 120
+    public static let defaultAttemptWindowSeconds = 3600
+    public static let defaultMaximumRequestAgeSeconds = 900
+    public static let defaultVerificationTimeoutSeconds = 300
+    public static let defaultPollIntervalSeconds = 2
+    public static let defaultHealthyProbeFailureThreshold = 3
+
+    public var statePath: String?
+    public var requestPath: String?
+    public var requestWriterUID: Int
+    public var maxRebootAttempts: Int
+    public var minimumRebootIntervalSeconds: Int
+    public var attemptWindowSeconds: Int
+    public var maximumRequestAgeSeconds: Int
+    public var verificationTimeoutSeconds: Int
+    public var pollIntervalSeconds: Int
+    public var healthyProbeFailureThreshold: Int
+
+    public init(
+        statePath: String? = nil,
+        requestPath: String? = nil,
+        requestWriterUID: Int = 0,
+        maxRebootAttempts: Int = Self.defaultMaxRebootAttempts,
+        minimumRebootIntervalSeconds: Int = Self.defaultMinimumRebootIntervalSeconds,
+        attemptWindowSeconds: Int = Self.defaultAttemptWindowSeconds,
+        maximumRequestAgeSeconds: Int = Self.defaultMaximumRequestAgeSeconds,
+        verificationTimeoutSeconds: Int = Self.defaultVerificationTimeoutSeconds,
+        pollIntervalSeconds: Int = Self.defaultPollIntervalSeconds,
+        healthyProbeFailureThreshold: Int = Self.defaultHealthyProbeFailureThreshold
+    ) {
+        self.statePath = statePath
+        self.requestPath = requestPath
+        self.requestWriterUID = requestWriterUID
+        self.maxRebootAttempts = maxRebootAttempts
+        self.minimumRebootIntervalSeconds = minimumRebootIntervalSeconds
+        self.attemptWindowSeconds = attemptWindowSeconds
+        self.maximumRequestAgeSeconds = maximumRequestAgeSeconds
+        self.verificationTimeoutSeconds = verificationTimeoutSeconds
+        self.pollIntervalSeconds = pollIntervalSeconds
+        self.healthyProbeFailureThreshold = healthyProbeFailureThreshold
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case statePath
+        case requestPath
+        case requestWriterUID
+        case maxRebootAttempts
+        case minimumRebootIntervalSeconds
+        case attemptWindowSeconds
+        case maximumRequestAgeSeconds
+        case verificationTimeoutSeconds
+        case pollIntervalSeconds
+        case healthyProbeFailureThreshold
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        statePath = try container.decodeIfPresent(String.self, forKey: .statePath)
+        requestPath = try container.decodeIfPresent(String.self, forKey: .requestPath)
+        requestWriterUID = try container.decodeIfPresent(Int.self, forKey: .requestWriterUID) ?? 0
+        maxRebootAttempts = try container.decodeIfPresent(Int.self, forKey: .maxRebootAttempts) ?? Self.defaultMaxRebootAttempts
+        minimumRebootIntervalSeconds =
+            try container.decodeIfPresent(Int.self, forKey: .minimumRebootIntervalSeconds)
+            ?? Self.defaultMinimumRebootIntervalSeconds
+        attemptWindowSeconds =
+            try container.decodeIfPresent(Int.self, forKey: .attemptWindowSeconds)
+            ?? Self.defaultAttemptWindowSeconds
+        maximumRequestAgeSeconds =
+            try container.decodeIfPresent(Int.self, forKey: .maximumRequestAgeSeconds)
+            ?? Self.defaultMaximumRequestAgeSeconds
+        verificationTimeoutSeconds =
+            try container.decodeIfPresent(Int.self, forKey: .verificationTimeoutSeconds)
+            ?? Self.defaultVerificationTimeoutSeconds
+        pollIntervalSeconds =
+            try container.decodeIfPresent(Int.self, forKey: .pollIntervalSeconds)
+            ?? Self.defaultPollIntervalSeconds
+        healthyProbeFailureThreshold =
+            try container.decodeIfPresent(Int.self, forKey: .healthyProbeFailureThreshold)
+            ?? Self.defaultHealthyProbeFailureThreshold
+    }
+}
+
+extension CRIShimConfig {
+    public var resolvedVMNetRecoveryConfig: VMNetRecoveryConfig {
+        var recovery = podNetwork?.vmnetRecovery ?? VMNetRecoveryConfig()
+        if recovery.statePath?.trimmed.isEmpty != false {
+            recovery.statePath = CRIShimConfigDefaults.vmnetRecoveryStateURL.path
+        }
+        if recovery.requestPath?.trimmed.isEmpty != false {
+            recovery.requestPath = CRIShimConfigDefaults.vmnetRecoveryRequestURL.path
+        }
+        return recovery
     }
 }

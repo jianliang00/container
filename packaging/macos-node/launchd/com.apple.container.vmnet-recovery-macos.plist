@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.apple.container.vmnet-recovery-macos</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/launchctl</string>
+        <string>asuser</string>
+        <string>0</string>
+        <string>/usr/local/bin/container-vmnet-recovery-macos</string>
+        <string>--config</string>
+        <string>/etc/kubernetes/container-cri-shim-macos-config.json</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/var/log/container-vmnet-recovery-macos.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/container-vmnet-recovery-macos.log</string>
+</dict>
+</plist>

@@ -52,6 +52,13 @@ public struct SandboxNetworkControl: Sendable {
 struct SandboxNetworkInvalidation: Sendable, Equatable {
     let network: String
     let hostname: String
+    let networkInstanceID: String?
+
+    init(network: String, hostname: String, networkInstanceID: String? = nil) {
+        self.network = network
+        self.hostname = hostname
+        self.networkInstanceID = networkInstanceID
+    }
 }
 
 private actor SandboxNetworkSessionStore {
@@ -145,8 +152,13 @@ private actor SandboxNetworkSessionStore {
             return
         }
         leases.removeValue(forKey: key)
+        let attachment = try? await lease.allocation.value
         await onInvalidation(
-            SandboxNetworkInvalidation(network: key.network, hostname: key.hostname)
+            SandboxNetworkInvalidation(
+                network: key.network,
+                hostname: key.hostname,
+                networkInstanceID: attachment?.networkInstanceID
+            )
         )
     }
 }
@@ -260,13 +272,20 @@ extension MacOSSandboxService {
                     )
                 }
 
+                try containerConfig.macosGuest?.requireVMNetRecoveryAdmission(
+                    networkName: request.network
+                )
                 let attachment = try await networkControl.allocate(
                     request.network,
                     request.hostname,
                     request.macAddress ?? persistedAttachment?.macAddress
                 )
-                attachments.append(attachment)
                 acquiredAttachments.append(attachment)
+                try containerConfig.macosGuest?.validateObservedVMNetInstance(
+                    networkName: request.network,
+                    networkInstanceID: attachment.networkInstanceID
+                )
+                attachments.append(attachment)
             }
 
             let projectedAttachments = containerConfig.macOSGuestReportedNetworkAttachments(attachments)

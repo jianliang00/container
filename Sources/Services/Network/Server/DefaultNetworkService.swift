@@ -106,6 +106,7 @@ public actor DefaultNetworkService: NetworkService {
         let ip = IPv4Address(index)
         let attachment = Attachment(
             network: network.id,
+            networkInstanceID: status.networkInstanceID,
             hostname: hostname,
             ipv4Address: try CIDRv4(ip, prefix: status.ipv4Subnet.prefix),
             ipv4Gateway: status.ipv4Gateway,
@@ -313,6 +314,7 @@ public actor DefaultNetworkService: NetworkService {
         let ipv6Address = try makeIPv6Address(status: status, macAddress: macAddress)
         let attachment = Attachment(
             network: network.id,
+            networkInstanceID: status.networkInstanceID,
             hostname: hostname,
             ipv4Address: ipv4Address,
             ipv4Gateway: status.ipv4Gateway,

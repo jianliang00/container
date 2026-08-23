@@ -105,6 +105,29 @@ struct MacOSKubeadmRenderingTests {
         #expect(object["ThrottleInterval"] == nil)
     }
 
+    @Test func vmnetRecoveryPlistUsesContainerServiceBootstrapContext() throws {
+        let rendered = MacOSKubeadmRenderer.vmnetRecoveryPlist(containerServiceUserID: 501)
+        let object = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(rendered.utf8),
+                format: nil
+            ) as? [String: Any]
+        )
+
+        #expect(object["Label"] as? String == "com.apple.container.vmnet-recovery-macos")
+        #expect(
+            object["ProgramArguments"] as? [String] == [
+                "/bin/launchctl",
+                "asuser",
+                "501",
+                "/usr/local/bin/container-vmnet-recovery-macos",
+                "--config",
+                "/etc/kubernetes/container-cri-shim-macos-config.json",
+            ])
+        #expect(object["KeepAlive"] as? Bool == true)
+        #expect(object["ThrottleInterval"] as? Int == 10)
+    }
+
     @Test func statusIncludesContainerSystemBootstrapArtifacts() {
         #expect(
             MacOSKubeadmStatusRunner.inspectedFiles.contains(
@@ -113,6 +136,14 @@ struct MacOSKubeadmRenderingTests {
         #expect(
             MacOSKubeadmStatusRunner.launchdLabels.contains(
                 MacOSKubeadmContainerSystem.bootstrapLaunchdLabel
+            ))
+        #expect(
+            MacOSKubeadmStatusRunner.inspectedFiles.contains(
+                "/var/lib/container/vmnet-recovery/state.json"
+            ))
+        #expect(
+            MacOSKubeadmStatusRunner.launchdLabels.contains(
+                "com.apple.container.vmnet-recovery-macos"
             ))
     }
 
@@ -185,6 +216,31 @@ struct MacOSKubeadmRenderingTests {
         let podNetwork = try #require(object["podNetwork"] as? [String: Any])
 
         #expect(podNetwork["vmnetDisconnectRecovery"] as? String == "stop-sandbox")
+    }
+
+    @Test func CRIConfigurationRendersBoundedRebootRecovery() throws {
+        let rendered = MacOSKubeadmRenderer.criShimConfiguration(
+            sandboxImage: "localhost/macos-sandbox:test",
+            vmnetDisconnectRecovery: .rebootNode,
+            containerServiceUserID: 501
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        let podNetwork = try #require(object["podNetwork"] as? [String: Any])
+        let recovery = try #require(podNetwork["vmnetRecovery"] as? [String: Any])
+
+        #expect(podNetwork["vmnetDisconnectRecovery"] as? String == "reboot-node")
+        #expect(recovery["statePath"] as? String == "/var/lib/container/vmnet-recovery/state.json")
+        #expect(recovery["requestPath"] as? String == "/var/lib/container/vmnet-recovery/requests/fence.json")
+        #expect(recovery["requestWriterUID"] as? Int == 501)
+        #expect(recovery["maxRebootAttempts"] as? Int == 2)
+        #expect(recovery["minimumRebootIntervalSeconds"] as? Int == 120)
+        #expect(recovery["attemptWindowSeconds"] as? Int == 3600)
+        #expect(recovery["maximumRequestAgeSeconds"] as? Int == 900)
+        #expect(recovery["verificationTimeoutSeconds"] as? Int == 300)
+        #expect(recovery["pollIntervalSeconds"] as? Int == 2)
+        #expect(recovery["healthyProbeFailureThreshold"] as? Int == 3)
     }
 
     @Test func kubeletPlistRendersDualNodeIPsAsOneArgument() throws {

@@ -58,6 +58,7 @@ struct CNIResultTests {
     @Test func projectsExplicitDualStackAttachment() throws {
         let attachment = Attachment(
             network: "kubernetes-pod",
+            networkInstanceID: "instance-a",
             hostname: "sandbox-1",
             ipv4Address: try CIDRv4("10.250.34.2/24"),
             ipv4Gateway: try IPv4Address("10.250.34.1"),
@@ -73,12 +74,42 @@ struct CNIResultTests {
         )
 
         #expect(result.ips?.map(\.address) == ["10.250.34.2/24", "fd42:10:244:22::2/64"])
+        #expect(result.networkInstanceID == "instance-a")
         #expect(result.ips?.map(\.gateway) == ["10.250.34.1", "fd42:10:244:22::1"])
         #expect(
             result.routes == [
                 CNIRoute(dst: "0.0.0.0/0", gw: "10.250.34.1"),
                 CNIRoute(dst: "::/0", gw: "fd42:10:244:22::1"),
             ])
+
+        var legacyResult = result
+        legacyResult.networkInstanceID = nil
+        #expect(
+            legacyResult.matches(
+                attachment: attachment,
+                interfaceName: "eth0",
+                sandbox: try CNISandboxURI("macvmnet://sandbox/sandbox-1")
+            )
+        )
+
+        var staleResult = result
+        staleResult.networkInstanceID = "instance-old"
+        #expect(
+            !staleResult.matches(
+                attachment: attachment,
+                interfaceName: "eth0",
+                sandbox: try CNISandboxURI("macvmnet://sandbox/sandbox-1")
+            )
+        )
+    }
+
+    @Test func legacyResultWithoutNetworkInstanceRemainsDecodable() throws {
+        let result = try JSONDecoder().decode(
+            CNIResult.self,
+            from: Data(#"{"cniVersion":"1.1.0"}"#.utf8)
+        )
+
+        #expect(result.networkInstanceID == nil)
     }
 
     @Test func ignoresVmnetGeneratedIPv6AddressWithoutExplicitGateway() throws {

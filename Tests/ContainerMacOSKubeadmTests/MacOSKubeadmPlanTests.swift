@@ -177,6 +177,84 @@ struct MacOSKubeadmPlanTests {
         }
     }
 
+    @Test func rebootNodeRecoveryStagesAndStartsCoordinatorOnlyWhenEnabled() throws {
+        var enabled = try makeOptions(startServices: true)
+        enabled.vmnetDisconnectRecovery = .rebootNode
+        enabled.containerServiceUserID = 501
+
+        let enabledPlan = try MacOSKubeadmPlanner.joinPlan(options: enabled)
+        let recoveryPlist = try #require(
+            enabledPlan.steps.compactMap { step -> String? in
+                guard case .writeFile(let path, let contents, 0o644, false) = step.action,
+                    path == "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.vmnet-recovery-macos.plist"
+                else {
+                    return nil
+                }
+                return contents
+            }.first
+        )
+        #expect(recoveryPlist.contains("<string>asuser</string>"))
+        #expect(recoveryPlist.contains("<string>501</string>"))
+        #expect(
+            enabledPlan.steps.contains { step in
+                guard step.message == "ensure private vmnet recovery directory",
+                    case .createDirectory(
+                        "/tmp/macos-node/var/lib/container/vmnet-recovery",
+                        0o700
+                    ) = step.action
+                else {
+                    return false
+                }
+                return true
+            }
+        )
+        #expect(
+            enabledPlan.steps.contains { step in
+                guard step.message == "ensure private vmnet recovery request directory",
+                    case .createDirectory(
+                        "/tmp/macos-node/var/lib/container/vmnet-recovery/requests",
+                        0o700
+                    ) = step.action
+                else {
+                    return false
+                }
+                return true
+            }
+        )
+        #expect(
+            enabledPlan.steps.contains { step in
+                guard step.message == "grant container service user access to vmnet recovery state",
+                    case .runCommand(let arguments, false) = step.action
+                else {
+                    return false
+                }
+                return arguments.contains("501")
+                    && arguments.contains("/tmp/macos-node/var/lib/container/vmnet-recovery")
+                    && arguments.contains("/tmp/macos-node/var/lib/container/vmnet-recovery/requests")
+                    && arguments[2].contains("file_inherit")
+                    && arguments[2].contains("only_inherit")
+                    && arguments[2].contains("state.json.lock")
+                    && arguments[2].contains("add_file")
+                    && !arguments[2].contains("delete_child")
+            }
+        )
+        #expect(enabledPlan.steps.contains { $0.message == "start vmnet recovery launchd job" })
+        #expect(enabledPlan.steps.contains { $0.message == "kickstart vmnet recovery launchd job" })
+
+        let disabled = try makeOptions(startServices: true)
+        let disabledPlan = try MacOSKubeadmPlanner.joinPlan(options: disabled)
+        #expect(
+            !disabledPlan.steps.contains { step in
+                guard case .writeFile(let path, _, _, _) = step.action else {
+                    return false
+                }
+                return path.hasSuffix("com.apple.container.vmnet-recovery-macos.plist")
+            }
+        )
+        #expect(!disabledPlan.steps.contains { $0.message == "start vmnet recovery launchd job" })
+        #expect(disabledPlan.steps.contains { $0.message == "remove previous vmnet recovery launchd plist" })
+    }
+
     @Test func dualStackJoinPlanRendersExplicitNodeContract() throws {
         var options = try makeOptions(startServices: false)
         options.enableDualStack = true

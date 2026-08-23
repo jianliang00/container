@@ -19,6 +19,7 @@ import ContainerResource
 import ContainerXPC
 import ContainerizationError
 import ContainerizationExtras
+import Foundation
 import Logging
 
 public actor AllocationOnlyVmnetNetwork: Network {
@@ -26,6 +27,7 @@ public actor AllocationOnlyVmnetNetwork: Network {
     private static let defaultIPv4Subnet = try! CIDRv4("192.168.64.1/24")
 
     private let configuration: NetworkConfiguration
+    private let networkInstanceID: String
     private let log: Logger
     private var _status: NetworkStatus?
 
@@ -44,6 +46,7 @@ public actor AllocationOnlyVmnetNetwork: Network {
         }
 
         self.configuration = configuration
+        self.networkInstanceID = UUID().uuidString.lowercased()
         self.log = log
         self._status = nil
     }
@@ -76,7 +79,8 @@ public actor AllocationOnlyVmnetNetwork: Network {
         self._status = NetworkStatus(
             ipv4Subnet: ipv4Subnet,
             ipv4Gateway: gateway,
-            ipv6Subnet: nil
+            ipv6Subnet: nil,
+            networkInstanceID: networkInstanceID
         )
         log.info(
             "started allocation-only network",

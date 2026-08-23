@@ -41,6 +41,18 @@
         "vmnetDisconnectRecovery": "disabled",
         "networkName": "kubernetes-pod",
         "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
-        "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"
+        "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json",
+        "vmnetRecovery": {
+            "statePath": "/var/lib/container/vmnet-recovery/state.json",
+            "requestPath": "/var/lib/container/vmnet-recovery/requests/fence.json",
+            "requestWriterUID": 0,
+            "maxRebootAttempts": 2,
+            "minimumRebootIntervalSeconds": 120,
+            "attemptWindowSeconds": 3600,
+            "maximumRequestAgeSeconds": 900,
+            "verificationTimeoutSeconds": 300,
+            "pollIntervalSeconds": 2,
+            "healthyProbeFailureThreshold": 3
+        }
     }
 }

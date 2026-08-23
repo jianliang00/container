@@ -111,7 +111,6 @@ public enum MacOSKubeadmPlanner {
                 "/var/lib/container/flannel-vxlan",
             ])
         }
-
         var steps: [MacOSKubeadmStep] = directories.map { path in
             MacOSKubeadmStep(
                 message: "ensure directory \(path)",
@@ -123,6 +122,42 @@ public enum MacOSKubeadmPlanner {
                 MacOSKubeadmStep(
                     message: "ensure private Kubernetes credential directory",
                     action: .createDirectory(path: options.rooted(credentialDirectory), mode: 0o700)
+                )
+            )
+        }
+        if options.vmnetDisconnectRecovery == .rebootNode {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "ensure private vmnet recovery directory",
+                    action: .createDirectory(
+                        path: options.rooted("/var/lib/container/vmnet-recovery"),
+                        mode: 0o700
+                    )
+                )
+            )
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "ensure private vmnet recovery request directory",
+                    action: .createDirectory(
+                        path: options.rooted("/var/lib/container/vmnet-recovery/requests"),
+                        mode: 0o700
+                    )
+                )
+            )
+            if options.containerServiceUserID != 0 {
+                steps.append(vmnetRecoveryAccessStep(options: options))
+            }
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "write vmnet recovery launchd plist",
+                    action: .writeFile(
+                        path: options.rooted("/Library/LaunchDaemons/com.apple.container.vmnet-recovery-macos.plist"),
+                        contents: MacOSKubeadmRenderer.vmnetRecoveryPlist(
+                            containerServiceUserID: options.containerServiceUserID
+                        ),
+                        mode: 0o644,
+                        sensitive: false
+                    )
                 )
             )
         }
@@ -180,6 +215,7 @@ public enum MacOSKubeadmPlanner {
                         networkMode: options.networkMode,
                         dualStackEnabled: options.enableDualStack,
                         vmnetDisconnectRecovery: options.vmnetDisconnectRecovery,
+                        containerServiceUserID: options.containerServiceUserID,
                         runtimeClasses: options.runtimeClasses
                     ),
                     mode: 0o644,
@@ -395,6 +431,10 @@ public enum MacOSKubeadmPlanner {
                 )
             ),
             stopLaunchdJobStep(
+                message: "stop vmnet recovery launchd job if present",
+                label: "com.apple.container.vmnet-recovery-macos"
+            ),
+            stopLaunchdJobStep(
                 message: "stop kubelet launchd job if present",
                 label: "com.apple.container.kubelet"
             ),
@@ -464,6 +504,7 @@ public enum MacOSKubeadmPlanner {
             ("/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist", false, false),
             ("/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist", false, false),
             ("/Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist", false, false),
+            ("/Library/LaunchDaemons/com.apple.container.vmnet-recovery-macos.plist", false, false),
             ("/etc/kubernetes/bootstrap-kubelet.kubeconfig", false, true),
             ("/etc/kubernetes/kubelet.conf", false, true),
             ("/etc/kubernetes/kubelet.kubeconfig", false, true),
@@ -499,12 +540,14 @@ public enum MacOSKubeadmPlanner {
             let statePaths = [
                 "/var/lib/kubelet",
                 "/var/lib/container/cri-shim-macos",
+                "/var/lib/container/vmnet-recovery",
                 "/var/lib/container/cni/macvmnet",
                 "/var/lib/container/flannel-vxlan",
                 "/var/log/pods",
                 "/var/log/containers",
                 "/var/log/kubelet.log",
                 "/var/log/container-cri-shim-macos.log",
+                "/var/log/container-vmnet-recovery-macos.log",
                 "/var/log/container-macos-node-bootstrap.log",
                 "/var/log/container-flannel-vxlan-macos.log",
                 "/var/log/container-kube-proxy-macos.log",
@@ -559,7 +602,9 @@ public enum MacOSKubeadmPlanner {
         guard !options.networkMode.usesPodNetworking || !(options.flannelToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("discovered flannel-macos token is required")
         }
-        guard options.containerServiceUserID >= 0 else {
+        guard options.containerServiceUserID >= 0,
+            UInt32(exactly: options.containerServiceUserID) != nil
+        else {
             throw MacOSKubeadmError.invalidInput("--container-service-user must be a non-negative uid")
         }
         guard !options.clusterDNS.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -616,7 +661,11 @@ public enum MacOSKubeadmPlanner {
             stopLaunchdJobStep(
                 message: "stop previous container system bootstrap launchd job if present",
                 label: MacOSKubeadmContainerSystem.bootstrapLaunchdLabel
-            )
+            ),
+            stopLaunchdJobStep(
+                message: "stop previous vmnet recovery launchd job if present",
+                label: "com.apple.container.vmnet-recovery-macos"
+            ),
         ]
         if !networkMode.usesPodNetworking {
             steps.append(
@@ -802,6 +851,48 @@ public enum MacOSKubeadmPlanner {
                 ),
             ])
         }
+        if options.vmnetDisconnectRecovery == .rebootNode {
+            steps.append(contentsOf: [
+                MacOSKubeadmStep(
+                    message: "enable vmnet recovery launchd job",
+                    action: .runCommand(
+                        arguments: ["/bin/launchctl", "enable", "system/com.apple.container.vmnet-recovery-macos"],
+                        bestEffort: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "start vmnet recovery launchd job",
+                    action: .runCommand(
+                        arguments: [
+                            "/bin/launchctl",
+                            "bootstrap",
+                            "system",
+                            "/Library/LaunchDaemons/com.apple.container.vmnet-recovery-macos.plist",
+                        ],
+                        bestEffort: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "kickstart vmnet recovery launchd job",
+                    action: .runCommand(
+                        arguments: ["/bin/launchctl", "kickstart", "-k", "system/com.apple.container.vmnet-recovery-macos"],
+                        bestEffort: false
+                    )
+                ),
+            ])
+        } else {
+            steps.append(
+                MacOSKubeadmStep(
+                    message: "remove previous vmnet recovery launchd plist",
+                    action: .removePath(
+                        path: options.rooted("/Library/LaunchDaemons/com.apple.container.vmnet-recovery-macos.plist"),
+                        recursive: false,
+                        bestEffort: true,
+                        sensitive: false
+                    )
+                )
+            )
+        }
         return steps
     }
 
@@ -911,6 +1002,7 @@ public enum MacOSKubeadmPlanner {
         for path in [
             "/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist",
             "/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
+            "/Library/LaunchDaemons/com.apple.container.vmnet-recovery-macos.plist",
             "/etc/kubernetes/flannel-macos.kubeconfig",
             "/etc/kubernetes/kube-proxy.kubeconfig",
             "/etc/kubernetes/flannel-vxlan-macos.conf",
@@ -973,6 +1065,49 @@ public enum MacOSKubeadmPlanner {
                 )
             ),
         ]
+    }
+
+    private static func vmnetRecoveryAccessStep(options: MacOSKubeadmJoinOptions) -> MacOSKubeadmStep {
+        let recoveryPath = options.rooted("/var/lib/container/vmnet-recovery")
+        let requestPath = options.rooted("/var/lib/container/vmnet-recovery/requests")
+        let script = """
+            set -eu
+            user=$(/usr/bin/id -nu "$1")
+            state_path=$2
+            request_path=$3
+            state_traverse_acl="$user allow readattr,readextattr,readsecurity,search"
+            state_inherit_acl="$user allow read,readattr,readextattr,readsecurity,file_inherit,only_inherit"
+            state_file_acl="$user allow read,readattr,readextattr,readsecurity"
+            request_directory_acl="$user allow readattr,readextattr,readsecurity,search,add_file"
+            /bin/mkdir -p "$state_path" "$request_path"
+            /bin/chmod -a "$state_traverse_acl" "$state_path" 2>/dev/null || true
+            /bin/chmod -a "$state_inherit_acl" "$state_path" 2>/dev/null || true
+            /bin/chmod +a "$state_traverse_acl" "$state_path"
+            /bin/chmod +a "$state_inherit_acl" "$state_path"
+            /bin/chmod -a "$request_directory_acl" "$request_path" 2>/dev/null || true
+            /bin/chmod +a "$request_directory_acl" "$request_path"
+            for file in "$state_path/state.json" "$state_path/state.json.lock"; do
+                if [ -e "$file" ]; then
+                    /bin/chmod -a "$state_file_acl" "$file" 2>/dev/null || true
+                    /bin/chmod +a "$state_file_acl" "$file"
+                fi
+            done
+            """
+        return MacOSKubeadmStep(
+            message: "grant container service user access to vmnet recovery state",
+            action: .runCommand(
+                arguments: [
+                    "/bin/sh",
+                    "-c",
+                    script,
+                    "container-macos-kubeadm-vmnet-recovery-acl",
+                    "\(options.containerServiceUserID)",
+                    recoveryPath,
+                    requestPath,
+                ],
+                bestEffort: false
+            )
+        )
     }
 
     private static func stopLaunchdJobStep(message: String, label: String) -> MacOSKubeadmStep {

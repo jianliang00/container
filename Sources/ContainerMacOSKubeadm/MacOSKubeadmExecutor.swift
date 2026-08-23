@@ -105,6 +105,9 @@ public struct MacOSKubeadmJoinRunner {
                 "/opt/cni/bin/container-cni-macvmnet",
             ])
         }
+        if options.vmnetDisconnectRecovery == .rebootNode {
+            requiredExecutables.append("/usr/local/bin/container-vmnet-recovery-macos")
+        }
         for executable in requiredExecutables {
             if !options.dryRun {
                 try validateExecutable(options.rooted(executable), name: executable)
@@ -360,6 +363,7 @@ public struct MacOSKubeadmStatusRunner {
     static let inspectedFiles = [
         "/usr/local/bin/container-macos-kubeadm",
         "/usr/local/bin/container-cri-shim-macos",
+        "/usr/local/bin/container-vmnet-recovery-macos",
         "/usr/local/bin/container-flannel-vxlan-macos",
         "/usr/local/bin/container-kube-proxy-macos",
         "/usr/local/bin/kubelet",
@@ -378,12 +382,15 @@ public struct MacOSKubeadmStatusRunner {
         "/var/lib/container/kubernetes-credentials/kube-proxy-macos.token",
         "/var/lib/container/kubernetes-credentials/flannel-macos.token",
         "/var/lib/container/flannel-vxlan/ready.json",
+        "/var/lib/container/vmnet-recovery/state.json",
+        "/var/lib/container/vmnet-recovery/requests/fence.json",
         MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath,
     ]
 
     static let launchdLabels = [
         MacOSKubeadmContainerSystem.bootstrapLaunchdLabel,
         "com.apple.container.cri-shim-macos",
+        "com.apple.container.vmnet-recovery-macos",
         "com.apple.container.flannel-vxlan-macos",
         "com.apple.container.kube-proxy-macos",
         "com.apple.container.kubelet",

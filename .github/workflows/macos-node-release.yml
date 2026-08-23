@@ -449,6 +449,7 @@ jobs:
             "usr/local/bin/container"
             "usr/local/bin/container-apiserver"
             "usr/local/bin/container-cri-shim-macos"
+            "usr/local/bin/container-vmnet-recovery-macos"
             "usr/local/bin/container-cni-macvmnet"
             "opt/cni/bin/container-cni-macvmnet"
             "usr/local/bin/container-flannel-vxlan-macos"
@@ -475,6 +476,7 @@ jobs:
             "usr/local/share/container-macos-node/templates/config/kube-proxy.conf"
             "usr/local/share/container-macos-node/templates/launchd/com.apple.container.kubelet.plist"
             "usr/local/share/container-macos-node/templates/launchd/com.apple.container.cri-shim-macos.plist"
+            "usr/local/share/container-macos-node/templates/launchd/com.apple.container.vmnet-recovery-macos.plist"
             "usr/local/share/container-macos-node/templates/launchd/com.apple.container.flannel-vxlan-macos.plist"
             "usr/local/share/container-macos-node/templates/launchd/com.apple.container.kube-proxy-macos.plist"
             "usr/local/libexec/container/plugins/machine-apiserver/config.toml"
@@ -501,6 +503,7 @@ jobs:
             "etc/cni/net.d/10-macvmnet.conflist"
             "Library/LaunchDaemons/com.apple.container.kubelet.plist"
             "Library/LaunchDaemons/com.apple.container.cri-shim-macos.plist"
+            "Library/LaunchDaemons/com.apple.container.vmnet-recovery-macos.plist"
             "Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist"
             "Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist"
           )

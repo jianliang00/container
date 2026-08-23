@@ -55,7 +55,10 @@ func makeCRIShimSandboxConfiguration(
     sandboxImage: CRIShimImageRecord,
     metadata: CRIShimSandboxMetadata? = nil,
     networkMTUOverride: UInt32? = nil,
-    vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled
+    vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled,
+    vmnetRecoveryStatePath: String? = nil,
+    vmnetRecoveryRequestPath: String? = nil,
+    vmnetRecoveryBootSessionID: String? = nil
 ) throws -> ContainerConfiguration {
     let sandboxID = id.trimmed
     guard !sandboxID.isEmpty else {
@@ -113,7 +116,10 @@ func makeCRIShimSandboxConfiguration(
         guiEnabled: handler.guiEnabled,
         agentPort: 27_000,
         networkBackend: try makeCRIShimMacOSNetworkBackend(handler.networkBackend),
-        vmnetDisconnectRecovery: vmnetDisconnectRecovery
+        vmnetDisconnectRecovery: vmnetDisconnectRecovery,
+        vmnetRecoveryStatePath: vmnetRecoveryStatePath,
+        vmnetRecoveryRequestPath: vmnetRecoveryRequestPath,
+        vmnetRecoveryBootSessionID: vmnetRecoveryBootSessionID
     )
     return configuration
 }

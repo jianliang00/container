@@ -73,6 +73,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
     }
 
     private let configuration: NetworkConfiguration
+    private let networkInstanceID: String
     private let stateMutex: Mutex<State>
     private let hostIPv6GatewayWaiter: VmnetHostIPv6GatewayWaiter
     private let log: Logger
@@ -101,6 +102,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
 
         log.info("creating vmnet network")
         self.configuration = configuration
+        self.networkInstanceID = UUID().uuidString.lowercased()
         self.log = log
         self.hostIPv6GatewayWaiter = VmnetHostIPv6GatewayWaiter(checker: hostIPv6GatewayReadinessChecker)
         stateMutex = Mutex(State())
@@ -145,7 +147,8 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
                     ipv4Subnet: networkInfo.ipv4Subnet,
                     ipv4Gateway: networkInfo.ipv4Gateway,
                     ipv6Subnet: networkInfo.ipv6Subnet,
-                    ipv6Gateway: configuration.ipv6Subnet.map { IPv6Address($0.lower.value + 1) }
+                    ipv6Gateway: configuration.ipv6Subnet.map { IPv6Address($0.lower.value + 1) },
+                    networkInstanceID: networkInstanceID
                 )
                 state.network = networkInfo.network
                 state.transition = nil

@@ -44,6 +44,7 @@ struct CRIShimErrorMappingTests {
         #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.unsupported("unsupported")).code == .unimplemented)
         #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.invalidArgument("invalid")).code == .invalidArgument)
         #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.notFound("missing")).code == .notFound)
+        #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.unavailable("fenced")).code == .unavailable)
         #expect(CRIShimGRPCStatusMapper.status(for: CRIShimError.internalError("boom")).code == .internalError)
 
         let passthrough = GRPCStatus(code: .failedPrecondition, message: "already mapped")

@@ -16,6 +16,7 @@
 
 public struct CNIResult: Codable, Equatable, Sendable {
     public var cniVersion: String
+    public var networkInstanceID: String?
     public var interfaces: [CNIInterface]?
     public var ips: [CNIIPConfig]?
     public var routes: [CNIRoute]?
@@ -23,12 +24,14 @@ public struct CNIResult: Codable, Equatable, Sendable {
 
     public init(
         cniVersion: String = CNISpec.version,
+        networkInstanceID: String? = nil,
         interfaces: [CNIInterface]? = nil,
         ips: [CNIIPConfig]? = nil,
         routes: [CNIRoute]? = nil,
         dns: CNIDNS? = nil
     ) {
         self.cniVersion = cniVersion
+        self.networkInstanceID = networkInstanceID
         self.interfaces = interfaces
         self.ips = ips
         self.routes = routes

@@ -84,6 +84,93 @@ struct CRIShimConfigTests {
     }
 
     @Test
+    func podNetworkRebootRecoveryDecodesDefaultsAndResolvesStatePath() throws {
+        let podNetwork = try JSONDecoder().decode(
+            PodNetworkConfig.self,
+            from: Data(
+                #"{"enabled":true,"vmnetDisconnectRecovery":"reboot-node","networkName":"kubernetes-pod","vmnetRecovery":{}}"#.utf8
+            )
+        )
+        let config = CRIShimConfig(
+            stateDirectory: "/var/lib/example-state",
+            podNetwork: podNetwork
+        )
+        let recovery = config.resolvedVMNetRecoveryConfig
+
+        #expect(podNetwork.vmnetDisconnectRecovery == .rebootNode)
+        #expect(recovery.statePath == "/var/lib/container/vmnet-recovery/state.json")
+        #expect(recovery.requestPath == "/var/lib/container/vmnet-recovery/requests/fence.json")
+        #expect(recovery.requestWriterUID == 0)
+        #expect(recovery.maxRebootAttempts == 2)
+        #expect(recovery.minimumRebootIntervalSeconds == 120)
+        #expect(recovery.attemptWindowSeconds == 3600)
+        #expect(recovery.maximumRequestAgeSeconds == 900)
+        #expect(recovery.verificationTimeoutSeconds == 300)
+        #expect(recovery.pollIntervalSeconds == 2)
+        #expect(recovery.healthyProbeFailureThreshold == 3)
+    }
+
+    @Test
+    func rebootRecoveryValidationRejectsUnsafeBounds() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.podNetwork?.vmnetDisconnectRecovery = .rebootNode
+        config.podNetwork?.vmnetRecovery = VMNetRecoveryConfig(
+            statePath: "relative-state.json",
+            requestPath: "relative-request.json",
+            requestWriterUID: -1,
+            maxRebootAttempts: 0,
+            minimumRebootIntervalSeconds: -1,
+            attemptWindowSeconds: 0,
+            maximumRequestAgeSeconds: 0,
+            verificationTimeoutSeconds: 0,
+            pollIntervalSeconds: 0,
+            healthyProbeFailureThreshold: 0
+        )
+
+        let issues = config.validationIssues
+        #expect(issues.contains("podNetwork.vmnetRecovery.statePath must be an absolute path"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.requestPath must be an absolute path"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.requestWriterUID must be a valid uid"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.maxRebootAttempts must be greater than zero"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.minimumRebootIntervalSeconds must not be negative"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.attemptWindowSeconds must be greater than zero"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.maximumRequestAgeSeconds must be greater than zero"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.verificationTimeoutSeconds must be greater than zero"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.pollIntervalSeconds must be greater than zero"))
+        #expect(issues.contains("podNetwork.vmnetRecovery.healthyProbeFailureThreshold must be greater than zero"))
+    }
+
+    @Test
+    func rebootRecoveryRequiresEnabledPodNetworking() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.podNetwork?.enabled = false
+        config.podNetwork?.vmnetDisconnectRecovery = .rebootNode
+
+        #expect(
+            config.validationIssues.contains(
+                "podNetwork.vmnetDisconnectRecovery reboot-node requires podNetwork.enabled true"
+            )
+        )
+    }
+
+    @Test
+    func disabledRecoveryIgnoresUnusedRecoveryTuning() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.podNetwork?.vmnetRecovery = VMNetRecoveryConfig(
+            statePath: "relative-state.json",
+            maxRebootAttempts: 0,
+            minimumRebootIntervalSeconds: -1,
+            attemptWindowSeconds: 0,
+            maximumRequestAgeSeconds: 0,
+            verificationTimeoutSeconds: 0,
+            pollIntervalSeconds: 0,
+            healthyProbeFailureThreshold: 0
+        )
+
+        #expect(config.validationIssues.isEmpty)
+    }
+
+    @Test
     func validDocumentedConfigHasNoValidationIssues() throws {
         let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
         #expect(config.validationIssues.isEmpty)

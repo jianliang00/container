@@ -165,6 +165,252 @@ struct MacOSKubeadmContainerSystemTests {
         #expect(try transientOperationArtifacts(in: directory).isEmpty)
     }
 
+    @Test func unsupportedLegacyGUIDomainDoesNotBlockBackgroundStart() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launchctl = LaunchctlHarness()
+        launchctl.guiDomainPrintStatusSequence = [125, 125]
+        launchctl.onAgentBootstrap = { plist in
+            try writeCompletion(from: plist, status: 0)
+        }
+
+        try MacOSKubeadmContainerSystemOperationRunner(
+            dependencies: makeOperationDependencies(
+                operationRoot: directory.path,
+                launchctl: launchctl.run
+            )
+        ).run(
+            userID: 501,
+            operation: .start,
+            log: MacOSKubeadmLog(debugEnabled: false)
+        )
+
+        #expect(launchctl.agentBootstrapCount == 1)
+        #expect(
+            launchctl.commands.contains {
+                $0.count == 3 && $0[0] == "bootstrap" && $0[1] == "user/501"
+            }
+        )
+        #expect(!launchctl.commands.contains { $0.count == 3 && $0[0] == "bootstrap" && $0[1] == "gui/501" })
+        #expect(try transientOperationArtifacts(in: directory).isEmpty)
+    }
+
+    @Test func disappearingLegacyGUIDomainDoesNotBlockBackgroundStart() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launchctl = LaunchctlHarness()
+        let guiTarget =
+            "gui/501/\(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabel(userID: 501))"
+        launchctl.guiDomainPrintStatusSequence = [0, 125]
+        launchctl.servicePrintResultSequences[guiTarget] = [
+            MacOSKubeadmLaunchctlResult(status: 125, output: "")
+        ]
+        launchctl.onAgentBootstrap = { plist in
+            try writeCompletion(from: plist, status: 0)
+        }
+
+        try MacOSKubeadmContainerSystemOperationRunner(
+            dependencies: makeOperationDependencies(
+                operationRoot: directory.path,
+                launchctl: launchctl.run
+            )
+        ).run(
+            userID: 501,
+            operation: .start,
+            log: MacOSKubeadmLog(debugEnabled: false)
+        )
+
+        #expect(launchctl.agentBootstrapCount == 1)
+        #expect(!launchctl.commands.contains { $0.count == 3 && $0[0] == "bootstrap" && $0[1] == "gui/501" })
+        #expect(try transientOperationArtifacts(in: directory).isEmpty)
+    }
+
+    @Test func unsupportedBackgroundServiceStatusRemainsAnError() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launchctl = LaunchctlHarness()
+        let backgroundTarget =
+            "user/501/\(MacOSKubeadmContainerSystem.operationLaunchdLabel(userID: 501))"
+        launchctl.servicePrintResultSequences[backgroundTarget] = [
+            MacOSKubeadmLaunchctlResult(status: 125, output: "")
+        ]
+
+        #expect(throws: (any Error).self) {
+            try MacOSKubeadmContainerSystemOperationRunner(
+                dependencies: makeOperationDependencies(
+                    operationRoot: directory.path,
+                    launchctl: launchctl.run
+                )
+            ).run(
+                userID: 501,
+                operation: .start,
+                log: MacOSKubeadmLog(debugEnabled: false)
+            )
+        }
+        #expect(launchctl.agentBootstrapCount == 0)
+    }
+
+    @Test func loadedLegacyGUIOperationCanDisappearDuringRecovery() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launchctl = LaunchctlHarness(guiDomainAvailable: true)
+        let guiTarget =
+            "gui/501/\(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabel(userID: 501))"
+        launchctl.guiDomainPrintStatusSequence = [0, 125]
+        launchctl.loadService(guiTarget)
+        launchctl.servicePrintResultSequences[guiTarget] = [
+            MacOSKubeadmLaunchctlResult(status: 0, output: "state = running\nruns = 1"),
+            MacOSKubeadmLaunchctlResult(status: 125, output: ""),
+        ]
+        launchctl.onAgentBootstrap = { plist in
+            try writeCompletion(from: plist, status: 0)
+        }
+
+        try MacOSKubeadmContainerSystemOperationRunner(
+            dependencies: makeOperationDependencies(
+                operationRoot: directory.path,
+                launchctl: launchctl.run
+            )
+        ).run(
+            userID: 501,
+            operation: .start,
+            log: MacOSKubeadmLog(debugEnabled: false)
+        )
+
+        #expect(launchctl.commands.contains(["bootout", guiTarget]))
+        #expect(launchctl.agentBootstrapCount == 1)
+        #expect(try transientOperationArtifacts(in: directory).isEmpty)
+    }
+
+    @Test func legacyGUIDomainCanDisappearBeforeOperationBootstrap() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launchctl = LaunchctlHarness()
+        let guiTarget =
+            "gui/501/\(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabel(userID: 501))"
+        launchctl.guiDomainPrintStatusSequence = [0, 0]
+        launchctl.agentBootstrapStatusSequence = [125, 0]
+        launchctl.servicePrintResultSequences[guiTarget] = [
+            MacOSKubeadmLaunchctlResult(status: 113, output: ""),
+            MacOSKubeadmLaunchctlResult(status: 125, output: ""),
+        ]
+        launchctl.onAgentBootstrap = { plist in
+            try writeCompletion(from: plist, status: 0)
+        }
+
+        try MacOSKubeadmContainerSystemOperationRunner(
+            dependencies: makeOperationDependencies(
+                operationRoot: directory.path,
+                launchctl: launchctl.run
+            )
+        ).run(
+            userID: 501,
+            operation: .start,
+            log: MacOSKubeadmLog(debugEnabled: false)
+        )
+
+        #expect(launchctl.agentBootstrapCount == 2)
+        #expect(try transientOperationArtifacts(in: directory).isEmpty)
+    }
+
+    @Test func legacyGUIDomainCanDisappearWhileWaitingForCompletion() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launchctl = LaunchctlHarness()
+        let guiTarget =
+            "gui/501/\(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabel(userID: 501))"
+        launchctl.guiDomainPrintStatusSequence = [0, 0]
+        launchctl.servicePrintResultSequences[guiTarget] = [
+            MacOSKubeadmLaunchctlResult(status: 113, output: ""),
+            MacOSKubeadmLaunchctlResult(status: 125, output: ""),
+        ]
+        launchctl.onAgentBootstrap = { plist in
+            let arguments = try #require(plist["ProgramArguments"] as? [String])
+            if try value(after: "--expected-session-type", in: arguments) == "Background" {
+                try writeCompletion(from: plist, status: 0)
+            }
+        }
+
+        try MacOSKubeadmContainerSystemOperationRunner(
+            dependencies: makeOperationDependencies(
+                operationRoot: directory.path,
+                launchctl: launchctl.run
+            )
+        ).run(
+            userID: 501,
+            operation: .start,
+            log: MacOSKubeadmLog(debugEnabled: false)
+        )
+
+        #expect(launchctl.agentBootstrapCount == 2)
+        #expect(try transientOperationArtifacts(in: directory).isEmpty)
+    }
+
+    @Test(arguments: [0, 501])
+    func unsupportedRequiredDomainDuringRecoveryRemainsAnError(userID: Int) throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let domain = userID == 0 ? "system" : "user/501"
+        let label = MacOSKubeadmContainerSystem.operationLaunchdLabel(userID: userID)
+        let target = "\(domain)/\(label)"
+        let launchctl = LaunchctlHarness(userID: userID, backgroundDomain: domain)
+        launchctl.loadService(target)
+        launchctl.servicePrintResultSequences[target] = [
+            MacOSKubeadmLaunchctlResult(status: 0, output: "state = running\nruns = 1"),
+            MacOSKubeadmLaunchctlResult(status: 125, output: ""),
+        ]
+
+        #expect(throws: (any Error).self) {
+            try MacOSKubeadmContainerSystemOperationRunner(
+                dependencies: makeOperationDependencies(
+                    operationRoot: directory.path,
+                    launchctl: launchctl.run
+                )
+            ).run(
+                userID: userID,
+                operation: .start,
+                log: MacOSKubeadmLog(debugEnabled: false)
+            )
+        }
+        #expect(launchctl.agentBootstrapCount == 0)
+    }
+
+    @Test(arguments: [0, 501])
+    func unsupportedRequiredDomainDuringCleanupRemainsAnError(userID: Int) throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let domain = userID == 0 ? "system" : "user/501"
+        let label = MacOSKubeadmContainerSystem.operationLaunchdLabel(userID: userID)
+        let target = "\(domain)/\(label)"
+        let launchctl = LaunchctlHarness(userID: userID, backgroundDomain: domain)
+        launchctl.servicePrintResultSequences[target] = [
+            MacOSKubeadmLaunchctlResult(status: 113, output: ""),
+            MacOSKubeadmLaunchctlResult(
+                status: 0,
+                output: "state = not running\nruns = 1\nlast exit code = 0"
+            ),
+            MacOSKubeadmLaunchctlResult(status: 125, output: ""),
+        ]
+        launchctl.onAgentBootstrap = { plist in
+            try writeCompletion(from: plist, status: 0)
+        }
+
+        #expect(throws: (any Error).self) {
+            try MacOSKubeadmContainerSystemOperationRunner(
+                dependencies: makeOperationDependencies(
+                    operationRoot: directory.path,
+                    launchctl: launchctl.run
+                )
+            ).run(
+                userID: userID,
+                operation: .start,
+                log: MacOSKubeadmLog(debugEnabled: false)
+            )
+        }
+        #expect(launchctl.agentBootstrapCount == 1)
+        #expect(try transientOperationArtifacts(in: directory).count == 2)
+    }
+
     @Test func guiMigrationFailureBlocksBackgroundStart() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -734,6 +980,56 @@ struct MacOSKubeadmContainerSystemTests {
         #expect(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == [".global.lock"])
     }
 
+    @Test func cleanupTreatsUnsupportedLegacyGUIDomainAsAbsent() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for name in ["501.lock", "501.legacy-gui.plist", "501.legacy-gui.completion.json"] {
+            try Data(name.utf8).write(to: directory.appendingPathComponent(name))
+        }
+        let launchctl = LaunchctlHarness()
+        let guiTarget =
+            "gui/501/\(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabel(userID: 501))"
+        launchctl.servicePrintResultSequences[guiTarget] = [
+            MacOSKubeadmLaunchctlResult(status: 125, output: "")
+        ]
+
+        try MacOSKubeadmContainerSystemOperationRunner(
+            dependencies: makeOperationDependencies(
+                operationRoot: directory.path,
+                launchctl: launchctl.run
+            )
+        ).cleanupAll(log: MacOSKubeadmLog(debugEnabled: false))
+
+        #expect(!launchctl.commands.contains(["bootout", guiTarget]))
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == [".global.lock"])
+    }
+
+    @Test func cleanupAllowsLoadedLegacyGUIOperationToDisappearDuringRemoval() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for name in ["501.lock", "501.legacy-gui.plist", "501.legacy-gui.completion.json"] {
+            try Data(name.utf8).write(to: directory.appendingPathComponent(name))
+        }
+        let launchctl = LaunchctlHarness()
+        let guiTarget =
+            "gui/501/\(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabel(userID: 501))"
+        launchctl.loadService(guiTarget)
+        launchctl.servicePrintResultSequences[guiTarget] = [
+            MacOSKubeadmLaunchctlResult(status: 0, output: "state = running\nruns = 1"),
+            MacOSKubeadmLaunchctlResult(status: 125, output: ""),
+        ]
+
+        try MacOSKubeadmContainerSystemOperationRunner(
+            dependencies: makeOperationDependencies(
+                operationRoot: directory.path,
+                launchctl: launchctl.run
+            )
+        ).cleanupAll(log: MacOSKubeadmLog(debugEnabled: false))
+
+        #expect(launchctl.commands.contains(["bootout", guiTarget]))
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == [".global.lock"])
+    }
+
     @Test func operationRootSymlinkIsRejected() throws {
         let parent = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: parent) }
@@ -985,6 +1281,9 @@ struct MacOSKubeadmContainerSystemTests {
         var onAgentBootstrap: (([String: Any]) throws -> Void)?
         var bootstrappedServiceOutputOverride: String?
         var servicePrintOutputSequence: [String] = []
+        var guiDomainPrintStatusSequence: [Int32] = []
+        var servicePrintResultSequences: [String: [MacOSKubeadmLaunchctlResult]] = [:]
+        var agentBootstrapStatusSequence: [Int32] = []
 
         private var domainAvailable: Bool
         private let domainBecomesAvailable: Bool
@@ -1041,10 +1340,19 @@ struct MacOSKubeadmContainerSystemTests {
                 return MacOSKubeadmLaunchctlResult(status: domainBootstrapStatus, output: "")
             }
             if arguments == ["print", "gui/\(userID)"] {
+                if !guiDomainPrintStatusSequence.isEmpty {
+                    return MacOSKubeadmLaunchctlResult(
+                        status: guiDomainPrintStatusSequence.removeFirst(),
+                        output: ""
+                    )
+                }
                 return MacOSKubeadmLaunchctlResult(status: guiDomainAvailable ? 0 : 112, output: "")
             }
             if arguments.count == 3, arguments[0] == "bootstrap" {
                 agentBootstrapCount += 1
+                let bootstrapStatus =
+                    agentBootstrapStatusSequence.isEmpty
+                    ? agentBootstrapStatus : agentBootstrapStatusSequence.removeFirst()
                 let data = try Data(contentsOf: URL(fileURLWithPath: arguments[2]))
                 guard
                     let plist = try PropertyListSerialization.propertyList(from: data, format: nil)
@@ -1052,9 +1360,11 @@ struct MacOSKubeadmContainerSystemTests {
                 else {
                     throw MacOSKubeadmError.preflightFailed("operation plist is invalid")
                 }
-                try onAgentBootstrap?(plist)
+                if bootstrapStatus == 0 {
+                    try onAgentBootstrap?(plist)
+                }
                 let label = try #require(plist["Label"] as? String)
-                if agentBootstrapStatus == 0 {
+                if bootstrapStatus == 0 {
                     let serviceTarget = "\(arguments[1])/\(label)"
                     loadedServiceTargets.insert(serviceTarget)
                     let programArguments = try #require(plist["ProgramArguments"] as? [String])
@@ -1067,7 +1377,7 @@ struct MacOSKubeadmContainerSystemTests {
                             ? "state = not running\nruns = 1\nlast exit code = 0"
                             : "state = running\nruns = 1")
                 }
-                return MacOSKubeadmLaunchctlResult(status: agentBootstrapStatus, output: "")
+                return MacOSKubeadmLaunchctlResult(status: bootstrapStatus, output: "")
             }
             if arguments.first == "bootout" {
                 bootoutCount += 1
@@ -1085,6 +1395,11 @@ struct MacOSKubeadmContainerSystemTests {
                 arguments[1].contains(MacOSKubeadmContainerSystem.operationLaunchdLabelPrefix)
                     || arguments[1].contains(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabelPrefix)
             {
+                if var results = servicePrintResultSequences[arguments[1]], !results.isEmpty {
+                    let result = results.removeFirst()
+                    servicePrintResultSequences[arguments[1]] = results
+                    return result
+                }
                 let loaded = loadedServiceTargets.contains(arguments[1])
                 let output =
                     if !loaded || servicePrintOutputSequence.isEmpty {

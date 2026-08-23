@@ -436,11 +436,13 @@ struct MacOSKubeadmContainerSystemOperationDependencies {
 public struct MacOSKubeadmContainerSystemOperationRunner {
     private enum OperationAgentState {
         case active
+        case domainUnavailable
         case exited(Int32?)
     }
 
     private static let launchctlDomainNotFoundStatus: Int32 = 112
     private static let launchctlServiceNotFoundStatus: Int32 = 113
+    private static let launchctlDomainUnsupportedStatus: Int32 = 125
     private static let maximumCompletionSize = 64 * 1024
     private let dependencies: MacOSKubeadmContainerSystemOperationDependencies
 
@@ -517,7 +519,8 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
                     try recoverPreviousOperation(
                         serviceTarget: "gui/\(userID)/\(MacOSKubeadmContainerSystem.legacyGUIOperationLaunchdLabel(userID: userID))",
                         artifactNames: operationArtifactNames(userID: userID, suffix: "legacy-gui"),
-                        operationRootDescriptor: operationRootDescriptor
+                        operationRootDescriptor: operationRootDescriptor,
+                        allowUnsupportedDomainAsAbsent: true
                     )
                 }
             } catch {
@@ -663,11 +666,12 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
             operationRootDescriptor: operationRootDescriptor
         )
 
-        if try domainExists(guiDomain) {
+        if try legacyGUIDomainExists(guiDomain) {
             try recoverPreviousOperation(
                 serviceTarget: guiServiceTarget,
                 artifactNames: guiArtifacts,
-                operationRootDescriptor: operationRootDescriptor
+                operationRootDescriptor: operationRootDescriptor,
+                allowUnsupportedDomainAsAbsent: true
             )
         } else {
             for name in guiArtifacts {
@@ -677,7 +681,7 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
                 )
             }
         }
-        if try domainExists(guiDomain) {
+        if try legacyGUIDomainExists(guiDomain) {
             try dispatchOperation(
                 userID: userID,
                 user: user,
@@ -686,7 +690,8 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
                 label: guiLabel,
                 artifactStem: guiArtifactStem,
                 operation: .stop,
-                operationRootDescriptor: operationRootDescriptor
+                operationRootDescriptor: operationRootDescriptor,
+                allowUnsupportedDomainAsAbsent: true
             )
         }
         try dispatchOperation(
@@ -709,7 +714,8 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
         label: String,
         artifactStem: String,
         operation: MacOSKubeadmContainerSystemOperation,
-        operationRootDescriptor: Int32
+        operationRootDescriptor: Int32,
+        allowUnsupportedDomainAsAbsent: Bool = false
     ) throws {
         let operationID = dependencies.operationID()
         guard isValidOperationID(operationID) else {
@@ -724,6 +730,7 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
         var bootstrapAttempted = false
         var completionCreated = false
         var plistCreated = false
+        var domainUnavailable = false
         var primaryError: Error?
 
         do {
@@ -758,29 +765,39 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
             let bootstrap = try dependencies.launchctl(["bootstrap", domain, plistPath])
             if bootstrap.status != 0 {
                 let loaded = try dependencies.launchctl(["print", serviceTarget])
-                guard loaded.status == 0 else {
+                if allowUnsupportedDomainAsAbsent,
+                    loaded.status == Self.launchctlDomainUnsupportedStatus
+                        || loaded.status == Self.launchctlDomainNotFoundStatus
+                {
+                    domainUnavailable = true
+                } else if loaded.status != 0 {
                     throw launchctlFailure(
                         arguments: ["bootstrap", domain, plistPath],
                         result: bootstrap
                     )
                 }
             }
-            let completion = try waitForCompletion(
-                name: completionName,
-                operationRootDescriptor: operationRootDescriptor,
-                ownerID: completionOwnerID,
-                serviceTarget: serviceTarget,
-                operationID: operationID,
-                userID: userID,
-                operation: operation,
-                managerName: managerName
-            )
-            guard completion.status == 0 else {
-                throw MacOSKubeadmError.commandFailed(
-                    command: "container system \(operation.rawValue) in \(domain) \(managerName) domain",
-                    status: completion.status,
-                    output: completion.error ?? "operation failed without an error message"
+            if !domainUnavailable {
+                let completion = try waitForCompletion(
+                    name: completionName,
+                    operationRootDescriptor: operationRootDescriptor,
+                    ownerID: completionOwnerID,
+                    serviceTarget: serviceTarget,
+                    operationID: operationID,
+                    userID: userID,
+                    operation: operation,
+                    managerName: managerName,
+                    allowUnsupportedDomainAsAbsent: allowUnsupportedDomainAsAbsent
                 )
+                if let completion {
+                    guard completion.status == 0 else {
+                        throw MacOSKubeadmError.commandFailed(
+                            command: "container system \(operation.rawValue) in \(domain) \(managerName) domain",
+                            status: completion.status,
+                            output: completion.error ?? "operation failed without an error message"
+                        )
+                    }
+                }
             }
         } catch {
             primaryError = error
@@ -793,7 +810,8 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
                 (name: plistName, created: plistCreated),
                 (name: completionName, created: completionCreated),
             ],
-            operationRootDescriptor: operationRootDescriptor
+            operationRootDescriptor: operationRootDescriptor,
+            allowUnsupportedDomainAsAbsent: allowUnsupportedDomainAsAbsent
         )
         if let primaryError, let cleanupError {
             throw MacOSKubeadmError.preflightFailed(
@@ -916,19 +934,25 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
     private func recoverPreviousOperation(
         serviceTarget: String,
         artifactNames: [String],
-        operationRootDescriptor: Int32
+        operationRootDescriptor: Int32,
+        allowUnsupportedDomainAsAbsent: Bool = false
     ) throws {
         let existing = try dependencies.launchctl(["print", serviceTarget])
         switch existing.status {
         case 0:
             let bootout = try dependencies.launchctl(["bootout", serviceTarget])
-            if let error = waitForServiceRemoval(serviceTarget) {
+            if let error = waitForServiceRemoval(
+                serviceTarget,
+                allowUnsupportedDomainAsAbsent: allowUnsupportedDomainAsAbsent
+            ) {
                 let output = bootout.output.isEmpty ? "" : ", output: \(bootout.output)"
                 throw MacOSKubeadmError.preflightFailed(
                     "cannot remove previous container system operation: launchctl bootout status \(bootout.status)\(output); \(error)"
                 )
             }
         case Self.launchctlDomainNotFoundStatus, Self.launchctlServiceNotFoundStatus:
+            break
+        case Self.launchctlDomainUnsupportedStatus where allowUnsupportedDomainAsAbsent:
             break
         default:
             throw MacOSKubeadmError.preflightFailed(
@@ -1013,12 +1037,12 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
         }
     }
 
-    private func domainExists(_ domain: String) throws -> Bool {
+    private func legacyGUIDomainExists(_ domain: String) throws -> Bool {
         let result = try dependencies.launchctl(["print", domain])
         switch result.status {
         case 0:
             return true
-        case Self.launchctlDomainNotFoundStatus:
+        case Self.launchctlDomainNotFoundStatus, Self.launchctlDomainUnsupportedStatus:
             return false
         default:
             throw MacOSKubeadmError.preflightFailed(
@@ -1035,15 +1059,21 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
         operationID: String,
         userID: Int,
         operation: MacOSKubeadmContainerSystemOperation,
-        managerName: String
-    ) throws -> MacOSKubeadmContainerSystemCompletion {
+        managerName: String,
+        allowUnsupportedDomainAsAbsent: Bool
+    ) throws -> MacOSKubeadmContainerSystemCompletion? {
         let timeout = dependencies.completionTimeout(operation)
         let deadline = dependencies.monotonicTime() + timeout
         while dependencies.monotonicTime() < deadline {
-            switch try operationAgentState(serviceTarget) {
+            switch try operationAgentState(
+                serviceTarget,
+                allowUnsupportedDomainAsAbsent: allowUnsupportedDomainAsAbsent
+            ) {
             case .active:
                 dependencies.sleep(dependencies.pollInterval)
                 continue
+            case .domainUnavailable:
+                return nil
             case .exited(let exitCode):
                 let data = try readCompletion(
                     name: name,
@@ -1086,7 +1116,10 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
         )
     }
 
-    private func operationAgentState(_ serviceTarget: String) throws -> OperationAgentState {
+    private func operationAgentState(
+        _ serviceTarget: String,
+        allowUnsupportedDomainAsAbsent: Bool
+    ) throws -> OperationAgentState {
         let result = try dependencies.launchctl(["print", serviceTarget])
         switch result.status {
         case 0:
@@ -1102,6 +1135,10 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
                 return .exited(nil)
             }
             return .active
+        case Self.launchctlDomainNotFoundStatus where allowUnsupportedDomainAsAbsent:
+            return .domainUnavailable
+        case Self.launchctlDomainUnsupportedStatus where allowUnsupportedDomainAsAbsent:
+            return .domainUnavailable
         case Self.launchctlDomainNotFoundStatus, Self.launchctlServiceNotFoundStatus:
             throw MacOSKubeadmError.preflightFailed(
                 "container system operation agent disappeared before writing a valid completion"
@@ -1125,14 +1162,18 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
         serviceTarget: String,
         bootstrapAttempted: Bool,
         paths: [(name: String, created: Bool)],
-        operationRootDescriptor: Int32
+        operationRootDescriptor: Int32,
+        allowUnsupportedDomainAsAbsent: Bool
     ) -> Error? {
         var errors: [String] = []
         var serviceIsAbsent = !bootstrapAttempted
         if bootstrapAttempted {
             do {
                 let bootout = try dependencies.launchctl(["bootout", serviceTarget])
-                if let error = waitForServiceRemoval(serviceTarget) {
+                if let error = waitForServiceRemoval(
+                    serviceTarget,
+                    allowUnsupportedDomainAsAbsent: allowUnsupportedDomainAsAbsent
+                ) {
                     let output = bootout.output.isEmpty ? "" : ", output: \(bootout.output)"
                     errors.append(
                         "launchctl bootout status \(bootout.status)\(output); \(error)"
@@ -1165,13 +1206,18 @@ public struct MacOSKubeadmContainerSystemOperationRunner {
         return MacOSKubeadmError.preflightFailed(errors.joined(separator: "; "))
     }
 
-    private func waitForServiceRemoval(_ serviceTarget: String) -> Error? {
+    private func waitForServiceRemoval(
+        _ serviceTarget: String,
+        allowUnsupportedDomainAsAbsent: Bool
+    ) -> Error? {
         let deadline = dependencies.monotonicTime() + dependencies.cleanupTimeout
         while dependencies.monotonicTime() < deadline {
             do {
                 let result = try dependencies.launchctl(["print", serviceTarget])
                 if result.status == Self.launchctlDomainNotFoundStatus
                     || result.status == Self.launchctlServiceNotFoundStatus
+                    || (allowUnsupportedDomainAsAbsent
+                        && result.status == Self.launchctlDomainUnsupportedStatus)
                 {
                     return nil
                 }

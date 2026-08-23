@@ -584,9 +584,10 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
             throw KubeProxyMacOSError.applyFailed("local PodCIDR is not canonical IPv4 CIDR")
         }
         let egressInterface = try resolvedEgressInterface(masqueradePodTraffic: masqueradePodTraffic)
-        let podIngressInterface = try podIngressInterfaceResolver.resolvePodIngressInterface(
+        let podIngressInterface = try resolvePodIngressInterface(
             family: .ipv4,
-            podCIDR: canonicalPodCIDR
+            podCIDR: canonicalPodCIDR,
+            withdrawFamiliesOnFailure: [.ipv4]
         )
         let fileManager = FileManager.default
         let configURL = URL(fileURLWithPath: config.configPath)
@@ -698,15 +699,17 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
         let ipv6Egress = try resolvedIPv6Egress(
             masqueradePodTraffic: ipv6Active && podNetwork.masqueradeIPv6PodTraffic
         )
-        let ipv4PodIngressInterface = try podIngressInterfaceResolver.resolvePodIngressInterface(
+        let ipv4PodIngressInterface = try resolvePodIngressInterface(
             family: .ipv4,
-            podCIDR: canonicalIPv4PodCIDR
+            podCIDR: canonicalIPv4PodCIDR,
+            withdrawFamiliesOnFailure: [.ipv4, .ipv6]
         )
         let ipv6PodIngressInterface: String?
         if ipv6Active, let canonicalIPv6PodCIDR {
-            ipv6PodIngressInterface = try podIngressInterfaceResolver.resolvePodIngressInterface(
+            ipv6PodIngressInterface = try resolvePodIngressInterface(
                 family: .ipv6,
-                podCIDR: canonicalIPv6PodCIDR
+                podCIDR: canonicalIPv6PodCIDR,
+                withdrawFamiliesOnFailure: [.ipv4, .ipv6]
             )
         } else {
             ipv6PodIngressInterface = nil
@@ -897,6 +900,28 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
             configuredInterface: config.configuredIPv6EgressInterface,
             configuredSourceAddress: config.configuredIPv6EgressSourceAddress
         )
+    }
+
+    private func resolvePodIngressInterface(
+        family: KubeProxyAddressFamily,
+        podCIDR: String,
+        withdrawFamiliesOnFailure: Set<KubeProxyAddressFamily>
+    ) throws -> String {
+        do {
+            return try podIngressInterfaceResolver.resolvePodIngressInterface(
+                family: family,
+                podCIDR: podCIDR
+            )
+        } catch {
+            do {
+                try withdrawLocked(families: withdrawFamiliesOnFailure)
+            } catch let withdrawError {
+                throw KubeProxyMacOSError.applyFailed(
+                    "Pod ingress interface resolution failed (\(error)); fail-closed PF withdrawal also failed (\(withdrawError))"
+                )
+            }
+            throw error
+        }
     }
 
     private func ensurePFEnabled() throws {

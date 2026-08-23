@@ -1097,6 +1097,65 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
+    func legacyApplierWithdrawsStaleRulesWhenPodIngressBridgeDisappearsAndRecovers() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        let anchorURL = anchorsURL.appendingPathComponent(anchorName)
+        try "set skip on lo0\n".write(to: configURL, atomically: true, encoding: .utf8)
+        let config = KubeProxyPFConfig(
+            anchorName: anchorName,
+            configPath: configURL.path,
+            anchorsPath: anchorsURL.path,
+            pfctlPath: pfctl.path
+        )
+        let readyApplier = KubeProxyPFRuleApplier(
+            config: config,
+            podIngressInterfaceResolver: StaticPodIngressInterfaceResolver(),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        let ruleSet = KubeProxyCompiler.compile(snapshot: makeSnapshot(), nodeName: "node-a")
+
+        try readyApplier.apply(ruleSet, localPodCIDR: "10.250.25.0/24")
+        try Data().write(to: argumentsLogURL)
+
+        let unavailableApplier = KubeProxyPFRuleApplier(
+            config: config,
+            podIngressInterfaceResolver: UnavailablePodIngressInterfaceResolver(failingFamily: .ipv4),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        do {
+            try unavailableApplier.apply(ruleSet, localPodCIDR: "10.250.25.0/24")
+            Issue.record("missing Pod ingress bridge must fail after withdrawing stale rules")
+        } catch {
+            #expect(String(describing: error).contains("Pod ingress bridge is not ready"))
+        }
+
+        let withdrawnConfig = try String(contentsOf: configURL, encoding: .utf8)
+        let withdrawalArguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        #expect(!withdrawnConfig.contains("anchor \"\(anchorName)\""))
+        #expect(!FileManager.default.fileExists(atPath: anchorURL.path))
+        #expect(withdrawalArguments.contains("-a \(anchorName) -F all"))
+        #expect(!withdrawalArguments.contains("-a \(anchorName).ipv6 -F all"))
+
+        try readyApplier.apply(ruleSet, localPodCIDR: "10.250.25.0/24")
+
+        #expect(FileManager.default.fileExists(atPath: anchorURL.path))
+        #expect(
+            try String(contentsOf: anchorURL, encoding: .utf8)
+                .contains("rdr pass on bridge100 inet")
+        )
+        #expect(
+            try String(contentsOf: configURL, encoding: .utf8)
+                .contains("rdr-anchor \"\(anchorName)\"")
+        )
+    }
+
+    @Test
     func dualStackApplierUsesFamilySpecificHairpinNAT() throws {
         let directory = try makeTemporaryDirectory()
         defer {
@@ -1158,6 +1217,139 @@ struct KubeProxyCompilerTests {
         #expect(ipv6Anchor.contains("nat on bridge101 inet6 proto tcp from fd42:10:244:19::/64"))
         #expect(ipv6Anchor.contains("tagged ckp_hairpin -> fd42:10:244:19::1"))
         #expect(ipv6Anchor.contains("rdr pass on bridge101 inet6 proto tcp from fd42:10:244:19::/64"))
+    }
+
+    @Test(arguments: [KubeProxyAddressFamily.ipv4, .ipv6])
+    func dualStackApplierWithdrawsBothFamiliesWhenPodIngressBridgeDisappears(
+        failingFamily: KubeProxyAddressFamily
+    ) throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let pfctl = try makeFakePFCTL(in: directory, exitCode: 0, argumentsLogURL: argumentsLogURL)
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        let ipv4AnchorURL = anchorsURL.appendingPathComponent(anchorName)
+        let ipv6AnchorURL = anchorsURL.appendingPathComponent("\(anchorName).ipv6")
+        try "set skip on lo0\n".write(to: configURL, atomically: true, encoding: .utf8)
+        let config = KubeProxyPFConfig(
+            anchorName: anchorName,
+            configPath: configURL.path,
+            anchorsPath: anchorsURL.path,
+            pfctlPath: pfctl.path
+        )
+        let ruleSet = KubeProxyCompiler.compile(snapshot: makeDualStackSnapshot(), nodeName: "node-a")
+        let podNetwork = KubeProxyFamilyRuleApplication(
+            ipv4PodCIDR: "10.250.25.0/24",
+            ipv6PodCIDR: "fd42:10:244:19::/64",
+            ipv6Ready: true,
+            dualStackEnabled: true
+        )
+        let readyApplier = KubeProxyPFRuleApplier(
+            config: config,
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            ipv6EgressResolver: StaticIPv6EgressResolver(),
+            podIngressInterfaceResolver: StaticPodIngressInterfaceResolver(),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+
+        try readyApplier.apply(ruleSet, podNetwork: podNetwork)
+        try Data().write(to: argumentsLogURL)
+
+        let unavailableApplier = KubeProxyPFRuleApplier(
+            config: config,
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            ipv6EgressResolver: StaticIPv6EgressResolver(),
+            podIngressInterfaceResolver: UnavailablePodIngressInterfaceResolver(failingFamily: failingFamily),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        do {
+            try unavailableApplier.apply(ruleSet, podNetwork: podNetwork)
+            Issue.record("missing \(failingFamily.rawValue) Pod ingress bridge must fail after withdrawing both families")
+        } catch {
+            #expect(String(describing: error).contains("Pod ingress bridge is not ready"))
+        }
+
+        let withdrawnConfig = try String(contentsOf: configURL, encoding: .utf8)
+        let withdrawalArguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+        #expect(!withdrawnConfig.contains("anchor \"\(anchorName)\""))
+        #expect(!withdrawnConfig.contains("anchor \"\(anchorName).ipv6\""))
+        #expect(!FileManager.default.fileExists(atPath: ipv4AnchorURL.path))
+        #expect(!FileManager.default.fileExists(atPath: ipv6AnchorURL.path))
+        #expect(withdrawalArguments.contains("-a \(anchorName) -F all"))
+        #expect(withdrawalArguments.contains("-a \(anchorName).ipv6 -F all"))
+    }
+
+    @Test
+    func podIngressResolutionFailureReportsWithdrawalFailureAndRestoresPersistentState() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("pf.conf")
+        let anchorsURL = directory.appendingPathComponent("anchors")
+        let anchorName = "com.apple.container.kube-proxy.test"
+        let ipv4AnchorURL = anchorsURL.appendingPathComponent(anchorName)
+        let ipv6AnchorURL = anchorsURL.appendingPathComponent("\(anchorName).ipv6")
+        let initialPFCTL = try makeFakePFCTL(in: directory, exitCode: 0)
+        try "set skip on lo0\n".write(to: configURL, atomically: true, encoding: .utf8)
+        let ruleSet = KubeProxyCompiler.compile(snapshot: makeDualStackSnapshot(), nodeName: "node-a")
+        let podNetwork = KubeProxyFamilyRuleApplication(
+            ipv4PodCIDR: "10.250.25.0/24",
+            ipv6PodCIDR: "fd42:10:244:19::/64",
+            ipv6Ready: true,
+            dualStackEnabled: true
+        )
+        let readyApplier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: initialPFCTL.path
+            ),
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            ipv6EgressResolver: StaticIPv6EgressResolver(),
+            podIngressInterfaceResolver: StaticPodIngressInterfaceResolver(),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+        try readyApplier.apply(ruleSet, podNetwork: podNetwork)
+        let originalConfig = try Data(contentsOf: configURL)
+        let originalIPv4Anchor = try Data(contentsOf: ipv4AnchorURL)
+        let originalIPv6Anchor = try Data(contentsOf: ipv6AnchorURL)
+
+        let argumentsLogURL = directory.appendingPathComponent("pfctl-arguments.log")
+        let failingPFCTL = try makePFCTLFailingFirstRootReload(
+            in: directory,
+            argumentsLogURL: argumentsLogURL
+        )
+        let unavailableApplier = KubeProxyPFRuleApplier(
+            config: KubeProxyPFConfig(
+                anchorName: anchorName,
+                configPath: configURL.path,
+                anchorsPath: anchorsURL.path,
+                pfctlPath: failingPFCTL.path
+            ),
+            egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
+            ipv6EgressResolver: StaticIPv6EgressResolver(),
+            podIngressInterfaceResolver: UnavailablePodIngressInterfaceResolver(failingFamily: .ipv6),
+            advisoryLockPath: directory.appendingPathComponent("pf.lock").path
+        )
+
+        do {
+            try unavailableApplier.apply(ruleSet, podNetwork: podNetwork)
+            Issue.record("Pod ingress and fail-closed withdrawal failures must both be reported")
+        } catch {
+            let message = String(describing: error)
+            #expect(message.contains("Pod ingress interface resolution failed"))
+            #expect(message.contains("Pod ingress bridge is not ready"))
+            #expect(message.contains("fail-closed PF withdrawal also failed"))
+            #expect(message.contains("pfctl reload failed"))
+        }
+        #expect(try Data(contentsOf: configURL) == originalConfig)
+        #expect(try Data(contentsOf: ipv4AnchorURL) == originalIPv4Anchor)
+        #expect(try Data(contentsOf: ipv6AnchorURL) == originalIPv6Anchor)
+        let arguments = try String(contentsOf: argumentsLogURL, encoding: .utf8)
+            .components(separatedBy: .newlines)
+        #expect(arguments.filter { $0 == "-f \(configURL.path)" }.count == 2)
     }
 
     @Test
@@ -2715,6 +2907,20 @@ private struct StaticPodIngressInterfaceResolver: KubeProxyPodIngressInterfaceRe
         case .ipv6:
             ipv6Interface
         }
+    }
+}
+
+private struct UnavailablePodIngressInterfaceResolver: KubeProxyPodIngressInterfaceResolving {
+    var failingFamily: KubeProxyAddressFamily
+
+    func resolvePodIngressInterface(
+        family: KubeProxyAddressFamily,
+        podCIDR: String
+    ) throws -> String {
+        guard family != failingFamily else {
+            throw KubeProxyMacOSError.applyFailed("Pod ingress bridge is not ready")
+        }
+        return "bridge100"
     }
 }
 

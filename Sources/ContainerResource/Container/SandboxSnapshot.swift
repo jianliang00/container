@@ -28,6 +28,8 @@ public struct SandboxSnapshot: Codable, Sendable {
     public var workloads: [WorkloadSnapshot]
     /// Applied sandbox network policy state, if available.
     public var networkPolicy: SandboxNetworkPolicyState?
+    /// Terminal runtime failure that requires the sandbox to be recreated.
+    public var failureReason: SandboxFailureReason?
 
     enum CodingKeys: String, CodingKey {
         case configuration
@@ -36,6 +38,7 @@ public struct SandboxSnapshot: Codable, Sendable {
         case containers
         case workloads
         case networkPolicy
+        case failureReason
     }
 
     public init(
@@ -44,7 +47,8 @@ public struct SandboxSnapshot: Codable, Sendable {
         networks: [Attachment],
         containers: [ContainerSnapshot],
         workloads: [WorkloadSnapshot] = [],
-        networkPolicy: SandboxNetworkPolicyState? = nil
+        networkPolicy: SandboxNetworkPolicyState? = nil,
+        failureReason: SandboxFailureReason? = nil
     ) {
         self.configuration = configuration
         self.status = status
@@ -52,6 +56,7 @@ public struct SandboxSnapshot: Codable, Sendable {
         self.containers = containers
         self.workloads = workloads
         self.networkPolicy = networkPolicy
+        self.failureReason = failureReason
     }
 
     public init(from decoder: Decoder) throws {
@@ -61,6 +66,7 @@ public struct SandboxSnapshot: Codable, Sendable {
         containers = try container.decode([ContainerSnapshot].self, forKey: .containers)
         workloads = try container.decodeIfPresent([WorkloadSnapshot].self, forKey: .workloads) ?? []
         networkPolicy = try container.decodeIfPresent(SandboxNetworkPolicyState.self, forKey: .networkPolicy)
+        failureReason = try container.decodeIfPresent(SandboxFailureReason.self, forKey: .failureReason)
         configuration =
             try container.decodeIfPresent(SandboxConfiguration.self, forKey: .configuration)
             ?? containers.first.map { SandboxConfiguration(containerConfiguration: $0.configuration) }
@@ -74,5 +80,10 @@ public struct SandboxSnapshot: Codable, Sendable {
         try container.encode(containers, forKey: .containers)
         try container.encode(workloads, forKey: .workloads)
         try container.encodeIfPresent(networkPolicy, forKey: .networkPolicy)
+        try container.encodeIfPresent(failureReason, forKey: .failureReason)
     }
+}
+
+public enum SandboxFailureReason: String, Codable, Sendable, Equatable {
+    case networkInvalidated
 }

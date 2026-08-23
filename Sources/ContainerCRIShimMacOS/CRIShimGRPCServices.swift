@@ -220,7 +220,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 handler: handler,
                 sandboxImage: sandboxImage,
                 metadata: metadata,
-                networkMTUOverride: networkMTUOverride
+                networkMTUOverride: networkMTUOverride,
+                vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled
             )
 
             do {

@@ -56,13 +56,15 @@ struct ContainerConfigurationMacOSTests {
             snapshotEnabled: true,
             guiEnabled: false,
             agentPort: 27000,
-            networkBackend: .vmnetShared
+            networkBackend: .vmnetShared,
+            vmnetDisconnectRecovery: .stopSandbox
         )
 
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
 
         #expect(decoded.macosGuest == config.macosGuest)
+        #expect(decoded.macosGuest?.vmnetDisconnectRecovery == .stopSandbox)
         #expect(decoded.runtimeHandler == "container-runtime-macos")
     }
 
@@ -102,12 +104,14 @@ struct ContainerConfigurationMacOSTests {
         var container = try #require(jsonObject as? [String: Any])
         var macosGuest = try #require(container["macosGuest"] as? [String: Any])
         macosGuest.removeValue(forKey: "networkBackend")
+        macosGuest.removeValue(forKey: "vmnetDisconnectRecovery")
         container["macosGuest"] = macosGuest
 
         let legacyData = try JSONSerialization.data(withJSONObject: container)
         let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: legacyData)
 
         #expect(decoded.macosGuest?.networkBackend == .virtualizationNAT)
+        #expect(decoded.macosGuest?.vmnetDisconnectRecovery == .disabled)
     }
 
     @Test

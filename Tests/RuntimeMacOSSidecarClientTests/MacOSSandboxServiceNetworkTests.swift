@@ -30,6 +30,69 @@ private typealias NetworkDNSConfiguration = ContainerResource.Attachment.DNSConf
 
 @Suite(.serialized)
 struct MacOSSandboxServiceNetworkTests {
+    @Test(arguments: ["created", "booted", "running"])
+    func stopSandboxRecoveryPersistsTerminalFailureAndStopsSandbox(initialState: String) async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-invalidation-\(initialState)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration(vmnetDisconnectRecovery: .stopSandbox)
+        try await service.testingPrepareSandbox(config, state: initialState)
+
+        await service.handleSandboxNetworkInvalidation(
+            SandboxNetworkInvalidation(network: "default", hostname: "sandbox-host")
+        )
+
+        let snapshot = try await service.testingStateSnapshot()
+        let storedFailure = try MacOSGuestNetworkFailureStore.load(from: root)
+        let failure = try #require(storedFailure)
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.failureReason == .networkInvalidated)
+        #expect(failure.reason == .networkInvalidated)
+        #expect(failure.network == "default")
+        #expect(failure.hostname == "sandbox-host")
+    }
+
+    @Test(arguments: ["stopping", "stopped", "shuttingDown"])
+    func stopSandboxRecoveryDoesNotRepeatTeardownForTerminalStates(initialState: String) async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-terminal-\(initialState)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration(vmnetDisconnectRecovery: .stopSandbox)
+        try await service.testingPrepareSandbox(config, state: initialState)
+
+        let invalidation = SandboxNetworkInvalidation(network: "default", hostname: "sandbox-host")
+        await service.handleSandboxNetworkInvalidation(invalidation)
+        await service.handleSandboxNetworkInvalidation(invalidation)
+
+        let snapshot = try await service.testingStateSnapshot()
+        #expect(snapshot.failureReason == .networkInvalidated)
+        #expect(await recorder.deallocateCalls().isEmpty)
+    }
+
+    @Test
+    func monitorRecoveryRecordsDisconnectWithoutStoppingSandbox() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-monitor")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let recorder = RecordingSandboxNetworkControl()
+        let service = makeService(root: root, recorder: recorder)
+        let config = try makeConfiguration(vmnetDisconnectRecovery: .monitor)
+        try await service.testingPrepareSandbox(config)
+
+        await service.handleSandboxNetworkInvalidation(
+            SandboxNetworkInvalidation(network: "default", hostname: "sandbox-host")
+        )
+
+        let snapshot = try await service.testingStateSnapshot()
+        #expect(snapshot.status == .running)
+        #expect(snapshot.failureReason == nil)
+        #expect(try MacOSGuestNetworkFailureStore.load(from: root) == nil)
+    }
+
     @Test
     func prepareInspectReleaseLifecyclePersistsLeaseAndRecoversAcrossServiceRestart() async throws {
         let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-lifecycle")
@@ -583,7 +646,8 @@ private func makeService(root: URL, recorder: RecordingSandboxNetworkControl) ->
 }
 
 private func makeConfiguration(
-    backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend = .vmnetShared
+    backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend = .vmnetShared,
+    vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled
 ) throws -> ContainerConfiguration {
     let image = ImageDescription(
         reference: "example/macos:latest",
@@ -629,7 +693,8 @@ private func makeConfiguration(
         snapshotEnabled: false,
         guiEnabled: false,
         agentPort: 27000,
-        networkBackend: backend
+        networkBackend: backend,
+        vmnetDisconnectRecovery: vmnetDisconnectRecovery
     )
     return config
 }

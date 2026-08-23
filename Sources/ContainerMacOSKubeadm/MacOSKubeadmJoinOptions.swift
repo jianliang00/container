@@ -61,6 +61,12 @@ public enum MacOSKubeadmNetworkMode: String, CaseIterable, Sendable, Equatable {
     }
 }
 
+public enum MacOSKubeadmVMNetDisconnectRecovery: String, CaseIterable, Sendable, Equatable {
+    case disabled
+    case monitor
+    case stopSandbox = "stop-sandbox"
+}
+
 public struct MacOSKubeadmRuntimeClassProfile: Sendable, Equatable {
     public var name: String
     public var handler: String
@@ -102,6 +108,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
     public var runtimeClasses: [MacOSKubeadmRuntimeClassProfile]
     public var networkMode: MacOSKubeadmNetworkMode
     public var enableDualStack: Bool
+    public var vmnetDisconnectRecovery: MacOSKubeadmVMNetDisconnectRecovery
     public var masqueradeIPv6PodTraffic: Bool?
     public var ipv6EgressInterface: String?
     public var ipv6EgressSourceAddress: String?
@@ -130,6 +137,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = [],
         networkMode: MacOSKubeadmNetworkMode = .full,
         enableDualStack: Bool = false,
+        vmnetDisconnectRecovery: MacOSKubeadmVMNetDisconnectRecovery = .disabled,
         masqueradeIPv6PodTraffic: Bool? = nil,
         ipv6EgressInterface: String? = nil,
         ipv6EgressSourceAddress: String? = nil,
@@ -157,6 +165,7 @@ public struct MacOSKubeadmJoinOptions: Sendable, Equatable {
         self.runtimeClasses = runtimeClasses
         self.networkMode = networkMode
         self.enableDualStack = enableDualStack
+        self.vmnetDisconnectRecovery = vmnetDisconnectRecovery
         self.masqueradeIPv6PodTraffic = masqueradeIPv6PodTraffic
         self.ipv6EgressInterface = ipv6EgressInterface
         self.ipv6EgressSourceAddress = ipv6EgressSourceAddress

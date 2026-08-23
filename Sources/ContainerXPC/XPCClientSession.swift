@@ -24,20 +24,22 @@ import Synchronization
 /// no window in which a server crash goes undetected.
 public final class XPCClientSession: Sendable {
     private let client: XPCClient
-    private let handlers: Mutex<[@Sendable () async -> Void]> = Mutex([])
+    private let disconnectState = XPCClientSessionDisconnectState()
 
     init(client: XPCClient) {
         self.client = client
         client.setDisconnectHandler { [weak self] in
             guard let self else { return }
-            let snapshot = self.handlers.withLock { $0 }
+            let snapshot = self.disconnectState.disconnect()
             Task { for handler in snapshot { await handler() } }
         }
     }
 
     /// Register a handler to be called when the server disconnects.
     public func onDisconnect(_ handler: @Sendable @escaping () async -> Void) {
-        handlers.withLock { $0.append(handler) }
+        if disconnectState.register(handler) {
+            Task { await handler() }
+        }
     }
 
     /// Send a message over the persistent connection.
@@ -47,7 +49,61 @@ public final class XPCClientSession: Sendable {
     }
 
     /// Cancel the underlying connection.
-    public func close() { client.close() }
+    public func close() {
+        disconnectState.close()
+        client.close()
+    }
+}
+
+final class XPCClientSessionDisconnectState: Sendable {
+    typealias Handler = @Sendable () async -> Void
+
+    private enum Phase: Sendable {
+        case active([Handler])
+        case disconnected
+        case closed
+    }
+
+    private let phase = Mutex<Phase>(.active([]))
+
+    /// Returns true when the disconnect was already observed and the caller
+    /// must run the newly registered handler immediately.
+    func register(_ handler: @escaping Handler) -> Bool {
+        phase.withLock { phase in
+            switch phase {
+            case .active(var handlers):
+                handlers.append(handler)
+                phase = .active(handlers)
+                return false
+            case .disconnected:
+                return true
+            case .closed:
+                return false
+            }
+        }
+    }
+
+    /// Records an unexpected disconnect once and returns the handlers that
+    /// were registered before it happened.
+    func disconnect() -> [Handler] {
+        phase.withLock { phase in
+            guard case .active(let handlers) = phase else {
+                return []
+            }
+            phase = .disconnected
+            return handlers
+        }
+    }
+
+    /// Suppresses a disconnect that races with an intentional close. If the
+    /// unexpected disconnect won the race, keep it sticky for late handlers.
+    func close() {
+        phase.withLock { phase in
+            if case .active = phase {
+                phase = .closed
+            }
+        }
+    }
 }
 
 #endif

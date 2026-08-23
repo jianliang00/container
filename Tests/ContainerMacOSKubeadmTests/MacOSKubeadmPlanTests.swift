@@ -104,6 +104,7 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""network": "kubernetes-pod""#)
                     && !contents.contains(#""networkMTU""#)
                     && contents.contains(#""dualStackEnabled": false"#)
+                    && contents.contains(#""vmnetDisconnectRecovery": "disabled""#)
                     && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
                     && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
             })
@@ -160,6 +161,20 @@ struct MacOSKubeadmPlanTests {
         #expect(flannel.contains(#""dualStackEnabled": true"#))
         #expect(kubeProxy.contains(#""dualStackEnabled": true"#))
         #expect(kubeProxy.contains(#""masqueradeIPv6PodTraffic": true"#))
+    }
+
+    @Test func stopSandboxRecoveryRequiresFullNetworkMode() throws {
+        var options = try makeOptions(startServices: false)
+        options.networkMode = .compat
+        options.vmnetDisconnectRecovery = .stopSandbox
+
+        #expect(
+            throws: MacOSKubeadmError.invalidInput(
+                "--vmnet-disconnect-recovery requires --network-mode full"
+            )
+        ) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
     }
 
     @Test func dualStackJoinPlanRendersExplicitNodeContract() throws {

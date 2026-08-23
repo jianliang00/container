@@ -47,6 +47,7 @@ struct CRIShimConfigTests {
         #expect(config.kubeProxy?.enabled == true)
         #expect(config.podNetwork?.enabled == true)
         #expect(config.podNetwork?.dualStackEnabled == false)
+        #expect(config.podNetwork?.vmnetDisconnectRecovery == .disabled)
         #expect(config.podNetwork?.networkName == "kubernetes-pods")
         #expect(config.podNetwork?.runtimeStatePath == "/var/lib/container/pod-network/runtime.json")
         #expect(config.podNetwork?.readyStatePath == "/var/lib/container/pod-network/ready.json")
@@ -65,6 +66,21 @@ struct CRIShimConfigTests {
             from: Data(#"{"enabled":true,"dualStackEnabled":true}"#.utf8)
         )
         #expect(enabledConfig.dualStackEnabled)
+    }
+
+    @Test
+    func podNetworkVMNetDisconnectRecoveryDefaultsOffAndDecodesStopSandbox() throws {
+        let defaultConfig = try JSONDecoder().decode(
+            PodNetworkConfig.self,
+            from: Data(#"{"enabled":true}"#.utf8)
+        )
+        #expect(defaultConfig.vmnetDisconnectRecovery == .disabled)
+
+        let enabledConfig = try JSONDecoder().decode(
+            PodNetworkConfig.self,
+            from: Data(#"{"enabled":true,"vmnetDisconnectRecovery":"stop-sandbox"}"#.utf8)
+        )
+        #expect(enabledConfig.vmnetDisconnectRecovery == .stopSandbox)
     }
 
     @Test

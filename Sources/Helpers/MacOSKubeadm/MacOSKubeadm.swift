@@ -68,6 +68,12 @@ extension MacOSKubeadm {
         @Flag(help: "Enable dual-stack Pod networking. Supported only with --network-mode full.")
         var enableDualStack: Bool = false
 
+        @Option(
+            name: .customLong("vmnet-disconnect-recovery"),
+            help: "Action after the vmnet helper disconnects: disabled, monitor, or stop-sandbox."
+        )
+        var vmnetDisconnectRecovery: String = MacOSKubeadmVMNetDisconnectRecovery.disabled.rawValue
+
         @Flag(
             name: .customLong("disable-ipv6-masquerade"),
             help: "Use routed IPv6 Pod source addresses instead of IPv6 source NAT. Requires --enable-dual-stack."
@@ -128,8 +134,12 @@ extension MacOSKubeadm {
         func run() throws {
             let apiServer = try parseAPIServerEndpoint(apiServerEndpoint)
             let resolvedNetworkMode = try parseNetworkMode(networkMode)
+            let resolvedVMNetDisconnectRecovery = try parseVMNetDisconnectRecovery(vmnetDisconnectRecovery)
             guard !enableDualStack || resolvedNetworkMode == .full else {
                 throw ValidationError("--enable-dual-stack requires --network-mode full")
+            }
+            guard resolvedVMNetDisconnectRecovery == .disabled || resolvedNetworkMode == .full else {
+                throw ValidationError("--vmnet-disconnect-recovery requires --network-mode full")
             }
             let resolvedContainerServiceUser = try resolveContainerServiceUser()
             let resolvedRuntimeClasses = try runtimeClass.map {
@@ -148,6 +158,7 @@ extension MacOSKubeadm {
                 runtimeClasses: resolvedRuntimeClasses + resolvedGUIRuntimeClasses,
                 networkMode: resolvedNetworkMode,
                 enableDualStack: enableDualStack,
+                vmnetDisconnectRecovery: resolvedVMNetDisconnectRecovery,
                 masqueradeIPv6PodTraffic: disableIPv6Masquerade ? false : nil,
                 ipv6EgressInterface: ipv6EgressInterface,
                 ipv6EgressSourceAddress: ipv6EgressSourceAddress,
@@ -185,6 +196,15 @@ extension MacOSKubeadm {
             guard let mode = MacOSKubeadmNetworkMode(rawValue: normalized) else {
                 let allowed = MacOSKubeadmNetworkMode.allCases.map(\.rawValue).joined(separator: ", ")
                 throw ValidationError("--network-mode must be one of: \(allowed)")
+            }
+            return mode
+        }
+
+        private func parseVMNetDisconnectRecovery(_ value: String) throws -> MacOSKubeadmVMNetDisconnectRecovery {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let mode = MacOSKubeadmVMNetDisconnectRecovery(rawValue: normalized) else {
+                let allowed = MacOSKubeadmVMNetDisconnectRecovery.allCases.map(\.rawValue).joined(separator: ", ")
+                throw ValidationError("--vmnet-disconnect-recovery must be one of: \(allowed)")
             }
             return mode
         }

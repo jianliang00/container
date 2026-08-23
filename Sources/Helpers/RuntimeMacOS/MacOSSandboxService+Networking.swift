@@ -28,7 +28,13 @@ public struct SandboxNetworkControl: Sendable {
     let deallocate: @Sendable (_ network: String, _ hostname: String) async throws -> Void
 
     public static var live: SandboxNetworkControl {
-        let sessions = SandboxNetworkSessionStore()
+        live(onInvalidation: { _ in })
+    }
+
+    static func live(
+        onInvalidation: @Sendable @escaping (SandboxNetworkInvalidation) async -> Void
+    ) -> SandboxNetworkControl {
+        let sessions = SandboxNetworkSessionStore(onInvalidation: onInvalidation)
         return SandboxNetworkControl(
             allocate: { network, hostname, macAddress in
                 try await sessions.allocate(network: network, hostname: hostname, macAddress: macAddress)
@@ -43,6 +49,11 @@ public struct SandboxNetworkControl: Sendable {
     }
 }
 
+struct SandboxNetworkInvalidation: Sendable, Equatable {
+    let network: String
+    let hostname: String
+}
+
 private actor SandboxNetworkSessionStore {
     private struct Key: Hashable, Sendable {
         let network: String
@@ -50,12 +61,18 @@ private actor SandboxNetworkSessionStore {
     }
 
     private struct Lease: Sendable {
+        let id: UUID
         let session: XPCClientSession
-        let attachment: Attachment
+        let allocation: Task<Attachment, Error>
     }
 
     private static let plugin = "container-network-vmnet"
+    private let onInvalidation: @Sendable (SandboxNetworkInvalidation) async -> Void
     private var leases: [Key: Lease] = [:]
+
+    init(onInvalidation: @Sendable @escaping (SandboxNetworkInvalidation) async -> Void) {
+        self.onInvalidation = onInvalidation
+    }
 
     deinit {
         for lease in leases.values {
@@ -66,34 +83,71 @@ private actor SandboxNetworkSessionStore {
     func allocate(network: String, hostname: String, macAddress: MACAddress?) async throws -> Attachment {
         let key = Key(network: network, hostname: hostname)
         if let lease = leases[key] {
-            return lease.attachment
+            return try await resolveAllocation(lease, for: key)
         }
 
         let client = NetworkClient(id: network, plugin: Self.plugin)
         let session = client.connect()
-        do {
+        let leaseID = UUID()
+        let allocation = Task {
             let (attachment, _) = try await client.allocate(
                 hostname: hostname,
                 macAddress: macAddress,
                 on: session
             )
-            leases[key] = Lease(session: session, attachment: attachment)
             return attachment
-        } catch {
-            session.close()
-            throw error
         }
+        let lease = Lease(
+            id: leaseID,
+            session: session,
+            allocation: allocation
+        )
+        leases[key] = lease
+        session.onDisconnect { [weak self] in
+            await self?.handleDisconnect(for: key, leaseID: leaseID)
+        }
+        return try await resolveAllocation(lease, for: key)
     }
 
     func lookup(network: String, hostname: String) async throws -> Attachment? {
-        if let lease = leases[Key(network: network, hostname: hostname)] {
-            return lease.attachment
+        let key = Key(network: network, hostname: hostname)
+        if let lease = leases[key] {
+            return try await resolveAllocation(lease, for: key)
         }
         return try await NetworkClient(id: network, plugin: Self.plugin).lookup(hostname: hostname)
     }
 
     func release(network: String, hostname: String) {
         leases.removeValue(forKey: Key(network: network, hostname: hostname))?.session.close()
+    }
+
+    private func resolveAllocation(_ lease: Lease, for key: Key) async throws -> Attachment {
+        do {
+            let attachment = try await lease.allocation.value
+            guard leases[key]?.id == lease.id else {
+                throw ContainerizationError(
+                    .interrupted,
+                    message: "network helper disconnected while allocating \(key.network)/\(key.hostname)"
+                )
+            }
+            return attachment
+        } catch {
+            if leases[key]?.id == lease.id {
+                leases.removeValue(forKey: key)
+            }
+            lease.session.close()
+            throw error
+        }
+    }
+
+    private func handleDisconnect(for key: Key, leaseID: UUID) async {
+        guard let lease = leases[key], lease.id == leaseID else {
+            return
+        }
+        leases.removeValue(forKey: key)
+        await onInvalidation(
+            SandboxNetworkInvalidation(network: key.network, hostname: key.hostname)
+        )
     }
 }
 

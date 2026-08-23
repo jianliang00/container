@@ -179,6 +179,7 @@ public enum MacOSKubeadmPlanner {
                         sandboxImage: options.sandboxImage,
                         networkMode: options.networkMode,
                         dualStackEnabled: options.enableDualStack,
+                        vmnetDisconnectRecovery: options.vmnetDisconnectRecovery,
                         runtimeClasses: options.runtimeClasses
                     ),
                     mode: 0o644,
@@ -534,6 +535,11 @@ public enum MacOSKubeadmPlanner {
         try options.validateNodeNetworkConfiguration()
         guard !options.enableDualStack || options.networkMode == .full else {
             throw MacOSKubeadmError.invalidInput("--enable-dual-stack requires --network-mode full")
+        }
+        guard options.vmnetDisconnectRecovery == .disabled || options.networkMode == .full else {
+            throw MacOSKubeadmError.invalidInput(
+                "--vmnet-disconnect-recovery requires --network-mode full"
+            )
         }
         guard options.nodeName.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
             throw MacOSKubeadmError.invalidInput("--node-name may only contain letters, numbers, '.', '_', and '-'")

@@ -174,6 +174,19 @@ struct MacOSKubeadmRenderingTests {
         #expect(guiHandler["guiEnabled"] as? Bool == true)
     }
 
+    @Test func CRIConfigurationRendersVMNetDisconnectRecovery() throws {
+        let rendered = MacOSKubeadmRenderer.criShimConfiguration(
+            sandboxImage: "localhost/macos-sandbox:test",
+            vmnetDisconnectRecovery: .stopSandbox
+        )
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        let podNetwork = try #require(object["podNetwork"] as? [String: Any])
+
+        #expect(podNetwork["vmnetDisconnectRecovery"] as? String == "stop-sandbox")
+    }
+
     @Test func kubeletPlistRendersDualNodeIPsAsOneArgument() throws {
         let rendered = MacOSKubeadmRenderer.kubeletPlist(
             nodeName: "macos-ci-1",

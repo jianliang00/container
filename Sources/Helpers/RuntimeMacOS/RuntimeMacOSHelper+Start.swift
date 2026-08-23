@@ -56,10 +56,21 @@ extension RuntimeMacOSHelper {
                 signal(SIGPIPE, SIG_IGN)
 
                 nonisolated(unsafe) let anonymousConnection = xpc_connection_create(nil, nil)
+                let networkInvalidationRelay = SandboxNetworkInvalidationRelay()
+                let networkControl = SandboxNetworkControl.live { invalidation in
+                    await networkInvalidationRelay.deliver(invalidation)
+                }
                 let service = MacOSSandboxService(
                     root: .init(fileURLWithPath: root),
-                    log: log
+                    log: log,
+                    networkControl: networkControl
                 )
+                await networkInvalidationRelay.install { [weak service] invalidation in
+                    guard let service else {
+                        return
+                    }
+                    await service.handleSandboxNetworkInvalidation(invalidation)
+                }
 
                 let endpointServer = XPCServer(
                     identifier: machServiceLabel,
@@ -143,5 +154,29 @@ extension RuntimeMacOSHelper {
                 throw POSIXError(.init(rawValue: errno)!)
             }
         }
+    }
+}
+
+private actor SandboxNetworkInvalidationRelay {
+    typealias Handler = @Sendable (SandboxNetworkInvalidation) async -> Void
+
+    private var handler: Handler?
+    private var pending: [SandboxNetworkInvalidation] = []
+
+    func install(_ handler: @escaping Handler) async {
+        self.handler = handler
+        let pending = self.pending
+        self.pending.removeAll()
+        for invalidation in pending {
+            await handler(invalidation)
+        }
+    }
+
+    func deliver(_ invalidation: SandboxNetworkInvalidation) async {
+        guard let handler else {
+            pending.append(invalidation)
+            return
+        }
+        await handler(invalidation)
     }
 }

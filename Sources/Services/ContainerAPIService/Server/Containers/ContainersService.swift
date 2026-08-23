@@ -1821,6 +1821,7 @@ public actor ContainersService {
         let networks = (try MacOSGuestNetworkLeaseStore.load(from: root))?.attachments ?? containerNetworks
         let workloads = try loadPersistedWorkloadSnapshots(root: root, configuration: configuration)
         let networkPolicy = try MacOSGuestNetworkPolicyStore.load(from: root)
+        let failureReason = try MacOSGuestNetworkFailureStore.load(from: root)?.reason
         return SandboxSnapshot(
             configuration: SandboxConfiguration(containerConfiguration: configuration),
             status: containerStatus,
@@ -1834,7 +1835,8 @@ public actor ContainersService {
                 )
             ],
             workloads: workloads,
-            networkPolicy: networkPolicy
+            networkPolicy: networkPolicy,
+            failureReason: failureReason
         )
     }
 

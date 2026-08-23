@@ -40,6 +40,25 @@ struct SandboxSnapshotTests {
     }
 
     @Test
+    func terminalFailureReasonRoundTripsAndDefaultsToNilForLegacySnapshots() throws {
+        let snapshot = SandboxSnapshot(
+            status: .stopped,
+            networks: [],
+            containers: [],
+            failureReason: .networkInvalidated
+        )
+        let encoded = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(SandboxSnapshot.self, from: encoded)
+        #expect(decoded.failureReason == .networkInvalidated)
+
+        var legacyObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacyObject.removeValue(forKey: "failureReason")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacy = try JSONDecoder().decode(SandboxSnapshot.self, from: legacyData)
+        #expect(legacy.failureReason == nil)
+    }
+
+    @Test
     func legacySnapshotDerivesSandboxConfigurationFromContainer() throws {
         let containerConfiguration = try makeContainerConfiguration()
         let snapshot = SandboxSnapshot(

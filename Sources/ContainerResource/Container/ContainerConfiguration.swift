@@ -184,28 +184,38 @@ public struct ContainerConfiguration: Sendable, Codable {
             case vmnetShared
         }
 
+        public enum VMNetDisconnectRecovery: String, Sendable, Codable, Equatable {
+            case disabled
+            case monitor
+            case stopSandbox = "stop-sandbox"
+        }
+
         public var snapshotEnabled: Bool
         public var guiEnabled: Bool
         public var agentPort: UInt32
         public var networkBackend: NetworkBackend
+        public var vmnetDisconnectRecovery: VMNetDisconnectRecovery
 
         enum CodingKeys: String, CodingKey {
             case snapshotEnabled
             case guiEnabled
             case agentPort
             case networkBackend
+            case vmnetDisconnectRecovery
         }
 
         public init(
             snapshotEnabled: Bool,
             guiEnabled: Bool,
             agentPort: UInt32,
-            networkBackend: NetworkBackend = .virtualizationNAT
+            networkBackend: NetworkBackend = .virtualizationNAT,
+            vmnetDisconnectRecovery: VMNetDisconnectRecovery = .disabled
         ) {
             self.snapshotEnabled = snapshotEnabled
             self.guiEnabled = guiEnabled
             self.agentPort = agentPort
             self.networkBackend = networkBackend
+            self.vmnetDisconnectRecovery = vmnetDisconnectRecovery
         }
 
         public init(from decoder: Decoder) throws {
@@ -214,6 +224,8 @@ public struct ContainerConfiguration: Sendable, Codable {
             guiEnabled = try container.decode(Bool.self, forKey: .guiEnabled)
             agentPort = try container.decode(UInt32.self, forKey: .agentPort)
             networkBackend = try container.decodeIfPresent(NetworkBackend.self, forKey: .networkBackend) ?? .virtualizationNAT
+            vmnetDisconnectRecovery =
+                try container.decodeIfPresent(VMNetDisconnectRecovery.self, forKey: .vmnetDisconnectRecovery) ?? .disabled
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -222,6 +234,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             try container.encode(guiEnabled, forKey: .guiEnabled)
             try container.encode(agentPort, forKey: .agentPort)
             try container.encode(networkBackend, forKey: .networkBackend)
+            try container.encode(vmnetDisconnectRecovery, forKey: .vmnetDisconnectRecovery)
         }
     }
 

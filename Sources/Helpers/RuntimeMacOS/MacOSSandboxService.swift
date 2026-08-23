@@ -256,6 +256,7 @@ public actor MacOSSandboxService {
     let networkControl: SandboxNetworkControl
 
     private var sandboxState: State = .created
+    private var sandboxFailureReason: SandboxFailureReason?
     var configuration: ContainerConfiguration?
     private var sandboxImageConfig: ContainerizationOCI.Image?
     private var sandboxImageConfigResolved = false
@@ -584,7 +585,7 @@ extension MacOSSandboxService {
         return message.reply()
     }
 
-    private func stopSandbox(stopOptions: ContainerStopOptions) async throws {
+    func stopSandbox(stopOptions: ContainerStopOptions) async throws {
         let stopSignalName = stopOptions.signal ?? "SIGTERM"
         let stopSignal = try Signal(stopSignalName, from: Signal.platform).rawValue
         let waitTimeout = Self.stopWaitTimeout(for: stopOptions)
@@ -892,7 +893,8 @@ extension MacOSSandboxService {
                 )
             ],
             workloads: workloadSnapshots(),
-            networkPolicy: networkPolicy
+            networkPolicy: networkPolicy,
+            failureReason: currentSandboxFailureReason()
         )
         let reply = message.reply()
         try reply.setState(snapshot)
@@ -968,6 +970,7 @@ extension MacOSSandboxService {
         presentGUI: Bool = true,
         progressUpdate: ProgressUpdateHandler? = nil
     ) async throws {
+        try requireUsableSandboxNetwork()
         if case .booted = sandboxState {
             return
         }
@@ -1001,6 +1004,7 @@ extension MacOSSandboxService {
                 attachments: networkState.attachments,
                 publishedPorts: config.publishedPorts
             )
+            try requireUsableSandboxNetwork()
             #else
             throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
             #endif
@@ -3899,7 +3903,8 @@ extension MacOSSandboxService {
                 )
             ],
             workloads: workloadSnapshots(),
-            networkPolicy: networkPolicy
+            networkPolicy: networkPolicy,
+            failureReason: currentSandboxFailureReason()
         )
     }
 
@@ -3926,6 +3931,12 @@ extension MacOSSandboxService {
         switch state {
         case "created":
             self.sandboxState = .created
+        case "stopping":
+            self.sandboxState = .stopping
+        case "stopped":
+            self.sandboxState = .stopped(0)
+        case "shuttingDown":
+            self.sandboxState = .shuttingDown
         case "running":
             self.sandboxState = .running
         default:
@@ -3971,6 +3982,75 @@ extension MacOSSandboxService {
         await stopSocketForwarders()
         closeAllSessions()
         sandboxState = .stopped(255)
+    }
+
+    func handleSandboxNetworkInvalidation(_ invalidation: SandboxNetworkInvalidation) async {
+        let recovery =
+            configuration?.macosGuest?.vmnetDisconnectRecovery
+            ?? .disabled
+        guard recovery != .disabled else {
+            return
+        }
+
+        let detail =
+            "vmnet helper disconnected network=\(invalidation.network) hostname=\(invalidation.hostname) recovery=\(recovery.rawValue)"
+        log.warning("\(detail)")
+        writeContainerLog(Data((detail + "\n").utf8))
+        guard recovery == .stopSandbox else {
+            return
+        }
+
+        sandboxFailureReason = .networkInvalidated
+        do {
+            try MacOSGuestNetworkFailureStore.save(
+                MacOSGuestNetworkFailure(
+                    reason: .networkInvalidated,
+                    network: invalidation.network,
+                    hostname: invalidation.hostname
+                ),
+                in: root
+            )
+        } catch {
+            log.error(
+                "failed to persist vmnet helper disconnect",
+                metadata: ["error": "\(error)"]
+            )
+        }
+        try? MacOSGuestNetworkLeaseStore.remove(from: root)
+
+        switch sandboxState {
+        case .stopping, .stopped, .shuttingDown:
+            return
+        case .created, .booted, .running:
+            do {
+                try await stopSandbox(
+                    stopOptions: ContainerStopOptions(timeoutInSeconds: 0, signal: "SIGKILL")
+                )
+            } catch {
+                log.error(
+                    "failed to stop sandbox after vmnet helper disconnect",
+                    metadata: ["error": "\(error)"]
+                )
+            }
+            sandboxState = .stopped(255)
+        }
+    }
+
+    private func currentSandboxFailureReason() -> SandboxFailureReason? {
+        if let sandboxFailureReason {
+            return sandboxFailureReason
+        }
+        return (try? MacOSGuestNetworkFailureStore.load(from: root))?.reason
+    }
+
+    private func requireUsableSandboxNetwork() throws {
+        guard let reason = currentSandboxFailureReason() else {
+            return
+        }
+        throw ContainerizationError(
+            .invalidState,
+            message: "sandbox must be recreated after terminal failure: \(reason.rawValue)"
+        )
     }
 
     func testingAttachWorkload(

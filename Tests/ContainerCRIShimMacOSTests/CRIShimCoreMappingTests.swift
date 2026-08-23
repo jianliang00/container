@@ -140,13 +140,15 @@ struct CRIShimCoreMappingTests {
                 digest: "sha256:sandbox",
                 size: 1
             ),
-            metadata: sandboxMetadata
+            metadata: sandboxMetadata,
+            vmnetDisconnectRecovery: .stopSandbox
         )
 
         #expect(configuration.labels["app"] == "demo")
         #expect(configuration.resources.cpus == 6)
         #expect(configuration.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
         #expect(configuration.macosGuest?.networkBackend == .vmnetShared)
+        #expect(configuration.macosGuest?.vmnetDisconnectRecovery == .stopSandbox)
         #expect(configuration.networks.map(\.network) == ["default"])
         #expect(configuration.networks.first?.options.mtu == 1_450)
         let decodedMetadata = try #require(decodeCRIShimCoreSandboxMetadataLabel(configuration.labels))

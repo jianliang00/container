@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 
 public enum CRIShimConfigDefaults {
@@ -270,6 +271,7 @@ public struct KubeProxyConfig: Codable, Equatable, Sendable {
 public struct PodNetworkConfig: Codable, Equatable, Sendable {
     public var enabled: Bool?
     public var dualStackEnabled: Bool
+    public var vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery
     public var networkName: String?
     public var runtimeStatePath: String?
     public var readyStatePath: String?
@@ -277,12 +279,14 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
     public init(
         enabled: Bool? = nil,
         dualStackEnabled: Bool = false,
+        vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled,
         networkName: String? = nil,
         runtimeStatePath: String? = nil,
         readyStatePath: String? = nil
     ) {
         self.enabled = enabled
         self.dualStackEnabled = dualStackEnabled
+        self.vmnetDisconnectRecovery = vmnetDisconnectRecovery
         self.networkName = networkName
         self.runtimeStatePath = runtimeStatePath
         self.readyStatePath = readyStatePath
@@ -291,6 +295,7 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case enabled
         case dualStackEnabled
+        case vmnetDisconnectRecovery
         case networkName
         case runtimeStatePath
         case readyStatePath
@@ -300,6 +305,11 @@ public struct PodNetworkConfig: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
         dualStackEnabled = try container.decodeIfPresent(Bool.self, forKey: .dualStackEnabled) ?? false
+        vmnetDisconnectRecovery =
+            try container.decodeIfPresent(
+                ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery.self,
+                forKey: .vmnetDisconnectRecovery
+            ) ?? .disabled
         networkName = try container.decodeIfPresent(String.self, forKey: .networkName)
         runtimeStatePath = try container.decodeIfPresent(String.self, forKey: .runtimeStatePath)
         readyStatePath = try container.decodeIfPresent(String.self, forKey: .readyStatePath)

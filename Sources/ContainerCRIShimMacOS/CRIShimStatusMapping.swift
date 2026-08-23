@@ -331,6 +331,10 @@ extension CRIShimSandboxMetadata {
         }
 
         var metadata = self
+        if sandboxSnapshot.failureReason == .networkInvalidated {
+            metadata.state = .stopped
+            return metadata.applyingNetworkAttachments(from: sandboxSnapshot)
+        }
         switch sandboxSnapshot.status {
         case .running:
             metadata.state = .running
@@ -344,6 +348,11 @@ extension CRIShimSandboxMetadata {
             break
         }
 
+        return metadata.applyingNetworkAttachments(from: sandboxSnapshot)
+    }
+
+    private func applyingNetworkAttachments(from sandboxSnapshot: SandboxSnapshot) -> CRIShimSandboxMetadata {
+        var metadata = self
         let networks = sandboxSnapshot.networks.map(\.network).filter { !$0.trimmed.isEmpty }
         if !networks.isEmpty {
             metadata.networkAttachments = networks

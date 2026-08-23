@@ -135,6 +135,7 @@ public enum MacOSKubeadmRenderer {
         sandboxImage: String,
         networkMode: MacOSKubeadmNetworkMode = .full,
         dualStackEnabled: Bool = false,
+        vmnetDisconnectRecovery: MacOSKubeadmVMNetDisconnectRecovery = .disabled,
         runtimeClasses: [MacOSKubeadmRuntimeClassProfile] = []
     ) -> String {
         let sandboxImageJSON = jsonString(sandboxImage)
@@ -187,6 +188,7 @@ public enum MacOSKubeadmRenderer {
                     "podNetwork": {
                         "enabled": true,
                         "dualStackEnabled": \(dualStackEnabled),
+                        "vmnetDisconnectRecovery": "\(vmnetDisconnectRecovery.rawValue)",
                         "networkName": "kubernetes-pod",
                         "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
                         "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json"

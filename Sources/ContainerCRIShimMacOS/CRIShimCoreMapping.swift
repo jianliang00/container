@@ -54,7 +54,8 @@ func makeCRIShimSandboxConfiguration(
     handler: ResolvedRuntimeHandler,
     sandboxImage: CRIShimImageRecord,
     metadata: CRIShimSandboxMetadata? = nil,
-    networkMTUOverride: UInt32? = nil
+    networkMTUOverride: UInt32? = nil,
+    vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled
 ) throws -> ContainerConfiguration {
     let sandboxID = id.trimmed
     guard !sandboxID.isEmpty else {
@@ -111,7 +112,8 @@ func makeCRIShimSandboxConfiguration(
         snapshotEnabled: false,
         guiEnabled: handler.guiEnabled,
         agentPort: 27_000,
-        networkBackend: try makeCRIShimMacOSNetworkBackend(handler.networkBackend)
+        networkBackend: try makeCRIShimMacOSNetworkBackend(handler.networkBackend),
+        vmnetDisconnectRecovery: vmnetDisconnectRecovery
     )
     return configuration
 }

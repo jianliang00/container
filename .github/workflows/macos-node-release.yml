@@ -294,7 +294,7 @@ jobs:
           build_signed_paths = build_script.scan(/codesign_path "\$\{PKGROOT\}\/([^\"]+)"/).flatten.sort
           verified_paths = signed_array[1].scan(/"([^"]+)"/).flatten.sort
           [build_staged_paths, build_signed_paths, verified_paths].each do |paths|
-            abort "installer must contain exactly 18 unique signed Mach-O payload paths" unless paths.length == 18 && paths.uniq.length == 18
+            abort "installer must contain exactly 19 unique signed Mach-O payload paths" unless paths.length == 19 && paths.uniq.length == 19
           end
           abort "installer staging, signing, and verification path lists differ" unless build_staged_paths == build_signed_paths && build_signed_paths == verified_paths
           RUBY

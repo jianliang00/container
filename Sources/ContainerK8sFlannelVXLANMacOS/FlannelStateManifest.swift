@@ -531,6 +531,27 @@ public struct FlannelStateManifestCoordinator: Sendable {
         }
     }
 
+    @discardableResult
+    public func requireExactClaim(
+        configPath: String,
+        config: FlannelVXLANMacOSConfig,
+        whileHolding lifetimeLock: FlannelDaemonLifetimeLock
+    ) throws -> FlannelStateManifest {
+        try lifetimeLock.requireHeld()
+        let candidate = try FlannelStateManifest(configPath: configPath, config: config)
+        guard let existing = try store.load() else {
+            throw FlannelVXLANError.invalidConfiguration(
+                "Flannel state manifest is missing for the active configuration"
+            )
+        }
+        guard existing == candidate else {
+            throw FlannelVXLANError.invalidConfiguration(
+                "Flannel state manifest does not match the active configuration"
+            )
+        }
+        return candidate
+    }
+
     public func discoverMissingConfiguration(
         requestedConfigPath: String,
         whileHolding lifetimeLock: FlannelDaemonLifetimeLock

@@ -14,42 +14,126 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import CryptoKit
 import Darwin
 import Foundation
 
+public struct FlannelPurgePreflightClaim: Codable, Sendable, Equatable {
+    public static let currentSchemaVersion = 1
+
+    public var schemaVersion: Int
+    public var manifestSHA256: String
+
+    public init(
+        schemaVersion: Int = Self.currentSchemaVersion,
+        manifestSHA256: String
+    ) {
+        self.schemaVersion = schemaVersion
+        self.manifestSHA256 = manifestSHA256
+    }
+
+    public init(manifest: FlannelStateManifest) throws {
+        try manifest.validate()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(manifest)
+        self.init(
+            manifestSHA256: SHA256.hash(data: data)
+                .map { String(format: "%02x", $0) }
+                .joined()
+        )
+    }
+
+    public func validate() throws {
+        guard schemaVersion == Self.currentSchemaVersion else {
+            throw FlannelVXLANError.runtime(
+                "unsupported purge preflight claim schema version \(schemaVersion)"
+            )
+        }
+        let digestBytes = Array(manifestSHA256.utf8)
+        guard digestBytes.count == 64,
+            digestBytes.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+        else {
+            throw FlannelVXLANError.runtime("purge preflight claim contains an invalid SHA-256 digest")
+        }
+    }
+}
+
 public struct FlannelControlRequest: Codable, Sendable, Equatable {
     public static let currentVersion = 1
+    public static let withdrawAction = "withdraw"
+    public static let checkPurgeAction = "check-purge"
 
     public var version: Int
     public var action: String
+    public var purgePreflightClaim: FlannelPurgePreflightClaim?
 
-    public init(version: Int = Self.currentVersion, action: String = "withdraw") {
+    public init(
+        version: Int = Self.currentVersion,
+        action: String = Self.withdrawAction,
+        purgePreflightClaim: FlannelPurgePreflightClaim? = nil
+    ) {
         self.version = version
         self.action = action
+        self.purgePreflightClaim = purgePreflightClaim
     }
 }
 
 public struct FlannelControlResponse: Codable, Sendable, Equatable {
+    public enum FailureKind: String, Codable, Sendable, Equatable {
+        case operationFailed
+        case unsupportedAction
+        case unsupportedVersion
+    }
+
     public static let currentVersion = 1
 
     public var version: Int
     public var outcome: FlannelWithdrawalOutcome
+    public var failureKind: FailureKind?
 
-    public init(version: Int = Self.currentVersion, outcome: FlannelWithdrawalOutcome) {
+    public init(
+        version: Int = Self.currentVersion,
+        outcome: FlannelWithdrawalOutcome,
+        failureKind: FailureKind? = nil
+    ) {
         self.version = version
         self.outcome = outcome
+        self.failureKind = failureKind
+    }
+}
+
+public enum FlannelCheckPurgeControlError: Error, Sendable, Equatable, CustomStringConvertible {
+    case authentication(String)
+    case protocolViolation(String)
+    case transport(String)
+    case unsupportedAction(String)
+
+    public var description: String {
+        switch self {
+        case .authentication(let message):
+            "control socket authentication failed: \(message)"
+        case .protocolViolation(let message):
+            "control protocol violation: \(message)"
+        case .transport(let message):
+            "control transport failed: \(message)"
+        case .unsupportedAction(let message):
+            "control action is unsupported: \(message)"
+        }
     }
 }
 
 public final class FlannelControlServer: @unchecked Sendable {
     public typealias WithdrawalHandler = @Sendable () async -> FlannelWithdrawalOutcome
+    public typealias CheckPurgeHandler = @Sendable (FlannelPurgePreflightClaim) async -> FlannelWithdrawalOutcome
 
     private let socketPath: String
     private let requiredPeerUID: uid_t
     private let lock = NSLock()
     private var listenFD: Int32 = -1
     private var stopping = true
-    private var handler: WithdrawalHandler?
+    private var withdrawalHandler: WithdrawalHandler?
+    private var checkPurgeHandler: CheckPurgeHandler?
 
     public init(socketPath: String, requiredPeerUID: uid_t = 0) {
         self.socketPath = socketPath
@@ -61,6 +145,20 @@ public final class FlannelControlServer: @unchecked Sendable {
     }
 
     public func start(handler: @escaping WithdrawalHandler) throws {
+        try startServer(withdrawalHandler: handler, checkPurgeHandler: nil)
+    }
+
+    public func start(
+        withdrawalHandler: @escaping WithdrawalHandler,
+        checkPurgeHandler: @escaping CheckPurgeHandler
+    ) throws {
+        try startServer(withdrawalHandler: withdrawalHandler, checkPurgeHandler: checkPurgeHandler)
+    }
+
+    private func startServer(
+        withdrawalHandler: @escaping WithdrawalHandler,
+        checkPurgeHandler: CheckPurgeHandler?
+    ) throws {
         try prepareSocketPath()
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -94,7 +192,8 @@ public final class FlannelControlServer: @unchecked Sendable {
         lock.withLock {
             listenFD = fd
             stopping = false
-            self.handler = handler
+            self.withdrawalHandler = withdrawalHandler
+            self.checkPurgeHandler = checkPurgeHandler
         }
         Thread.detachNewThread { [weak self] in
             self?.acceptLoop()
@@ -107,7 +206,8 @@ public final class FlannelControlServer: @unchecked Sendable {
                 return -1
             }
             stopping = true
-            handler = nil
+            withdrawalHandler = nil
+            checkPurgeHandler = nil
             let descriptor = listenFD
             listenFD = -1
             return descriptor
@@ -156,18 +256,74 @@ public final class FlannelControlServer: @unchecked Sendable {
                 throw FlannelVXLANError.runtime("control request denied for uid \(peerUID)")
             }
             let request = try readFrame(FlannelControlRequest.self, from: clientFD)
-            guard request.version == FlannelControlRequest.currentVersion, request.action == "withdraw" else {
-                let outcome = FlannelWithdrawalOutcome(succeeded: false, message: "unsupported control request")
-                try writeFrame(FlannelControlResponse(outcome: outcome), to: clientFD)
+            guard request.version == FlannelControlRequest.currentVersion else {
+                try writeFailure(
+                    "unsupported control request version \(request.version)",
+                    kind: .unsupportedVersion,
+                    to: clientFD
+                )
                 return
             }
-            guard let handler = lock.withLock({ self.handler }) else {
-                let outcome = FlannelWithdrawalOutcome(succeeded: false, message: "control server is stopping")
-                try writeFrame(FlannelControlResponse(outcome: outcome), to: clientFD)
+            let handler: WithdrawalHandler?
+            switch request.action {
+            case FlannelControlRequest.withdrawAction:
+                handler = lock.withLock { withdrawalHandler }
+            case FlannelControlRequest.checkPurgeAction:
+                guard let claim = request.purgePreflightClaim else {
+                    try writeFailure(
+                        "control request action \(request.action) requires a purge preflight claim",
+                        kind: .operationFailed,
+                        to: clientFD
+                    )
+                    return
+                }
+                do {
+                    try claim.validate()
+                } catch {
+                    try writeFailure(
+                        "invalid purge preflight claim: \(error)",
+                        kind: .operationFailed,
+                        to: clientFD
+                    )
+                    return
+                }
+                guard let checkHandler = lock.withLock({ checkPurgeHandler }) else {
+                    try writeFailure(
+                        "unsupported control request action \(request.action)",
+                        kind: .unsupportedAction,
+                        to: clientFD
+                    )
+                    return
+                }
+                handler = { await checkHandler(claim) }
+            default:
+                try writeFailure(
+                    "unsupported control request action \(request.action)",
+                    kind: .unsupportedAction,
+                    to: clientFD
+                )
+                return
+            }
+            guard let handler else {
+                let kind: FlannelControlResponse.FailureKind =
+                    request.action == FlannelControlRequest.checkPurgeAction
+                    ? .unsupportedAction
+                    : .operationFailed
+                try writeFailure(
+                    request.action == FlannelControlRequest.checkPurgeAction
+                        ? "unsupported control request action \(request.action)"
+                        : "control server is stopping",
+                    kind: kind,
+                    to: clientFD
+                )
                 return
             }
             let responseTask = Task {
-                FlannelControlResponse(outcome: await handler())
+                let outcome = await handler()
+                return FlannelControlResponse(
+                    outcome: outcome,
+                    failureKind: outcome.succeeded ? nil : .operationFailed
+                )
             }
             let response = awaitBlocking(responseTask)
             try writeFrame(response, to: clientFD)
@@ -175,6 +331,15 @@ public final class FlannelControlServer: @unchecked Sendable {
             let outcome = FlannelWithdrawalOutcome(succeeded: false, message: String(describing: error))
             try? writeFrame(FlannelControlResponse(outcome: outcome), to: clientFD)
         }
+    }
+
+    private func writeFailure(
+        _ message: String,
+        kind: FlannelControlResponse.FailureKind,
+        to clientFD: Int32
+    ) throws {
+        let outcome = FlannelWithdrawalOutcome(succeeded: false, message: message)
+        try writeFrame(FlannelControlResponse(outcome: outcome, failureKind: kind), to: clientFD)
     }
 
     private func prepareSocketPath() throws {
@@ -206,27 +371,135 @@ public enum FlannelControlClient {
         socketPath: String = FlannelVXLANMacOSConfig.defaultControlSocketPath,
         requiredPeerUID: uid_t = 0
     ) throws -> FlannelWithdrawalOutcome {
-        let fd = try connectUnixSocket(path: socketPath)
+        let response = try request(
+            FlannelControlRequest(),
+            socketPath: socketPath,
+            requiredPeerUID: requiredPeerUID
+        )
+        return response.outcome
+    }
+
+    public static func requestPurgePreflight(
+        claim: FlannelPurgePreflightClaim,
+        socketPath: String = FlannelVXLANMacOSConfig.defaultControlSocketPath,
+        requiredPeerUID: uid_t = 0
+    ) throws -> FlannelWithdrawalOutcome {
+        let response: FlannelControlResponse
+        do {
+            response = try request(
+                FlannelControlRequest(
+                    action: FlannelControlRequest.checkPurgeAction,
+                    purgePreflightClaim: claim
+                ),
+                socketPath: socketPath,
+                requiredPeerUID: requiredPeerUID,
+                classifyCheckPurgeErrors: true
+            )
+        } catch let error as FlannelCheckPurgeControlError {
+            throw error
+        } catch {
+            throw FlannelCheckPurgeControlError.transport(String(describing: error))
+        }
+        return try purgePreflightOutcome(from: response)
+    }
+
+    static func purgePreflightOutcome(
+        from response: FlannelControlResponse
+    ) throws -> FlannelWithdrawalOutcome {
+        if response.outcome.succeeded, let failureKind = response.failureKind {
+            throw FlannelCheckPurgeControlError.protocolViolation(
+                "successful response reported failure kind \(failureKind.rawValue)"
+            )
+        }
+        if response.failureKind == .unsupportedAction
+            || (response.failureKind == nil
+                && !response.outcome.succeeded
+                && response.outcome.message == "unsupported control request")
+        {
+            throw FlannelCheckPurgeControlError.unsupportedAction(response.outcome.message)
+        }
+        if response.failureKind == .unsupportedVersion {
+            throw FlannelCheckPurgeControlError.protocolViolation(response.outcome.message)
+        }
+        return response.outcome
+    }
+
+    static func request(
+        _ request: FlannelControlRequest,
+        socketPath: String,
+        requiredPeerUID: uid_t,
+        classifyCheckPurgeErrors: Bool = false
+    ) throws -> FlannelControlResponse {
+        let fd: Int32
+        do {
+            fd = try connectUnixSocket(path: socketPath)
+        } catch {
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.transport(String(describing: error))
+            }
+            throw error
+        }
         defer { Darwin.close(fd) }
         var peerUID = uid_t.max
         var peerGID = gid_t.max
         guard getpeereid(fd, &peerUID, &peerGID) == 0 else {
-            throw posixError("authenticate Flannel control server")
+            let error = posixError("authenticate Flannel control server")
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.authentication(String(describing: error))
+            }
+            throw error
         }
         guard peerUID == requiredPeerUID else {
-            throw FlannelVXLANError.runtime(
+            let message =
                 "refusing Flannel control server owned by uid \(peerUID); expected uid \(requiredPeerUID)"
-            )
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.authentication(message)
+            }
+            throw FlannelVXLANError.runtime(message)
         }
         var timeout = timeval(tv_sec: 120, tv_usec: 0)
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        try writeFrame(FlannelControlRequest(), to: fd)
-        let response = try readFrame(FlannelControlResponse.self, from: fd)
-        guard response.version == FlannelControlResponse.currentVersion else {
-            throw FlannelVXLANError.runtime("unsupported control response version \(response.version)")
+        let response: FlannelControlResponse
+        do {
+            try writeFrame(request, to: fd)
+        } catch let error as EncodingError {
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.protocolViolation(String(describing: error))
+            }
+            throw error
+        } catch {
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.transport(String(describing: error))
+            }
+            throw error
         }
-        return response.outcome
+        do {
+            response = try readFrame(FlannelControlResponse.self, from: fd)
+        } catch let error as DecodingError {
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.protocolViolation(String(describing: error))
+            }
+            throw error
+        } catch let error as FlannelControlFrameError {
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.protocolViolation(error.description)
+            }
+            throw error
+        } catch {
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.transport(String(describing: error))
+            }
+            throw error
+        }
+        guard response.version == FlannelControlResponse.currentVersion else {
+            let message = "unsupported control response version \(response.version)"
+            if classifyCheckPurgeErrors {
+                throw FlannelCheckPurgeControlError.protocolViolation(message)
+            }
+            throw FlannelVXLANError.runtime(message)
+        }
+        return response
     }
 }
 
@@ -295,7 +568,18 @@ private func readFrame<T: Decodable>(_ type: T.Type, from fd: Int32) throws -> T
         }
         throw posixError("read Flannel control frame")
     }
-    throw FlannelVXLANError.runtime("Flannel control frame exceeds \(maximumSize) bytes")
+    throw FlannelControlFrameError.tooLarge(maximumSize: maximumSize)
+}
+
+private enum FlannelControlFrameError: Error, CustomStringConvertible {
+    case tooLarge(maximumSize: Int)
+
+    var description: String {
+        switch self {
+        case .tooLarge(let maximumSize):
+            "Flannel control frame exceeds \(maximumSize) bytes"
+        }
+    }
 }
 
 private func writeFrame<T: Encodable>(_ value: T, to fd: Int32) throws {

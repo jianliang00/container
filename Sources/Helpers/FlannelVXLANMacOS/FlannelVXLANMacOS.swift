@@ -74,6 +74,8 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             throw ValidationError("--control-socket must be an absolute path")
         }
         var initialWithdrawalError: (any Error)?
+        var onlinePurgeFallbackContext: String?
+        let configurationExists = FileManager.default.fileExists(atPath: configPath)
         if withdraw {
             do {
                 try requestDaemonWithdrawal()
@@ -82,24 +84,36 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 initialWithdrawalError = error
             }
         }
-        if cleanup || withdraw || checkPurge || purgeNetwork,
-            !FileManager.default.fileExists(atPath: configPath)
-        {
-            guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+        if cleanup || withdraw || checkPurge || purgeNetwork, !configurationExists {
+            let acquiredLifetimeLock: FlannelDaemonLifetimeLock?
+            do {
+                acquiredLifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire()
+            } catch {
+                throw FlannelVXLANError.runtime(
+                    "offline state inspection could not acquire the lifetime lock: \(error)"
+                )
+            }
+            guard let lifetimeLock = acquiredLifetimeLock else {
                 let withdrawalDetail = initialWithdrawalError.map { "; daemon withdrawal failed: \($0)" } ?? ""
                 throw FlannelVXLANError.runtime(
-                    "cleanup configuration is missing and Flannel state inspection was refused because the daemon lifetime lock is held"
+                    "offline cleanup configuration is missing and state inspection was refused because the daemon lifetime lock is held"
                         + withdrawalDetail
                 )
             }
             defer { withExtendedLifetime(lifetimeLock) {} }
-            switch try FlannelStateManifestCoordinator().discoverMissingConfiguration(
-                requestedConfigPath: configPath,
-                whileHolding: lifetimeLock
-            ) {
+            let missingConfigurationState: FlannelMissingConfigurationState
+            do {
+                missingConfigurationState = try FlannelStateManifestCoordinator().discoverMissingConfiguration(
+                    requestedConfigPath: configPath,
+                    whileHolding: lifetimeLock
+                )
+            } catch {
+                throw FlannelVXLANError.runtime("offline state inspection failed: \(error)")
+            }
+            switch missingConfigurationState {
             case .managedStateRemains(_, let paths):
                 throw ValidationError(
-                    "cleanup configuration \(configPath) is missing while Flannel state remains at "
+                    "offline cleanup configuration \(configPath) is missing while Flannel state remains at "
                         + paths.joined(separator: ", ")
                 )
             case .noManagedState:
@@ -109,7 +123,7 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 let statePaths = Self.defaultStatePaths
                 guard statePaths.allSatisfy({ !FileManager.default.fileExists(atPath: $0) }) else {
                     throw ValidationError(
-                        "cleanup configuration \(configPath) is missing while legacy Flannel state remains"
+                        "offline cleanup configuration \(configPath) is missing while legacy Flannel state remains"
                     )
                 }
             }
@@ -122,6 +136,17 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             controlSocketPath,
             configurationFilePath: configPath
         )
+        if checkPurge {
+            let manifest = try FlannelStateManifest(configPath: configPath, config: config)
+            let claim = try FlannelPurgePreflightClaim(manifest: manifest)
+            switch try requestOnlinePurgePreflight(claim: claim) {
+            case .completed(let message):
+                print("online network purge preflight complete \(message)")
+                return
+            case .fallbackAllowed(let context):
+                onlinePurgeFallbackContext = context
+            }
+        }
         switch try FlannelBootstrapContext().ensure(
             containerServiceUserID: config.containerServiceUserID,
             executablePath: Bundle.main.executableURL?.path ?? CommandLine.arguments[0],
@@ -206,24 +231,38 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             return
         }
         if checkPurge {
-            guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+            let onlineDetail =
+                onlinePurgeFallbackContext.map {
+                    "online preflight fallback was allowed because \($0); "
+                } ?? ""
+            let acquiredLifetimeLock: FlannelDaemonLifetimeLock?
+            do {
+                acquiredLifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire()
+            } catch {
                 throw FlannelVXLANError.runtime(
-                    "network purge preflight refused because the Flannel daemon lifetime lock is held"
+                    onlineDetail + "offline network purge preflight could not acquire the lifetime lock: \(error)"
+                )
+            }
+            guard let lifetimeLock = acquiredLifetimeLock else {
+                throw FlannelVXLANError.runtime(
+                    onlineDetail + "offline network purge preflight refused because the Flannel daemon lifetime lock is held"
                 )
             }
             defer { withExtendedLifetime(lifetimeLock) {} }
-            try FlannelStateManifestCoordinator().validateClaim(
-                configPath: configPath,
-                config: config,
-                whileHolding: lifetimeLock
-            )
-            let result = try await FlannelHostOnlyNetworkPurger(config: config).checkPurge()
-            let networkName = result.ownedNetworkName ?? "<none>"
-            print(
-                "network purge preflight complete owned=\(result.ownedNetworkName != nil) "
-                    + "network=\(networkName) attachments=\(result.referringObjectIDs.count)"
-            )
-            return
+            do {
+                try FlannelStateManifestCoordinator().validateClaim(
+                    configPath: configPath,
+                    config: config,
+                    whileHolding: lifetimeLock
+                )
+                let result = try await FlannelHostOnlyNetworkPurger(config: config).checkPurge()
+                print("offline network purge preflight complete \(Self.formatPurgePreflight(result))")
+                return
+            } catch {
+                throw FlannelVXLANError.runtime(
+                    onlineDetail + "offline network purge preflight failed: \(error)"
+                )
+            }
         }
         if cleanup {
             guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
@@ -306,9 +345,37 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
         let signalStream = terminationSignals()
         let lifecycle = FlannelDaemonLifecycle(controller: controller)
         let controlServer = FlannelControlServer(socketPath: controlSocketPath)
-        try controlServer.start {
-            await lifecycle.withdraw()
-        }
+        let daemonConfigPath = configPath
+        try controlServer.start(
+            withdrawalHandler: {
+                await lifecycle.withdraw()
+            },
+            checkPurgeHandler: { requestedClaim in
+                do {
+                    let activeManifest = try manifestCoordinator.requireExactClaim(
+                        configPath: daemonConfigPath,
+                        config: config,
+                        whileHolding: lifetimeLock
+                    )
+                    let activeClaim = try FlannelPurgePreflightClaim(manifest: activeManifest)
+                    guard requestedClaim == activeClaim else {
+                        throw FlannelVXLANError.invalidConfiguration(
+                            "purge preflight request does not match the active Flannel state manifest"
+                        )
+                    }
+                    let result = try await FlannelHostOnlyNetworkPurger(config: config).checkPurge()
+                    return FlannelWithdrawalOutcome(
+                        succeeded: true,
+                        message: Self.formatPurgePreflight(result)
+                    )
+                } catch {
+                    return FlannelWithdrawalOutcome(
+                        succeeded: false,
+                        message: "network purge preflight failed: \(error)"
+                    )
+                }
+            }
+        )
         await lifecycle.start()
         _ = await signalStream.first { _ in true }
         await lifecycle.terminateWhenClean()
@@ -318,6 +385,43 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
 
     private static var defaultStatePaths: [String] {
         FlannelVXLANMacOSConfig.defaultPersistentStatePaths
+    }
+
+    private enum OnlinePurgePreflightAttempt {
+        case completed(String)
+        case fallbackAllowed(String)
+    }
+
+    private func requestOnlinePurgePreflight(
+        claim: FlannelPurgePreflightClaim
+    ) throws -> OnlinePurgePreflightAttempt {
+        do {
+            let outcome = try FlannelControlClient.requestPurgePreflight(
+                claim: claim,
+                socketPath: controlSocketPath
+            )
+            guard outcome.succeeded else {
+                throw FlannelVXLANError.runtime(
+                    "online network purge preflight failed: \(outcome.message)"
+                )
+            }
+            return .completed(outcome.message)
+        } catch let error as FlannelCheckPurgeControlError {
+            switch error {
+            case .transport, .unsupportedAction:
+                return .fallbackAllowed(error.description)
+            case .authentication, .protocolViolation:
+                throw FlannelVXLANError.runtime(
+                    "online network purge preflight refused: \(error)"
+                )
+            }
+        }
+    }
+
+    private static func formatPurgePreflight(_ result: FlannelHostOnlyNetworkPurgeCheckResult) -> String {
+        let networkName = result.ownedNetworkName ?? "<none>"
+        return "owned=\(result.ownedNetworkName != nil) network=\(networkName) "
+            + "present=\(result.networkWasPresent) attachments=\(result.referringObjectIDs.count)"
     }
 
     private func makeController(config: FlannelVXLANMacOSConfig) throws -> FlannelVXLANController {

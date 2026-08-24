@@ -158,6 +158,44 @@ struct FlannelStateManifestTests {
         #expect(try fixture.store.load()?.identity.nodeName == "mac-a")
     }
 
+    @Test func exactClaimRequiresAPersistedMatchingManifest() throws {
+        let fixture = try ManifestFixture()
+        defer { fixture.remove() }
+        let lock = try fixture.lock()
+        defer { lock.release() }
+
+        #expect(throws: FlannelVXLANError.self) {
+            try fixture.coordinator.requireExactClaim(
+                configPath: fixture.configPath,
+                config: fixture.config,
+                whileHolding: lock
+            )
+        }
+
+        let claimed = try fixture.coordinator.claim(
+            configPath: fixture.configPath,
+            config: fixture.config,
+            whileHolding: lock
+        )
+        #expect(
+            try fixture.coordinator.requireExactClaim(
+                configPath: fixture.configPath,
+                config: fixture.config,
+                whileHolding: lock
+            ) == claimed
+        )
+
+        var replacement = fixture.config
+        replacement.nodeName = "mac-b"
+        #expect(throws: FlannelVXLANError.self) {
+            try fixture.coordinator.requireExactClaim(
+                configPath: fixture.configPath,
+                config: replacement,
+                whileHolding: lock
+            )
+        }
+    }
+
     @Test func manifestIsRemovedOnlyAfterEveryManagedStateFileIsGone() throws {
         let fixture = try ManifestFixture()
         defer { fixture.remove() }

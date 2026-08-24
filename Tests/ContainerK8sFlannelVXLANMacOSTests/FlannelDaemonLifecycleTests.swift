@@ -104,6 +104,240 @@ struct FlannelDaemonLifecycleTests {
         #expect(second.message == "withdrawn")
         #expect(await outcomes.calls == 2)
     }
+
+    @Test
+    func controlSocketRoutesCheckPurgeWithoutBreakingWithdrawal() async throws {
+        let socketPath = "/tmp/flannel-control-\(UUID().uuidString).sock"
+        let handlers = ControlHandlers()
+        let claim = try makePurgePreflightClaim()
+        let server = FlannelControlServer(socketPath: socketPath, requiredPeerUID: geteuid())
+        try server.start(
+            withdrawalHandler: {
+                await handlers.withdraw()
+            },
+            checkPurgeHandler: { requestedClaim in
+                await handlers.checkPurge(claim: requestedClaim)
+            }
+        )
+        defer { server.stop() }
+
+        let preflight = try FlannelControlClient.requestPurgePreflight(
+            claim: claim,
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
+        #expect(preflight == FlannelWithdrawalOutcome(succeeded: true, message: "owned=true network=test"))
+
+        let withdrawal = try FlannelControlClient.requestWithdrawal(
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
+        #expect(withdrawal == FlannelWithdrawalOutcome(succeeded: true, message: "withdrawn"))
+        #expect(await handlers.checkPurgeCalls == 1)
+        #expect(await handlers.withdrawalCalls == 1)
+        #expect(await handlers.lastPurgePreflightClaim == claim)
+    }
+
+    @Test
+    func controlSocketRejectsUnsupportedActionExplicitly() async throws {
+        let socketPath = "/tmp/flannel-control-\(UUID().uuidString).sock"
+        let outcomes = ControlOutcomes()
+        let server = FlannelControlServer(socketPath: socketPath, requiredPeerUID: geteuid())
+        try server.start {
+            await outcomes.next()
+        }
+        defer { server.stop() }
+
+        let response = try FlannelControlClient.request(
+            FlannelControlRequest(action: "future-action"),
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
+        #expect(!response.outcome.succeeded)
+        #expect(response.failureKind == .unsupportedAction)
+        #expect(response.outcome.message.contains("future-action"))
+        #expect(await outcomes.calls == 0)
+    }
+
+    @Test
+    func withdrawalOnlyServerExplicitlyRejectsCheckPurge() async throws {
+        let socketPath = "/tmp/flannel-control-\(UUID().uuidString).sock"
+        let outcomes = ControlOutcomes()
+        let claim = try makePurgePreflightClaim()
+        let server = FlannelControlServer(socketPath: socketPath, requiredPeerUID: geteuid())
+        try server.start {
+            await outcomes.next()
+        }
+        defer { server.stop() }
+
+        #expect(throws: FlannelCheckPurgeControlError.self) {
+            try FlannelControlClient.requestPurgePreflight(
+                claim: claim,
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
+        #expect(await outcomes.calls == 0)
+    }
+
+    @Test
+    func checkPurgeResponseValidationSupportsLegacyFallbackAndRejectsMalformedSuccess() throws {
+        let legacyUnsupported = FlannelControlResponse(
+            outcome: FlannelWithdrawalOutcome(succeeded: false, message: "unsupported control request")
+        )
+        #expect(throws: FlannelCheckPurgeControlError.unsupportedAction("unsupported control request")) {
+            try FlannelControlClient.purgePreflightOutcome(from: legacyUnsupported)
+        }
+
+        let malformedSuccess = FlannelControlResponse(
+            outcome: FlannelWithdrawalOutcome(succeeded: true, message: "ok"),
+            failureKind: .unsupportedAction
+        )
+        #expect(throws: FlannelCheckPurgeControlError.self) {
+            try FlannelControlClient.purgePreflightOutcome(from: malformedSuccess)
+        }
+    }
+
+    @Test
+    func checkPurgeOperationFailureRemainsACompletedSemanticResponse() async throws {
+        let socketPath = "/tmp/flannel-control-\(UUID().uuidString).sock"
+        let claim = try makePurgePreflightClaim()
+        let server = FlannelControlServer(socketPath: socketPath, requiredPeerUID: geteuid())
+        try server.start(
+            withdrawalHandler: {
+                FlannelWithdrawalOutcome(succeeded: true, message: "withdrawn")
+            },
+            checkPurgeHandler: { _ in
+                FlannelWithdrawalOutcome(succeeded: false, message: "network still has attachments")
+            }
+        )
+        defer { server.stop() }
+
+        let response = try FlannelControlClient.requestPurgePreflight(
+            claim: claim,
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
+        #expect(response == FlannelWithdrawalOutcome(succeeded: false, message: "network still has attachments"))
+    }
+
+    @Test
+    func oversizedCheckPurgeResponseFailsAsAProtocolViolation() async throws {
+        let socketPath = "/tmp/flannel-control-\(UUID().uuidString).sock"
+        let claim = try makePurgePreflightClaim()
+        let server = FlannelControlServer(socketPath: socketPath, requiredPeerUID: geteuid())
+        try server.start(
+            withdrawalHandler: {
+                FlannelWithdrawalOutcome(succeeded: true, message: "withdrawn")
+            },
+            checkPurgeHandler: { _ in
+                FlannelWithdrawalOutcome(
+                    succeeded: false,
+                    message: String(repeating: "attachment ", count: 600)
+                )
+            }
+        )
+        defer { server.stop() }
+
+        #expect(throws: FlannelCheckPurgeControlError.protocolViolation("Flannel control frame exceeds 4096 bytes")) {
+            try FlannelControlClient.requestPurgePreflight(
+                claim: claim,
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
+    }
+
+    @Test
+    func checkPurgeRequiresAValidCompactManifestClaim() async throws {
+        let socketPath = "/tmp/flannel-control-\(UUID().uuidString).sock"
+        let handlers = ControlHandlers()
+        let server = FlannelControlServer(socketPath: socketPath, requiredPeerUID: geteuid())
+        try server.start(
+            withdrawalHandler: {
+                await handlers.withdraw()
+            },
+            checkPurgeHandler: { requestedClaim in
+                await handlers.checkPurge(claim: requestedClaim)
+            }
+        )
+        defer { server.stop() }
+
+        let missingClaim = try FlannelControlClient.request(
+            FlannelControlRequest(action: FlannelControlRequest.checkPurgeAction),
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
+        #expect(!missingClaim.outcome.succeeded)
+        #expect(missingClaim.failureKind == .operationFailed)
+        #expect(missingClaim.outcome.message.contains("requires a purge preflight claim"))
+
+        let invalidClaim = try FlannelControlClient.request(
+            FlannelControlRequest(
+                action: FlannelControlRequest.checkPurgeAction,
+                purgePreflightClaim: FlannelPurgePreflightClaim(manifestSHA256: String(repeating: "g", count: 64))
+            ),
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
+        #expect(!invalidClaim.outcome.succeeded)
+        #expect(invalidClaim.failureKind == .operationFailed)
+        #expect(invalidClaim.outcome.message.contains("invalid SHA-256 digest"))
+        #expect(await handlers.checkPurgeCalls == 0)
+    }
+
+    @Test
+    func compactManifestClaimIsStableAndWireCompatibleWithVersionOne() throws {
+        let manifest = makePurgePreflightManifest()
+        let claim = try FlannelPurgePreflightClaim(manifest: manifest)
+        let duplicateClaim = try FlannelPurgePreflightClaim(manifest: manifest)
+        #expect(claim == duplicateClaim)
+        #expect(claim.manifestSHA256.count == 64)
+
+        var changedManifest = manifest
+        changedManifest.identity.nodeName = "different-node"
+        #expect(try FlannelPurgePreflightClaim(manifest: changedManifest) != claim)
+
+        let request = FlannelControlRequest(
+            action: FlannelControlRequest.checkPurgeAction,
+            purgePreflightClaim: claim
+        )
+        let encodedRequest = try JSONEncoder().encode(request)
+        #expect(encodedRequest.count < 4_096)
+
+        let legacyDecoded = try JSONDecoder().decode(LegacyControlRequest.self, from: encodedRequest)
+        #expect(legacyDecoded.version == FlannelControlRequest.currentVersion)
+        #expect(legacyDecoded.action == FlannelControlRequest.checkPurgeAction)
+
+        let legacyRequest = LegacyControlRequest(
+            version: FlannelControlRequest.currentVersion,
+            action: FlannelControlRequest.withdrawAction
+        )
+        let newDecoded = try JSONDecoder().decode(
+            FlannelControlRequest.self,
+            from: JSONEncoder().encode(legacyRequest)
+        )
+        #expect(newDecoded.purgePreflightClaim == nil)
+    }
+
+    @Test
+    func controlServerRejectsUnexpectedClientUIDBeforeDispatch() async throws {
+        let socketPath = "/tmp/flannel-control-\(UUID().uuidString).sock"
+        let outcomes = ControlOutcomes()
+        let server = FlannelControlServer(socketPath: socketPath, requiredPeerUID: geteuid() &+ 1)
+        try server.start {
+            await outcomes.next()
+        }
+        defer { server.stop() }
+
+        let response = try FlannelControlClient.requestWithdrawal(
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
+        #expect(!response.succeeded)
+        #expect(response.message.contains("control request denied for uid"))
+        #expect(await outcomes.calls == 0)
+    }
 }
 
 private actor LifecycleOperations {
@@ -153,6 +387,52 @@ private actor ControlOutcomes {
         }
         return FlannelWithdrawalOutcome(succeeded: true, message: "withdrawn")
     }
+}
+
+private actor ControlHandlers {
+    private(set) var withdrawalCalls = 0
+    private(set) var checkPurgeCalls = 0
+    private(set) var lastPurgePreflightClaim: FlannelPurgePreflightClaim?
+
+    func withdraw() -> FlannelWithdrawalOutcome {
+        withdrawalCalls += 1
+        return FlannelWithdrawalOutcome(succeeded: true, message: "withdrawn")
+    }
+
+    func checkPurge(claim: FlannelPurgePreflightClaim) -> FlannelWithdrawalOutcome {
+        checkPurgeCalls += 1
+        lastPurgePreflightClaim = claim
+        return FlannelWithdrawalOutcome(succeeded: true, message: "owned=true network=test")
+    }
+}
+
+private struct LegacyControlRequest: Codable {
+    var version: Int
+    var action: String
+}
+
+private func makePurgePreflightClaim() throws -> FlannelPurgePreflightClaim {
+    try FlannelPurgePreflightClaim(manifest: makePurgePreflightManifest())
+}
+
+private func makePurgePreflightManifest() -> FlannelStateManifest {
+    FlannelStateManifest(
+        configPath: "/etc/kubernetes/flannel-vxlan-macos.conf",
+        identity: FlannelStateManifestIdentity(
+            nodeName: "test-node",
+            networkName: "kubernetes-pod",
+            networkPlugin: "hostOnly",
+            networkVariant: "kubernetes",
+            annotationPrefix: "flannel.alpha.coreos.com"
+        ),
+        statePaths: FlannelManagedStatePaths(
+            dataplaneOwnership: "/var/lib/container/flannel-vxlan/ownership.json",
+            networkOwnership: "/var/lib/container/flannel-vxlan/network-ownership.json",
+            hostIPv6GatewayOwnership: "/var/lib/container/flannel-vxlan/host-ipv6-gateway-ownership.json",
+            forwardingOwnership: "/var/lib/container/flannel-vxlan/forwarding-ownership.json",
+            ready: "/var/lib/container/flannel-vxlan/ready.json"
+        )
+    )
 }
 
 private func waitUntil(

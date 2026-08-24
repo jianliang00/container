@@ -24,6 +24,7 @@ import Testing
 
 @testable import ContainerAPIClient
 
+@Suite(.serialized)
 struct PacketFilterTest {
     @Test
     func testRedirectRuleUpdate() async throws {

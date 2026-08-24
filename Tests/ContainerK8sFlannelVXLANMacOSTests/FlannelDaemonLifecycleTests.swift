@@ -83,23 +83,29 @@ struct FlannelDaemonLifecycleTests {
         let attributes = try FileManager.default.attributesOfItem(atPath: socketPath)
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
 
-        #expect(throws: FlannelVXLANError.self) {
-            try FlannelControlClient.requestWithdrawal(
-                socketPath: socketPath,
-                requiredPeerUID: geteuid() &+ 1
-            )
+        await #expect(throws: FlannelVXLANError.self) {
+            try await runControlClient {
+                try FlannelControlClient.requestWithdrawal(
+                    socketPath: socketPath,
+                    requiredPeerUID: geteuid() &+ 1
+                )
+            }
         }
 
-        let first = try FlannelControlClient.requestWithdrawal(
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let first = try await runControlClient {
+            try FlannelControlClient.requestWithdrawal(
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(!first.succeeded)
         #expect(first.message == "injected cleanup failure")
-        let second = try FlannelControlClient.requestWithdrawal(
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let second = try await runControlClient {
+            try FlannelControlClient.requestWithdrawal(
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(second.succeeded)
         #expect(second.message == "withdrawn")
         #expect(await outcomes.calls == 2)
@@ -121,17 +127,21 @@ struct FlannelDaemonLifecycleTests {
         )
         defer { server.stop() }
 
-        let preflight = try FlannelControlClient.requestPurgePreflight(
-            claim: claim,
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let preflight = try await runControlClient {
+            try FlannelControlClient.requestPurgePreflight(
+                claim: claim,
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(preflight == FlannelWithdrawalOutcome(succeeded: true, message: "owned=true network=test"))
 
-        let withdrawal = try FlannelControlClient.requestWithdrawal(
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let withdrawal = try await runControlClient {
+            try FlannelControlClient.requestWithdrawal(
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(withdrawal == FlannelWithdrawalOutcome(succeeded: true, message: "withdrawn"))
         #expect(await handlers.checkPurgeCalls == 1)
         #expect(await handlers.withdrawalCalls == 1)
@@ -148,11 +158,13 @@ struct FlannelDaemonLifecycleTests {
         }
         defer { server.stop() }
 
-        let response = try FlannelControlClient.request(
-            FlannelControlRequest(action: "future-action"),
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let response = try await runControlClient {
+            try FlannelControlClient.request(
+                FlannelControlRequest(action: "future-action"),
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(!response.outcome.succeeded)
         #expect(response.failureKind == .unsupportedAction)
         #expect(response.outcome.message.contains("future-action"))
@@ -170,12 +182,14 @@ struct FlannelDaemonLifecycleTests {
         }
         defer { server.stop() }
 
-        #expect(throws: FlannelCheckPurgeControlError.self) {
-            try FlannelControlClient.requestPurgePreflight(
-                claim: claim,
-                socketPath: socketPath,
-                requiredPeerUID: geteuid()
-            )
+        await #expect(throws: FlannelCheckPurgeControlError.self) {
+            try await runControlClient {
+                try FlannelControlClient.requestPurgePreflight(
+                    claim: claim,
+                    socketPath: socketPath,
+                    requiredPeerUID: geteuid()
+                )
+            }
         }
         #expect(await outcomes.calls == 0)
     }
@@ -224,11 +238,13 @@ struct FlannelDaemonLifecycleTests {
         )
         defer { server.stop() }
 
-        let response = try FlannelControlClient.requestPurgePreflight(
-            claim: claim,
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let response = try await runControlClient {
+            try FlannelControlClient.requestPurgePreflight(
+                claim: claim,
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(response == FlannelWithdrawalOutcome(succeeded: false, message: "network still has attachments"))
     }
 
@@ -250,12 +266,16 @@ struct FlannelDaemonLifecycleTests {
         )
         defer { server.stop() }
 
-        #expect(throws: FlannelCheckPurgeControlError.protocolViolation("Flannel control frame exceeds 4096 bytes")) {
-            try FlannelControlClient.requestPurgePreflight(
-                claim: claim,
-                socketPath: socketPath,
-                requiredPeerUID: geteuid()
-            )
+        await #expect(
+            throws: FlannelCheckPurgeControlError.protocolViolation("Flannel control frame exceeds 4096 bytes")
+        ) {
+            try await runControlClient {
+                try FlannelControlClient.requestPurgePreflight(
+                    claim: claim,
+                    socketPath: socketPath,
+                    requiredPeerUID: geteuid()
+                )
+            }
         }
     }
 
@@ -274,23 +294,29 @@ struct FlannelDaemonLifecycleTests {
         )
         defer { server.stop() }
 
-        let missingClaim = try FlannelControlClient.request(
-            FlannelControlRequest(action: FlannelControlRequest.checkPurgeAction),
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let missingClaim = try await runControlClient {
+            try FlannelControlClient.request(
+                FlannelControlRequest(action: FlannelControlRequest.checkPurgeAction),
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(!missingClaim.outcome.succeeded)
         #expect(missingClaim.failureKind == .operationFailed)
         #expect(missingClaim.outcome.message.contains("requires a purge preflight claim"))
 
-        let invalidClaim = try FlannelControlClient.request(
-            FlannelControlRequest(
-                action: FlannelControlRequest.checkPurgeAction,
-                purgePreflightClaim: FlannelPurgePreflightClaim(manifestSHA256: String(repeating: "g", count: 64))
-            ),
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let invalidClaim = try await runControlClient {
+            try FlannelControlClient.request(
+                FlannelControlRequest(
+                    action: FlannelControlRequest.checkPurgeAction,
+                    purgePreflightClaim: FlannelPurgePreflightClaim(
+                        manifestSHA256: String(repeating: "g", count: 64)
+                    )
+                ),
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(!invalidClaim.outcome.succeeded)
         #expect(invalidClaim.failureKind == .operationFailed)
         #expect(invalidClaim.outcome.message.contains("invalid SHA-256 digest"))
@@ -341,10 +367,12 @@ struct FlannelDaemonLifecycleTests {
         }
         defer { server.stop() }
 
-        let response = try FlannelControlClient.requestWithdrawal(
-            socketPath: socketPath,
-            requiredPeerUID: geteuid()
-        )
+        let response = try await runControlClient {
+            try FlannelControlClient.requestWithdrawal(
+                socketPath: socketPath,
+                requiredPeerUID: geteuid()
+            )
+        }
         #expect(!response.succeeded)
         #expect(response.message.contains("control request denied for uid"))
         #expect(await outcomes.calls == 0)
@@ -420,6 +448,16 @@ private actor ControlHandlers {
 private struct LegacyControlRequest: Codable {
     var version: Int
     var action: String
+}
+
+private func runControlClient<T: Sendable>(
+    _ operation: @escaping @Sendable () throws -> T
+) async throws -> T {
+    try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+            continuation.resume(with: Result(catching: operation))
+        }
+    }
 }
 
 private func makePurgePreflightClaim() throws -> FlannelPurgePreflightClaim {

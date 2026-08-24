@@ -70,7 +70,7 @@ extension MacOSKubeadm {
 
         @Option(
             name: .customLong("vmnet-disconnect-recovery"),
-            help: "Action after the vmnet helper disconnects: disabled, monitor, or stop-sandbox."
+            help: "Action after the vmnet helper disconnects: disabled, monitor, stop-sandbox, or reboot-node."
         )
         var vmnetDisconnectRecovery: String = MacOSKubeadmVMNetDisconnectRecovery.disabled.rawValue
 

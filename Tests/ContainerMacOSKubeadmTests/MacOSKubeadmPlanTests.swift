@@ -14,9 +14,10 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import ContainerMacOSKubeadm
 import Foundation
 import Testing
+
+@testable import ContainerMacOSKubeadm
 
 struct MacOSKubeadmPlanTests {
     @Test func joinPlanRendersExpectedNodeConfiguration() throws {
@@ -1493,6 +1494,138 @@ struct MacOSKubeadmPlanTests {
                 }
                 return path == "/tmp/macos-node/var/log/container-macos-node-bootstrap.log"
             })
+    }
+
+    @Test func resetRemovesAllGeneratedRuntimeClassManifests() throws {
+        let plan = try MacOSKubeadmPlanner.resetPlan(
+            options: MacOSKubeadmResetOptions(
+                installRoot: "/tmp/macos-node",
+                dryRun: true
+            )
+        )
+
+        #expect(
+            plan.steps.contains { step in
+                guard step.message == "remove generated RuntimeClass manifests",
+                    case .removeRuntimeClassManifests(let directory, let bestEffort) = step.action
+                else {
+                    return false
+                }
+                return directory == "/tmp/macos-node/usr/local/share/container-macos-node/manifests"
+                    && bestEffort
+            }
+        )
+        #expect(
+            !plan.steps.contains { step in
+                guard case .removePath(let path, _, _, _) = step.action else {
+                    return false
+                }
+                return path.contains("/manifests/runtimeclass-")
+            }
+        )
+    }
+
+    @Test func runtimeClassManifestCleanerOnlyRemovesGeneratedFiles() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("container-macos-kubeadm-runtimeclass-cleaner-\(UUID().uuidString)")
+        let manifests = root.appendingPathComponent("manifests")
+        let externalTarget = root.appendingPathComponent("external-target.yaml")
+        try fileManager.createDirectory(at: manifests, withIntermediateDirectories: true)
+        try "external".write(to: externalTarget, atomically: true, encoding: .utf8)
+        defer { try? fileManager.removeItem(at: root) }
+
+        for fileName in [
+            "runtimeclass-macos.yaml",
+            "runtimeclass-macos-gui.yaml",
+            "runtimeclass-macos-15-2.yaml",
+        ] {
+            try "generated".write(
+                to: manifests.appendingPathComponent(fileName),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        for fileName in [
+            "macos-node-bootstrap-rbac.yaml",
+            "runtimeclass-.yaml",
+            "runtimeclass-macos.yml",
+            "runtimeclass-macos.extra.yaml",
+        ] {
+            try "preserved".write(
+                to: manifests.appendingPathComponent(fileName),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        try fileManager.createDirectory(
+            at: manifests.appendingPathComponent("runtimeclass-directory.yaml"),
+            withIntermediateDirectories: false
+        )
+        try fileManager.createSymbolicLink(
+            at: manifests.appendingPathComponent("runtimeclass-link.yaml"),
+            withDestinationURL: externalTarget
+        )
+        try fileManager.createSymbolicLink(
+            at: manifests.appendingPathComponent("runtimeclass-dangling.yaml"),
+            withDestinationURL: root.appendingPathComponent("missing-target.yaml")
+        )
+
+        try MacOSKubeadmRuntimeClassManifestCleaner.remove(
+            in: manifests.path,
+            bestEffort: false,
+            log: MacOSKubeadmLog()
+        )
+
+        let remaining = try Set(fileManager.contentsOfDirectory(atPath: manifests.path))
+        #expect(
+            remaining == [
+                "macos-node-bootstrap-rbac.yaml",
+                "runtimeclass-.yaml",
+                "runtimeclass-directory.yaml",
+                "runtimeclass-macos.extra.yaml",
+                "runtimeclass-macos.yml",
+            ]
+        )
+        #expect(try String(contentsOf: externalTarget, encoding: .utf8) == "external")
+
+        try MacOSKubeadmRuntimeClassManifestCleaner.remove(
+            in: root.appendingPathComponent("missing").path,
+            bestEffort: false,
+            log: MacOSKubeadmLog()
+        )
+
+        #expect(MacOSKubeadmRuntimeClassManifestCleaner.isGeneratedManifest("runtimeclass-macos-gui.yaml"))
+        #expect(!MacOSKubeadmRuntimeClassManifestCleaner.isGeneratedManifest("runtimeclass-MACOS.yaml"))
+        #expect(!MacOSKubeadmRuntimeClassManifestCleaner.isGeneratedManifest("runtimeclass-.yaml"))
+    }
+
+    @Test func runtimeClassManifestCleanerDoesNotFollowDirectorySymlinks() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("container-macos-kubeadm-runtimeclass-symlink-\(UUID().uuidString)")
+        let externalDirectory = root.appendingPathComponent("external")
+        let externalManifest = externalDirectory.appendingPathComponent("runtimeclass-external.yaml")
+        let manifestsLink = root.appendingPathComponent("manifests")
+        try fileManager.createDirectory(at: externalDirectory, withIntermediateDirectories: true)
+        try "external".write(to: externalManifest, atomically: true, encoding: .utf8)
+        try fileManager.createSymbolicLink(at: manifestsLink, withDestinationURL: externalDirectory)
+        defer { try? fileManager.removeItem(at: root) }
+
+        #expect(throws: (any Error).self) {
+            try MacOSKubeadmRuntimeClassManifestCleaner.remove(
+                in: manifestsLink.path,
+                bestEffort: false,
+                log: MacOSKubeadmLog()
+            )
+        }
+        try MacOSKubeadmRuntimeClassManifestCleaner.remove(
+            in: manifestsLink.path,
+            bestEffort: true,
+            log: MacOSKubeadmLog()
+        )
+
+        #expect(try String(contentsOf: externalManifest, encoding: .utf8) == "external")
     }
 
     @Test func resetKubeconfigRemovalIsMarkedSensitive() throws {

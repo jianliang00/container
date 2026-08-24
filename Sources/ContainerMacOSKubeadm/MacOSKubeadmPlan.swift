@@ -39,6 +39,7 @@ public enum MacOSKubeadmAction: Sendable, Equatable {
     case copyFile(source: String, destination: String, mode: Int, sensitive: Bool)
     case writeFile(path: String, contents: String, mode: Int, sensitive: Bool)
     case removePath(path: String, recursive: Bool, bestEffort: Bool, sensitive: Bool)
+    case removeRuntimeClassManifests(directory: String, bestEffort: Bool)
     case runCommand(arguments: [String], bestEffort: Bool)
     case waitForPath(path: String, timeoutSeconds: Int)
     case cleanupContainerSystemOperations
@@ -64,6 +65,9 @@ public enum MacOSKubeadmAction: Sendable, Equatable {
                 description += " (best effort)"
             }
             return description
+        case .removeRuntimeClassManifests(let directory, let bestEffort):
+            let description = "remove generated RuntimeClass manifests in \(directory)"
+            return bestEffort ? "\(description) (best effort)" : description
         case .runCommand(let arguments, let bestEffort):
             let command = Self.shellEscaped(arguments)
             return bestEffort ? "\(command) (best effort)" : command
@@ -518,8 +522,6 @@ public enum MacOSKubeadmPlanner {
             ("/etc/cni/net.d/10-macvmnet.conflist", false, false),
             ("/var/lib/container/flannel-vxlan/ready.json", false, false),
             ("/var/lib/container/kubernetes-credentials", true, true),
-            ("/usr/local/share/container-macos-node/manifests/runtimeclass-macos.yaml", false, false),
-            ("/usr/local/share/container-macos-node/manifests/runtimeclass-macos-compat.yaml", false, false),
         ]
 
         for entry in generatedPaths {
@@ -535,6 +537,16 @@ public enum MacOSKubeadmPlanner {
                 )
             )
         }
+
+        steps.append(
+            MacOSKubeadmStep(
+                message: "remove generated RuntimeClass manifests",
+                action: .removeRuntimeClassManifests(
+                    directory: options.rooted("/usr/local/share/container-macos-node/manifests"),
+                    bestEffort: true
+                )
+            )
+        )
 
         if options.purgeState {
             let statePaths = [

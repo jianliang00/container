@@ -191,6 +191,12 @@ public struct MacOSKubeadmJoinRunner {
                 }
                 throw error
             }
+        case .removeRuntimeClassManifests(let directory, let bestEffort):
+            try MacOSKubeadmRuntimeClassManifestCleaner.remove(
+                in: directory,
+                bestEffort: bestEffort,
+                log: log
+            )
         }
     }
 
@@ -321,6 +327,12 @@ public struct MacOSKubeadmResetRunner {
                 }
                 throw error
             }
+        case .removeRuntimeClassManifests(let directory, let bestEffort):
+            try MacOSKubeadmRuntimeClassManifestCleaner.remove(
+                in: directory,
+                bestEffort: bestEffort,
+                log: log
+            )
         case .runCommand(let arguments, let bestEffort):
             try MacOSKubeadmProcess.run(arguments, bestEffort: bestEffort, log: log)
         case .cleanupContainerSystemOperations:
@@ -328,6 +340,113 @@ public struct MacOSKubeadmResetRunner {
         case .createDirectory, .copyFile, .writeFile, .waitForPath:
             throw MacOSKubeadmError.invalidInput("unsupported reset action: \(action.safeDescription)")
         }
+    }
+}
+
+enum MacOSKubeadmRuntimeClassManifestCleaner {
+    private static let generatedManifestPattern = #"^runtimeclass-[a-z0-9]([-a-z0-9]*[a-z0-9])?\.yaml$"#
+
+    static func remove(
+        in directory: String,
+        bestEffort: Bool,
+        log: MacOSKubeadmLog
+    ) throws {
+        let directoryDescriptor = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directoryDescriptor >= 0 else {
+            let errorCode = errno
+            if errorCode == ENOENT {
+                return
+            }
+            let error = posixError(errorCode, path: directory)
+            if bestEffort {
+                log.debug("best-effort RuntimeClass manifest enumeration failed for \(directory): \(error)")
+                return
+            }
+            throw error
+        }
+
+        guard let directoryStream = fdopendir(directoryDescriptor) else {
+            let error = posixError(errno, path: directory)
+            close(directoryDescriptor)
+            if bestEffort {
+                log.debug("best-effort RuntimeClass manifest enumeration failed for \(directory): \(error)")
+                return
+            }
+            throw error
+        }
+        defer { closedir(directoryStream) }
+
+        let stableDirectoryDescriptor = dirfd(directoryStream)
+        while true {
+            errno = 0
+            guard let entry = readdir(directoryStream) else {
+                let errorCode = errno
+                if errorCode != 0 {
+                    let error = posixError(errorCode, path: directory)
+                    if bestEffort {
+                        log.debug("best-effort RuntimeClass manifest enumeration failed for \(directory): \(error)")
+                        return
+                    }
+                    throw error
+                }
+                return
+            }
+
+            let fileName = withUnsafePointer(to: entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) {
+                    String(cString: $0)
+                }
+            }
+            guard isGeneratedManifest(fileName) else {
+                continue
+            }
+
+            var entryStatus = stat()
+            guard fstatat(stableDirectoryDescriptor, fileName, &entryStatus, AT_SYMLINK_NOFOLLOW) == 0 else {
+                let errorCode = errno
+                if errorCode == ENOENT {
+                    continue
+                }
+                let path = URL(fileURLWithPath: directory).appendingPathComponent(fileName).path
+                let error = posixError(errorCode, path: path)
+                if bestEffort {
+                    log.debug("best-effort remove failed for \(path): \(error)")
+                    continue
+                }
+                throw error
+            }
+
+            let fileType = entryStatus.st_mode & S_IFMT
+            guard fileType == S_IFREG || fileType == S_IFLNK else {
+                continue
+            }
+
+            guard unlinkat(stableDirectoryDescriptor, fileName, 0) == 0 else {
+                let errorCode = errno
+                if errorCode == ENOENT {
+                    continue
+                }
+                let path = URL(fileURLWithPath: directory).appendingPathComponent(fileName).path
+                let error = posixError(errorCode, path: path)
+                if bestEffort {
+                    log.debug("best-effort remove failed for \(path): \(error)")
+                    continue
+                }
+                throw error
+            }
+        }
+    }
+
+    static func isGeneratedManifest(_ fileName: String) -> Bool {
+        fileName.range(of: generatedManifestPattern, options: .regularExpression) != nil
+    }
+
+    private static func posixError(_ code: Int32, path: String) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(code),
+            userInfo: [NSFilePathErrorKey: path]
+        )
     }
 }
 

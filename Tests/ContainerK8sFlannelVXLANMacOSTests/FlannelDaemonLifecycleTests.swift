@@ -196,6 +196,17 @@ struct FlannelDaemonLifecycleTests {
         #expect(throws: FlannelCheckPurgeControlError.self) {
             try FlannelControlClient.purgePreflightOutcome(from: malformedSuccess)
         }
+
+        #expect(
+            FlannelCheckPurgeControlError.transport("unreachable").fallbackManifestPolicy
+                == .requireExactManifest
+        )
+        #expect(
+            FlannelCheckPurgeControlError.unsupportedAction("legacy").fallbackManifestPolicy
+                == .allowMissingLegacyManifest
+        )
+        #expect(FlannelCheckPurgeControlError.authentication("uid").fallbackManifestPolicy == nil)
+        #expect(FlannelCheckPurgeControlError.protocolViolation("invalid").fallbackManifestPolicy == nil)
     }
 
     @Test

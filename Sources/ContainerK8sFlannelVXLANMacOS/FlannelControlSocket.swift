@@ -121,6 +121,22 @@ public enum FlannelCheckPurgeControlError: Error, Sendable, Equatable, CustomStr
             "control action is unsupported: \(message)"
         }
     }
+
+    public var fallbackManifestPolicy: FlannelPurgePreflightFallbackManifestPolicy? {
+        switch self {
+        case .transport:
+            .requireExactManifest
+        case .unsupportedAction:
+            .allowMissingLegacyManifest
+        case .authentication, .protocolViolation:
+            nil
+        }
+    }
+}
+
+public enum FlannelPurgePreflightFallbackManifestPolicy: Sendable, Equatable {
+    case requireExactManifest
+    case allowMissingLegacyManifest
 }
 
 public final class FlannelControlServer: @unchecked Sendable {

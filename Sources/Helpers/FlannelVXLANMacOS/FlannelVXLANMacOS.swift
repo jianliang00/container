@@ -75,6 +75,7 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
         }
         var initialWithdrawalError: (any Error)?
         var onlinePurgeFallbackContext: String?
+        var purgeFallbackManifestPolicy: FlannelPurgePreflightFallbackManifestPolicy?
         let configurationExists = FileManager.default.fileExists(atPath: configPath)
         if withdraw {
             do {
@@ -143,8 +144,9 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             case .completed(let message):
                 print("online network purge preflight complete \(message)")
                 return
-            case .fallbackAllowed(let context):
+            case .fallbackAllowed(let context, let manifestPolicy):
                 onlinePurgeFallbackContext = context
+                purgeFallbackManifestPolicy = manifestPolicy
             }
         }
         switch try FlannelBootstrapContext().ensure(
@@ -250,11 +252,21 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             }
             defer { withExtendedLifetime(lifetimeLock) {} }
             do {
-                try FlannelStateManifestCoordinator().validateClaim(
-                    configPath: configPath,
-                    config: config,
-                    whileHolding: lifetimeLock
-                )
+                let manifestCoordinator = FlannelStateManifestCoordinator()
+                switch purgeFallbackManifestPolicy ?? .requireExactManifest {
+                case .requireExactManifest:
+                    try manifestCoordinator.requireExactClaim(
+                        configPath: configPath,
+                        config: config,
+                        whileHolding: lifetimeLock
+                    )
+                case .allowMissingLegacyManifest:
+                    try manifestCoordinator.validateClaim(
+                        configPath: configPath,
+                        config: config,
+                        whileHolding: lifetimeLock
+                    )
+                }
                 let result = try await FlannelHostOnlyNetworkPurger(config: config).checkPurge()
                 print("offline network purge preflight complete \(Self.formatPurgePreflight(result))")
                 return
@@ -389,7 +401,10 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
 
     private enum OnlinePurgePreflightAttempt {
         case completed(String)
-        case fallbackAllowed(String)
+        case fallbackAllowed(
+            context: String,
+            manifestPolicy: FlannelPurgePreflightFallbackManifestPolicy
+        )
     }
 
     private func requestOnlinePurgePreflight(
@@ -407,14 +422,15 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             }
             return .completed(outcome.message)
         } catch let error as FlannelCheckPurgeControlError {
-            switch error {
-            case .transport, .unsupportedAction:
-                return .fallbackAllowed(error.description)
-            case .authentication, .protocolViolation:
+            guard let manifestPolicy = error.fallbackManifestPolicy else {
                 throw FlannelVXLANError.runtime(
                     "online network purge preflight refused: \(error)"
                 )
             }
+            return .fallbackAllowed(
+                context: error.description,
+                manifestPolicy: manifestPolicy
+            )
         }
     }
 

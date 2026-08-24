@@ -1261,14 +1261,13 @@ struct KubeProxyCompilerTests {
             config: config,
             egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
             ipv6EgressResolver: StaticIPv6EgressResolver(),
-            podIngressInterfaceResolver: UnavailablePodIngressInterfaceResolver(failingFamily: failingFamily),
+            podIngressInterfaceResolver: UnavailablePodIngressRouteResolver(failingFamily: failingFamily),
             advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
-        do {
+        #expect(
+            throws: KubeProxyPodIngressRouteTransitionError.unavailableAfterWithdrawal(failingFamily)
+        ) {
             try unavailableApplier.apply(ruleSet, podNetwork: podNetwork)
-            Issue.record("missing \(failingFamily.rawValue) Pod ingress bridge must fail after withdrawing both families")
-        } catch {
-            #expect(String(describing: error).contains("Pod ingress bridge is not ready"))
         }
 
         let withdrawnConfig = try String(contentsOf: configURL, encoding: .utf8)
@@ -1330,7 +1329,7 @@ struct KubeProxyCompilerTests {
             ),
             egressInterfaceResolver: StaticEgressInterfaceResolver(interface: "en7"),
             ipv6EgressResolver: StaticIPv6EgressResolver(),
-            podIngressInterfaceResolver: UnavailablePodIngressInterfaceResolver(failingFamily: .ipv6),
+            podIngressInterfaceResolver: UnavailablePodIngressRouteResolver(failingFamily: .ipv6),
             advisoryLockPath: directory.appendingPathComponent("pf.lock").path
         )
 
@@ -1340,7 +1339,7 @@ struct KubeProxyCompilerTests {
         } catch {
             let message = String(describing: error)
             #expect(message.contains("Pod ingress interface resolution failed"))
-            #expect(message.contains("Pod ingress bridge is not ready"))
+            #expect(message.contains("local IPv6 PodCIDR route is not directly connected"))
             #expect(message.contains("fail-closed PF withdrawal also failed"))
             #expect(message.contains("pfctl reload failed"))
         }
@@ -2034,8 +2033,10 @@ struct KubeProxyCompilerTests {
     }
 
     @Test
-    func runForeverRetriesWhenPodIngressBridgeBecomesReady() async throws {
-        let applier = InitiallyUnavailableBridgeRuleApplier()
+    func runForeverRetriesSameGenerationWhenPodIngressRouteBecomesReady() async throws {
+        let applier = InitiallyUnavailablePodIngressRouteRuleApplier()
+        let results = RecordedKubeProxyRunResults()
+        let failures = RecordedKubeProxyErrors()
         let errors = RecordedKubeProxyErrors()
         let controller = KubeProxyController(
             config: KubeProxyMacOSConfig(
@@ -2049,9 +2050,17 @@ struct KubeProxyCompilerTests {
         )
         let runTask = Task {
             do {
-                try await controller.runForever { error in
-                    errors.append(error)
-                }
+                try await controller.runForeverReportingResults(
+                    onResult: { result in
+                        results.append(result)
+                    },
+                    onFailure: { _, error in
+                        failures.append(error)
+                    },
+                    onError: { error in
+                        errors.append(error)
+                    }
+                )
             } catch is CancellationError {
             } catch {
                 Issue.record("runForever must stop only through cancellation: \(error)")
@@ -2059,18 +2068,82 @@ struct KubeProxyCompilerTests {
         }
 
         for _ in 0..<40 {
-            if applier.successfulApplyCount > 0 {
+            if results.values.contains(where: \.applied) {
                 break
             }
-            try await Task.sleep(for: .milliseconds(50))
+            try await Task.sleep(for: .milliseconds(100))
         }
         runTask.cancel()
         await runTask.value
 
-        #expect(applier.applyAttemptCount == 2)
+        #expect(applier.applyAttemptCount == 3)
         #expect(applier.successfulApplyCount == 1)
+        #expect(applier.attemptedGenerations == [1, 1, 1])
+        #expect(results.values.map(\.ruleSet.generation) == [1, 1, 1])
+        #expect(results.values.map(\.applied) == [false, false, true])
+        #expect(results.values.map(\.pendingFamily) == [.ipv4, .ipv4, nil])
+        #expect(failures.messages.isEmpty)
         #expect(errors.messages.count == 1)
-        #expect(errors.messages[0].contains("Pod ingress bridge is not ready"))
+        #expect(errors.messages[0].contains("managed PF rules were withdrawn"))
+    }
+
+    @Test
+    func controllerReturnsPendingOnlyAfterFailClosedWithdrawal() async throws {
+        let controller = KubeProxyController(
+            config: KubeProxyMacOSConfig(
+                kubeconfig: "/tmp/kubeconfig",
+                nodeName: "node-a",
+                pf: KubeProxyPFConfig(vmnetCIDR: "192.168.64.0/24")
+            ),
+            reader: KubeProxyStaticSnapshotReader(makeSnapshot()),
+            applier: ConfiguredTransitionRuleApplier(
+                error: .unavailableAfterWithdrawal(.ipv4)
+            )
+        )
+
+        let result = try await controller.runOnce(generation: 7)
+
+        #expect(result.ruleSet.generation == 7)
+        #expect(!result.applied)
+        #expect(result.pendingFamily == .ipv4)
+    }
+
+    @Test
+    func controllerKeepsNonWithdrawnApplyErrorsHard() async throws {
+        let config = KubeProxyMacOSConfig(
+            kubeconfig: "/tmp/kubeconfig",
+            nodeName: "node-a",
+            pf: KubeProxyPFConfig(vmnetCIDR: "192.168.64.0/24")
+        )
+        let rawRouteError = KubeProxyPodIngressRouteTransitionError.unavailable(.ipv4)
+        let rawRouteController = KubeProxyController(
+            config: config,
+            reader: KubeProxyStaticSnapshotReader(makeSnapshot()),
+            applier: ConfiguredTransitionRuleApplier(error: rawRouteError)
+        )
+        do {
+            _ = try await rawRouteController.runOnce(generation: 7)
+            Issue.record("expected raw route unavailability to remain a hard error")
+        } catch let error as KubeProxyPodIngressRouteTransitionError {
+            #expect(error == rawRouteError)
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
+
+        let applyError = KubeProxyMacOSError.applyFailed("PF apply failed")
+        let applyController = KubeProxyController(
+            config: config,
+            reader: KubeProxyStaticSnapshotReader(makeSnapshot()),
+            applier: ConfiguredErrorRuleApplier(error: applyError)
+        )
+        do {
+            _ = try await applyController.runOnce(generation: 7)
+            Issue.record("expected PF apply failure to remain a hard error")
+        } catch let error as KubeProxyMacOSError {
+            #expect(error == applyError)
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
     }
 
     @Test
@@ -2924,6 +2997,20 @@ private struct UnavailablePodIngressInterfaceResolver: KubeProxyPodIngressInterf
     }
 }
 
+private struct UnavailablePodIngressRouteResolver: KubeProxyPodIngressInterfaceResolving {
+    var failingFamily: KubeProxyAddressFamily
+
+    func resolvePodIngressInterface(
+        family: KubeProxyAddressFamily,
+        podCIDR: String
+    ) throws -> String {
+        guard family != failingFamily else {
+            throw KubeProxyPodIngressRouteTransitionError.unavailable(family)
+        }
+        return "bridge100"
+    }
+}
+
 private struct FailingSnapshotReader: KubeProxyKubernetesReading {
     func snapshot() async throws -> KubeProxySnapshot {
         throw KubeProxyMacOSError.applyFailed("snapshot unavailable")
@@ -2949,10 +3036,35 @@ private final class LegacyOnlyRuleApplier: KubeProxyRuleApplying, @unchecked Sen
     }
 }
 
-private final class InitiallyUnavailableBridgeRuleApplier: KubeProxyRuleApplying, @unchecked Sendable {
+private struct ConfiguredErrorRuleApplier: KubeProxyRuleApplying {
+    var error: KubeProxyMacOSError
+
+    func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        localPodCIDR: String,
+        masqueradePodTraffic: Bool
+    ) throws {
+        throw error
+    }
+}
+
+private struct ConfiguredTransitionRuleApplier: KubeProxyRuleApplying {
+    var error: KubeProxyPodIngressRouteTransitionError
+
+    func apply(
+        _ ruleSet: KubeProxyRuleSet,
+        localPodCIDR: String,
+        masqueradePodTraffic: Bool
+    ) throws {
+        throw error
+    }
+}
+
+private final class InitiallyUnavailablePodIngressRouteRuleApplier: KubeProxyRuleApplying, @unchecked Sendable {
     private let lock = NSLock()
     private var attempts = 0
     private var successes = 0
+    private var generations: [Int] = []
 
     var applyAttemptCount: Int {
         lock.withLock { attempts }
@@ -2962,6 +3074,10 @@ private final class InitiallyUnavailableBridgeRuleApplier: KubeProxyRuleApplying
         lock.withLock { successes }
     }
 
+    var attemptedGenerations: [Int] {
+        lock.withLock { generations }
+    }
+
     func apply(
         _ ruleSet: KubeProxyRuleSet,
         localPodCIDR: String,
@@ -2969,14 +3085,30 @@ private final class InitiallyUnavailableBridgeRuleApplier: KubeProxyRuleApplying
     ) throws {
         let bridgeIsReady = lock.withLock { () -> Bool in
             attempts += 1
-            guard attempts > 1 else {
+            generations.append(ruleSet.generation)
+            guard attempts > 2 else {
                 return false
             }
             successes += 1
             return true
         }
         guard bridgeIsReady else {
-            throw KubeProxyMacOSError.applyFailed("Pod ingress bridge is not ready")
+            throw KubeProxyPodIngressRouteTransitionError.unavailableAfterWithdrawal(.ipv4)
+        }
+    }
+}
+
+private final class RecordedKubeProxyRunResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedValues: [KubeProxyRunResult] = []
+
+    var values: [KubeProxyRunResult] {
+        lock.withLock { recordedValues }
+    }
+
+    func append(_ result: KubeProxyRunResult) {
+        lock.withLock {
+            recordedValues.append(result)
         }
     }
 }

@@ -345,6 +345,7 @@ public enum MacOSKubeadmRenderer {
                 "nodeName": "\(nodeName)",
                 "syncPeriodSeconds": 5,
                 "dualStackEnabled": \(dualStackEnabled),
+                "statusPath": "/var/lib/container/kube-proxy-macos/status.json",
                 "pf": {
                     "anchorName": "com.apple.container.kube-proxy",
                     "configPath": "/etc/pf.conf",

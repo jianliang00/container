@@ -42,8 +42,17 @@ struct MacOSKubeadmPlanTests {
                 return path == "/tmp/macos-node/etc/kubernetes/kube-proxy.conf"
                     && contents.contains(#""nodeName": "macos-ci-1""#)
                     && contents.contains(#""dualStackEnabled": false"#)
+                    && contents.contains(#""statusPath": "/var/lib/container/kube-proxy-macos/status.json""#)
                     && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
                     && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
+            })
+
+        #expect(
+            plan.steps.contains { step in
+                guard case .createDirectory(let path, 0o755) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/container/kube-proxy-macos"
             })
 
         #expect(
@@ -1355,11 +1364,17 @@ struct MacOSKubeadmPlanTests {
         )
         let stopKubeletIndex = try #require(descriptions.firstIndex(of: "stop kubelet launchd job if present"))
         let stopProxyIndex = try #require(descriptions.firstIndex(of: "stop kube-proxy launchd job if present"))
+        let withdrawProxyIndex = try #require(
+            descriptions.firstIndex(of: "withdraw kube-proxy PF configuration")
+        )
         let withdrawFlannelIndex = try #require(descriptions.firstIndex(of: "withdraw flannel VXLAN data plane"))
         let stopFlannelIndex = try #require(descriptions.firstIndex(of: "stop flannel VXLAN launchd job if present"))
         let stopCRIIndex = try #require(descriptions.firstIndex(of: "stop CRI shim launchd job if present"))
         let purgeIndex = try #require(descriptions.firstIndex(of: "purge owned pod network"))
         let removeFlannelConfigIndex = try #require(descriptions.firstIndex(of: "remove /etc/kubernetes/flannel-vxlan-macos.conf"))
+        let removeProxyStatusIndex = try #require(
+            descriptions.firstIndex(of: "remove /var/lib/container/kube-proxy-macos/status.json")
+        )
         let firstGeneratedRemoveIndex = try #require(
             descriptions.firstIndex(of: "remove /Library/LaunchDaemons/com.apple.container.kubelet.plist")
         )
@@ -1370,6 +1385,8 @@ struct MacOSKubeadmPlanTests {
         #expect(removeBootstrapIndex < stopKubeletIndex)
         #expect(stopKubeletIndex < firstGeneratedRemoveIndex)
         #expect(stopKubeletIndex < stopProxyIndex)
+        #expect(stopProxyIndex < withdrawProxyIndex)
+        #expect(withdrawProxyIndex < removeProxyStatusIndex)
         #expect(stopProxyIndex < withdrawFlannelIndex)
         #expect(withdrawFlannelIndex < stopFlannelIndex)
         #expect(stopFlannelIndex < stopCRIIndex)
@@ -1493,6 +1510,13 @@ struct MacOSKubeadmPlanTests {
                     return false
                 }
                 return path == "/tmp/macos-node/var/log/container-macos-node-bootstrap.log"
+            })
+        #expect(
+            plan.steps.contains { step in
+                guard case .removePath(let path, true, true, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/container/kube-proxy-macos"
             })
     }
 

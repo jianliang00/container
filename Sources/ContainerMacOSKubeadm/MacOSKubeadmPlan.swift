@@ -113,6 +113,7 @@ public enum MacOSKubeadmPlanner {
                 "/opt/cni/bin",
                 "/var/lib/container/cni/macvmnet",
                 "/var/lib/container/flannel-vxlan",
+                "/var/lib/container/kube-proxy-macos",
             ])
         }
         var steps: [MacOSKubeadmStep] = directories.map { path in
@@ -521,6 +522,7 @@ public enum MacOSKubeadmPlanner {
             ("/etc/kubernetes/pki/ca.crt", false, false),
             ("/etc/cni/net.d/10-macvmnet.conflist", false, false),
             ("/var/lib/container/flannel-vxlan/ready.json", false, false),
+            ("/var/lib/container/kube-proxy-macos/status.json", false, false),
             ("/var/lib/container/kubernetes-credentials", true, true),
         ]
 
@@ -555,6 +557,7 @@ public enum MacOSKubeadmPlanner {
                 "/var/lib/container/vmnet-recovery",
                 "/var/lib/container/cni/macvmnet",
                 "/var/lib/container/flannel-vxlan",
+                "/var/lib/container/kube-proxy-macos",
                 "/var/log/pods",
                 "/var/log/containers",
                 "/var/log/kubelet.log",

@@ -347,6 +347,7 @@ struct MacOSKubeadmRenderingTests {
         #expect(pf["ipv6EgressSourceAddress"] == nil)
         #expect(pf["masqueradeIPv6PodTraffic"] as? Bool == false)
         #expect(object["dualStackEnabled"] as? Bool == false)
+        #expect(object["statusPath"] as? String == "/var/lib/container/kube-proxy-macos/status.json")
     }
 
     @Test func kubeProxyConfigurationCanEnableDualStack() throws {

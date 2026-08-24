@@ -17,10 +17,13 @@
 import Foundation
 
 public struct KubeProxyMacOSConfig: Codable, Sendable, Equatable {
+    public static let defaultStatusPath = "/var/lib/container/kube-proxy-macos/status.json"
+
     public var kubeconfig: String
     public var nodeName: String
     public var syncPeriodSeconds: Int
     public var dualStackEnabled: Bool
+    public var statusPath: String?
     public var pf: KubeProxyPFConfig
 
     public init(
@@ -28,12 +31,14 @@ public struct KubeProxyMacOSConfig: Codable, Sendable, Equatable {
         nodeName: String,
         syncPeriodSeconds: Int = 5,
         dualStackEnabled: Bool = false,
+        statusPath: String? = nil,
         pf: KubeProxyPFConfig = KubeProxyPFConfig()
     ) {
         self.kubeconfig = kubeconfig
         self.nodeName = nodeName
         self.syncPeriodSeconds = syncPeriodSeconds
         self.dualStackEnabled = dualStackEnabled
+        self.statusPath = statusPath
         self.pf = pf
     }
 
@@ -42,6 +47,7 @@ public struct KubeProxyMacOSConfig: Codable, Sendable, Equatable {
         case nodeName
         case syncPeriodSeconds
         case dualStackEnabled
+        case statusPath
         case pf
     }
 
@@ -51,6 +57,7 @@ public struct KubeProxyMacOSConfig: Codable, Sendable, Equatable {
         nodeName = try container.decode(String.self, forKey: .nodeName)
         syncPeriodSeconds = try container.decodeIfPresent(Int.self, forKey: .syncPeriodSeconds) ?? 5
         dualStackEnabled = try container.decodeIfPresent(Bool.self, forKey: .dualStackEnabled) ?? false
+        statusPath = try container.decodeIfPresent(String.self, forKey: .statusPath)
         pf = try container.decodeIfPresent(KubeProxyPFConfig.self, forKey: .pf) ?? KubeProxyPFConfig()
     }
 
@@ -70,6 +77,13 @@ public struct KubeProxyMacOSConfig: Codable, Sendable, Equatable {
         }
         guard syncPeriodSeconds > 0 else {
             throw KubeProxyMacOSError.invalidConfiguration("syncPeriodSeconds must be greater than zero")
+        }
+        if let statusPath {
+            guard statusPath == Self.defaultStatusPath else {
+                throw KubeProxyMacOSError.invalidConfiguration(
+                    "statusPath must be \(Self.defaultStatusPath)"
+                )
+            }
         }
         try pf.validate()
         if dualStackEnabled {
@@ -214,6 +228,20 @@ public enum KubeProxyMacOSError: Error, Sendable, Equatable, CustomStringConvert
             "unsupported kube-proxy macOS input: \(message)"
         case .applyFailed(let message):
             "failed to apply kube-proxy macOS rules: \(message)"
+        }
+    }
+}
+
+enum KubeProxyPodIngressRouteTransitionError: Error, Sendable, Equatable, CustomStringConvertible {
+    case unavailable(KubeProxyAddressFamily)
+    case unavailableAfterWithdrawal(KubeProxyAddressFamily)
+
+    var description: String {
+        switch self {
+        case .unavailable(let family):
+            "local \(family.rawValue) PodCIDR route is not directly connected"
+        case .unavailableAfterWithdrawal(let family):
+            "local \(family.rawValue) PodCIDR route is not directly connected; managed PF rules were withdrawn"
         }
     }
 }

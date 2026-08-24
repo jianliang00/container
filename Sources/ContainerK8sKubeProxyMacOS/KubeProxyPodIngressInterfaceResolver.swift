@@ -17,6 +17,15 @@
 import Darwin
 import Foundation
 
+struct KubeProxyRouteLookupUnavailableError: Error, Sendable, Equatable, CustomStringConvertible {
+    var status: Int32
+    var message: String
+
+    var description: String {
+        "route lookup exited with status \(status): \(message)"
+    }
+}
+
 public protocol KubeProxyPodIngressInterfaceResolving: Sendable {
     func resolvePodIngressInterface(
         family: KubeProxyAddressFamily,
@@ -51,30 +60,45 @@ public struct KubeProxyDefaultPodIngressInterfaceResolver: KubeProxyPodIngressIn
         let canonicalPodCIDR = try canonicalPodCIDR(family: family, value: podCIDR)
         let probeAddress = try Self.probeAddress(family: family, canonicalPodCIDR: canonicalPodCIDR)
         let familyArgument = family == .ipv4 ? "-inet" : "-inet6"
-        let probeOutput = try commandRunner("/sbin/route", ["-n", "get", familyArgument, probeAddress])
+        let probeOutput = try routeOutput(
+            family: family,
+            arguments: ["-n", "get", familyArgument, probeAddress]
+        )
         let probeRoute = try Self.parseRoute(probeOutput)
-        let networkOutput = try commandRunner("/sbin/route", ["-n", "get", familyArgument, canonicalPodCIDR])
+        let networkOutput = try routeOutput(
+            family: family,
+            arguments: ["-n", "get", familyArgument, canonicalPodCIDR]
+        )
         let networkRoute = try Self.parseRoute(networkOutput)
 
-        guard
-            probeRoute.interfaceName == networkRoute.interfaceName,
-            !probeRoute.flags.contains("GATEWAY"),
-            !networkRoute.flags.contains("GATEWAY")
-        else {
-            throw KubeProxyMacOSError.applyFailed(
-                "local \(family.rawValue) PodCIDR route is not directly connected"
-            )
+        let hasExactNetworkRoute: Bool
+        if let mask = networkRoute.mask,
+            let routePrefixLength = Self.maskPrefixLength(mask, family: family)
+        {
+            hasExactNetworkRoute =
+                Self.canonicalize(
+                    family: family,
+                    value: "\(Self.addressWithoutScope(networkRoute.destination))/\(routePrefixLength)"
+                ) == canonicalPodCIDR
+        } else {
+            hasExactNetworkRoute = false
         }
-        guard
-            let mask = networkRoute.mask,
-            let routePrefixLength = Self.maskPrefixLength(mask, family: family),
-            Self.canonicalize(
-                family: family,
-                value: "\(Self.addressWithoutScope(networkRoute.destination))/\(routePrefixLength)"
-            ) == canonicalPodCIDR
-        else {
+        guard hasExactNetworkRoute else {
+            if networkRoute.flags.contains("GATEWAY") || networkRoute.destination == "default" {
+                throw KubeProxyPodIngressRouteTransitionError.unavailable(family)
+            }
             throw KubeProxyMacOSError.applyFailed(
                 "route to local \(family.rawValue) PodCIDR does not cover the canonical PodCIDR exactly"
+            )
+        }
+        guard !probeRoute.flags.contains("GATEWAY"), !networkRoute.flags.contains("GATEWAY") else {
+            throw KubeProxyMacOSError.applyFailed(
+                "local \(family.rawValue) PodCIDR route unexpectedly uses a gateway"
+            )
+        }
+        guard probeRoute.interfaceName == networkRoute.interfaceName else {
+            throw KubeProxyMacOSError.applyFailed(
+                "local \(family.rawValue) PodCIDR probe and network routes use different interfaces"
             )
         }
         guard try interfaceTypeResolver(probeRoute.interfaceName) == UInt8(IFT_BRIDGE) else {
@@ -83,6 +107,17 @@ public struct KubeProxyDefaultPodIngressInterfaceResolver: KubeProxyPodIngressIn
             )
         }
         return probeRoute.interfaceName
+    }
+
+    private func routeOutput(
+        family: KubeProxyAddressFamily,
+        arguments: [String]
+    ) throws -> String {
+        do {
+            return try commandRunner("/sbin/route", arguments)
+        } catch is KubeProxyRouteLookupUnavailableError {
+            throw KubeProxyPodIngressRouteTransitionError.unavailable(family)
+        }
     }
 
     private func canonicalPodCIDR(
@@ -323,6 +358,9 @@ public struct KubeProxyDefaultPodIngressInterfaceResolver: KubeProxyPodIngressIn
         process.arguments = arguments
         process.standardOutput = stdout
         process.standardError = stderr
+        var environment = ProcessInfo.processInfo.environment
+        environment["LC_ALL"] = "C"
+        process.environment = environment
         do {
             try process.run()
         } catch {
@@ -331,13 +369,35 @@ public struct KubeProxyDefaultPodIngressInterfaceResolver: KubeProxyPodIngressIn
         process.waitUntilExit()
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
         let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
-        guard process.terminationStatus == 0 else {
-            let message = String(decoding: errorOutput, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        return try checkedCommandOutput(
+            status: process.terminationStatus,
+            output: String(decoding: output, as: UTF8.self),
+            errorOutput: String(decoding: errorOutput, as: UTF8.self)
+        )
+    }
+
+    static func checkedCommandOutput(
+        status: Int32,
+        output: String,
+        errorOutput: String
+    ) throws -> String {
+        let message = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let diagnosticLines = message.split(separator: "\n")
+        // Apple's route(8) get path exits zero after an RTM_GET write failure. ESRCH is rendered
+        // as this exact C-locale diagnostic, so both the diagnostic and an otherwise empty result
+        // are required before treating the lookup as an unavailable route.
+        if status == 0,
+            output.isEmpty,
+            diagnosticLines.count == 1,
+            diagnosticLines[0].hasSuffix("writing to routing socket: not in table")
+        {
+            throw KubeProxyRouteLookupUnavailableError(status: status, message: message)
+        }
+        guard status == 0, message.isEmpty else {
             throw KubeProxyMacOSError.applyFailed(
-                "failed to inspect the local PodCIDR route with status \(process.terminationStatus): \(message)"
+                "failed to inspect the local PodCIDR route with status \(status): \(message)"
             )
         }
-        return String(decoding: output, as: UTF8.self)
+        return output
     }
 }

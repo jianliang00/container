@@ -162,7 +162,7 @@ struct KubeProxyPodIngressInterfaceResolverTests {
     }
 
     @Test
-    func rejectsDefaultOrBroaderRouteForPodCIDR() {
+    func reportsDefaultFallbackAsUnavailableAndRejectsBroaderDirectRoute() {
         let defaultRoute = KubeProxyDefaultPodIngressInterfaceResolver(
             commandRunner: { _, _ in
                 """
@@ -186,15 +186,144 @@ struct KubeProxyPodIngressInterfaceResolverTests {
             },
             interfaceTypeResolver: { _ in UInt8(IFT_BRIDGE) }
         )
+        let ipv6DefaultRoute = KubeProxyDefaultPodIngressInterfaceResolver(
+            commandRunner: { _, _ in
+                """
+                destination: ::
+                       mask: default
+                    gateway: fe80::1%en0
+                  interface: en0
+                      flags: <UP,GATEWAY,DONE,PRCLONING,GLOBAL>
+                """
+            },
+            interfaceTypeResolver: { _ in UInt8(IFT_ETHER) }
+        )
 
-        #expect(throws: KubeProxyMacOSError.self) {
+        #expect(throws: KubeProxyPodIngressRouteTransitionError.unavailable(.ipv4)) {
             try defaultRoute.resolvePodIngressInterface(
                 family: .ipv4,
                 podCIDR: "10.250.34.0/24"
             )
         }
-        #expect(throws: KubeProxyMacOSError.self) {
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "route to local IPv4 PodCIDR does not cover the canonical PodCIDR exactly"
+            )
+        ) {
             try broaderRoute.resolvePodIngressInterface(
+                family: .ipv4,
+                podCIDR: "10.250.34.0/24"
+            )
+        }
+        #expect(throws: KubeProxyPodIngressRouteTransitionError.unavailable(.ipv6)) {
+            try ipv6DefaultRoute.resolvePodIngressInterface(
+                family: .ipv6,
+                podCIDR: "fd42:10:244:22::/64"
+            )
+        }
+    }
+
+    @Test(arguments: [true, false])
+    func reportsUnavailableProbeOrNetworkLookupAsPending(failProbeLookup: Bool) {
+        let resolver = KubeProxyDefaultPodIngressInterfaceResolver(
+            commandRunner: { _, arguments in
+                let isProbeLookup = arguments.last == "10.250.34.2"
+                if isProbeLookup == failProbeLookup {
+                    throw KubeProxyRouteLookupUnavailableError(status: 1, message: "not in table")
+                }
+                return """
+                    destination: \(isProbeLookup ? "10.250.34.2" : "10.250.34.0")
+                           mask: \(isProbeLookup ? "255.255.255.255" : "255.255.255.0")
+                      interface: bridge100
+                          flags: <UP,\(isProbeLookup ? "HOST," : "")DONE,CLONING>
+                    """
+            },
+            interfaceTypeResolver: { _ in UInt8(IFT_BRIDGE) }
+        )
+
+        #expect(throws: KubeProxyPodIngressRouteTransitionError.unavailable(.ipv4)) {
+            try resolver.resolvePodIngressInterface(
+                family: .ipv4,
+                podCIDR: "10.250.34.0/24"
+            )
+        }
+    }
+
+    @Test
+    func recognizesOnlyVerifiedNotInTableCommandResultAsUnavailable() {
+        let notInTable = "route: writing to routing socket: not in table\n"
+        #expect(
+            throws: KubeProxyRouteLookupUnavailableError(
+                status: 0,
+                message: "route: writing to routing socket: not in table"
+            )
+        ) {
+            try KubeProxyDefaultPodIngressInterfaceResolver.checkedCommandOutput(
+                status: 0,
+                output: "",
+                errorOutput: notInTable
+            )
+        }
+
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "failed to inspect the local PodCIDR route with status 64: route: usage error"
+            )
+        ) {
+            try KubeProxyDefaultPodIngressInterfaceResolver.checkedCommandOutput(
+                status: 64,
+                output: "",
+                errorOutput: "route: usage error\n"
+            )
+        }
+
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "failed to inspect the local PodCIDR route with status 64: route: writing to routing socket: not in table"
+            )
+        ) {
+            try KubeProxyDefaultPodIngressInterfaceResolver.checkedCommandOutput(
+                status: 64,
+                output: "",
+                errorOutput: notInTable
+            )
+        }
+
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "failed to inspect the local PodCIDR route with status 0: route: routing socket unavailable"
+            )
+        ) {
+            try KubeProxyDefaultPodIngressInterfaceResolver.checkedCommandOutput(
+                status: 0,
+                output: "",
+                errorOutput: "route: routing socket unavailable\n"
+            )
+        }
+
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "failed to inspect the local PodCIDR route with status 0: route: writing to routing socket: not in table"
+            )
+        ) {
+            try KubeProxyDefaultPodIngressInterfaceResolver.checkedCommandOutput(
+                status: 0,
+                output: "unexpected route output\n",
+                errorOutput: notInTable
+            )
+        }
+    }
+
+    @Test
+    func keepsUnexpectedRouteCommandFailureHard() {
+        let expected = KubeProxyMacOSError.applyFailed("route inspection failed")
+        let resolver = KubeProxyDefaultPodIngressInterfaceResolver(
+            commandRunner: { _, _ in throw expected },
+            interfaceTypeResolver: { _ in UInt8(IFT_BRIDGE) }
+        )
+
+        #expect(throws: expected) {
+            try resolver.resolvePodIngressInterface(
                 family: .ipv4,
                 podCIDR: "10.250.34.0/24"
             )
@@ -215,7 +344,11 @@ struct KubeProxyPodIngressInterfaceResolverTests {
             interfaceTypeResolver: { _ in UInt8(IFT_ETHER) }
         )
 
-        #expect(throws: KubeProxyMacOSError.self) {
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "local IPv4 PodCIDR route interface bridge100 is not a bridge"
+            )
+        ) {
             try resolver.resolvePodIngressInterface(
                 family: .ipv4,
                 podCIDR: "10.250.34.0/24"
@@ -238,7 +371,11 @@ struct KubeProxyPodIngressInterfaceResolverTests {
             interfaceTypeResolver: { _ in UInt8(IFT_BRIDGE) }
         )
 
-        #expect(throws: KubeProxyMacOSError.self) {
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "local IPv4 PodCIDR probe and network routes use different interfaces"
+            )
+        ) {
             try resolver.resolvePodIngressInterface(
                 family: .ipv4,
                 podCIDR: "10.250.34.0/24"
@@ -270,7 +407,11 @@ struct KubeProxyPodIngressInterfaceResolverTests {
             interfaceTypeResolver: { _ in UInt8(IFT_BRIDGE) }
         )
 
-        #expect(throws: KubeProxyMacOSError.self) {
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "route to local IPv4 PodCIDR does not cover the canonical PodCIDR exactly"
+            )
+        ) {
             try resolver.resolvePodIngressInterface(
                 family: .ipv4,
                 podCIDR: "10.250.34.0/24"
@@ -293,7 +434,11 @@ struct KubeProxyPodIngressInterfaceResolverTests {
             interfaceTypeResolver: { _ in UInt8(IFT_BRIDGE) }
         )
 
-        #expect(throws: KubeProxyMacOSError.self) {
+        #expect(
+            throws: KubeProxyMacOSError.applyFailed(
+                "local IPv4 PodCIDR route unexpectedly uses a gateway"
+            )
+        ) {
             try resolver.resolvePodIngressInterface(
                 family: .ipv4,
                 podCIDR: "10.250.34.0/24"

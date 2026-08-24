@@ -920,6 +920,9 @@ public struct KubeProxyPFRuleApplier: KubeProxyRuleApplying {
                     "Pod ingress interface resolution failed (\(error)); fail-closed PF withdrawal also failed (\(withdrawError))"
                 )
             }
+            if case KubeProxyPodIngressRouteTransitionError.unavailable(let family) = error {
+                throw KubeProxyPodIngressRouteTransitionError.unavailableAfterWithdrawal(family)
+            }
             throw error
         }
     }

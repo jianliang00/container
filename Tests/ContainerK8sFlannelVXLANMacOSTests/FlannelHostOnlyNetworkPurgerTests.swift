@@ -265,6 +265,37 @@ struct FlannelHostOnlyNetworkPurgerTests {
         #expect(try fixture.forwardingOwnershipStore.load() == nil)
     }
 
+    @Test
+    func offlineRecoveryDiscardsPreviousBootOwnershipWithoutTouchingCurrentSysctls() throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveForwardingOwnership()
+        let commands = PurgerTestForwardingCommands()
+        let forwardingManager = SystemFlannelForwardingManager(
+            ownershipStore: fixture.forwardingOwnershipStore,
+            advisoryLockPath: fixture.root.appendingPathComponent("forwarding.lock").path,
+            bootSessionProvider: { "boot-b" },
+            commandRunner: { [commands] executable, arguments in
+                commands.run(executable: executable, arguments: arguments)
+            }
+        )
+        let recovery = FlannelOfflineForwardingRecovery(
+            dataplaneOwnershipStore: fixture.dataplaneStore,
+            forwardingOwnershipStore: fixture.forwardingOwnershipStore,
+            hostIPv6GatewayOwnershipStore: fixture.gatewayOwnershipStore,
+            forwardingManager: forwardingManager,
+            readyStateExists: { false }
+        )
+
+        let result = try recovery.restoreIfForwardingOnly(
+            whileHolding: fixture.acquireLifetimeLock()
+        )
+
+        #expect(result == .restored([]))
+        #expect(commands.calls.isEmpty)
+        #expect(try fixture.forwardingOwnershipStore.load() == nil)
+    }
+
     @Test(arguments: OfflineForwardingRecoveryBlockingState.allCases)
     func offlineRecoveryDoesNotRestoreBeforeOtherDataplaneStateIsGone(
         blockingState: OfflineForwardingRecoveryBlockingState
@@ -623,6 +654,20 @@ private final class PurgerTestForwardingManager: FlannelForwardingManaging, @unc
 
     func ownedFamilies() throws -> Set<FlannelForwardingFamily> {
         try ownershipStore.load()?.families ?? []
+    }
+}
+
+private final class PurgerTestForwardingCommands: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedCalls: [[String]] = []
+
+    var calls: [[String]] {
+        lock.withLock { recordedCalls }
+    }
+
+    func run(executable: String, arguments: [String]) -> String {
+        lock.withLock { recordedCalls.append([executable] + arguments) }
+        return "0\n"
     }
 }
 

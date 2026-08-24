@@ -486,8 +486,13 @@ public struct SystemFlannelForwardingManager: FlannelForwardingManaging, Sendabl
     private func ensureEnabledLocked(_ family: FlannelForwardingFamily) throws {
         let bootSessionID = try normalizedBootSessionID()
         var ownership: FlannelForwardingOwnership
-        if let persistedOwnership = try ownershipStore.load() {
-            ownership = try rebasedOwnership(persistedOwnership, for: bootSessionID)
+        if let persistedOwnership = try ownershipStore.load(),
+            let currentOwnership = try currentBootOwnership(
+                persistedOwnership,
+                for: bootSessionID
+            )
+        {
+            ownership = currentOwnership
         } else {
             ownership = FlannelForwardingOwnership(bootSessionID: bootSessionID)
         }
@@ -537,7 +542,14 @@ public struct SystemFlannelForwardingManager: FlannelForwardingManaging, Sendabl
             return false
         }
         let bootSessionID = try normalizedBootSessionID()
-        var ownership = try rebasedOwnership(persistedOwnership, for: bootSessionID)
+        guard
+            var ownership = try currentBootOwnership(
+                persistedOwnership,
+                for: bootSessionID
+            )
+        else {
+            return false
+        }
         guard var entry = ownership.entry(for: family) else {
             return false
         }
@@ -589,35 +601,28 @@ public struct SystemFlannelForwardingManager: FlannelForwardingManaging, Sendabl
             guard let persistedOwnership = try ownershipStore.load() else {
                 return []
             }
-            return try rebasedOwnership(
-                persistedOwnership,
-                for: normalizedBootSessionID()
-            ).families
+            guard
+                let ownership = try currentBootOwnership(
+                    persistedOwnership,
+                    for: normalizedBootSessionID()
+                )
+            else {
+                return []
+            }
+            return ownership.families
         }
     }
 
-    private func rebasedOwnership(
+    private func currentBootOwnership(
         _ persistedOwnership: FlannelForwardingOwnership,
         for bootSessionID: String
-    ) throws -> FlannelForwardingOwnership {
-        var ownership = persistedOwnership
-        guard ownership.bootSessionID != bootSessionID else {
-            return ownership
+    ) throws -> FlannelForwardingOwnership? {
+        guard persistedOwnership.bootSessionID == bootSessionID else {
+            // A boot-scoped claim cannot authorize sysctl mutation after a reboot.
+            try ownershipStore.remove()
+            return nil
         }
-
-        for family in ownership.families.sorted() {
-            let originalEnabled = try read(family)
-            ownership.set(
-                FlannelForwardingFamilyOwnership(
-                    originalEnabled: originalEnabled,
-                    phase: originalEnabled ? .owned : .enabling
-                ),
-                for: family
-            )
-        }
-        ownership.bootSessionID = bootSessionID
-        try persist(ownership)
-        return ownership
+        return persistedOwnership
     }
 
     private func normalizedBootSessionID() throws -> String {

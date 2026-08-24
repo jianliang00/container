@@ -58,6 +58,41 @@ struct FlannelForwardingTests {
     }
 
     @Test
+    func preenabledDualStackBaselineIsPreservedAcrossIPv4OnlyTransition() throws {
+        let fixture = ForwardingFixture()
+        defer { fixture.removeFiles() }
+
+        #expect(!fixture.host.value(.ipv4))
+        #expect(!fixture.host.value(.ipv6))
+        fixture.host.setValue(.ipv4, enabled: true)
+        fixture.host.setValue(.ipv6, enabled: true)
+
+        try fixture.manager.ensureEnabled(.ipv4)
+        try fixture.manager.ensureEnabled(.ipv6)
+
+        let ownership = try #require(try fixture.store.load())
+        #expect(ownership.ipv4?.originalEnabled == true)
+        #expect(ownership.ipv4?.phase == .owned)
+        #expect(ownership.ipv6?.originalEnabled == true)
+        #expect(ownership.ipv6?.phase == .owned)
+        #expect(try fixture.manager.ownedFamilies() == [.ipv4, .ipv6])
+        #expect(fixture.host.writeValues.isEmpty)
+
+        #expect(try fixture.manager.restore(.ipv6))
+        let ipv4OnlyOwnership = try #require(try fixture.store.load())
+        #expect(ipv4OnlyOwnership.ipv4?.originalEnabled == true)
+        #expect(ipv4OnlyOwnership.ipv4?.phase == .owned)
+        #expect(ipv4OnlyOwnership.ipv6 == nil)
+        #expect(try fixture.manager.ownedFamilies() == [.ipv4])
+
+        #expect(try fixture.manager.restoreAll() == [.ipv4])
+        #expect(fixture.host.value(.ipv4))
+        #expect(fixture.host.value(.ipv6))
+        #expect(fixture.host.writeValues.isEmpty)
+        #expect(try fixture.store.load() == nil)
+    }
+
+    @Test
     func restoringIPv6PreservesIPv4ForwardingOwnership() throws {
         let fixture = ForwardingFixture(ipv4: false, ipv6: false)
         defer { fixture.removeFiles() }
@@ -134,46 +169,140 @@ struct FlannelForwardingTests {
         #expect(host.value(.ipv6))
     }
 
+    @Test(arguments: PreviousBootOwnershipOperation.allCases)
+    func previousBootOwnershipIsDiscardedWithoutMutatingCurrentBoot(
+        operation: PreviousBootOwnershipOperation
+    ) throws {
+        let fixture = ForwardingFixture(bootSessionID: "boot-b")
+        defer { fixture.removeFiles() }
+        try fixture.store.save(
+            FlannelForwardingOwnership(
+                bootSessionID: "boot-a",
+                ipv4: FlannelForwardingFamilyOwnership(
+                    originalEnabled: true,
+                    phase: .owned
+                ),
+                ipv6: FlannelForwardingFamilyOwnership(
+                    originalEnabled: true,
+                    phase: .owned
+                )
+            )
+        )
+
+        switch operation {
+        case .ownedFamilies:
+            #expect(try fixture.manager.ownedFamilies().isEmpty)
+        case .restore:
+            #expect(try fixture.manager.restore(.ipv4) == false)
+        case .restoreAll:
+            #expect(try fixture.manager.restoreAll().isEmpty)
+        }
+
+        #expect(!fixture.host.value(.ipv4))
+        #expect(!fixture.host.value(.ipv6))
+        #expect(fixture.host.writeValues.isEmpty)
+        #expect(fixture.host.readCount(.ipv4) == 0)
+        #expect(fixture.host.readCount(.ipv6) == 0)
+        #expect(try fixture.store.load() == nil)
+    }
+
     @Test
-    func newBootRebasesRestorationToTheCurrentBootBaseline() throws {
+    func ensureEnabledAfterNewBootRecordsOnlyTheCurrentBaseline() throws {
+        let fixture = ForwardingFixture(ipv4: true, ipv6: true, bootSessionID: "boot-b")
+        defer { fixture.removeFiles() }
+        try fixture.store.save(
+            FlannelForwardingOwnership(
+                bootSessionID: "boot-a",
+                ipv4: FlannelForwardingFamilyOwnership(
+                    originalEnabled: false,
+                    phase: .owned
+                ),
+                ipv6: FlannelForwardingFamilyOwnership(
+                    originalEnabled: false,
+                    phase: .owned
+                )
+            )
+        )
+
+        try fixture.manager.ensureEnabled(.ipv4)
+
+        let ipv4Ownership = try #require(try fixture.store.load())
+        #expect(ipv4Ownership.bootSessionID == "boot-b")
+        #expect(ipv4Ownership.ipv4?.originalEnabled == true)
+        #expect(ipv4Ownership.ipv4?.phase == .owned)
+        #expect(ipv4Ownership.ipv6 == nil)
+        #expect(try fixture.manager.ownedFamilies() == [.ipv4])
+
+        try fixture.manager.ensureEnabled(.ipv6)
+
+        let dualStackOwnership = try #require(try fixture.store.load())
+        #expect(dualStackOwnership.bootSessionID == "boot-b")
+        #expect(dualStackOwnership.ipv4?.originalEnabled == true)
+        #expect(dualStackOwnership.ipv4?.phase == .owned)
+        #expect(dualStackOwnership.ipv6?.originalEnabled == true)
+        #expect(dualStackOwnership.ipv6?.phase == .owned)
+        #expect(fixture.host.writeValues.isEmpty)
+
+        #expect(try fixture.manager.restoreAll() == [.ipv4, .ipv6])
+        #expect(fixture.host.value(.ipv4))
+        #expect(fixture.host.value(.ipv6))
+        #expect(fixture.host.writeValues.isEmpty)
+        #expect(try fixture.store.load() == nil)
+    }
+
+    @Test
+    func previousBootOwnershipRemovalFailureIsFailClosedAndRetryable() throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("flannel-forwarding-boot-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("flannel-forwarding-boot-failure-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = FlannelForwardingOwnershipStore(
+        let persistedStore = FlannelForwardingOwnershipStore(
             url: root.appendingPathComponent("ownership.json"),
             requiredOwnerID: geteuid()
         )
-        let host = ForwardingTestHost(ipv4: false, ipv6: false)
-        let lockPath = root.appendingPathComponent("forwarding.lock").path
-        let firstBootManager = SystemFlannelForwardingManager(
-            ownershipStore: store,
-            advisoryLockPath: lockPath,
-            bootSessionProvider: { "boot-a" },
-            commandRunner: { [host] executable, arguments in
-                try host.run(executable: executable, arguments: arguments)
-            }
+        try persistedStore.save(
+            FlannelForwardingOwnership(
+                bootSessionID: "boot-a",
+                ipv4: FlannelForwardingFamilyOwnership(
+                    originalEnabled: true,
+                    phase: .owned
+                )
+            )
         )
-        try firstBootManager.ensureEnabled(.ipv4)
-        try firstBootManager.ensureEnabled(.ipv6)
-
-        host.setValue(.ipv4, enabled: true)
-        host.setValue(.ipv6, enabled: false)
-        host.clearWrites()
-        let secondBootManager = SystemFlannelForwardingManager(
-            ownershipStore: store,
-            advisoryLockPath: lockPath,
+        let failingStore = FailingForwardingOwnershipStore(store: persistedStore)
+        failingStore.failNextRemove()
+        let host = ForwardingTestHost(ipv4: false, ipv6: false)
+        let manager = SystemFlannelForwardingManager(
+            ownershipStore: failingStore,
+            advisoryLockPath: root.appendingPathComponent("forwarding.lock").path,
             bootSessionProvider: { "boot-b" },
             commandRunner: { [host] executable, arguments in
                 try host.run(executable: executable, arguments: arguments)
             }
         )
 
-        #expect(try secondBootManager.restoreAll() == [.ipv4, .ipv6])
+        #expect(throws: FlannelVXLANError.self) {
+            try manager.ensureEnabled(.ipv4)
+        }
 
-        #expect(host.value(.ipv4))
-        #expect(!host.value(.ipv6))
+        #expect(host.readCount(.ipv4) == 0)
+        #expect(host.readCount(.ipv6) == 0)
         #expect(host.writeValues.isEmpty)
-        #expect(try store.load() == nil)
+        #expect(try persistedStore.load()?.bootSessionID == "boot-a")
+
+        host.setValue(.ipv4, enabled: true)
+        try manager.ensureEnabled(.ipv4)
+
+        let ownership = try #require(try persistedStore.load())
+        #expect(ownership.bootSessionID == "boot-b")
+        #expect(ownership.ipv4?.originalEnabled == true)
+        #expect(ownership.ipv4?.phase == .owned)
+        #expect(ownership.ipv6 == nil)
+        #expect(host.writeValues.isEmpty)
+
+        #expect(try manager.restore(.ipv4))
+        #expect(host.value(.ipv4))
+        #expect(host.writeValues.isEmpty)
+        #expect(try persistedStore.load() == nil)
     }
 
     @Test
@@ -458,7 +587,11 @@ private struct ForwardingFixture: Sendable {
     let host: ForwardingTestHost
     let manager: SystemFlannelForwardingManager
 
-    init(ipv4: Bool = false, ipv6: Bool = false) {
+    init(
+        ipv4: Bool = false,
+        ipv6: Bool = false,
+        bootSessionID: String = "boot-a"
+    ) {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("flannel-forwarding-tests-\(UUID().uuidString)", isDirectory: true)
         store = FlannelForwardingOwnershipStore(
@@ -468,7 +601,7 @@ private struct ForwardingFixture: Sendable {
         host = ForwardingTestHost(ipv4: ipv4, ipv6: ipv6)
         manager = SystemFlannelForwardingManager(
             ownershipStore: store,
-            bootSessionProvider: { "boot-a" },
+            bootSessionProvider: { bootSessionID },
             commandRunner: { [host] executable, arguments in
                 try host.run(executable: executable, arguments: arguments)
             }
@@ -478,6 +611,12 @@ private struct ForwardingFixture: Sendable {
     func removeFiles() {
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+enum PreviousBootOwnershipOperation: CaseIterable, Sendable {
+    case ownedFamilies
+    case restore
+    case restoreAll
 }
 
 private final class ForwardingWriteObservation: @unchecked Sendable {

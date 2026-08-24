@@ -106,24 +106,28 @@ struct FlannelForwardingTests {
             }
         )
 
-        let ipv4Task = Task.detached {
-            try ipv4Manager.ensureEnabled(.ipv4)
-        }
-        defer {
-            gate.open()
-            ipv4Task.cancel()
-        }
-        #expect(await gate.waitUntilBlocked())
-        let ipv6Task = Task.detached {
-            try ipv6Manager.ensureEnabled(.ipv6)
-        }
-        defer { ipv6Task.cancel() }
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(host.readCount(.ipv6) == 0)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await runForwardingOperation {
+                    try ipv4Manager.ensureEnabled(.ipv4)
+                }
+            }
+            defer {
+                gate.open()
+                group.cancelAll()
+            }
+            #expect(await gate.waitUntilBlocked())
+            group.addTask {
+                try await runForwardingOperation {
+                    try ipv6Manager.ensureEnabled(.ipv6)
+                }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(host.readCount(.ipv6) == 0)
 
-        gate.open()
-        try await ipv4Task.value
-        try await ipv6Task.value
+            gate.open()
+            try await group.waitForAll()
+        }
 
         #expect(try ipv4Manager.ownedFamilies() == [.ipv4, .ipv6])
         #expect(host.value(.ipv4))
@@ -530,6 +534,16 @@ private final class ForwardingReadGate: @unchecked Sendable {
 
     func open() {
         released.signal()
+    }
+}
+
+private func runForwardingOperation<T: Sendable>(
+    _ operation: @escaping @Sendable () throws -> T
+) async throws -> T {
+    try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+            continuation.resume(with: Result(catching: operation))
+        }
     }
 }
 

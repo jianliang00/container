@@ -109,10 +109,15 @@ struct FlannelForwardingTests {
         let ipv4Task = Task.detached {
             try ipv4Manager.ensureEnabled(.ipv4)
         }
-        #expect(gate.waitUntilBlocked())
+        defer {
+            gate.open()
+            ipv4Task.cancel()
+        }
+        #expect(await gate.waitUntilBlocked())
         let ipv6Task = Task.detached {
             try ipv6Manager.ensureEnabled(.ipv6)
         }
+        defer { ipv6Task.cancel() }
         try await Task.sleep(for: .milliseconds(50))
         #expect(host.readCount(.ipv6) == 0)
 
@@ -515,8 +520,12 @@ private final class ForwardingReadGate: @unchecked Sendable {
         released.wait()
     }
 
-    func waitUntilBlocked() -> Bool {
-        entered.wait(timeout: .now() + 2) == .success
+    func waitUntilBlocked() async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [entered] in
+                continuation.resume(returning: entered.wait(timeout: .now() + 10) == .success)
+            }
+        }
     }
 
     func open() {

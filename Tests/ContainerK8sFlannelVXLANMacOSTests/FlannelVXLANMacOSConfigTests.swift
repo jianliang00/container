@@ -34,6 +34,16 @@ struct FlannelVXLANMacOSConfigTests {
             config.hostIPv6GatewayOwnershipStatePath
                 == "/var/lib/container/flannel-vxlan/host-ipv6-gateway-ownership.json"
         )
+        #expect(
+            config.forwardingOwnershipStatePath
+                == "/var/lib/container/flannel-vxlan/forwarding-ownership.json"
+        )
+        #expect(config.withdrawalStatePaths.contains(config.forwardingOwnershipStatePath))
+        #expect(
+            FlannelVXLANMacOSConfig.defaultPersistentStatePaths.contains(
+                "/var/lib/container/flannel-vxlan/forwarding-ownership.json"
+            )
+        )
         try config.validate()
     }
 
@@ -84,6 +94,109 @@ struct FlannelVXLANMacOSConfigTests {
 
         #expect(throws: FlannelVXLANError.self) {
             try config.validate()
+        }
+    }
+
+    @Test func rejectsPersistentStatePathCollisions() throws {
+        let sharedCredentialPath = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/kubelet.conf",
+            nodeKubeconfig: "/etc/kubernetes/kubelet.conf",
+            nodeName: "mac-a"
+        )
+        try sharedCredentialPath.validate()
+
+        var ownershipCollision = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        ownershipCollision.ownershipStatePath = "/var/lib/container/flannel-vxlan/forwarding-ownership.json"
+        #expect(throws: FlannelVXLANError.self) {
+            try ownershipCollision.validate()
+        }
+
+        var readyCollision = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        readyCollision.readyStatePath = readyCollision.networkOwnershipStatePath
+        #expect(throws: FlannelVXLANError.self) {
+            try readyCollision.validate()
+        }
+
+        var vtepCollision = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        vtepCollision.vtepMACPath = "/var/lib/container/flannel-vxlan/vtep-mac-v6"
+        #expect(throws: FlannelVXLANError.self) {
+            try vtepCollision.validate()
+        }
+
+        var kubeconfigCollision = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        kubeconfigCollision.ownershipStatePath = kubeconfigCollision.kubeconfig
+        #expect(throws: FlannelVXLANError.self) {
+            try kubeconfigCollision.validate()
+        }
+
+        var manifestCollision = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        manifestCollision.ownershipStatePath = FlannelVXLANMacOSConfig.defaultStateManifestPath
+        #expect(throws: FlannelVXLANError.self) {
+            try manifestCollision.validate()
+        }
+
+        var ancestorCollision = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        ancestorCollision.readyStatePath = ancestorCollision.ownershipStatePath + "/ready.json"
+        #expect(throws: FlannelVXLANError.self) {
+            try ancestorCollision.validate()
+        }
+
+        let configPathCollision = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        #expect(throws: FlannelVXLANError.self) {
+            try configPathCollision.validateConfigurationFilePath(
+                configPathCollision.forwardingOwnershipStatePath
+            )
+        }
+
+        #expect(throws: FlannelVXLANError.self) {
+            try configPathCollision.validateControlSocketPath(
+                configPathCollision.forwardingOwnershipStatePath,
+                configurationFilePath: "/etc/container/flannel-vxlan.json"
+            )
+        }
+        #expect(throws: FlannelVXLANError.self) {
+            try configPathCollision.validateControlSocketPath(
+                "/etc/container/flannel-vxlan.json",
+                configurationFilePath: "/etc/container/flannel-vxlan.json"
+            )
+        }
+        #expect(throws: FlannelVXLANError.self) {
+            try configPathCollision.validateControlSocketPath(
+                "relative.sock",
+                configurationFilePath: "/etc/container/flannel-vxlan.json"
+            )
+        }
+
+        for lockPath in [
+            FlannelVXLANMacOSConfig.defaultDaemonLifetimeLockPath,
+            FlannelVXLANMacOSConfig.defaultForwardingAdvisoryLockPath,
+        ] {
+            var lockCollision = configPathCollision
+            lockCollision.ownershipStatePath = lockPath
+            #expect(throws: FlannelVXLANError.self) {
+                try lockCollision.validate()
+            }
         }
     }
 }

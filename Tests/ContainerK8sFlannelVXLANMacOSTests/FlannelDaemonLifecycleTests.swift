@@ -83,10 +83,23 @@ struct FlannelDaemonLifecycleTests {
         let attributes = try FileManager.default.attributesOfItem(atPath: socketPath)
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
 
-        let first = try FlannelControlClient.requestWithdrawal(socketPath: socketPath)
+        #expect(throws: FlannelVXLANError.self) {
+            try FlannelControlClient.requestWithdrawal(
+                socketPath: socketPath,
+                requiredPeerUID: geteuid() &+ 1
+            )
+        }
+
+        let first = try FlannelControlClient.requestWithdrawal(
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
         #expect(!first.succeeded)
         #expect(first.message == "injected cleanup failure")
-        let second = try FlannelControlClient.requestWithdrawal(socketPath: socketPath)
+        let second = try FlannelControlClient.requestWithdrawal(
+            socketPath: socketPath,
+            requiredPeerUID: geteuid()
+        )
         #expect(second.succeeded)
         #expect(second.message == "withdrawn")
         #expect(await outcomes.calls == 2)

@@ -102,7 +102,9 @@ public actor FlannelDaemonLifecycle {
                 let result = try await cleanup()
                 return FlannelWithdrawalOutcome(
                     succeeded: true,
-                    message: "withdrawn routes=\(result.removedRoutes.count) tunnelStopped=\(result.stoppedTunnel)"
+                    message: "withdrawn routes=\(result.removedRoutes.count) "
+                        + "tunnelStopped=\(result.stoppedTunnel) "
+                        + "forwardingRestored=\(result.restoredForwardingFamilies.count)"
                 )
             } catch {
                 return FlannelWithdrawalOutcome(succeeded: false, message: String(describing: error))

@@ -112,6 +112,24 @@ struct FlannelHostOnlyNetworkPurgerTests {
     }
 
     @Test
+    func missingNetworkOwnershipWithForwardingStateIsFailClosed() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveForwardingOwnership()
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.checkPurge()
+        }
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.purge()
+        }
+
+        #expect(await fixture.attachmentInspector.inspectionCalls == 0)
+        #expect(await fixture.networkManager.validationCalls == 0)
+        #expect(try fixture.forwardingOwnershipStore.load() != nil)
+    }
+
+    @Test
     func readOnlyCheckAllowsActiveDataplaneButPurgeRequiresWithdrawal() async throws {
         let fixture = PurgerFixture()
         defer { fixture.removeFiles() }
@@ -138,6 +156,198 @@ struct FlannelHostOnlyNetworkPurgerTests {
         #expect(purge == FlannelHostOnlyNetworkPurgeResult(networkWasPresent: true, removed: true))
         #expect(await fixture.networkManager.purgeCalls.count == 1)
         #expect(try fixture.networkOwnershipStore.load() == nil)
+    }
+
+    @Test
+    func readOnlyCheckAllowsForwardingOwnershipButPurgeRequiresRestoration() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveNetworkOwnership()
+        try fixture.forwardingOwnershipStore.save(
+            FlannelForwardingOwnership(
+                bootSessionID: "boot-a",
+                ipv4: FlannelForwardingFamilyOwnership(
+                    originalEnabled: false,
+                    phase: .owned
+                )
+            )
+        )
+
+        let check = try await fixture.purger.checkPurge()
+        #expect(check.ownedNetworkName == "kubernetes-pod")
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.purge()
+        }
+        #expect(await fixture.networkManager.purgeCalls.isEmpty)
+
+        try fixture.forwardingOwnershipStore.remove()
+        let purge = try await fixture.purger.purge()
+        #expect(purge.removed)
+        #expect(await fixture.networkManager.purgeCalls.count == 1)
+    }
+
+    @Test
+    func purgeRechecksDataplaneOwnershipAfterAsyncPreflight() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveNetworkOwnership()
+        let dataplaneStore = fixture.dataplaneStore
+        await fixture.attachmentInspector.setInspectionHook {
+            try! dataplaneStore.save(
+                FlannelOwnershipState(
+                    interfaceName: "utun42",
+                    localPodCIDR: "10.250.22.0/24",
+                    routePodCIDRs: []
+                )
+            )
+        }
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.purge()
+        }
+
+        #expect(await fixture.networkManager.purgeCalls.isEmpty)
+        #expect(try fixture.networkOwnershipStore.load() != nil)
+    }
+
+    @Test
+    func purgeRechecksForwardingOwnershipAfterAsyncPreflight() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveNetworkOwnership()
+        let forwardingOwnershipStore = fixture.forwardingOwnershipStore
+        await fixture.attachmentInspector.setInspectionHook {
+            try! forwardingOwnershipStore.save(Self.forwardingOwnership())
+        }
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.purge()
+        }
+
+        #expect(await fixture.networkManager.purgeCalls.isEmpty)
+        #expect(try fixture.networkOwnershipStore.load() != nil)
+    }
+
+    @Test
+    func purgeRechecksGatewayOwnershipAfterAsyncPreflight() async throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveNetworkOwnership(ipv6PodCIDR: "fd42:10:244:22::/64")
+        let gatewayOwnershipStore = fixture.gatewayOwnershipStore
+        let gatewayOwnership = fixture.gatewayOwnership()
+        await fixture.attachmentInspector.setInspectionHook {
+            try! gatewayOwnershipStore.save(gatewayOwnership)
+        }
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await fixture.purger.purge()
+        }
+
+        #expect(fixture.gatewayManager.removed.isEmpty)
+        #expect(await fixture.networkManager.purgeCalls.isEmpty)
+        #expect(try fixture.networkOwnershipStore.load() != nil)
+    }
+
+    @Test
+    func offlineRecoveryRestoresForwardingWithoutOtherDataplaneState() throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveForwardingOwnership()
+
+        let lifetimeLock = try fixture.acquireLifetimeLock()
+        let result = try fixture.forwardingRecovery().restoreIfForwardingOnly(
+            whileHolding: lifetimeLock
+        )
+
+        #expect(result == .restored([.ipv4]))
+        #expect(fixture.forwardingManager.restoreAllCalls == 1)
+        #expect(try fixture.forwardingOwnershipStore.load() == nil)
+    }
+
+    @Test(arguments: OfflineForwardingRecoveryBlockingState.allCases)
+    func offlineRecoveryDoesNotRestoreBeforeOtherDataplaneStateIsGone(
+        blockingState: OfflineForwardingRecoveryBlockingState
+    ) throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveForwardingOwnership()
+        switch blockingState {
+        case .dataplane:
+            try fixture.dataplaneStore.save(
+                FlannelOwnershipState(
+                    interfaceName: "utun42",
+                    localPodCIDR: "10.250.22.0/24",
+                    routePodCIDRs: []
+                )
+            )
+        case .gateway:
+            try fixture.gatewayOwnershipStore.save(fixture.gatewayOwnership())
+        case .readyState:
+            break
+        }
+
+        let lifetimeLock = try fixture.acquireLifetimeLock()
+        let result = try fixture.forwardingRecovery(
+            readyStateExists: blockingState == .readyState
+        ).restoreIfForwardingOnly(whileHolding: lifetimeLock)
+
+        #expect(result == .blockedByDataplaneState)
+        #expect(fixture.forwardingManager.restoreAllCalls == 0)
+        #expect(try fixture.forwardingOwnershipStore.load() != nil)
+    }
+
+    private static func forwardingOwnership() -> FlannelForwardingOwnership {
+        FlannelForwardingOwnership(
+            bootSessionID: "boot-a",
+            ipv4: FlannelForwardingFamilyOwnership(
+                originalEnabled: false,
+                phase: .owned
+            )
+        )
+    }
+
+    @Test
+    func daemonLifetimeLockIsExclusiveAndKeepsAStableInode() throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+
+        let first = try fixture.acquireLifetimeLock()
+        let initialInode = try #require(
+            FileManager.default.attributesOfItem(atPath: fixture.lifetimeLockPath)[.systemFileNumber]
+                as? NSNumber
+        )
+        let competingLock = try FlannelDaemonLifetimeLock.tryAcquire(path: fixture.lifetimeLockPath)
+        #expect(competingLock == nil)
+
+        first.release()
+        let second = try fixture.acquireLifetimeLock()
+        let reacquiredInode = try #require(
+            FileManager.default.attributesOfItem(atPath: fixture.lifetimeLockPath)[.systemFileNumber]
+                as? NSNumber
+        )
+
+        #expect(initialInode == reacquiredInode)
+        second.release()
+        #expect(FileManager.default.fileExists(atPath: fixture.lifetimeLockPath))
+    }
+
+    @Test
+    func offlineRecoveryRefusesAReleasedDaemonLifetimeLock() throws {
+        let fixture = PurgerFixture()
+        defer { fixture.removeFiles() }
+        try fixture.saveForwardingOwnership()
+        let lifetimeLock = try fixture.acquireLifetimeLock()
+        lifetimeLock.release()
+
+        #expect(throws: FlannelVXLANError.self) {
+            try fixture.forwardingRecovery().restoreIfForwardingOnly(
+                whileHolding: lifetimeLock
+            )
+        }
+
+        #expect(fixture.forwardingManager.restoreAllCalls == 0)
+        #expect(try fixture.forwardingOwnershipStore.load() != nil)
     }
 
     @Test
@@ -272,21 +482,34 @@ private func makeContainerSnapshot(
 private struct PurgerFixture {
     let root: URL
     let dataplaneStore: FlannelOwnershipStateStore
+    let forwardingOwnershipStore: FlannelForwardingOwnershipStore
     let networkOwnershipStore: FlannelHostOnlyNetworkOwnershipStore
     let gatewayOwnershipStore: FlannelHostIPv6GatewayOwnershipStore
     let networkManager = PurgerTestNetworkManager()
     let attachmentInspector = PurgerTestAttachmentInspector()
     let gatewayManager = PurgerTestGatewayManager()
+    let forwardingManager: PurgerTestForwardingManager
+
+    var lifetimeLockPath: String {
+        root.appendingPathComponent("daemon.lock").path
+    }
 
     init() {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("flannel-purge-tests-\(UUID().uuidString)", isDirectory: true)
         dataplaneStore = FlannelOwnershipStateStore(url: root.appendingPathComponent("ownership.json"))
+        forwardingOwnershipStore = FlannelForwardingOwnershipStore(
+            url: root.appendingPathComponent("forwarding-ownership.json"),
+            requiredOwnerID: geteuid()
+        )
         networkOwnershipStore = FlannelHostOnlyNetworkOwnershipStore(
             url: root.appendingPathComponent("network-ownership.json")
         )
         gatewayOwnershipStore = FlannelHostIPv6GatewayOwnershipStore(
             url: root.appendingPathComponent("host-ipv6-gateway-ownership.json")
+        )
+        forwardingManager = PurgerTestForwardingManager(
+            ownershipStore: forwardingOwnershipStore
         )
     }
 
@@ -295,6 +518,7 @@ private struct PurgerFixture {
             networkManager: networkManager,
             attachmentInspector: attachmentInspector,
             dataplaneOwnershipStore: dataplaneStore,
+            forwardingOwnershipStore: forwardingOwnershipStore,
             networkOwnershipStore: networkOwnershipStore,
             hostIPv6GatewayManager: gatewayManager,
             hostIPv6GatewayOwnershipStore: gatewayOwnershipStore
@@ -314,6 +538,38 @@ private struct PurgerFixture {
         )
     }
 
+    func saveForwardingOwnership() throws {
+        try forwardingOwnershipStore.save(
+            FlannelForwardingOwnership(
+                bootSessionID: "boot-a",
+                ipv4: FlannelForwardingFamilyOwnership(
+                    originalEnabled: false,
+                    phase: .owned
+                )
+            )
+        )
+    }
+
+    func forwardingRecovery(
+        readyStateExists: Bool = false
+    ) -> FlannelOfflineForwardingRecovery {
+        FlannelOfflineForwardingRecovery(
+            dataplaneOwnershipStore: dataplaneStore,
+            forwardingOwnershipStore: forwardingOwnershipStore,
+            hostIPv6GatewayOwnershipStore: gatewayOwnershipStore,
+            forwardingManager: forwardingManager,
+            readyStateExists: { readyStateExists }
+        )
+    }
+
+    func acquireLifetimeLock() throws -> FlannelDaemonLifetimeLock {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire(path: lifetimeLockPath) else {
+            throw FlannelVXLANError.runtime("test daemon lifetime lock is already held")
+        }
+        return lifetimeLock
+    }
+
     func gatewayOwnership() -> FlannelHostIPv6GatewayOwnership {
         FlannelHostIPv6GatewayOwnership(
             networkName: "kubernetes-pod",
@@ -328,6 +584,45 @@ private struct PurgerFixture {
 
     func removeFiles() {
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+enum OfflineForwardingRecoveryBlockingState: CaseIterable, Sendable {
+    case dataplane
+    case gateway
+    case readyState
+}
+
+private final class PurgerTestForwardingManager: FlannelForwardingManaging, @unchecked Sendable {
+    private let lock = NSLock()
+    private let ownershipStore: FlannelForwardingOwnershipStore
+    private var restoreAllCallCount = 0
+
+    init(ownershipStore: FlannelForwardingOwnershipStore) {
+        self.ownershipStore = ownershipStore
+    }
+
+    var restoreAllCalls: Int {
+        lock.withLock { restoreAllCallCount }
+    }
+
+    func ensureEnabled(_: FlannelForwardingFamily) throws {
+        throw FlannelVXLANError.runtime("unexpected forwarding enable")
+    }
+
+    func restore(_: FlannelForwardingFamily) throws -> Bool {
+        throw FlannelVXLANError.runtime("unexpected single-family forwarding restore")
+    }
+
+    func restoreAll() throws -> [FlannelForwardingFamily] {
+        lock.withLock { restoreAllCallCount += 1 }
+        let families = try ownershipStore.load()?.families.sorted() ?? []
+        try ownershipStore.remove()
+        return families
+    }
+
+    func ownedFamilies() throws -> Set<FlannelForwardingFamily> {
+        try ownershipStore.load()?.families ?? []
     }
 }
 
@@ -392,12 +687,16 @@ private actor PurgerTestAttachmentInspector: FlannelNetworkAttachmentInspecting 
     var inspectionCalls = 0
     private var objectIDs: [String] = []
     private var inspectionFails = false
+    private var inspectionHook: (@Sendable () -> Void)?
 
     func referringObjectIDs(networkName: String) async throws -> [String] {
         inspectionCalls += 1
         if inspectionFails {
             throw FlannelVXLANError.runtime("injected attachment inspection failure")
         }
+        let hook = inspectionHook
+        inspectionHook = nil
+        hook?()
         return objectIDs
     }
 
@@ -407,5 +706,9 @@ private actor PurgerTestAttachmentInspector: FlannelNetworkAttachmentInspecting 
 
     func failInspections(_ value: Bool) {
         inspectionFails = value
+    }
+
+    func setInspectionHook(_ hook: @escaping @Sendable () -> Void) {
+        inspectionHook = hook
     }
 }

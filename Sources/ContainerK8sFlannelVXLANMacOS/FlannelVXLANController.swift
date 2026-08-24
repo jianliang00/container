@@ -66,6 +66,7 @@ public struct FlannelVXLANReconcileResult: Sendable, Equatable {
 public struct FlannelCleanupResult: Sendable, Equatable {
     public var removedRoutes: [String]
     public var removedIPv6Routes: [String]
+    public var restoredForwardingFamilies: [FlannelForwardingFamily]
     public var stoppedTunnel: Bool
     public var stoppedIPv6Tunnel: Bool
     public var removedNodeAnnotations: Bool
@@ -74,6 +75,7 @@ public struct FlannelCleanupResult: Sendable, Equatable {
     public init(
         removedRoutes: [String],
         removedIPv6Routes: [String] = [],
+        restoredForwardingFamilies: [FlannelForwardingFamily] = [],
         stoppedTunnel: Bool,
         stoppedIPv6Tunnel: Bool = false,
         removedNodeAnnotations: Bool,
@@ -81,6 +83,7 @@ public struct FlannelCleanupResult: Sendable, Equatable {
     ) {
         self.removedRoutes = removedRoutes
         self.removedIPv6Routes = removedIPv6Routes
+        self.restoredForwardingFamilies = restoredForwardingFamilies
         self.stoppedTunnel = stoppedTunnel
         self.stoppedIPv6Tunnel = stoppedIPv6Tunnel
         self.removedNodeAnnotations = removedNodeAnnotations
@@ -97,6 +100,7 @@ public actor FlannelVXLANController {
     private let kubernetes: any FlannelKubernetesReading & FlannelKubernetesWriting
     private let networkManager: any FlannelNetworkManaging
     private let system: any FlannelSystemManaging
+    private let forwardingManager: any FlannelForwardingManaging
     private let podNetworkStateStore: PodNetworkStateStore
     private let vtepMACStore: any FlannelVTEPMACStoring
     private let vtepMACIPv6Store: any FlannelVTEPMACStoring
@@ -137,6 +141,7 @@ public actor FlannelVXLANController {
         kubernetes: any FlannelKubernetesReading & FlannelKubernetesWriting,
         networkManager: any FlannelNetworkManaging = ContainerKitFlannelNetworkManager(),
         system: any FlannelSystemManaging = FlannelSystemManager(),
+        forwardingManager: (any FlannelForwardingManaging)? = nil,
         podNetworkStateStore: PodNetworkStateStore = PodNetworkStateStore(),
         vtepMACStore: (any FlannelVTEPMACStoring)? = nil,
         vtepMACIPv6Store: (any FlannelVTEPMACStoring)? = nil,
@@ -154,6 +159,13 @@ public actor FlannelVXLANController {
         self.kubernetes = kubernetes
         self.networkManager = networkManager
         self.system = system
+        self.forwardingManager =
+            forwardingManager
+            ?? SystemFlannelForwardingManager(
+                ownershipStore: FlannelForwardingOwnershipStore(
+                    path: config.forwardingOwnershipStatePath
+                )
+            )
         self.podNetworkStateStore = podNetworkStateStore
         self.vtepMACStore = vtepMACStore ?? FlannelVTEPMACStore(path: config.vtepMACPath)
         self.vtepMACIPv6Store = vtepMACIPv6Store ?? FlannelVTEPMACStore(path: config.vtepMACIPv6Path)
@@ -229,6 +241,13 @@ public actor FlannelVXLANController {
         } catch {
             throw FlannelVXLANError.runtime(
                 "cleanup refused because host IPv6 gateway ownership cannot be read: \(error)"
+            )
+        }
+        do {
+            _ = try forwardingManager.ownedFamilies()
+        } catch {
+            throw FlannelVXLANError.runtime(
+                "cleanup refused because forwarding ownership cannot be read: \(error)"
             )
         }
         if tunnel == nil, let persistedState,
@@ -360,6 +379,13 @@ public actor FlannelVXLANController {
             }
         }
 
+        var restoredForwardingFamilies: [FlannelForwardingFamily] = []
+        do {
+            restoredForwardingFamilies = try forwardingManager.restoreAll()
+        } catch {
+            failures.append("restore host forwarding: \(error)")
+        }
+
         do {
             try ownershipStateStore.remove()
         } catch {
@@ -372,6 +398,7 @@ public actor FlannelVXLANController {
         return FlannelCleanupResult(
             removedRoutes: removedRoutes,
             removedIPv6Routes: removedIPv6Routes,
+            restoredForwardingFamilies: restoredForwardingFamilies,
             stoppedTunnel: stoppedTunnel,
             stoppedIPv6Tunnel: stoppedIPv6Tunnel,
             removedNodeAnnotations: removedNodeAnnotations,
@@ -391,6 +418,11 @@ public actor FlannelVXLANController {
             throw FlannelVXLANError.runtime(
                 "dual-stack is disabled but persisted host IPv6 gateway ownership exists; run cleanup before migrating to IPv4-only mode"
             )
+        }
+        if !config.dualStackEnabled,
+            try forwardingManager.ownedFamilies().contains(.ipv6)
+        {
+            _ = try forwardingManager.restore(.ipv6)
         }
         guard let runtimeState = try await podNetworkStateStore.loadRuntimeState(path: config.runtimeStatePath) else {
             throw FlannelVXLANError.runtime("waiting for kubelet to publish the local PodCIDR")
@@ -563,7 +595,7 @@ public actor FlannelVXLANController {
                     ))
             }
         }
-        try system.enableIPv4Forwarding()
+        try forwardingManager.ensureEnabled(.ipv4)
 
         let vtepMAC = try vtepMACStore.loadOrCreate()
         let desiredTunnelConfiguration = FlannelTunnelConfiguration(
@@ -817,7 +849,7 @@ public actor FlannelVXLANController {
             try system.validateIPv6UnderlayRoute(destination: publicIPv6, interface: underlay.name)
         }
 
-        try system.enableIPv6Forwarding()
+        try forwardingManager.ensureEnabled(.ipv6)
         let vtepMAC = try vtepMACIPv6Store.loadOrCreate()
         let desiredConfiguration = FlannelIPv6TunnelConfiguration(
             vni: networkConfig.backend.vni,
@@ -1021,6 +1053,12 @@ public actor FlannelVXLANController {
             }
         } catch {
             failures.append("remove owned host IPv6 gateway: \(error)")
+        }
+
+        do {
+            _ = try forwardingManager.restore(.ipv6)
+        } catch {
+            failures.append("restore IPv6 forwarding: \(error)")
         }
 
         return IPv6FamilyWithdrawalResult(

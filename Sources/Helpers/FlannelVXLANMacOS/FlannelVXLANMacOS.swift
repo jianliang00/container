@@ -70,19 +70,58 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 "--once, --cleanup, --withdraw, --check-purge, and --purge-network are mutually exclusive"
             )
         }
+        guard controlSocketPath.hasPrefix("/") else {
+            throw ValidationError("--control-socket must be an absolute path")
+        }
+        var initialWithdrawalError: (any Error)?
+        if withdraw {
+            do {
+                try requestDaemonWithdrawal()
+                return
+            } catch {
+                initialWithdrawalError = error
+            }
+        }
         if cleanup || withdraw || checkPurge || purgeNetwork,
             !FileManager.default.fileExists(atPath: configPath)
         {
-            let statePaths = Self.defaultStatePaths
-            guard statePaths.allSatisfy({ !FileManager.default.fileExists(atPath: $0) }) else {
-                throw ValidationError(
-                    "cleanup configuration \(configPath) is missing while Flannel state remains"
+            guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+                let withdrawalDetail = initialWithdrawalError.map { "; daemon withdrawal failed: \($0)" } ?? ""
+                throw FlannelVXLANError.runtime(
+                    "cleanup configuration is missing and Flannel state inspection was refused because the daemon lifetime lock is held"
+                        + withdrawalDetail
                 )
+            }
+            defer { withExtendedLifetime(lifetimeLock) {} }
+            switch try FlannelStateManifestCoordinator().discoverMissingConfiguration(
+                requestedConfigPath: configPath,
+                whileHolding: lifetimeLock
+            ) {
+            case .managedStateRemains(_, let paths):
+                throw ValidationError(
+                    "cleanup configuration \(configPath) is missing while Flannel state remains at "
+                        + paths.joined(separator: ", ")
+                )
+            case .noManagedState:
+                print("no Flannel state requires cleanup")
+                return
+            case .noManifest:
+                let statePaths = Self.defaultStatePaths
+                guard statePaths.allSatisfy({ !FileManager.default.fileExists(atPath: $0) }) else {
+                    throw ValidationError(
+                        "cleanup configuration \(configPath) is missing while legacy Flannel state remains"
+                    )
+                }
             }
             print("no Flannel state requires cleanup")
             return
         }
         let config = try FlannelVXLANMacOSConfig.load(from: URL(fileURLWithPath: configPath))
+        try config.validateConfigurationFilePath(configPath)
+        try config.validateControlSocketPath(
+            controlSocketPath,
+            configurationFilePath: configPath
+        )
         switch try FlannelBootstrapContext().ensure(
             containerServiceUserID: config.containerServiceUserID,
             executablePath: Bundle.main.executableURL?.path ?? CommandLine.arguments[0],
@@ -98,19 +137,34 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
         }
         if withdraw {
             do {
-                let outcome = try FlannelControlClient.requestWithdrawal(socketPath: controlSocketPath)
-                guard outcome.succeeded else {
-                    throw FlannelVXLANError.runtime("daemon withdrawal was not acknowledged: \(outcome.message)")
-                }
-                print("withdrawal acknowledged: \(outcome.message)")
+                try requestDaemonWithdrawal()
                 return
             } catch let controlError {
-                let hasDataplaneState = [
-                    config.ownershipStatePath,
-                    config.hostIPv6GatewayOwnershipStatePath,
-                    config.readyStatePath,
-                ]
-                .contains { FileManager.default.fileExists(atPath: $0) }
+                guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+                    throw FlannelVXLANError.runtime(
+                        "daemon withdrawal failed: \(controlError); offline cleanup refused because the daemon lifetime lock is held"
+                    )
+                }
+                defer { withExtendedLifetime(lifetimeLock) {} }
+                let manifestCoordinator = FlannelStateManifestCoordinator()
+                try manifestCoordinator.claim(
+                    configPath: configPath,
+                    config: config,
+                    whileHolding: lifetimeLock
+                )
+                let forwardingRecovery = try FlannelOfflineForwardingRecovery(config: config)
+                    .restoreIfForwardingOnly(whileHolding: lifetimeLock)
+                if case .restored(let families) = forwardingRecovery {
+                    try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
+                    print(
+                        "offline forwarding recovery complete families="
+                            + families.map(\.rawValue).sorted().joined(separator: ",")
+                    )
+                    return
+                }
+                let hasDataplaneState = config.withdrawalStatePaths.contains {
+                    FileManager.default.fileExists(atPath: $0)
+                }
                 let hasNodeCredential = FileManager.default.fileExists(atPath: config.nodeKubeconfig)
                 guard hasDataplaneState || hasNodeCredential else {
                     print("no running or owned Flannel dataplane requires withdrawal")
@@ -118,9 +172,12 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 }
                 do {
                     let result = try await makeController(config: config).cleanup()
+                    try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
                     print(
                         "offline withdrawal complete routes=\(result.removedRoutes.count) "
-                            + "tunnelStopped=\(result.stoppedTunnel) annotationsRemoved=\(result.removedNodeAnnotations)"
+                            + "tunnelStopped=\(result.stoppedTunnel) "
+                            + "forwardingRestored=\(result.restoredForwardingFamilies.count) "
+                            + "annotationsRemoved=\(result.removedNodeAnnotations)"
                     )
                     return
                 } catch let cleanupError {
@@ -131,11 +188,35 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             }
         }
         if purgeNetwork {
+            guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+                throw FlannelVXLANError.runtime(
+                    "network purge refused because the Flannel daemon lifetime lock is held"
+                )
+            }
+            defer { withExtendedLifetime(lifetimeLock) {} }
+            let manifestCoordinator = FlannelStateManifestCoordinator()
+            try manifestCoordinator.claim(
+                configPath: configPath,
+                config: config,
+                whileHolding: lifetimeLock
+            )
             let result = try await FlannelHostOnlyNetworkPurger(config: config).purge()
+            try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
             print("network purge complete present=\(result.networkWasPresent) removed=\(result.removed)")
             return
         }
         if checkPurge {
+            guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+                throw FlannelVXLANError.runtime(
+                    "network purge preflight refused because the Flannel daemon lifetime lock is held"
+                )
+            }
+            defer { withExtendedLifetime(lifetimeLock) {} }
+            try FlannelStateManifestCoordinator().validateClaim(
+                configPath: configPath,
+                config: config,
+                whileHolding: lifetimeLock
+            )
             let result = try await FlannelHostOnlyNetworkPurger(config: config).checkPurge()
             let networkName = result.ownedNetworkName ?? "<none>"
             print(
@@ -144,19 +225,45 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             )
             return
         }
-        let controller = try makeController(config: config)
-
         if cleanup {
+            guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+                throw FlannelVXLANError.runtime(
+                    "cleanup refused because the Flannel daemon lifetime lock is held"
+                )
+            }
+            defer { withExtendedLifetime(lifetimeLock) {} }
+            let manifestCoordinator = FlannelStateManifestCoordinator()
+            try manifestCoordinator.claim(
+                configPath: configPath,
+                config: config,
+                whileHolding: lifetimeLock
+            )
+            let controller = try makeController(config: config)
             let result = try await controller.cleanup()
+            try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
             print(
                 "cleanup complete routes=\(result.removedRoutes.count) ipv6Routes=\(result.removedIPv6Routes.count) "
                     + "tunnelStopped=\(result.stoppedTunnel) ipv6TunnelStopped=\(result.stoppedIPv6Tunnel) "
+                    + "forwardingRestored=\(result.restoredForwardingFamilies.count) "
                     + "annotationsRemoved=\(result.removedNodeAnnotations) attempts=\(result.nodeAnnotationAttempts)"
             )
             return
         }
 
         if once {
+            guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+                throw FlannelVXLANError.runtime(
+                    "one-shot reconciliation refused because the Flannel daemon lifetime lock is held"
+                )
+            }
+            defer { withExtendedLifetime(lifetimeLock) {} }
+            let manifestCoordinator = FlannelStateManifestCoordinator()
+            try manifestCoordinator.claim(
+                configPath: configPath,
+                config: config,
+                whileHolding: lifetimeLock
+            )
+            let controller = try makeController(config: config)
             let result: FlannelVXLANReconcileResult
             do {
                 result = try await controller.runOnce()
@@ -178,12 +285,24 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                     + "ipv6Peers=\(result.ipv6Peers.count) issues=\(result.issues.count)"
             )
             try await controller.shutdown()
+            try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
             return
         }
 
         guard geteuid() == 0 else {
             throw ValidationError("the Flannel daemon must run as root")
         }
+        guard let lifetimeLock = try FlannelDaemonLifetimeLock.tryAcquire() else {
+            throw FlannelVXLANError.runtime("another Flannel daemon holds the daemon lifetime lock")
+        }
+        defer { withExtendedLifetime(lifetimeLock) {} }
+        let manifestCoordinator = FlannelStateManifestCoordinator()
+        try manifestCoordinator.claim(
+            configPath: configPath,
+            config: config,
+            whileHolding: lifetimeLock
+        )
+        let controller = try makeController(config: config)
         let signalStream = terminationSignals()
         let lifecycle = FlannelDaemonLifecycle(controller: controller)
         let controlServer = FlannelControlServer(socketPath: controlSocketPath)
@@ -194,16 +313,11 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
         _ = await signalStream.first { _ in true }
         await lifecycle.terminateWhenClean()
         controlServer.stop()
+        try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
     }
 
     private static var defaultStatePaths: [String] {
-        let ownershipURL = URL(fileURLWithPath: FlannelVXLANMacOSConfig.defaultOwnershipStatePath)
-        return [
-            ownershipURL.path,
-            ownershipURL.deletingLastPathComponent().appendingPathComponent("network-ownership.json").path,
-            ownershipURL.deletingLastPathComponent().appendingPathComponent("host-ipv6-gateway-ownership.json").path,
-            ownershipURL.deletingLastPathComponent().appendingPathComponent("ready.json").path,
-        ]
+        FlannelVXLANMacOSConfig.defaultPersistentStatePaths
     }
 
     private func makeController(config: FlannelVXLANMacOSConfig) throws -> FlannelVXLANController {
@@ -213,6 +327,14 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             nodeName: config.nodeName
         )
         return try FlannelVXLANController(config: config, kubernetes: kubernetes)
+    }
+
+    private func requestDaemonWithdrawal() throws {
+        let outcome = try FlannelControlClient.requestWithdrawal(socketPath: controlSocketPath)
+        guard outcome.succeeded else {
+            throw FlannelVXLANError.runtime("daemon withdrawal was not acknowledged: \(outcome.message)")
+        }
+        print("withdrawal acknowledged: \(outcome.message)")
     }
 
     private func terminationSignals() -> AsyncStream<Int32> {

@@ -439,8 +439,6 @@ public protocol FlannelSystemManaging: Sendable {
     func validateUnderlayRoute(destination: String, interface: String) throws
     func validateIPv6UnderlayRoute(destination: String, interface: String) throws
     func interfaceExists(_ name: String) throws -> Bool
-    func enableIPv4Forwarding() throws
-    func enableIPv6Forwarding() throws
     func configureTunnelInterface(_ name: String, localAddress: String, mtu: Int) throws
     func configureIPv6TunnelInterface(_ name: String, localAddress: String, mtu: Int) throws
     func ensureRoute(podCIDR: String, interface: String) throws
@@ -452,10 +450,6 @@ public protocol FlannelSystemManaging: Sendable {
 extension FlannelSystemManaging {
     public func validateIPv6UnderlayRoute(destination: String, interface: String) throws {
         throw FlannelVXLANError.runtime("system manager does not support IPv6 underlay routes")
-    }
-
-    public func enableIPv6Forwarding() throws {
-        throw FlannelVXLANError.runtime("system manager does not support IPv6 forwarding")
     }
 
     public func configureIPv6TunnelInterface(_ name: String, localAddress: String, mtu: Int) throws {
@@ -613,24 +607,6 @@ public struct FlannelSystemManager: FlannelSystemManaging {
             }
             return false
         }
-    }
-
-    public func enableIPv4Forwarding() throws {
-        let value = try run("/usr/sbin/sysctl", ["-n", "net.inet.ip.forwarding"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard value != "1" else {
-            return
-        }
-        _ = try run("/usr/sbin/sysctl", ["-w", "net.inet.ip.forwarding=1"])
-    }
-
-    public func enableIPv6Forwarding() throws {
-        let value = try run("/usr/sbin/sysctl", ["-n", "net.inet6.ip6.forwarding"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard value != "1" else {
-            return
-        }
-        _ = try run("/usr/sbin/sysctl", ["-w", "net.inet6.ip6.forwarding=1"])
     }
 
     public func configureTunnelInterface(_ name: String, localAddress: String, mtu: Int) throws {

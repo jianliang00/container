@@ -82,6 +82,7 @@ struct FlannelVXLANControllerTests {
 
         let cleanup = try await controller.shutdown()
         #expect(cleanup.removedRoutes == ["10.250.2.0/24", "10.250.5.0/24"])
+        #expect(cleanup.restoredForwardingFamilies == [.ipv4])
         #expect(cleanup.stoppedTunnel)
         #expect(cleanup.removedNodeAnnotations)
         #expect(cleanup.nodeAnnotationAttempts == 1)
@@ -126,7 +127,7 @@ struct FlannelVXLANControllerTests {
         let networkCalls = await fixture.networkManager.calls
         #expect(networkCalls.count == 1)
         #expect(networkCalls.first?.ipv6PodCIDR == "fd42:10:244:22::/64")
-        #expect(fixture.system.ipv6ForwardingEnableCount == 1)
+        #expect(fixture.forwardingManager.ensureCalls == [.ipv4, .ipv6])
         #expect(fixture.system.ipv6TunnelLocalAddress == "fd42:10:244:22::")
         #expect(
             fixture.system.validatedIPv6UnderlayRoutes.map { "\($0.destination)|\($0.interface)" }
@@ -168,8 +169,11 @@ struct FlannelVXLANControllerTests {
 
         let cleanup = try await controller.shutdown()
         #expect(cleanup.removedIPv6Routes == ["fd42:10:244:2::/64"])
+        #expect(cleanup.restoredForwardingFamilies == [.ipv4, .ipv6])
         #expect(cleanup.stoppedIPv6Tunnel)
         #expect(fixture.ipv6TunnelBox.tunnel.wasDestroyed)
+        #expect(fixture.forwardingManager.restoreCalls == [.ipv4, .ipv6])
+        #expect(try fixture.forwardingManager.ownedFamilies().isEmpty)
     }
 
     @Test
@@ -356,11 +360,42 @@ struct FlannelVXLANControllerTests {
         )
         #expect(ownership.ipv6InterfaceName == nil)
         #expect(ownership.schemaVersion == 1)
+        #expect(fixture.forwardingManager.restoreCalls == [.ipv6])
+        #expect(try fixture.forwardingManager.ownedFamilies() == [.ipv4])
 
         let keys = try FlannelAnnotationKeys(prefix: fixture.config.annotationPrefix)
         let patch = try #require(await fixture.kubernetes.patches.last)
         #expect(patch.removals.contains(keys.publicIPv6))
         #expect(patch.removals.contains(keys.backendV6Data))
+    }
+
+    @Test
+    func retriesFailedIPv6ForwardingRestorationWithoutWithdrawingIPv4() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+        _ = try await controller.runOnce()
+        fixture.forwardingManager.failRestore(.ipv6)
+        fixture.system.failIPv6UnderlayRouteValidation()
+
+        let firstDegraded = try await controller.runOnce()
+
+        #expect(firstDegraded.ipv4Ready)
+        #expect(firstDegraded.ipv6Ready == false)
+        #expect(firstDegraded.issues.contains { $0.id == "local/ipv6-family-withdrawal" })
+        #expect(fixture.forwardingManager.restoreCalls == [.ipv6])
+        #expect(try fixture.forwardingManager.ownedFamilies() == [.ipv4, .ipv6])
+
+        fixture.forwardingManager.failRestore(.ipv6, enabled: false)
+        let secondDegraded = try await controller.runOnce()
+
+        #expect(secondDegraded.ipv4Ready)
+        #expect(secondDegraded.ipv6Ready == false)
+        #expect(fixture.forwardingManager.restoreCalls == [.ipv6, .ipv6])
+        #expect(try fixture.forwardingManager.ownedFamilies() == [.ipv4])
     }
 
     @Test
@@ -964,7 +999,7 @@ struct FlannelVXLANControllerTests {
         #expect(result.issues.allSatisfy { !$0.id.contains("ipv6") })
         #expect(await fixture.networkManager.calls.first?.ipv6PodCIDR == nil)
         #expect(fixture.ipv6TunnelBox.createdConfigurations.isEmpty)
-        #expect(fixture.system.ipv6ForwardingEnableCount == 0)
+        #expect(fixture.forwardingManager.ensureCalls == [.ipv4])
 
         let keys = try FlannelAnnotationKeys(prefix: fixture.config.annotationPrefix)
         let patch = try #require(await fixture.kubernetes.patches.last)
@@ -975,6 +1010,23 @@ struct FlannelVXLANControllerTests {
         )
         #expect(ready.podCIDRs.ipv6 == nil)
         #expect(ready.ipv6Ready == nil)
+    }
+
+    @Test
+    func disabledGateRestoresResidualIPv6ForwardingBeforeReconcilingIPv4() async throws {
+        let fixture = try ControllerFixture(
+            dualStackEnabled: false,
+            clusterDualStackEnabled: true
+        )
+        try await fixture.writeRuntimeState(podCIDR: "10.250.22.0/24")
+        try fixture.forwardingManager.ensureEnabled(.ipv6)
+
+        let result = try await fixture.makeController().runOnce()
+
+        #expect(result.ipv4Ready)
+        #expect(result.ipv6Ready == nil)
+        #expect(fixture.forwardingManager.restoreCalls == [.ipv6])
+        #expect(try fixture.forwardingManager.ownedFamilies() == [.ipv4])
     }
 
     @Test
@@ -1161,6 +1213,59 @@ struct FlannelVXLANControllerTests {
     }
 
     @Test
+    func cleanupRetriesOnlyForwardingFamiliesWhoseRestorationFailed() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+        _ = try await controller.runOnce()
+        fixture.forwardingManager.failRestore(.ipv6)
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await controller.cleanup()
+        }
+
+        #expect(fixture.forwardingManager.restoreCalls == [.ipv4, .ipv6])
+        #expect(try fixture.forwardingManager.ownedFamilies() == [.ipv6])
+
+        fixture.forwardingManager.failRestore(.ipv6, enabled: false)
+        let retry = try await controller.cleanup()
+
+        #expect(retry.restoredForwardingFamilies == [.ipv6])
+        #expect(fixture.forwardingManager.restoreCalls == [.ipv4, .ipv6, .ipv4, .ipv6])
+        #expect(try fixture.forwardingManager.ownedFamilies().isEmpty)
+    }
+
+    @Test
+    func cleanupValidatesForwardingOwnershipBeforeMutatingDataplane() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+        _ = try await controller.runOnce()
+        let patchCount = await fixture.kubernetes.patches.count
+        fixture.forwardingManager.failOwnedFamiliesInspection()
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await controller.cleanup()
+        }
+
+        #expect(fixture.system.removedRoutes.isEmpty)
+        #expect(fixture.system.removedIPv6Routes.isEmpty)
+        #expect(fixture.tunnelBox.tunnel.isRunning)
+        #expect(fixture.ipv6TunnelBox.tunnel.isRunning)
+        #expect(FileManager.default.fileExists(atPath: fixture.config.readyStatePath))
+        #expect(await fixture.kubernetes.patches.count == patchCount)
+
+        fixture.forwardingManager.failOwnedFamiliesInspection(false)
+        _ = try await controller.cleanup()
+    }
+
+    @Test
     func purgesOwnedNetworkOnlyAfterDataplaneCleanup() async throws {
         let fixture = try ControllerFixture()
         try await fixture.writeRuntimeState(podCIDR: "10.250.22.0/24")
@@ -1170,6 +1275,10 @@ struct FlannelVXLANControllerTests {
             networkManager: fixture.networkManager,
             attachmentInspector: EmptyFlannelNetworkAttachmentInspector(),
             dataplaneOwnershipStore: FlannelOwnershipStateStore(path: fixture.config.ownershipStatePath),
+            forwardingOwnershipStore: FlannelForwardingOwnershipStore(
+                path: fixture.config.forwardingOwnershipStatePath,
+                requiredOwnerID: geteuid()
+            ),
             networkOwnershipStore: FlannelHostOnlyNetworkOwnershipStore(path: fixture.config.networkOwnershipStatePath)
         )
 
@@ -1276,6 +1385,7 @@ private struct ControllerFixture {
     let kubernetes: MockFlannelKubernetes
     let networkManager = MockFlannelNetworkManager()
     let system = MockFlannelSystemManager()
+    let forwardingManager = MockFlannelForwardingManager()
     let tunnelBox = MockTunnelBox()
     let ipv6TunnelBox = MockIPv6TunnelBox()
     let hostIPv6GatewayManager: MockHostIPv6GatewayManager
@@ -1371,6 +1481,7 @@ private struct ControllerFixture {
             kubernetes: kubernetes,
             networkManager: networkManager,
             system: system,
+            forwardingManager: forwardingManager,
             podNetworkStateStore: stateStore,
             vtepMACStore: StaticVTEPMACStore(),
             vtepMACIPv6Store: StaticVTEPMACStore("02:aa:bb:cc:dd:ff"),
@@ -1655,6 +1766,87 @@ private struct EmptyFlannelNetworkAttachmentInspector: FlannelNetworkAttachmentI
     }
 }
 
+private final class MockFlannelForwardingManager: FlannelForwardingManaging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var families: Set<FlannelForwardingFamily> = []
+    private var ensureCallValues: [FlannelForwardingFamily] = []
+    private var restoreCallValues: [FlannelForwardingFamily] = []
+    private var restoreFailures: Set<FlannelForwardingFamily> = []
+    private var ownedFamiliesInspectionFails = false
+
+    var ensureCalls: [FlannelForwardingFamily] {
+        lock.withLock { ensureCallValues }
+    }
+
+    var restoreCalls: [FlannelForwardingFamily] {
+        lock.withLock { restoreCallValues }
+    }
+
+    func failRestore(_ family: FlannelForwardingFamily, enabled: Bool = true) {
+        lock.withLock {
+            if enabled {
+                restoreFailures.insert(family)
+            } else {
+                restoreFailures.remove(family)
+            }
+        }
+    }
+
+    func failOwnedFamiliesInspection(_ enabled: Bool = true) {
+        lock.withLock {
+            ownedFamiliesInspectionFails = enabled
+        }
+    }
+
+    func ensureEnabled(_ family: FlannelForwardingFamily) throws {
+        lock.withLock {
+            ensureCallValues.append(family)
+            families.insert(family)
+        }
+    }
+
+    @discardableResult
+    func restore(_ family: FlannelForwardingFamily) throws -> Bool {
+        try lock.withLock {
+            restoreCallValues.append(family)
+            guard families.contains(family) else {
+                return false
+            }
+            if restoreFailures.contains(family) {
+                throw FlannelVXLANError.runtime("injected \(family.rawValue) forwarding restore failure")
+            }
+            return families.remove(family) != nil
+        }
+    }
+
+    func restoreAll() throws -> [FlannelForwardingFamily] {
+        var restored: [FlannelForwardingFamily] = []
+        var failures: [String] = []
+        for family in FlannelForwardingFamily.allCases {
+            do {
+                if try restore(family) {
+                    restored.append(family)
+                }
+            } catch {
+                failures.append(String(describing: error))
+            }
+        }
+        guard failures.isEmpty else {
+            throw FlannelVXLANError.runtime(failures.joined(separator: "; "))
+        }
+        return restored.sorted()
+    }
+
+    func ownedFamilies() throws -> Set<FlannelForwardingFamily> {
+        try lock.withLock {
+            if ownedFamiliesInspectionFails {
+                throw FlannelVXLANError.runtime("injected forwarding ownership inspection failure")
+            }
+            return families
+        }
+    }
+}
+
 private final class MockFlannelSystemManager: FlannelSystemManaging, @unchecked Sendable {
     private let lock = NSLock()
     private var ensuredRouteValues: [(podCIDR: String, interface: String)] = []
@@ -1665,7 +1857,6 @@ private final class MockFlannelSystemManager: FlannelSystemManaging, @unchecked 
     private var validatedIPv6UnderlayRouteValues: [(destination: String, interface: String)] = []
     private var tunnelLocalAddressValue: String?
     private var ipv6TunnelLocalAddressValue: String?
-    private var ipv6ForwardingEnableCountValue = 0
     private var existingInterfaces: Set<String> = []
     private var routeRemovalFailuresRemaining = 0
     private var ipv6RouteRemovalFailuresRemaining = 0
@@ -1706,10 +1897,6 @@ private final class MockFlannelSystemManager: FlannelSystemManaging, @unchecked 
 
     var validatedIPv6UnderlayRoutes: [(destination: String, interface: String)] {
         lock.withLock { validatedIPv6UnderlayRouteValues }
-    }
-
-    var ipv6ForwardingEnableCount: Int {
-        lock.withLock { ipv6ForwardingEnableCountValue }
     }
 
     func inspectUnderlayInterface(_ name: String) throws -> FlannelUnderlayInterface {
@@ -1787,14 +1974,6 @@ private final class MockFlannelSystemManager: FlannelSystemManaging, @unchecked 
     func failNextIPv6RouteRemovals(_ count: Int) {
         lock.withLock {
             ipv6RouteRemovalFailuresRemaining = count
-        }
-    }
-
-    func enableIPv4Forwarding() throws {}
-
-    func enableIPv6Forwarding() throws {
-        lock.withLock {
-            ipv6ForwardingEnableCountValue += 1
         }
     }
 

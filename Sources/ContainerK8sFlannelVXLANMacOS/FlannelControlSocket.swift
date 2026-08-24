@@ -203,10 +203,21 @@ public final class FlannelControlServer: @unchecked Sendable {
 
 public enum FlannelControlClient {
     public static func requestWithdrawal(
-        socketPath: String = FlannelVXLANMacOSConfig.defaultControlSocketPath
+        socketPath: String = FlannelVXLANMacOSConfig.defaultControlSocketPath,
+        requiredPeerUID: uid_t = 0
     ) throws -> FlannelWithdrawalOutcome {
         let fd = try connectUnixSocket(path: socketPath)
         defer { Darwin.close(fd) }
+        var peerUID = uid_t.max
+        var peerGID = gid_t.max
+        guard getpeereid(fd, &peerUID, &peerGID) == 0 else {
+            throw posixError("authenticate Flannel control server")
+        }
+        guard peerUID == requiredPeerUID else {
+            throw FlannelVXLANError.runtime(
+                "refusing Flannel control server owned by uid \(peerUID); expected uid \(requiredPeerUID)"
+            )
+        }
         var timeout = timeval(tv_sec: 120, tv_usec: 0)
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))

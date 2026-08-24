@@ -24,7 +24,21 @@ import Glibc
 
 public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
     public static let defaultOwnershipStatePath = "/var/lib/container/flannel-vxlan/ownership.json"
+    public static let defaultStateManifestPath = "/private/var/lib/container/flannel-vxlan/state-manifest.json"
     public static let defaultControlSocketPath = "/var/run/container-flannel-vxlan-macos.sock"
+    public static let defaultDaemonLifetimeLockPath = "/var/run/container-flannel-vxlan-daemon.lock"
+    public static let defaultForwardingAdvisoryLockPath = "/var/run/container-flannel-vxlan-forwarding.lock"
+
+    public static var defaultPersistentStatePaths: [String] {
+        let ownershipURL = URL(fileURLWithPath: defaultOwnershipStatePath)
+        return [
+            ownershipURL.path,
+            ownershipURL.deletingLastPathComponent().appendingPathComponent("network-ownership.json").path,
+            ownershipURL.deletingLastPathComponent().appendingPathComponent("host-ipv6-gateway-ownership.json").path,
+            ownershipURL.deletingLastPathComponent().appendingPathComponent("forwarding-ownership.json").path,
+            ownershipURL.deletingLastPathComponent().appendingPathComponent("ready.json").path,
+        ]
+    }
 
     public var kubeconfig: String
     public var nodeKubeconfig: String
@@ -59,11 +73,37 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             .path
     }
 
+    public var forwardingOwnershipStatePath: String {
+        URL(fileURLWithPath: ownershipStatePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("forwarding-ownership.json")
+            .path
+    }
+
     public var vtepMACIPv6Path: String {
         URL(fileURLWithPath: vtepMACPath)
             .deletingLastPathComponent()
             .appendingPathComponent("vtep-mac-v6")
             .path
+    }
+
+    public var withdrawalStatePaths: [String] {
+        [
+            ownershipStatePath,
+            hostIPv6GatewayOwnershipStatePath,
+            forwardingOwnershipStatePath,
+            readyStatePath,
+        ]
+    }
+
+    public var managedStatePaths: FlannelManagedStatePaths {
+        FlannelManagedStatePaths(
+            dataplaneOwnership: ownershipStatePath,
+            networkOwnership: networkOwnershipStatePath,
+            hostIPv6GatewayOwnership: hostIPv6GatewayOwnershipStatePath,
+            forwardingOwnership: forwardingOwnershipStatePath,
+            ready: readyStatePath
+        )
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -204,6 +244,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
                 "dual-stack syncPeriodSeconds must be at most 5 so the first VM can wait for its host IPv6 gateway"
             )
         }
+        try validateFilePathLayout()
         guard !networkName.contains("/"), !networkName.contains(where: { $0.isWhitespace }) else {
             throw FlannelVXLANError.invalidConfiguration("networkName must not contain slashes or whitespace")
         }
@@ -215,6 +256,100 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             }
         }
         _ = try FlannelAnnotationKeys(prefix: annotationPrefix)
+    }
+
+    public func validateConfigurationFilePath(_ configPath: String) throws {
+        guard configPath.hasPrefix("/") else {
+            throw FlannelVXLANError.invalidConfiguration("configPath must be an absolute path")
+        }
+        try validateFilePathLayout(additionalExclusivePaths: [("configPath", configPath)])
+    }
+
+    public func validateControlSocketPath(
+        _ controlSocketPath: String,
+        configurationFilePath configPath: String
+    ) throws {
+        guard controlSocketPath.hasPrefix("/") else {
+            throw FlannelVXLANError.invalidConfiguration("controlSocketPath must be an absolute path")
+        }
+        guard configPath.hasPrefix("/") else {
+            throw FlannelVXLANError.invalidConfiguration("configPath must be an absolute path")
+        }
+        try validateFilePathLayout(
+            additionalExclusivePaths: [
+                ("controlSocketPath", controlSocketPath),
+                ("configPath", configPath),
+            ]
+        )
+    }
+
+    public static func canonicalFilePath(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
+    }
+
+    public static func filePathsOverlap(_ lhs: String, _ rhs: String) -> Bool {
+        let canonicalLHS = canonicalFilePath(lhs)
+        let canonicalRHS = canonicalFilePath(rhs)
+        return canonicalLHS == canonicalRHS
+            || isAncestorFilePath(canonicalLHS, of: canonicalRHS)
+            || isAncestorFilePath(canonicalRHS, of: canonicalLHS)
+    }
+
+    private static func validateDistinctFilePaths(_ paths: [(String, String)]) throws {
+        for (index, candidate) in paths.enumerated() {
+            for existing in paths[..<index] where filePathsOverlap(candidate.1, existing.1) {
+                throw FlannelVXLANError.invalidConfiguration(
+                    "\(candidate.0) and \(existing.0) must resolve to separate files"
+                )
+            }
+        }
+    }
+
+    private func validateFilePathLayout(
+        additionalExclusivePaths: [(String, String)] = []
+    ) throws {
+        let exclusivePaths = additionalExclusivePaths + exclusiveFilePaths
+        try Self.validateDistinctFilePaths(exclusivePaths)
+        for credential in credentialFilePaths {
+            for exclusivePath in exclusivePaths where Self.filePathsOverlap(credential.1, exclusivePath.1) {
+                throw FlannelVXLANError.invalidConfiguration(
+                    "\(credential.0) and \(exclusivePath.0) must resolve to separate files"
+                )
+            }
+        }
+    }
+
+    private var credentialFilePaths: [(String, String)] {
+        [
+            ("kubeconfig", kubeconfig),
+            ("nodeKubeconfig", nodeKubeconfig),
+        ]
+    }
+
+    private var exclusiveFilePaths: [(String, String)] {
+        [
+            ("vtepMACPath", vtepMACPath),
+            ("vtepMACIPv6Path", vtepMACIPv6Path),
+            ("runtimeStatePath", runtimeStatePath),
+            ("readyStatePath", readyStatePath),
+            ("ownershipStatePath", ownershipStatePath),
+            ("networkOwnershipStatePath", networkOwnershipStatePath),
+            ("hostIPv6GatewayOwnershipStatePath", hostIPv6GatewayOwnershipStatePath),
+            ("forwardingOwnershipStatePath", forwardingOwnershipStatePath),
+            ("stateManifestPath", Self.defaultStateManifestPath),
+            ("daemonLifetimeLockPath", Self.defaultDaemonLifetimeLockPath),
+            ("forwardingAdvisoryLockPath", Self.defaultForwardingAdvisoryLockPath),
+        ]
+    }
+
+    private static func isAncestorFilePath(_ candidate: String, of path: String) -> Bool {
+        if candidate == "/" {
+            return path.hasPrefix("/")
+        }
+        return path.hasPrefix(candidate + "/")
     }
 }
 

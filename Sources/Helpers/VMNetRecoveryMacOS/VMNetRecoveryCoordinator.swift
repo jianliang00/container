@@ -86,7 +86,8 @@ struct VMNetRecoveryCoordinator: Sendable {
             self.statusRecorder = statusRecorder
         } else if recovery.statusPath == CRIShimConfigDefaults.vmnetRecoveryStatusURL.path {
             self.statusRecorder = VMNetRecoveryStatusRecorder(
-                store: VMNetRecoveryStatusFileStore(url: CRIShimConfigDefaults.vmnetRecoveryStatusURL)
+                store: VMNetRecoveryStatusFileStore(url: CRIShimConfigDefaults.vmnetRecoveryStatusURL),
+                admissionRejectionCounter: VMNetRecoveryAdmissionRejectionCounter()
             )
         } else {
             self.statusRecorder = nil

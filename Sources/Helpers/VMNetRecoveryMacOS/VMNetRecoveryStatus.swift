@@ -36,15 +36,18 @@ struct VMNetRecoveryStatusRecorder: Sendable {
     private static let minimumFreshnessSeconds = 15
 
     private let store: any VMNetRecoveryStatusStoring
+    private let admissionRejectionCounter: VMNetRecoveryAdmissionRejectionCounter?
     private let now: @Sendable () -> Date
     private let coordinatorInstanceID: String
 
     init(
         store: any VMNetRecoveryStatusStoring,
+        admissionRejectionCounter: VMNetRecoveryAdmissionRejectionCounter? = nil,
         coordinatorInstanceID: String = UUID().uuidString,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
+        self.admissionRejectionCounter = admissionRejectionCounter
         self.coordinatorInstanceID = coordinatorInstanceID
         self.now = now
     }
@@ -86,6 +89,13 @@ struct VMNetRecoveryStatusRecorder: Sendable {
         }
 
         let normalizedCurrentBoot = Self.normalized(currentBootSessionID)
+        let sandboxRejectedTotal: UInt64?
+        if let bootSessionID = normalizedCurrentBoot, let admissionRejectionCounter {
+            let result = admissionRejectionCounter.consume(currentBootSessionID: bootSessionID)
+            sandboxRejectedTotal = result.known ? result.total : nil
+        } else {
+            sandboxRejectedTotal = nil
+        }
         let stateBoot = authority.state.flatMap { Self.normalized($0.bootSessionID) }
         let requestPending = authority.requestPending
         let authorityHealthy = authority.state?.phase == .healthy
@@ -187,7 +197,7 @@ struct VMNetRecoveryStatusRecorder: Sendable {
             recoveryWindowStartedAt: authority.state.map { Self.timestamp($0.firstObservedAt) },
             requestPending: requestPending,
             sandboxAdmissionRejecting: admissionRejecting,
-            sandboxRejectedTotal: nil,
+            sandboxRejectedTotal: sandboxRejectedTotal,
             fenceActive: fenceActive,
             failureReason: authority.state?.failureReason.map(Self.truncatedErrorMessage),
             rebootAttempts: authority.state?.rebootAttempts ?? 0,

@@ -1520,89 +1520,47 @@ struct CRIShimRuntimeServerTests {
 
     @Test
     func vmnetRecoveryFenceRejectsRunPodSandboxBeforeImageRuntimeOrCNIWork() async throws {
-        let socketPath = "/tmp/cri-shim-vmnet-fence-\(UUID().uuidString.prefix(8)).sock"
-        let stateDirectory = makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: stateDirectory) }
-
-        let config = CRIShimConfig(
-            runtimeEndpoint: "/var/run/container-cri-macos.sock",
-            stateDirectory: stateDirectory.path,
-            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
-            cni: CNIConfig(binDir: "/opt/cni/bin", confDir: "/etc/cni/net.d", plugin: "macvmnet"),
-            defaults: RuntimeProfile(
-                sandboxImage: "example.com/macos/sandbox:latest",
-                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
-                network: "kubernetes-pod",
-                networkBackend: "vmnetShared",
-                guiEnabled: false
-            ),
-            runtimeHandlers: [
-                "macos": RuntimeProfile(network: "kubernetes-pod", networkBackend: "vmnetShared")
-            ],
-            networkPolicy: NetworkPolicyConfig(enabled: false),
-            kubeProxy: KubeProxyConfig(enabled: false),
-            podNetwork: PodNetworkConfig(
-                enabled: true,
-                vmnetDisconnectRecovery: .rebootNode,
-                networkName: "kubernetes-pod",
-                runtimeStatePath: stateDirectory.appendingPathComponent("pod-network.json").path,
-                readyStatePath: stateDirectory.appendingPathComponent("flannel-ready.json").path,
-                vmnetRecovery: VMNetRecoveryConfig(
-                    statePath: stateDirectory.appendingPathComponent("vmnet-recovery.json").path,
-                    requestPath: stateDirectory.appendingPathComponent("requests/fence.json").path,
-                    requestWriterUID: Int(geteuid())
-                )
-            )
+        let result = try await runVMNetRecoveryAdmissionRejectionScenario(
+            gate: .beforeRequestValidation
         )
-        let runtimeManager = RecordingRuntimeManager(
-            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+
+        #expect(result.grpcCode == .unavailable)
+        #expect(result.grpcMessage.contains("state is missing"))
+        #expect(result.events.count == 1)
+        #expect(result.events.first?.gate == .beforeRequestValidation)
+        #expect(result.events.first?.reason == .stateMissing)
+        #expect(result.imagePullCount == 0)
+        #expect(result.createSandboxCount == 0)
+        #expect(result.cniAddCount == 0)
+        #expect(result.cniDeleteCount == 0)
+        #expect(result.removeSandboxCount == 0)
+    }
+
+    @Test
+    func vmnetRecoveryFenceRacesAreAttributedAndCleanedUpAtLaterAdmissionGates() async throws {
+        let beforeCreate = try await runVMNetRecoveryAdmissionRejectionScenario(
+            gate: .beforeSandboxCreate
         )
-        let imageManager = RecordingImageManager(images: [])
-        let cniManager = RecordingCNIManager()
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let server = try CRIShimGRPCServer(
-            socketPath: socketPath,
-            config: config,
-            versionInfo: CRIShimRuntimeVersionInfo(),
-            eventLoopGroup: group,
-            readinessChecker: StaticReadinessChecker(snapshot: readyReadinessSnapshot()),
-            runtimeManager: runtimeManager,
-            imageManager: imageManager,
-            cniManager: cniManager
+        #expect(beforeCreate.grpcCode == .unavailable)
+        #expect(beforeCreate.events.count == 1)
+        #expect(beforeCreate.events.first?.gate == .beforeSandboxCreate)
+        #expect(beforeCreate.events.first?.reason == .stateFenced)
+        #expect(beforeCreate.createSandboxCount == 0)
+        #expect(beforeCreate.cniAddCount == 0)
+        #expect(beforeCreate.cniDeleteCount == 1)
+        #expect(beforeCreate.removeSandboxCount == 1)
+
+        let beforeNetwork = try await runVMNetRecoveryAdmissionRejectionScenario(
+            gate: .beforeNetworkAttach
         )
-        let serverTask = Task {
-            try await server.run()
-        }
-        defer {
-            serverTask.cancel()
-            _ = try? FileManager.default.removeItem(atPath: socketPath)
-        }
-
-        try await waitForSocket(at: socketPath)
-        let channel = ClientConnection.insecure(group: group)
-            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
-        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
-        var request = Runtime_V1_RunPodSandboxRequest()
-        request.runtimeHandler = "macos"
-        request.config.metadata.uid = "fenced-pod-uid"
-        request.config.metadata.namespace = "default"
-        request.config.metadata.name = "fenced-pod"
-
-        do {
-            _ = try await client.runPodSandbox(request)
-            Issue.record("expected vmnet recovery admission to reject the sandbox")
-        } catch let status as GRPCStatus {
-            #expect(status.code == .unavailable)
-            #expect(status.message?.contains("state is missing") == true)
-        }
-        #expect(imageManager.pulledReferences.isEmpty)
-        #expect(runtimeManager.createSandboxCalls.isEmpty)
-        #expect(cniManager.addCalls.isEmpty)
-
-        try await channel.close().get()
-        await server.stop()
-        try await serverTask.value
-        await shutdown(group)
+        #expect(beforeNetwork.grpcCode == .unavailable)
+        #expect(beforeNetwork.events.count == 1)
+        #expect(beforeNetwork.events.first?.gate == .beforeNetworkAttach)
+        #expect(beforeNetwork.events.first?.reason == .stateFenced)
+        #expect(beforeNetwork.createSandboxCount == 1)
+        #expect(beforeNetwork.cniAddCount == 0)
+        #expect(beforeNetwork.cniDeleteCount == 1)
+        #expect(beforeNetwork.removeSandboxCount == 1)
     }
 
     @Test
@@ -2245,6 +2203,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var inspectWorkloadError: (any Error)?
     var streamExecWaitsForStartPermission = false
     var streamExecRejectsResizeBeforeStart = false
+    var createSandboxHook: (@Sendable () throws -> Void)?
 
     init(
         execSyncResult: ExecSyncResult,
@@ -2270,6 +2229,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             workloads: []
         )
         createSandboxCalls.append(configuration)
+        try createSandboxHook?()
     }
 
     func startSandbox(
@@ -2587,6 +2547,7 @@ private final class RecordingImageManager: CRIShimImageManaging, @unchecked Send
     private(set) var pulledReferences: [String] = []
     private(set) var pulledAuthentications: [CRIShimImagePullAuthentication?] = []
     private(set) var removedReferences: [String] = []
+    var listImagesHook: (@Sendable () throws -> Void)?
 
     init(
         images: [CRIShimImageRecord],
@@ -2607,7 +2568,8 @@ private final class RecordingImageManager: CRIShimImageManaging, @unchecked Send
     }
 
     func listImages() async throws -> [CRIShimImageRecord] {
-        images
+        try listImagesHook?()
+        return images
     }
 
     func pullImage(
@@ -2626,6 +2588,191 @@ private final class RecordingImageManager: CRIShimImageManaging, @unchecked Send
     func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage {
         filesystemUsage
     }
+}
+
+private struct VMNetRecoveryAdmissionRejectionScenarioResult {
+    var grpcCode: GRPCStatus.Code
+    var grpcMessage: String
+    var events: [VMNetRecoveryAdmissionRejectionEventV1]
+    var imagePullCount: Int
+    var createSandboxCount: Int
+    var removeSandboxCount: Int
+    var cniAddCount: Int
+    var cniDeleteCount: Int
+}
+
+private func runVMNetRecoveryAdmissionRejectionScenario(
+    gate: VMNetRecoveryAdmissionGate
+) async throws -> VMNetRecoveryAdmissionRejectionScenarioResult {
+    let socketPath = "/tmp/cri-shim-vmnet-gate-\(UUID().uuidString.prefix(8)).sock"
+    let stateDirectory = makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+    let statePath = stateDirectory.appendingPathComponent("vmnet-recovery.json").path
+    let podNetworkRuntimeStatePath = stateDirectory.appendingPathComponent("pod-network.json").path
+    let podNetworkReadyStatePath = stateDirectory.appendingPathComponent("flannel-ready.json").path
+    let config = CRIShimConfig(
+        runtimeEndpoint: "/var/run/container-cri-macos.sock",
+        stateDirectory: stateDirectory.path,
+        streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+        cni: CNIConfig(binDir: "/opt/cni/bin", confDir: "/etc/cni/net.d", plugin: "macvmnet"),
+        defaults: RuntimeProfile(
+            sandboxImage: "example.com/macos/sandbox:latest",
+            workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+            network: "kubernetes-pod",
+            networkBackend: "vmnetShared",
+            guiEnabled: false
+        ),
+        runtimeHandlers: [
+            "macos": RuntimeProfile(network: "kubernetes-pod", networkBackend: "vmnetShared")
+        ],
+        networkPolicy: NetworkPolicyConfig(enabled: false),
+        kubeProxy: KubeProxyConfig(enabled: false),
+        podNetwork: PodNetworkConfig(
+            enabled: true,
+            vmnetDisconnectRecovery: .rebootNode,
+            networkName: "kubernetes-pod",
+            runtimeStatePath: podNetworkRuntimeStatePath,
+            readyStatePath: podNetworkReadyStatePath,
+            vmnetRecovery: VMNetRecoveryConfig(
+                statePath: statePath,
+                requestPath: stateDirectory.appendingPathComponent("requests/fence.json").path,
+                requestWriterUID: Int(geteuid())
+            )
+        )
+    )
+    let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
+    let stateStore = VMNetRecoveryStateStore(path: statePath)
+    if gate != .beforeRequestValidation {
+        let podNetworkStateStore = PodNetworkStateStore()
+        let runtimeState = try await podNetworkStateStore.updateRuntimeState(
+            networkName: "kubernetes-pod",
+            podCIDR: "10.42.1.0/24",
+            path: podNetworkRuntimeStatePath
+        )
+        try await podNetworkStateStore.writeReadyState(
+            PodNetworkReadyState(
+                networkName: "kubernetes-pod",
+                podCIDR: "10.42.1.0/24",
+                runtimeGeneration: runtimeState.generation,
+                mtu: 1_420,
+                expiresAtUnixSeconds: Int64(Date().timeIntervalSince1970) + 300
+            ),
+            path: podNetworkReadyStatePath
+        )
+        _ = try stateStore.recordHealthyObservation(
+            networkName: "kubernetes-pod",
+            networkInstanceID: "instance-a",
+            bootSessionID: "boot-a"
+        )
+    }
+    let runtimeManager = RecordingRuntimeManager(
+        execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+    )
+    let imageManager = RecordingImageManager(
+        images: [
+            CRIShimImageRecord(
+                reference: "example.com/macos/sandbox:latest",
+                digest: "sha256:sandbox",
+                size: 16_384,
+                annotations: ["org.apple.container.macos.image.role": "sandbox"]
+            )
+        ]
+    )
+    let fence: @Sendable () throws -> Void = {
+        _ = try stateStore.recordFence(
+            networkName: "kubernetes-pod",
+            networkInstanceID: "instance-a",
+            failureReason: "helper disconnected",
+            bootSessionID: "boot-a",
+            attemptWindow: 3_600
+        )
+    }
+    if gate == .beforeSandboxCreate {
+        imageManager.listImagesHook = fence
+    } else if gate == .beforeNetworkAttach {
+        runtimeManager.createSandboxHook = fence
+    }
+    let cniManager = RecordingCNIManager()
+    let telemetryPaths = VMNetRecoveryAdmissionTelemetryPaths(
+        directoryURL: stateDirectory.appendingPathComponent("telemetry", isDirectory: true)
+    )
+    let controller = CRIShimVMNetRecoveryController(
+        config: config,
+        bootSessionID: "boot-a",
+        admissionRejectionRecorder: VMNetRecoveryAdmissionRejectionJournal(
+            paths: telemetryPaths,
+            requiredOwnerID: geteuid(),
+            requiredGroupID: getegid()
+        )
+    )
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    let server = CRIShimGRPCServer(
+        socketPath: socketPath,
+        serviceProviders: [
+            CRIShimRuntimeServiceProvider(
+                config: config,
+                metadataStore: metadataStore,
+                readinessChecker: StaticReadinessChecker(snapshot: readyReadinessSnapshot()),
+                runtimeManager: runtimeManager,
+                imageManager: imageManager,
+                cniManager: cniManager,
+                vmnetRecoveryController: controller
+            )
+        ],
+        eventLoopGroup: group
+    )
+    let serverTask = Task {
+        try await server.run()
+    }
+    defer {
+        serverTask.cancel()
+        _ = try? FileManager.default.removeItem(atPath: socketPath)
+    }
+
+    try await waitForSocket(at: socketPath)
+    let channel = ClientConnection.insecure(group: group)
+        .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+    let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+    var request = Runtime_V1_RunPodSandboxRequest()
+    request.runtimeHandler = "macos"
+    request.config.metadata.uid = "fenced-pod-uid"
+    request.config.metadata.namespace = "default"
+    request.config.metadata.name = "fenced-pod"
+
+    let grpcCode: GRPCStatus.Code
+    let grpcMessage: String
+    do {
+        _ = try await client.runPodSandbox(request)
+        Issue.record("expected vmnet recovery admission to reject the sandbox")
+        grpcCode = .ok
+        grpcMessage = ""
+    } catch let status as GRPCStatus {
+        grpcCode = status.code
+        grpcMessage = status.message ?? ""
+    }
+
+    try await channel.close().get()
+    await server.stop()
+    try await serverTask.value
+    await shutdown(group)
+
+    let data = FileManager.default.contents(atPath: telemetryPaths.journalURL.path) ?? Data()
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let events = try data.split(separator: 0x0A).map {
+        try decoder.decode(VMNetRecoveryAdmissionRejectionEventV1.self, from: Data($0))
+    }
+    return VMNetRecoveryAdmissionRejectionScenarioResult(
+        grpcCode: grpcCode,
+        grpcMessage: grpcMessage,
+        events: events,
+        imagePullCount: imageManager.pulledReferences.count,
+        createSandboxCount: runtimeManager.createSandboxCalls.count,
+        removeSandboxCount: runtimeManager.removeSandboxCalls.count,
+        cniAddCount: cniManager.addCalls.count,
+        cniDeleteCount: cniManager.deleteCalls.count
+    )
 }
 
 private func waitForSocket(at path: String) async throws {

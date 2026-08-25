@@ -125,6 +125,122 @@ struct CRIShimVMNetRecoveryStateTests {
     }
 
     @Test
+    func admissionRejectionRecordsStableAttemptGateAndStateReason() throws {
+        let recorder = RecordingVMNetRecoveryAdmissionRejectionRecorder()
+        let attemptID = UUID()
+        try withRecoveryController(admissionRejectionRecorder: recorder) { controller, _ in
+            #expect(throws: CRIShimError.self) {
+                try controller.requireAdmission(
+                    gate: .beforeSandboxCreate,
+                    attemptID: attemptID
+                )
+            }
+        }
+
+        #expect(
+            recorder.observations == [
+                VMNetRecoveryAdmissionRejectionObservation(
+                    attemptID: attemptID,
+                    bootSessionID: "boot-a",
+                    gate: .beforeSandboxCreate,
+                    reason: .stateMissing
+                )
+            ]
+        )
+    }
+
+    @Test
+    func pendingRequestAndBootMismatchHaveDistinctRejectionReasons() throws {
+        let recorder = RecordingVMNetRecoveryAdmissionRejectionRecorder()
+        try withRecoveryController(admissionRejectionRecorder: recorder) { controller, store in
+            _ = try store.recordHealthyObservation(
+                networkName: "kubernetes-pod",
+                networkInstanceID: "instance-a",
+                bootSessionID: "boot-old"
+            )
+            #expect(throws: CRIShimError.self) {
+                try controller.requireAdmission(
+                    gate: .beforeNetworkAttach,
+                    attemptID: UUID()
+                )
+            }
+
+            _ = try store.recordHealthyObservation(
+                networkName: "kubernetes-pod",
+                networkInstanceID: "instance-a",
+                bootSessionID: "boot-a"
+            )
+            let requestPath = try #require(controller.requestPath)
+            try FileManager.default.createDirectory(
+                at: URL(fileURLWithPath: requestPath).deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try VMNetRecoveryRequestStore(path: requestPath).submit(
+                networkName: "kubernetes-pod",
+                networkInstanceID: "instance-a",
+                failureReason: "helper disconnected",
+                bootSessionID: "boot-a"
+            )
+            #expect(throws: CRIShimError.self) {
+                try controller.requireAdmission(
+                    gate: .beforeRequestValidation,
+                    attemptID: UUID()
+                )
+            }
+        }
+
+        #expect(recorder.observations.map(\.reason) == [.bootMismatch, .requestPending])
+        #expect(recorder.observations.map(\.gate) == [.beforeNetworkAttach, .beforeRequestValidation])
+    }
+
+    @Test
+    func telemetryFailureNeverReplacesAdmissionFailure() throws {
+        let recorder = RecordingVMNetRecoveryAdmissionRejectionRecorder(throwsOnRecord: true)
+        try withRecoveryController(admissionRejectionRecorder: recorder) { controller, _ in
+            #expect(
+                throws: CRIShimError.unavailable(
+                    "vmnet recovery state is missing for network kubernetes-pod"
+                )
+            ) {
+                try controller.requireAdmission(
+                    gate: .beforeSandboxCreate,
+                    attemptID: UUID()
+                )
+            }
+        }
+        #expect(recorder.observations.count == 1)
+    }
+
+    @Test
+    func healthyAndDisabledAdmissionsDoNotRecordRejections() throws {
+        let recorder = RecordingVMNetRecoveryAdmissionRejectionRecorder()
+        try withRecoveryController(admissionRejectionRecorder: recorder) { controller, store in
+            _ = try store.recordHealthyObservation(
+                networkName: "kubernetes-pod",
+                networkInstanceID: "instance-a",
+                bootSessionID: "boot-a"
+            )
+            try controller.requireAdmission(
+                gate: .beforeRequestValidation,
+                attemptID: UUID()
+            )
+        }
+
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let disabled = CRIShimVMNetRecoveryController(
+            config: recoveryConfig(root: root, mode: .disabled),
+            bootSessionID: "boot-a",
+            admissionRejectionRecorder: recorder
+        )
+        try disabled.requireAdmission(
+            gate: .beforeNetworkAttach,
+            attemptID: UUID()
+        )
+        #expect(recorder.observations.isEmpty)
+    }
+
+    @Test
     func disabledModePreservesLegacyReadinessWithoutStateFile() throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -137,12 +253,17 @@ struct CRIShimVMNetRecoveryStateTests {
 }
 
 private func withRecoveryController(
+    admissionRejectionRecorder: (any VMNetRecoveryAdmissionRejectionRecording)? = nil,
     _ body: (CRIShimVMNetRecoveryController, VMNetRecoveryStateStore) throws -> Void
 ) throws {
     let root = temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
     let config = recoveryConfig(root: root, mode: .rebootNode)
-    let controller = CRIShimVMNetRecoveryController(config: config, bootSessionID: "boot-a")
+    let controller = CRIShimVMNetRecoveryController(
+        config: config,
+        bootSessionID: "boot-a",
+        admissionRejectionRecorder: admissionRejectionRecorder
+    )
     let store = VMNetRecoveryStateStore(path: config.resolvedVMNetRecoveryConfig.statePath!)
     try body(controller, store)
 }
@@ -186,4 +307,52 @@ private func readySnapshot() -> CRIShimReadinessSnapshot {
 private func temporaryDirectory() -> URL {
     FileManager.default.temporaryDirectory
         .appendingPathComponent("CRIShimVMNetRecoveryStateTests-\(UUID().uuidString)", isDirectory: true)
+}
+
+private struct VMNetRecoveryAdmissionRejectionObservation: Equatable {
+    var attemptID: UUID
+    var bootSessionID: String
+    var gate: VMNetRecoveryAdmissionGate
+    var reason: VMNetRecoveryAdmissionRejectReason
+}
+
+private enum RecordingVMNetRecoveryAdmissionRejectionError: Error {
+    case failed
+}
+
+private final class RecordingVMNetRecoveryAdmissionRejectionRecorder:
+    VMNetRecoveryAdmissionRejectionRecording, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let throwsOnRecord: Bool
+    private var recorded: [VMNetRecoveryAdmissionRejectionObservation] = []
+
+    init(throwsOnRecord: Bool = false) {
+        self.throwsOnRecord = throwsOnRecord
+    }
+
+    var observations: [VMNetRecoveryAdmissionRejectionObservation] {
+        lock.withLock { recorded }
+    }
+
+    func record(
+        attemptID: UUID,
+        bootSessionID: String,
+        gate: VMNetRecoveryAdmissionGate,
+        reason: VMNetRecoveryAdmissionRejectReason
+    ) throws {
+        lock.withLock {
+            recorded.append(
+                VMNetRecoveryAdmissionRejectionObservation(
+                    attemptID: attemptID,
+                    bootSessionID: bootSessionID,
+                    gate: gate,
+                    reason: reason
+                )
+            )
+        }
+        if throwsOnRecord {
+            throw RecordingVMNetRecoveryAdmissionRejectionError.failed
+        }
+    }
 }

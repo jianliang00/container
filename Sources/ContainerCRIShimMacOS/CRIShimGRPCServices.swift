@@ -80,7 +80,12 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         self.imageManager = imageManager
         self.cniManager = cniManager
         self.podNetworkStateStore = podNetworkStateStore
-        self.vmnetRecoveryController = vmnetRecoveryController ?? CRIShimVMNetRecoveryController(config: config)
+        self.vmnetRecoveryController =
+            vmnetRecoveryController
+            ?? CRIShimVMNetRecoveryController(
+                config: config,
+                admissionRejectionRecorder: VMNetRecoveryAdmissionRejectionJournal()
+            )
         self.logManager =
             logManager
             ?? CRIShimLogManager(
@@ -202,7 +207,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RunPodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.runPodSandbox.rawValue) {
-            try vmnetRecoveryController.requireAdmission()
+            let admissionAttemptID = UUID()
+            try vmnetRecoveryController.requireAdmission(
+                gate: .beforeRequestValidation,
+                attemptID: admissionAttemptID
+            )
             try CRIShimUnsupportedFieldValidator.validate(request)
 
             var handler = try config.resolveRuntimeHandler(request.runtimeHandler)
@@ -234,11 +243,17 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             )
 
             do {
-                try vmnetRecoveryController.requireAdmission()
+                try vmnetRecoveryController.requireAdmission(
+                    gate: .beforeSandboxCreate,
+                    attemptID: admissionAttemptID
+                )
                 try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
                 try metadataStore.upsertSandbox(metadata)
                 if handler.usesPodNetworking {
-                    try vmnetRecoveryController.requireAdmission()
+                    try vmnetRecoveryController.requireAdmission(
+                        gate: .beforeNetworkAttach,
+                        attemptID: admissionAttemptID
+                    )
                     let network = try await cniManager.add(
                         sandboxID: sandboxID,
                         networkName: handler.network,

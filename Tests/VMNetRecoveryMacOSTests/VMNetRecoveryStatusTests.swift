@@ -255,6 +255,128 @@ struct VMNetRecoveryStatusTests {
     }
 
     @Test
+    func aggregatesAdmissionRejectionsAcrossStatusRecorderRestartsAndResetsPerBoot() throws {
+        let context = try makeRecorderContext()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        _ = try context.stateStore.recordHealthyObservation(
+            networkName: context.networkName,
+            networkInstanceID: "instance-a",
+            bootSessionID: "boot-a",
+            now: baseDate
+        )
+        let telemetryPaths = VMNetRecoveryAdmissionTelemetryPaths(
+            directoryURL: context.root.appendingPathComponent("telemetry", isDirectory: true)
+        )
+        let journal = VMNetRecoveryAdmissionRejectionJournal(
+            paths: telemetryPaths,
+            requiredOwnerID: geteuid(),
+            requiredGroupID: getegid(),
+            now: { self.baseDate }
+        )
+        let counter = VMNetRecoveryAdmissionRejectionCounter(
+            paths: telemetryPaths,
+            requiredOwnerID: geteuid(),
+            requiredGroupID: getegid()
+        )
+        try journal.record(
+            attemptID: UUID(),
+            bootSessionID: "boot-a",
+            gate: .beforeSandboxCreate,
+            reason: .stateFenced
+        )
+        try journal.record(
+            attemptID: UUID(),
+            bootSessionID: "boot-a",
+            gate: .beforeNetworkAttach,
+            reason: .stateFenced
+        )
+
+        let recorder = VMNetRecoveryStatusRecorder(
+            store: context.statusStore,
+            admissionRejectionCounter: counter,
+            coordinatorInstanceID: coordinatorInstanceID,
+            now: { self.baseDate }
+        )
+        let first = try recorder.record(
+            event: .result(.idle),
+            config: context.config,
+            currentBootSessionID: "boot-a"
+        )
+        #expect(first.sandboxRejectedTotal == 2)
+
+        try journal.record(
+            attemptID: UUID(),
+            bootSessionID: "boot-a",
+            gate: .beforeRequestValidation,
+            reason: .requestPending
+        )
+        let restartedRecorder = VMNetRecoveryStatusRecorder(
+            store: context.statusStore,
+            admissionRejectionCounter: counter,
+            coordinatorInstanceID: "00000000-0000-4000-8000-000000000003",
+            now: { self.baseDate.addingTimeInterval(1) }
+        )
+        let afterRestart = try restartedRecorder.record(
+            event: .result(.idle),
+            config: context.config,
+            currentBootSessionID: "boot-a"
+        )
+        #expect(afterRestart.sandboxRejectedTotal == 3)
+
+        try journal.record(
+            attemptID: UUID(),
+            bootSessionID: "boot-b",
+            gate: .beforeRequestValidation,
+            reason: .bootMismatch
+        )
+        let nextBoot = try restartedRecorder.record(
+            event: .verificationStarted,
+            config: context.config,
+            currentBootSessionID: "boot-b"
+        )
+        #expect(nextBoot.sandboxRejectedTotal == 1)
+    }
+
+    @Test
+    func unknownAdmissionCounterDoesNotBlockStatusPersistence() throws {
+        let context = try makeRecorderContext()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        _ = try context.stateStore.recordHealthyObservation(
+            networkName: context.networkName,
+            networkInstanceID: "instance-a",
+            bootSessionID: "boot-a",
+            now: baseDate
+        )
+        let telemetryPaths = VMNetRecoveryAdmissionTelemetryPaths(
+            directoryURL: context.root.appendingPathComponent("telemetry", isDirectory: true)
+        )
+        try FileManager.default.createDirectory(
+            at: telemetryPaths.directoryURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o755]
+        )
+        let recorder = VMNetRecoveryStatusRecorder(
+            store: context.statusStore,
+            admissionRejectionCounter: VMNetRecoveryAdmissionRejectionCounter(
+                paths: telemetryPaths,
+                requiredOwnerID: geteuid(),
+                requiredGroupID: getegid()
+            ),
+            coordinatorInstanceID: coordinatorInstanceID,
+            now: { self.baseDate }
+        )
+
+        let status = try recorder.record(
+            event: .result(.idle),
+            config: context.config,
+            currentBootSessionID: "boot-a"
+        )
+
+        #expect(status.sandboxRejectedTotal == nil)
+        #expect(try context.statusStore.load() == status)
+    }
+
+    @Test
     func statusValidationRejectsInvalidSchemaTimelineAndReadyAuthority() throws {
         var status = makeReadyStatus()
         status.schemaVersion += 1

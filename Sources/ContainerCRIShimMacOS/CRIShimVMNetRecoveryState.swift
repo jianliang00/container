@@ -26,10 +26,12 @@ public struct CRIShimVMNetRecoveryController: Sendable {
 
     private let stateStore: VMNetRecoveryStateStore?
     private let requestStore: VMNetRecoveryRequestStore?
+    private let admissionRejectionRecorder: (any VMNetRecoveryAdmissionRejectionRecording)?
 
     public init(
         config: CRIShimConfig,
-        bootSessionID: String? = try? VMNetBootSession.current()
+        bootSessionID: String? = try? VMNetBootSession.current(),
+        admissionRejectionRecorder: (any VMNetRecoveryAdmissionRejectionRecording)? = nil
     ) {
         let mode =
             config.podNetwork?.enabled == true
@@ -44,33 +46,98 @@ public struct CRIShimVMNetRecoveryController: Sendable {
             self.bootSessionID = bootSessionID
             self.stateStore = recovery.statePath.map(VMNetRecoveryStateStore.init(path:))
             self.requestStore = recovery.requestPath.map(VMNetRecoveryRequestStore.init(path:))
+            self.admissionRejectionRecorder = admissionRejectionRecorder
         } else {
             self.statePath = nil
             self.requestPath = nil
             self.bootSessionID = nil
             self.stateStore = nil
             self.requestStore = nil
+            self.admissionRejectionRecorder = nil
         }
     }
 
     public func requireAdmission() throws {
+        try requireAdmission(
+            gate: .beforeRequestValidation,
+            attemptID: UUID()
+        )
+    }
+
+    public func requireAdmission(
+        gate: VMNetRecoveryAdmissionGate,
+        attemptID: UUID
+    ) throws {
         guard mode == .rebootNode else {
             return
         }
         guard let networkName, !networkName.isEmpty, let stateStore, let requestStore, let bootSessionID else {
+            recordAdmissionRejectionBestEffort(
+                attemptID: attemptID,
+                bootSessionID: bootSessionID,
+                gate: gate,
+                reason: .configurationUnavailable
+            )
             throw CRIShimError.unavailable("vmnet recovery admission is not configured")
         }
         do {
             try requestStore.requireNoPendingRequest(networkName: networkName)
+        } catch let error as VMNetRecoveryStateError {
+            recordAdmissionRejectionBestEffort(
+                attemptID: attemptID,
+                bootSessionID: bootSessionID,
+                gate: gate,
+                reason: error.isAdmissionFence ? .requestPending : .requestStateUnavailable
+            )
+            throw CRIShimError.unavailable(error.description)
+        } catch {
+            recordAdmissionRejectionBestEffort(
+                attemptID: attemptID,
+                bootSessionID: bootSessionID,
+                gate: gate,
+                reason: .requestStateUnavailable
+            )
+            throw CRIShimError.unavailable("vmnet recovery admission state is unavailable")
+        }
+        do {
             try stateStore.requireHealthy(
                 networkName: networkName,
                 expectedBootSessionID: bootSessionID
             )
         } catch let error as VMNetRecoveryStateError {
+            recordAdmissionRejectionBestEffort(
+                attemptID: attemptID,
+                bootSessionID: bootSessionID,
+                gate: gate,
+                reason: error.admissionRejectReason
+            )
             throw CRIShimError.unavailable(error.description)
         } catch {
+            recordAdmissionRejectionBestEffort(
+                attemptID: attemptID,
+                bootSessionID: bootSessionID,
+                gate: gate,
+                reason: .stateUnavailable
+            )
             throw CRIShimError.unavailable("vmnet recovery admission state is unavailable")
         }
+    }
+
+    private func recordAdmissionRejectionBestEffort(
+        attemptID: UUID,
+        bootSessionID: String?,
+        gate: VMNetRecoveryAdmissionGate,
+        reason: VMNetRecoveryAdmissionRejectReason
+    ) {
+        guard let bootSessionID else {
+            return
+        }
+        try? admissionRejectionRecorder?.record(
+            attemptID: attemptID,
+            bootSessionID: bootSessionID,
+            gate: gate,
+            reason: reason
+        )
     }
 
     public func apply(to snapshot: CRIShimReadinessSnapshot) -> CRIShimReadinessSnapshot {
@@ -153,6 +220,30 @@ public struct CRIShimVMNetRecoveryController: Sendable {
             message: message
         )
         return result
+    }
+}
+
+extension VMNetRecoveryStateError {
+    fileprivate var isAdmissionFence: Bool {
+        if case .admissionFenced = self {
+            return true
+        }
+        return false
+    }
+
+    fileprivate var admissionRejectReason: VMNetRecoveryAdmissionRejectReason {
+        switch self {
+        case .stateMissing:
+            return .stateMissing
+        case .networkMismatch:
+            return .networkMismatch
+        case .admissionFenced:
+            return .stateFenced
+        case .bootSessionMismatch:
+            return .bootMismatch
+        default:
+            return .stateUnavailable
+        }
     }
 }
 

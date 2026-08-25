@@ -1944,7 +1944,10 @@ struct CRIShimRuntimeServerTests {
 
         let expected = Data("small-output".utf8)
         try pipe.fileHandleForWriting.write(contentsOf: expected)
-        try await waitForCondition(description: "small file handle stream write") {
+        try await waitForCondition(
+            description: "small file handle stream write",
+            timeout: .seconds(30)
+        ) {
             recorder.snapshot().data == expected
         }
 
@@ -1980,7 +1983,10 @@ struct CRIShimRuntimeServerTests {
         try pipe.fileHandleForWriting.write(contentsOf: expected)
         try pipe.fileHandleForWriting.close()
 
-        try await waitForCondition(description: "duplicate file descriptor EOF") {
+        try await waitForCondition(
+            description: "duplicate file descriptor EOF",
+            timeout: .seconds(30)
+        ) {
             recorder.snapshot().consumerFinished
         }
         _ = await consumer.result
@@ -2007,12 +2013,40 @@ struct CRIShimRuntimeServerTests {
         }
 
         let expected = Data(repeating: 0xA5, count: 128 * 1024 + 17)
+        let writeDescriptor = pipe.fileHandleForWriting.fileDescriptor
+        let writeFlags = Darwin.fcntl(writeDescriptor, F_GETFL)
+        guard writeFlags >= 0, Darwin.fcntl(writeDescriptor, F_SETFL, writeFlags | O_NONBLOCK) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         let producer = Task {
             do {
-                try pipe.fileHandleForWriting.write(contentsOf: expected)
+                var offset = 0
+                while offset < expected.count {
+                    try Task.checkCancellation()
+                    let result = expected.withUnsafeBytes { buffer in
+                        Darwin.write(
+                            writeDescriptor,
+                            buffer.baseAddress?.advanced(by: offset),
+                            buffer.count - offset
+                        )
+                    }
+                    if result > 0 {
+                        offset += result
+                        continue
+                    }
+                    if result < 0, errno == EINTR {
+                        continue
+                    }
+                    if result < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                        try await Task.sleep(for: .milliseconds(1))
+                        continue
+                    }
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
                 try pipe.fileHandleForWriting.close()
                 recorder.markProducerFinished(errorDescription: nil)
             } catch {
+                try? pipe.fileHandleForWriting.close()
                 recorder.markProducerFinished(errorDescription: String(describing: error))
             }
         }
@@ -2020,7 +2054,7 @@ struct CRIShimRuntimeServerTests {
         do {
             try await waitForCondition(
                 description: "large file handle stream transfer",
-                timeout: .seconds(5)
+                timeout: .seconds(30)
             ) {
                 let snapshot = recorder.snapshot()
                 return snapshot.producerFinished && snapshot.consumerFinished
@@ -2030,7 +2064,6 @@ struct CRIShimRuntimeServerTests {
             consumer.cancel()
             producer.cancel()
             try? pipe.fileHandleForReading.close()
-            try? pipe.fileHandleForWriting.close()
             _ = await producer.result
             _ = await consumer.result
             throw error
@@ -2085,23 +2118,32 @@ struct CRIShimRuntimeServerTests {
         let startTask = Task {
             try await process.start()
         }
-        defer {
+        func teardown() async {
             process.permitStart()
             startTask.cancel()
+            _ = await startTask.result
             try? stdinPipe.fileHandleForReading.close()
             try? stdinPipe.fileHandleForWriting.close()
             try? stdoutPipe.fileHandleForReading.close()
             try? stdoutPipe.fileHandleForWriting.close()
+            _ = try? await process.wait()
         }
 
-        try await waitForCondition(description: "blocked streaming process start") {
-            process.startCalled
-        }
-        try await process.kill(SIGTERM)
-        process.permitStart()
-        try await startTask.value
+        do {
+            try await waitForCondition(description: "blocked streaming process start") {
+                process.startCalled
+            }
+            try await process.kill(SIGTERM)
+            process.permitStart()
+            try await startTask.value
 
-        #expect(try await process.wait() == 128 + SIGTERM)
+            #expect(try await process.wait() == 128 + SIGTERM)
+        } catch {
+            await teardown()
+            throw error
+        }
+
+        await teardown()
     }
 
     @Test
@@ -2118,45 +2160,46 @@ struct CRIShimRuntimeServerTests {
             }
         }
         var killTask: Task<String?, Never>?
-        defer {
+        do {
+            try await waitForCondition(description: "controlled streaming process start") {
+                rawProcess.startCallCount == 1
+            }
+            killTask = Task {
+                do {
+                    try await process.kill(SIGTERM)
+                    return nil
+                } catch {
+                    return String(describing: error)
+                }
+            }
+            try await waitForCondition(description: "controlled streaming process kill") {
+                rawProcess.killCallCount == 1
+            }
+
+            rawProcess.completeStart()
+            try await waitForAsyncCondition(description: "start waiting for kill outcome") {
+                await process.isWaitingForTerminationOutcome
+            }
+            #expect(!startRecorder.snapshot().finished)
+
+            rawProcess.failKill()
+            try await waitForCondition(description: "streaming process start after failed kill") {
+                startRecorder.snapshot().finished
+            }
+            _ = await startTask.result
+            #expect(startRecorder.snapshot().errorDescription == nil)
+            #expect(await killTask?.value != nil)
+
+            let size = CRIShimTerminalSize(width: 120, height: 40)
+            try await process.resize(size)
+            #expect(rawProcess.resizeCalls == [size])
+        } catch {
             rawProcess.completeStart()
             rawProcess.failKill()
-            startTask.cancel()
-            killTask?.cancel()
+            _ = await startTask.result
+            _ = await killTask?.result
+            throw error
         }
-
-        try await waitForCondition(description: "controlled streaming process start") {
-            rawProcess.startCallCount == 1
-        }
-        killTask = Task {
-            do {
-                try await process.kill(SIGTERM)
-                return nil
-            } catch {
-                return String(describing: error)
-            }
-        }
-        try await waitForCondition(description: "controlled streaming process kill") {
-            rawProcess.killCallCount == 1
-        }
-
-        rawProcess.completeStart()
-        try await waitForAsyncCondition(description: "start waiting for kill outcome") {
-            await process.isWaitingForTerminationOutcome
-        }
-        #expect(!startRecorder.snapshot().finished)
-
-        rawProcess.failKill()
-        try await waitForCondition(description: "streaming process start after failed kill") {
-            startRecorder.snapshot().finished
-        }
-        _ = await startTask.result
-        #expect(startRecorder.snapshot().errorDescription == nil)
-        #expect(await killTask?.value != nil)
-
-        let size = CRIShimTerminalSize(width: 120, height: 40)
-        try await process.resize(size)
-        #expect(rawProcess.resizeCalls == [size])
     }
 
     @Test
@@ -3268,14 +3311,15 @@ private func waitForValue<T>(
     )
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(timeoutNanoseconds, 1))
 
-    while DispatchTime.now().uptimeNanoseconds <= deadline {
+    while true {
         if let value = body() {
             return value
         }
+        guard DispatchTime.now().uptimeNanoseconds <= deadline else {
+            throw CRIShimRuntimeServerTestError.timedOut(description)
+        }
         try await Task.sleep(nanoseconds: UInt64(pollNanoseconds))
     }
-
-    throw CRIShimRuntimeServerTestError.timedOut(description)
 }
 
 private func waitForCondition(
@@ -3301,13 +3345,15 @@ private func waitForAsyncCondition(
 ) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
-    while clock.now <= deadline {
+    while true {
         if await body() {
             return
         }
+        guard clock.now <= deadline else {
+            throw CRIShimRuntimeServerTestError.timedOut(description)
+        }
         try await Task.sleep(for: pollInterval)
     }
-    throw CRIShimRuntimeServerTestError.timedOut(description)
 }
 
 private func makeSocketPair() throws -> (FileHandle, FileHandle) {

@@ -233,6 +233,29 @@ public enum MacOSKubeadmPlanner {
         if options.networkMode.usesPodNetworking {
             steps.append(contentsOf: [
                 MacOSKubeadmStep(
+                    message: "write macOS node status collector configuration",
+                    action: .writeFile(
+                        path: options.rooted("/etc/kubernetes/container-macos-node-status.json"),
+                        contents: MacOSKubeadmRenderer.nodeStatusConfiguration(
+                            nodeName: options.nodeName,
+                            expectVMNetRecovery: options.vmnetDisconnectRecovery == .rebootNode
+                        ),
+                        mode: 0o600,
+                        sensitive: false
+                    )
+                ),
+                MacOSKubeadmStep(
+                    message: "remove inherited ACL from macOS node status collector configuration",
+                    action: .runCommand(
+                        arguments: [
+                            "/bin/chmod",
+                            "-N",
+                            options.rooted("/etc/kubernetes/container-macos-node-status.json"),
+                        ],
+                        bestEffort: false
+                    )
+                ),
+                MacOSKubeadmStep(
                     message: "write kube-proxy ServiceAccount token",
                     action: .writeFile(
                         path: options.rooted(kubeProxyTokenPath),
@@ -527,6 +550,7 @@ public enum MacOSKubeadmPlanner {
             ("/etc/kubernetes/flannel-macos.kubeconfig", false, true),
             ("/etc/kubernetes/kubelet-config.yaml", false, false),
             ("/etc/kubernetes/container-cri-shim-macos-config.json", false, false),
+            ("/etc/kubernetes/container-macos-node-status.json", false, false),
             ("/etc/kubernetes/flannel-vxlan-macos.conf", false, false),
             ("/etc/kubernetes/kube-proxy.conf", false, false),
             ("/etc/kubernetes/pki/ca.crt", false, false),
@@ -1051,6 +1075,7 @@ public enum MacOSKubeadmPlanner {
             "/etc/kubernetes/kube-proxy.kubeconfig",
             "/etc/kubernetes/flannel-vxlan-macos.conf",
             "/etc/kubernetes/kube-proxy.conf",
+            "/etc/kubernetes/container-macos-node-status.json",
             "/etc/cni/net.d/10-macvmnet.conflist",
         ] {
             steps.append(

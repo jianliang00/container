@@ -57,6 +57,37 @@ struct MacOSKubeadmPlanTests {
 
         #expect(
             plan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o600, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/etc/kubernetes/container-macos-node-status.json"
+                    && contents.contains(#""nodeName": "macos-ci-1""#)
+                    && contents.contains(#""networkName": "kubernetes-pod""#)
+                    && contents.contains(#""vmnetRecovery": false"#)
+            })
+        #expect(
+            plan.steps.contains { step in
+                guard case .runCommand(let arguments, false) = step.action else {
+                    return false
+                }
+                return arguments == [
+                    "/bin/chmod",
+                    "-N",
+                    "/tmp/macos-node/etc/kubernetes/container-macos-node-status.json",
+                ]
+            })
+        let writeNodeStatusIndex = try #require(
+            plan.steps.firstIndex { $0.message == "write macOS node status collector configuration" }
+        )
+        let protectNodeStatusIndex = try #require(
+            plan.steps.firstIndex {
+                $0.message == "remove inherited ACL from macOS node status collector configuration"
+            }
+        )
+        #expect(writeNodeStatusIndex < protectNodeStatusIndex)
+
+        #expect(
+            plan.steps.contains { step in
                 guard case .writeFile(let path, let contents, 0o644, false) = step.action else {
                     return false
                 }
@@ -208,6 +239,15 @@ struct MacOSKubeadmPlanTests {
         )
         #expect(recoveryPlist.contains("<string>asuser</string>"))
         #expect(recoveryPlist.contains("<string>501</string>"))
+        #expect(
+            enabledPlan.steps.contains { step in
+                guard case .writeFile(let path, let contents, 0o600, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/etc/kubernetes/container-macos-node-status.json"
+                    && contents.contains(#""vmnetRecovery": true"#)
+            }
+        )
         #expect(
             enabledPlan.steps.contains { step in
                 guard step.message == "ensure private vmnet recovery directory",
@@ -621,6 +661,7 @@ struct MacOSKubeadmPlanTests {
         #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/flannel-macos.kubeconfig"))
         #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf"))
         #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/kube-proxy.conf"))
+        #expect(!writePaths.contains("/tmp/macos-node/etc/kubernetes/container-macos-node-status.json"))
         #expect(!writePaths.contains("/tmp/macos-node/etc/cni/net.d/10-macvmnet.conflist"))
         #expect(!writePaths.contains("/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist"))
         #expect(!writePaths.contains("/tmp/macos-node/Library/LaunchDaemons/com.apple.container.flannel-vxlan-macos.plist"))
@@ -658,6 +699,7 @@ struct MacOSKubeadmPlanTests {
             "/tmp/macos-node/Library/LaunchDaemons/com.apple.container.kube-proxy-macos.plist",
             "/tmp/macos-node/etc/kubernetes/flannel-vxlan-macos.conf",
             "/tmp/macos-node/etc/kubernetes/kube-proxy.conf",
+            "/tmp/macos-node/etc/kubernetes/container-macos-node-status.json",
             "/tmp/macos-node/etc/cni/net.d/10-macvmnet.conflist",
         ] {
             #expect(
@@ -1412,6 +1454,9 @@ struct MacOSKubeadmPlanTests {
         let stopCRIIndex = try #require(descriptions.firstIndex(of: "stop CRI shim launchd job if present"))
         let purgeIndex = try #require(descriptions.firstIndex(of: "purge owned pod network"))
         let removeFlannelConfigIndex = try #require(descriptions.firstIndex(of: "remove /etc/kubernetes/flannel-vxlan-macos.conf"))
+        let removeNodeStatusConfigIndex = try #require(
+            descriptions.firstIndex(of: "remove /etc/kubernetes/container-macos-node-status.json")
+        )
         let removeProxyStatusIndex = try #require(
             descriptions.firstIndex(of: "remove /var/lib/container/kube-proxy-macos/status.json")
         )
@@ -1440,6 +1485,7 @@ struct MacOSKubeadmPlanTests {
         #expect(stopCRIIndex < purgeIndex)
         #expect(purgeIndex < removeFlannelStatusIndex)
         #expect(purgeIndex < removeFlannelConfigIndex)
+        #expect(purgeIndex < removeNodeStatusConfigIndex)
         #expect(
             plan.steps.contains { step in
                 step.message == "clean container system operation agents"

@@ -294,7 +294,7 @@ jobs:
           build_signed_paths = build_script.scan(/codesign_path "\$\{PKGROOT\}\/([^\"]+)"/).flatten.sort
           verified_paths = signed_array[1].scan(/"([^"]+)"/).flatten.sort
           [build_staged_paths, build_signed_paths, verified_paths].each do |paths|
-            abort "installer must contain exactly 19 unique signed Mach-O payload paths" unless paths.length == 19 && paths.uniq.length == 19
+            abort "installer must contain exactly 20 unique signed Mach-O payload paths" unless paths.length == 20 && paths.uniq.length == 20
           end
           abort "installer staging, signing, and verification path lists differ" unless build_staged_paths == build_signed_paths && build_signed_paths == verified_paths
           RUBY
@@ -321,7 +321,9 @@ jobs:
           test_filter+='|ContainerCRIShimMacOSTests\.CRIShimRuntimeServerTests/(grpcServerServesVersionOnUnixDomainSocket|updateRuntimeConfigIgnoresPodCIDRsWhenPodNetworkingIsDisabled)\(\)'
           test_filter+='|ContainerK8sFlannelVXLANMacOSTests\.'
           test_filter+='|ContainerK8sKubeProxyMacOSTests\.'
+          test_filter+='|ContainerMacOSNodeStatusTests\.'
           test_filter+='|ContainerMacOSKubeadmTests\.'
+          test_filter+='|VMNetRecoveryMacOSTests\.'
           test_filter+='|ContainerOSTests\.DirectoryWatcherTest'
           test_filter+='|ContainerResourceTests\.ContainerConfigurationMacOSTests'
           test_filter+='|MacOSGuestAgentTests\.GuestDNSProxyTests'
@@ -454,6 +456,7 @@ jobs:
             "opt/cni/bin/container-cni-macvmnet"
             "usr/local/bin/container-flannel-vxlan-macos"
             "usr/local/bin/container-kube-proxy-macos"
+            "usr/local/bin/container-macos-node-status"
             "usr/local/bin/container-k8s-networkpolicy-macos"
             "usr/local/bin/container-macos-kubeadm"
             "usr/local/bin/kubelet"
@@ -498,6 +501,7 @@ jobs:
           forbidden_payload_paths=(
             "etc/kubernetes/kubelet-config.yaml"
             "etc/kubernetes/container-cri-shim-macos-config.json"
+            "etc/kubernetes/container-macos-node-status.json"
             "etc/kubernetes/flannel-vxlan-macos.conf"
             "etc/kubernetes/kube-proxy.conf"
             "etc/cni/net.d/10-macvmnet.conflist"

@@ -153,6 +153,42 @@ struct MacOSKubeadmRenderingTests {
             MacOSKubeadmStatusRunner.launchdLabels.contains(
                 "com.apple.container.vmnet-recovery-macos"
             ))
+        #expect(
+            MacOSKubeadmStatusRunner.inspectedFiles.contains(
+                "/usr/local/bin/container-macos-node-status"
+            ))
+        #expect(
+            MacOSKubeadmStatusRunner.inspectedFiles.contains(
+                "/etc/kubernetes/container-macos-node-status.json"
+            ))
+    }
+
+    @Test func nodeStatusConfigurationBindsTrustedIdentityAndExpectedComponents() throws {
+        let enabled = MacOSKubeadmRenderer.nodeStatusConfiguration(
+            nodeName: "macos-ci-1",
+            expectVMNetRecovery: true
+        )
+        let enabledObject = try #require(
+            JSONSerialization.jsonObject(with: Data(enabled.utf8)) as? [String: Any]
+        )
+        let enabledComponents = try #require(enabledObject["expectedComponents"] as? [String: Any])
+
+        #expect(enabledObject["schemaVersion"] as? Int == 1)
+        #expect(enabledObject["nodeName"] as? String == "macos-ci-1")
+        #expect(enabledObject["networkName"] as? String == "kubernetes-pod")
+        #expect(enabledComponents["kubeProxy"] as? Bool == true)
+        #expect(enabledComponents["flannel"] as? Bool == true)
+        #expect(enabledComponents["vmnetRecovery"] as? Bool == true)
+
+        let disabled = MacOSKubeadmRenderer.nodeStatusConfiguration(
+            nodeName: "macos-ci-1",
+            expectVMNetRecovery: false
+        )
+        let disabledObject = try #require(
+            JSONSerialization.jsonObject(with: Data(disabled.utf8)) as? [String: Any]
+        )
+        let disabledComponents = try #require(disabledObject["expectedComponents"] as? [String: Any])
+        #expect(disabledComponents["vmnetRecovery"] as? Bool == false)
     }
 
     @Test func flannelConfigurationPersistsContainerServiceUserID() throws {

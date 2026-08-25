@@ -68,6 +68,7 @@ let package = Package(
         .executable(name: "container-k8s-networkpolicy-macos", targets: ["container-k8s-networkpolicy-macos"]),
         .executable(name: "container-kube-proxy-macos", targets: ["container-kube-proxy-macos"]),
         .executable(name: "container-flannel-vxlan-macos", targets: ["container-flannel-vxlan-macos"]),
+        .executable(name: "container-macos-node-status", targets: ["container-macos-node-status"]),
         .executable(name: "container-macos-kubeadm", targets: ["container-macos-kubeadm"]),
         .library(name: "MachineAPIClient", targets: ["MachineAPIClient"]),
         .library(name: "MachineAPIService", targets: ["MachineAPIService"]),
@@ -377,6 +378,25 @@ let package = Package(
                 "ContainerK8sFlannelVXLANMacOS",
                 "ContainerKit",
                 "ContainerResource",
+            ]
+        ),
+        .executableTarget(
+            name: "container-macos-node-status",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerCRIShimMacOS",
+                "ContainerK8sFlannelVXLANMacOS",
+                "ContainerK8sKubeProxyMacOS",
+            ],
+            path: "Sources/Helpers/MacOSNodeStatus"
+        ),
+        .testTarget(
+            name: "ContainerMacOSNodeStatusTests",
+            dependencies: [
+                "ContainerCRIShimMacOS",
+                "ContainerK8sFlannelVXLANMacOS",
+                "ContainerK8sKubeProxyMacOS",
+                .target(name: "container-macos-node-status", condition: .when(platforms: [.macOS])),
             ]
         ),
         .target(

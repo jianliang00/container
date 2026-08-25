@@ -13,6 +13,7 @@ needed by the first rollout:
 - `container-cni-macvmnet`
 - `container-flannel-vxlan-macos`
 - `container-kube-proxy-macos`
+- `container-macos-node-status`
 - `container-macos-kubeadm`
 - forked `kubelet`
 - kubelet, CRI, CNI, Flannel VXLAN, and kube-proxy config templates
@@ -260,6 +261,24 @@ generated node configuration and the owned host-only Pod network while
 preserving installed binaries. The reset command refuses to continue while a
 container or sandbox still refers to that network. Add `--purge-state` only
 when kubelet, CRI/CNI state, and node logs should also be removed.
+
+In full mode, run `sudo container-macos-node-status` from the host monitoring
+agent to export Prometheus text on standard output. The command does not open a
+listener or modify the data plane. It reads only the three fixed root-owned
+component status files, validates their schema, node and network identity, and
+freshness, and emits bounded labels without raw errors, addresses, interface
+names, or process identifiers. A missing, invalid, mismatched, or expired file
+marks only that component's status source down. Alert separately on
+`expected == 1 && status_up == 0`, on sustained Flannel or VMNet recovery
+`expected == 1 && status_up == 1 && ready == 0`, and on a kube-proxy `failed`
+state. Kube-proxy
+`waitingForPodIngressRoute` is normal while the node has no local Pod; alert on
+that state only when a local Pod should already have materialized its bridge
+route. Dual-stack pools must also require the IPv6 family to have `enabled ==
+1` and `ready/applied == 1`. Treat a non-zero collector exit or absent
+`container_macos_kubernetes_collector_up` as a
+collector failure; configuration errors occur before component metrics can be
+emitted.
 
 Runtime logs are written to stable host paths:
 

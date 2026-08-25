@@ -17,10 +17,10 @@
 import Darwin
 import Foundation
 
-enum VMNetRecoveryStatusStoreError: Error, Sendable, Equatable, CustomStringConvertible {
+public enum VMNetRecoveryStatusStoreError: Error, Sendable, Equatable, CustomStringConvertible {
     case persistence(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .persistence(let message):
             "vmnet recovery status persistence failed: \(message)"
@@ -28,20 +28,20 @@ enum VMNetRecoveryStatusStoreError: Error, Sendable, Equatable, CustomStringConv
     }
 }
 
-protocol VMNetRecoveryStatusStoring: Sendable {
+public protocol VMNetRecoveryStatusStoring: Sendable {
     func load() throws -> VMNetRecoveryStatus?
     func save(_ status: VMNetRecoveryStatus) throws
     func remove() throws
 }
 
-struct VMNetRecoveryStatusFileStore: VMNetRecoveryStatusStoring, Sendable {
+public struct VMNetRecoveryStatusFileStore: VMNetRecoveryStatusStoring, Sendable {
     private static let maximumEncodedSize = 64 * 1024
 
-    let url: URL
+    public let url: URL
     private let requiredOwnerID: uid_t
     private let requiredGroupID: gid_t
 
-    init(
+    public init(
         path: String,
         requiredOwnerID: uid_t = geteuid(),
         requiredGroupID: gid_t = getegid()
@@ -53,7 +53,7 @@ struct VMNetRecoveryStatusFileStore: VMNetRecoveryStatusStoring, Sendable {
         )
     }
 
-    init(
+    public init(
         url: URL,
         requiredOwnerID: uid_t = geteuid(),
         requiredGroupID: gid_t = getegid()
@@ -63,7 +63,7 @@ struct VMNetRecoveryStatusFileStore: VMNetRecoveryStatusStoring, Sendable {
         self.requiredGroupID = requiredGroupID
     }
 
-    func load() throws -> VMNetRecoveryStatus? {
+    public func load() throws -> VMNetRecoveryStatus? {
         guard let directoryDescriptor = try openDirectory(createIfMissing: false) else {
             return nil
         }
@@ -94,7 +94,7 @@ struct VMNetRecoveryStatusFileStore: VMNetRecoveryStatusStoring, Sendable {
         }
     }
 
-    func save(_ status: VMNetRecoveryStatus) throws {
+    public func save(_ status: VMNetRecoveryStatus) throws {
         let status = try status.validated()
         let data: Data
         do {
@@ -159,7 +159,7 @@ struct VMNetRecoveryStatusFileStore: VMNetRecoveryStatusStoring, Sendable {
         }
     }
 
-    func remove() throws {
+    public func remove() throws {
         guard let directoryDescriptor = try openDirectory(createIfMissing: false) else {
             return
         }

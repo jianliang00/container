@@ -102,6 +102,7 @@ public struct MacOSKubeadmJoinRunner {
         if options.networkMode.usesPodNetworking {
             requiredExecutables.append(contentsOf: [
                 "/usr/local/bin/container-kube-proxy-macos",
+                "/usr/local/bin/container-macos-node-status",
                 "/opt/cni/bin/container-cni-macvmnet",
             ])
         }
@@ -485,6 +486,7 @@ public struct MacOSKubeadmStatusRunner {
         "/usr/local/bin/container-vmnet-recovery-macos",
         "/usr/local/bin/container-flannel-vxlan-macos",
         "/usr/local/bin/container-kube-proxy-macos",
+        "/usr/local/bin/container-macos-node-status",
         "/usr/local/bin/kubelet",
         "/opt/cni/bin/container-cni-macvmnet",
         "/etc/kubernetes/pki/ca.crt",
@@ -495,6 +497,7 @@ public struct MacOSKubeadmStatusRunner {
         "/etc/kubernetes/flannel-macos.kubeconfig",
         "/etc/kubernetes/kubelet-config.yaml",
         "/etc/kubernetes/container-cri-shim-macos-config.json",
+        "/etc/kubernetes/container-macos-node-status.json",
         "/etc/kubernetes/flannel-vxlan-macos.conf",
         "/etc/kubernetes/kube-proxy.conf",
         "/etc/cni/net.d/10-macvmnet.conflist",

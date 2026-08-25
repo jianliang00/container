@@ -280,6 +280,26 @@ public enum MacOSKubeadmRenderer {
         """
     }
 
+    public static func nodeStatusConfiguration(
+        nodeName: String,
+        networkName: String = "kubernetes-pod",
+        expectVMNetRecovery: Bool
+    ) -> String {
+        """
+        {
+            "schemaVersion": 1,
+            "nodeName": \(jsonString(nodeName)),
+            "networkName": \(jsonString(networkName)),
+            "expectedComponents": {
+                "kubeProxy": true,
+                "flannel": true,
+                "vmnetRecovery": \(expectVMNetRecovery)
+            }
+        }
+
+        """
+    }
+
     public static func flannelVXLANConfiguration(
         nodeName: String,
         containerServiceUserID: Int = 0,

@@ -279,6 +279,9 @@ struct CRIShimRuntimeServerTests {
 
             _ = try await client.updateRuntimeConfig(request)
             try await channel.close().get()
+            await server.stop()
+            try await serverTask.value
+            await shutdown(group)
         }
     }
 
@@ -2777,10 +2780,15 @@ private func runVMNetRecoveryAdmissionRejectionScenario(
 
 private func waitForSocket(at path: String) async throws {
     for _ in 0..<100 {
-        if FileManager.default.fileExists(atPath: path) {
+        do {
+            let socket = try connectedUnixSocket(path: path)
+            _ = close(socket)
             return
+        } catch let error as POSIXError
+            where error.code == .ENOENT || error.code == .ECONNREFUSED
+        {
+            try await Task.sleep(for: .milliseconds(10))
         }
-        try await Task.sleep(for: .milliseconds(10))
     }
     throw CRIShimRuntimeServerTestError.socketDidNotStart(path)
 }

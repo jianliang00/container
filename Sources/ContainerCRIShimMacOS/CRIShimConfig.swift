@@ -26,6 +26,9 @@ public enum CRIShimConfigDefaults {
     public static let vmnetRecoveryRequestURL = URL(
         fileURLWithPath: "/var/lib/container/vmnet-recovery/requests/fence.json"
     )
+    public static let vmnetRecoveryStatusURL = URL(
+        fileURLWithPath: "/var/lib/container/vmnet-recovery/status.json"
+    )
     public static let userConfigURL = URL(
         fileURLWithPath: ("~/.config/container/\(fileName)" as NSString).expandingTildeInPath
     )
@@ -334,8 +337,10 @@ public struct VMNetRecoveryConfig: Codable, Equatable, Sendable {
     public static let defaultPollIntervalSeconds = 2
     public static let defaultHealthyProbeFailureThreshold = 3
 
+    public var nodeName: String?
     public var statePath: String?
     public var requestPath: String?
+    public var statusPath: String?
     public var requestWriterUID: Int
     public var maxRebootAttempts: Int
     public var minimumRebootIntervalSeconds: Int
@@ -346,8 +351,10 @@ public struct VMNetRecoveryConfig: Codable, Equatable, Sendable {
     public var healthyProbeFailureThreshold: Int
 
     public init(
+        nodeName: String? = nil,
         statePath: String? = nil,
         requestPath: String? = nil,
+        statusPath: String? = nil,
         requestWriterUID: Int = 0,
         maxRebootAttempts: Int = Self.defaultMaxRebootAttempts,
         minimumRebootIntervalSeconds: Int = Self.defaultMinimumRebootIntervalSeconds,
@@ -357,8 +364,10 @@ public struct VMNetRecoveryConfig: Codable, Equatable, Sendable {
         pollIntervalSeconds: Int = Self.defaultPollIntervalSeconds,
         healthyProbeFailureThreshold: Int = Self.defaultHealthyProbeFailureThreshold
     ) {
+        self.nodeName = nodeName
         self.statePath = statePath
         self.requestPath = requestPath
+        self.statusPath = statusPath
         self.requestWriterUID = requestWriterUID
         self.maxRebootAttempts = maxRebootAttempts
         self.minimumRebootIntervalSeconds = minimumRebootIntervalSeconds
@@ -370,8 +379,10 @@ public struct VMNetRecoveryConfig: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case nodeName
         case statePath
         case requestPath
+        case statusPath
         case requestWriterUID
         case maxRebootAttempts
         case minimumRebootIntervalSeconds
@@ -384,8 +395,10 @@ public struct VMNetRecoveryConfig: Codable, Equatable, Sendable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        nodeName = try container.decodeIfPresent(String.self, forKey: .nodeName)
         statePath = try container.decodeIfPresent(String.self, forKey: .statePath)
         requestPath = try container.decodeIfPresent(String.self, forKey: .requestPath)
+        statusPath = try container.decodeIfPresent(String.self, forKey: .statusPath)
         requestWriterUID = try container.decodeIfPresent(Int.self, forKey: .requestWriterUID) ?? 0
         maxRebootAttempts = try container.decodeIfPresent(Int.self, forKey: .maxRebootAttempts) ?? Self.defaultMaxRebootAttempts
         minimumRebootIntervalSeconds =

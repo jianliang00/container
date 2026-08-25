@@ -43,8 +43,10 @@
         "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
         "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json",
         "vmnetRecovery": {
+            "nodeName": "__NODE_NAME__",
             "statePath": "/var/lib/container/vmnet-recovery/state.json",
             "requestPath": "/var/lib/container/vmnet-recovery/requests/fence.json",
+            "statusPath": "/var/lib/container/vmnet-recovery/status.json",
             "requestWriterUID": 0,
             "maxRebootAttempts": 2,
             "minimumRebootIntervalSeconds": 120,

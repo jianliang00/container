@@ -98,8 +98,10 @@ struct CRIShimConfigTests {
         let recovery = config.resolvedVMNetRecoveryConfig
 
         #expect(podNetwork.vmnetDisconnectRecovery == .rebootNode)
+        #expect(recovery.nodeName == nil)
         #expect(recovery.statePath == "/var/lib/container/vmnet-recovery/state.json")
         #expect(recovery.requestPath == "/var/lib/container/vmnet-recovery/requests/fence.json")
+        #expect(recovery.statusPath == nil)
         #expect(recovery.requestWriterUID == 0)
         #expect(recovery.maxRebootAttempts == 2)
         #expect(recovery.minimumRebootIntervalSeconds == 120)
@@ -115,8 +117,10 @@ struct CRIShimConfigTests {
         var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
         config.podNetwork?.vmnetDisconnectRecovery = .rebootNode
         config.podNetwork?.vmnetRecovery = VMNetRecoveryConfig(
+            nodeName: "invalid node",
             statePath: "relative-state.json",
             requestPath: "relative-request.json",
+            statusPath: "/tmp/recovery-status.json",
             requestWriterUID: -1,
             maxRebootAttempts: 0,
             minimumRebootIntervalSeconds: -1,
@@ -130,6 +134,16 @@ struct CRIShimConfigTests {
         let issues = config.validationIssues
         #expect(issues.contains("podNetwork.vmnetRecovery.statePath must be an absolute path"))
         #expect(issues.contains("podNetwork.vmnetRecovery.requestPath must be an absolute path"))
+        #expect(
+            issues.contains(
+                "podNetwork.vmnetRecovery.statusPath must be /var/lib/container/vmnet-recovery/status.json"
+            )
+        )
+        #expect(
+            issues.contains(
+                "podNetwork.vmnetRecovery.nodeName may only contain letters, numbers, '.', '_', and '-', and must start with a letter or number"
+            )
+        )
         #expect(issues.contains("podNetwork.vmnetRecovery.requestWriterUID must be a valid uid"))
         #expect(issues.contains("podNetwork.vmnetRecovery.maxRebootAttempts must be greater than zero"))
         #expect(issues.contains("podNetwork.vmnetRecovery.minimumRebootIntervalSeconds must not be negative"))
@@ -138,6 +152,75 @@ struct CRIShimConfigTests {
         #expect(issues.contains("podNetwork.vmnetRecovery.verificationTimeoutSeconds must be greater than zero"))
         #expect(issues.contains("podNetwork.vmnetRecovery.pollIntervalSeconds must be greater than zero"))
         #expect(issues.contains("podNetwork.vmnetRecovery.healthyProbeFailureThreshold must be greater than zero"))
+    }
+
+    @Test
+    func rebootRecoveryStatusRequiresNodeIdentity() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.podNetwork?.vmnetDisconnectRecovery = .rebootNode
+        config.podNetwork?.vmnetRecovery = VMNetRecoveryConfig(
+            statusPath: CRIShimConfigDefaults.vmnetRecoveryStatusURL.path
+        )
+
+        #expect(
+            config.validationIssues.contains(
+                "podNetwork.vmnetRecovery.nodeName is required when statusPath is configured"
+            )
+        )
+
+        config.podNetwork?.vmnetRecovery?.nodeName = "macos-node-1"
+        #expect(config.validationIssues.isEmpty)
+    }
+
+    @Test
+    func configuredRecoveryStatusIsValidatedWhileRecoveryIsDisabled() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.podNetwork?.vmnetRecovery = VMNetRecoveryConfig(
+            nodeName: "invalid node",
+            statusPath: "/tmp/recovery-status.json"
+        )
+
+        #expect(
+            config.validationIssues.contains(
+                "podNetwork.vmnetRecovery.statusPath must be /var/lib/container/vmnet-recovery/status.json"
+            )
+        )
+        #expect(
+            config.validationIssues.contains(
+                "podNetwork.vmnetRecovery.nodeName may only contain letters, numbers, '.', '_', and '-', and must start with a letter or number"
+            )
+        )
+    }
+
+    @Test
+    func recoveryStatusPathCannotOverlapAuthorityFiles() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.podNetwork?.vmnetDisconnectRecovery = .rebootNode
+        config.podNetwork?.vmnetRecovery = VMNetRecoveryConfig(
+            nodeName: "macos-node-1",
+            statePath: CRIShimConfigDefaults.vmnetRecoveryStatusURL.path,
+            requestPath: CRIShimConfigDefaults.vmnetRecoveryStatusURL.path,
+            statusPath: CRIShimConfigDefaults.vmnetRecoveryStatusURL.path
+        )
+
+        let issues = config.validationIssues
+        #expect(issues.contains("podNetwork.vmnetRecovery statusPath and statePath must be different"))
+        #expect(issues.contains("podNetwork.vmnetRecovery statusPath and requestPath must be different"))
+    }
+
+    @Test
+    func recoveryStatusPathRejectsSurroundingWhitespace() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.podNetwork?.vmnetRecovery = VMNetRecoveryConfig(
+            nodeName: "macos-node-1",
+            statusPath: " \(CRIShimConfigDefaults.vmnetRecoveryStatusURL.path) "
+        )
+
+        #expect(
+            config.validationIssues.contains(
+                "podNetwork.vmnetRecovery.statusPath must be /var/lib/container/vmnet-recovery/status.json"
+            )
+        )
     }
 
     @Test

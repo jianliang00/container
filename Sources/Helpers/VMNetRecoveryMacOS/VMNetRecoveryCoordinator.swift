@@ -70,20 +70,37 @@ struct VMNetRecoveryCoordinator: Sendable {
     let dependencies: VMNetRecoveryCoordinatorDependencies
     let log: Logger
     private let healthyProbeTracker: VMNetRecoveryHealthyProbeTracker
+    private let statusRecorder: VMNetRecoveryStatusRecorder?
 
     init(
         config: CRIShimConfig,
         dependencies: VMNetRecoveryCoordinatorDependencies = .live,
+        statusRecorder: VMNetRecoveryStatusRecorder? = nil,
         log: Logger
     ) {
         self.config = config
         self.dependencies = dependencies
         self.healthyProbeTracker = VMNetRecoveryHealthyProbeTracker()
+        let recovery = config.resolvedVMNetRecoveryConfig
+        if let statusRecorder {
+            self.statusRecorder = statusRecorder
+        } else if recovery.statusPath == CRIShimConfigDefaults.vmnetRecoveryStatusURL.path {
+            self.statusRecorder = VMNetRecoveryStatusRecorder(
+                store: VMNetRecoveryStatusFileStore(url: CRIShimConfigDefaults.vmnetRecoveryStatusURL)
+            )
+        } else {
+            self.statusRecorder = nil
+        }
         self.log = log
     }
 
     func run() async throws {
         let pollSeconds = max(1, config.resolvedVMNetRecoveryConfig.pollIntervalSeconds)
+        recordStatusBestEffort(
+            event: .starting,
+            currentBootSessionID: try? dependencies.currentBootSessionID()
+        )
+        defer { removeStatusBestEffort() }
         var previousResult: VMNetRecoveryCoordinatorResult?
         while !Task.isCancelled {
             let result: VMNetRecoveryCoordinatorResult
@@ -94,6 +111,14 @@ struct VMNetRecoveryCoordinator: Sendable {
                     throw error
                 }
                 result = .blocked("reconciliation failed: \(error)")
+            }
+            if result == .disabled {
+                removeStatusBestEffort()
+            } else {
+                recordStatusBestEffort(
+                    event: .result(result),
+                    currentBootSessionID: try? dependencies.currentBootSessionID()
+                )
             }
             if result != previousResult {
                 logResult(result)
@@ -173,6 +198,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                     attemptWindow: TimeInterval(recovery.attemptWindowSeconds),
                     now: now
                 )
+                recordStatusBestEffort(event: .fenced, currentBootSessionID: bootSessionID)
                 await healthyProbeTracker.recordSuccess()
                 observation = nil
             }
@@ -188,6 +214,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                 if state.phase == .healthy {
                     return .idle
                 }
+                recordStatusBestEffort(event: .fenced, currentBootSessionID: bootSessionID)
             }
         } else {
             await healthyProbeTracker.recordSuccess()
@@ -203,6 +230,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                     currentBootSessionID: bootSessionID,
                     now: now
                 )
+                recordStatusBestEffort(event: .verificationStarted, currentBootSessionID: bootSessionID)
                 return await verify(
                     state: state,
                     store: store,
@@ -212,6 +240,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                     now: now
                 )
             }
+            recordStatusBestEffort(event: .fenced, currentBootSessionID: bootSessionID)
             do {
                 _ = try store.requestReboot(
                     networkName: networkName,
@@ -229,7 +258,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                     throw error
                 }
             }
-            try await dependencies.reboot()
+            try await requestHostReboot(currentBootSessionID: bootSessionID)
             return .rebootRequested
         case .rebootRequested:
             if state.bootSessionID == bootSessionID {
@@ -252,7 +281,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                         throw error
                     }
                 }
-                try await dependencies.reboot()
+                try await requestHostReboot(currentBootSessionID: bootSessionID)
                 return .rebootRequested
             }
             state = try store.beginVerification(
@@ -260,6 +289,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                 currentBootSessionID: bootSessionID,
                 now: now
             )
+            recordStatusBestEffort(event: .verificationStarted, currentBootSessionID: bootSessionID)
             return await verify(
                 state: state,
                 store: store,
@@ -272,6 +302,7 @@ struct VMNetRecoveryCoordinator: Sendable {
             guard state.bootSessionID != bootSessionID else {
                 return .blocked("verification requires a new host boot session")
             }
+            recordStatusBestEffort(event: .verificationStarted, currentBootSessionID: bootSessionID)
             return await verify(
                 state: state,
                 store: store,
@@ -319,6 +350,7 @@ struct VMNetRecoveryCoordinator: Sendable {
             attemptWindow: TimeInterval(recovery.attemptWindowSeconds),
             now: request.observedAt
         )
+        recordStatusBestEffort(event: .fenced, currentBootSessionID: currentBootSessionID)
         try requestStore.remove()
     }
 
@@ -352,6 +384,7 @@ struct VMNetRecoveryCoordinator: Sendable {
         recovery: VMNetRecoveryConfig,
         now: Date
     ) async -> VMNetRecoveryCoordinatorResult {
+        recordStatusBestEffort(event: .verificationStarted, currentBootSessionID: bootSessionID)
         do {
             let verification = try await dependencies.verify(config, state.networkInstanceID)
             _ = try store.recordHealthyObservation(
@@ -361,6 +394,7 @@ struct VMNetRecoveryCoordinator: Sendable {
                 attemptWindow: TimeInterval(recovery.attemptWindowSeconds),
                 now: now
             )
+            recordStatusBestEffort(event: .recovered, currentBootSessionID: bootSessionID)
             return .recovered(networkInstanceID: verification.networkInstanceID)
         } catch {
             return .waitingForVerification(String(describing: error))
@@ -389,9 +423,53 @@ struct VMNetRecoveryCoordinator: Sendable {
                 currentBootSessionID: bootSessionID,
                 now: now
             )
+            recordStatusBestEffort(event: .recovered, currentBootSessionID: bootSessionID)
             return .recovered(networkInstanceID: verification.networkInstanceID)
         } catch {
             return .waitingForVerification(String(describing: error))
+        }
+    }
+
+    private func requestHostReboot(currentBootSessionID: String) async throws {
+        recordStatusBestEffort(event: .rebootCommandRequested, currentBootSessionID: currentBootSessionID)
+        do {
+            try await dependencies.reboot()
+            recordStatusBestEffort(event: .rebootCommandAccepted, currentBootSessionID: currentBootSessionID)
+        } catch {
+            recordStatusBestEffort(
+                event: .rebootCommandFailed(String(describing: error)),
+                currentBootSessionID: currentBootSessionID
+            )
+            throw error
+        }
+    }
+
+    private func recordStatusBestEffort(
+        event: VMNetRecoveryStatusEvent,
+        currentBootSessionID: String?
+    ) {
+        do {
+            try statusRecorder?.record(
+                event: event,
+                config: config,
+                currentBootSessionID: currentBootSessionID
+            )
+        } catch {
+            log.error(
+                "failed to publish vmnet recovery status",
+                metadata: ["reason": "\(error)"]
+            )
+        }
+    }
+
+    private func removeStatusBestEffort() {
+        do {
+            try statusRecorder?.remove()
+        } catch {
+            log.error(
+                "failed to remove vmnet recovery status",
+                metadata: ["reason": "\(error)"]
+            )
         }
     }
 

@@ -217,6 +217,7 @@ public enum MacOSKubeadmPlanner {
                     path: options.rooted("/etc/kubernetes/container-cri-shim-macos-config.json"),
                     contents: MacOSKubeadmRenderer.criShimConfiguration(
                         sandboxImage: options.sandboxImage,
+                        nodeName: options.nodeName,
                         networkMode: options.networkMode,
                         dualStackEnabled: options.enableDualStack,
                         vmnetDisconnectRecovery: options.vmnetDisconnectRecovery,
@@ -438,6 +439,15 @@ public enum MacOSKubeadmPlanner {
             stopLaunchdJobStep(
                 message: "stop vmnet recovery launchd job if present",
                 label: "com.apple.container.vmnet-recovery-macos"
+            ),
+            MacOSKubeadmStep(
+                message: "remove stale vmnet recovery status",
+                action: .removePath(
+                    path: options.rooted("/var/lib/container/vmnet-recovery/status.json"),
+                    recursive: false,
+                    bestEffort: true,
+                    sensitive: false
+                )
             ),
             stopLaunchdJobStep(
                 message: "stop kubelet launchd job if present",
@@ -681,6 +691,15 @@ public enum MacOSKubeadmPlanner {
             stopLaunchdJobStep(
                 message: "stop previous vmnet recovery launchd job if present",
                 label: "com.apple.container.vmnet-recovery-macos"
+            ),
+            MacOSKubeadmStep(
+                message: "remove stale vmnet recovery status",
+                action: .removePath(
+                    path: options.rooted("/var/lib/container/vmnet-recovery/status.json"),
+                    recursive: false,
+                    bestEffort: true,
+                    sensitive: false
+                )
             ),
         ]
         if !networkMode.usesPodNetworking {

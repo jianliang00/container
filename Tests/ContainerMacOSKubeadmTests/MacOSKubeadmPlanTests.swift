@@ -115,6 +115,8 @@ struct MacOSKubeadmPlanTests {
                     && !contents.contains(#""networkMTU""#)
                     && contents.contains(#""dualStackEnabled": false"#)
                     && contents.contains(#""vmnetDisconnectRecovery": "disabled""#)
+                    && contents.contains(#""nodeName": "macos-ci-1""#)
+                    && contents.contains(#""statusPath": "/var/lib/container/vmnet-recovery/status.json""#)
                     && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
                     && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
             })
@@ -251,6 +253,23 @@ struct MacOSKubeadmPlanTests {
         )
         #expect(enabledPlan.steps.contains { $0.message == "start vmnet recovery launchd job" })
         #expect(enabledPlan.steps.contains { $0.message == "kickstart vmnet recovery launchd job" })
+        #expect(
+            enabledPlan.steps.contains { step in
+                guard step.message == "remove stale vmnet recovery status",
+                    case .removePath(let path, false, true, false) = step.action
+                else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/container/vmnet-recovery/status.json"
+            })
+        let enabledDescriptions = enabledPlan.steps.map(\.message)
+        let stopRecoveryIndex = try #require(
+            enabledDescriptions.firstIndex(of: "stop previous vmnet recovery launchd job if present")
+        )
+        let removeStatusIndex = try #require(
+            enabledDescriptions.firstIndex(of: "remove stale vmnet recovery status")
+        )
+        #expect(stopRecoveryIndex < removeStatusIndex)
 
         let disabled = try makeOptions(startServices: true)
         let disabledPlan = try MacOSKubeadmPlanner.joinPlan(options: disabled)
@@ -264,6 +283,17 @@ struct MacOSKubeadmPlanTests {
         )
         #expect(!disabledPlan.steps.contains { $0.message == "start vmnet recovery launchd job" })
         #expect(disabledPlan.steps.contains { $0.message == "remove previous vmnet recovery launchd plist" })
+        #expect(disabledPlan.steps.contains { $0.message == "remove stale vmnet recovery status" })
+        #expect(
+            disabledPlan.steps.contains { step in
+                guard step.message == "remove stale vmnet recovery status",
+                    case .removePath(let path, false, true, false) = step.action
+                else {
+                    return false
+                }
+                return path == "/tmp/macos-node/var/lib/container/vmnet-recovery/status.json"
+            }
+        )
     }
 
     @Test func dualStackJoinPlanRendersExplicitNodeContract() throws {
@@ -1366,6 +1396,12 @@ struct MacOSKubeadmPlanTests {
         let removeBootstrapIndex = try #require(
             descriptions.firstIndex(of: "remove container system bootstrap launchd plist")
         )
+        let stopRecoveryIndex = try #require(
+            descriptions.firstIndex(of: "stop vmnet recovery launchd job if present")
+        )
+        let removeRecoveryStatusIndex = try #require(
+            descriptions.firstIndex(of: "remove stale vmnet recovery status")
+        )
         let stopKubeletIndex = try #require(descriptions.firstIndex(of: "stop kubelet launchd job if present"))
         let stopProxyIndex = try #require(descriptions.firstIndex(of: "stop kube-proxy launchd job if present"))
         let withdrawProxyIndex = try #require(
@@ -1389,7 +1425,9 @@ struct MacOSKubeadmPlanTests {
         #expect(preflightIndex < stopBootstrapIndex)
         #expect(stopBootstrapIndex < cleanupOperationsIndex)
         #expect(cleanupOperationsIndex < removeBootstrapIndex)
-        #expect(removeBootstrapIndex < stopKubeletIndex)
+        #expect(removeBootstrapIndex < stopRecoveryIndex)
+        #expect(stopRecoveryIndex < removeRecoveryStatusIndex)
+        #expect(removeRecoveryStatusIndex < stopKubeletIndex)
         #expect(stopKubeletIndex < firstGeneratedRemoveIndex)
         #expect(stopKubeletIndex < stopProxyIndex)
         #expect(stopProxyIndex < withdrawProxyIndex)

@@ -504,6 +504,7 @@ public struct MacOSKubeadmStatusRunner {
         "/var/lib/container/flannel-vxlan/status.json",
         "/var/lib/container/vmnet-recovery/state.json",
         "/var/lib/container/vmnet-recovery/requests/fence.json",
+        "/var/lib/container/vmnet-recovery/status.json",
         MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath,
     ]
 

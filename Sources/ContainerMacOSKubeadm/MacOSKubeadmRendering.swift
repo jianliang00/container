@@ -133,6 +133,7 @@ public enum MacOSKubeadmRenderer {
 
     public static func criShimConfiguration(
         sandboxImage: String,
+        nodeName: String,
         networkMode: MacOSKubeadmNetworkMode = .full,
         dualStackEnabled: Bool = false,
         vmnetDisconnectRecovery: MacOSKubeadmVMNetDisconnectRecovery = .disabled,
@@ -194,8 +195,10 @@ public enum MacOSKubeadmRenderer {
                         "runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json",
                         "readyStatePath": "/var/lib/container/flannel-vxlan/ready.json",
                         "vmnetRecovery": {
+                            "nodeName": \(jsonString(nodeName)),
                             "statePath": "/var/lib/container/vmnet-recovery/state.json",
                             "requestPath": "/var/lib/container/vmnet-recovery/requests/fence.json",
+                            "statusPath": "/var/lib/container/vmnet-recovery/status.json",
                             "requestWriterUID": \(containerServiceUserID),
                             "maxRebootAttempts": 2,
                             "minimumRebootIntervalSeconds": 120,

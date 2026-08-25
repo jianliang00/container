@@ -121,6 +121,27 @@ extension CRIShimConfig {
             if podNetwork.enabled == nil {
                 issues.append("podNetwork.enabled is required")
             }
+            if let recovery = podNetwork.vmnetRecovery,
+                let statusPath = recovery.statusPath
+            {
+                let normalizedStatusPath = statusPath.trimmed
+                if statusPath != CRIShimConfigDefaults.vmnetRecoveryStatusURL.path {
+                    issues.append(
+                        "podNetwork.vmnetRecovery.statusPath must be \(CRIShimConfigDefaults.vmnetRecoveryStatusURL.path)"
+                    )
+                }
+                validateNodeName(
+                    recovery.nodeName,
+                    name: "podNetwork.vmnetRecovery.nodeName",
+                    issues: &issues
+                )
+                if normalizedStatusPath == recovery.statePath?.trimmed {
+                    issues.append("podNetwork.vmnetRecovery statusPath and statePath must be different")
+                }
+                if normalizedStatusPath == recovery.requestPath?.trimmed {
+                    issues.append("podNetwork.vmnetRecovery statusPath and requestPath must be different")
+                }
+            }
             if podNetwork.vmnetDisconnectRecovery == .rebootNode,
                 podNetwork.enabled != true
             {
@@ -264,6 +285,20 @@ private func validateOptionalPath(_ value: String?, name: String, allowUnixSchem
 private func validateNonEmpty(_ value: String?, name: String, issues: inout [String]) {
     guard let value = value?.trimmed, !value.isEmpty else {
         issues.append("\(name) is required")
+        return
+    }
+}
+
+private func validateNodeName(_ value: String?, name: String, issues: inout [String]) {
+    guard let value, !value.trimmed.isEmpty else {
+        issues.append("\(name) is required when statusPath is configured")
+        return
+    }
+    guard value == value.trimmed,
+        value.utf8.count <= 253,
+        value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil
+    else {
+        issues.append("\(name) may only contain letters, numbers, '.', '_', and '-', and must start with a letter or number")
         return
     }
 }

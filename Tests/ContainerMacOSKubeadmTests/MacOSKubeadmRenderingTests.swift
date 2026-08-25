@@ -143,6 +143,10 @@ struct MacOSKubeadmRenderingTests {
             ))
         #expect(
             MacOSKubeadmStatusRunner.inspectedFiles.contains(
+                "/var/lib/container/vmnet-recovery/status.json"
+            ))
+        #expect(
+            MacOSKubeadmStatusRunner.inspectedFiles.contains(
                 "/var/lib/container/flannel-vxlan/status.json"
             ))
         #expect(
@@ -209,6 +213,7 @@ struct MacOSKubeadmRenderingTests {
     @Test func CRIConfigurationCanEnableGUIForOneRuntimeClass() throws {
         let rendered = MacOSKubeadmRenderer.criShimConfiguration(
             sandboxImage: "localhost/macos-sandbox:test",
+            nodeName: "macos-ci-1",
             runtimeClasses: [
                 MacOSKubeadmRuntimeClassProfile(
                     name: "macos-gui",
@@ -235,6 +240,7 @@ struct MacOSKubeadmRenderingTests {
     @Test func CRIConfigurationRendersVMNetDisconnectRecovery() throws {
         let rendered = MacOSKubeadmRenderer.criShimConfiguration(
             sandboxImage: "localhost/macos-sandbox:test",
+            nodeName: "macos-ci-1",
             vmnetDisconnectRecovery: .stopSandbox
         )
         let object = try #require(
@@ -248,6 +254,7 @@ struct MacOSKubeadmRenderingTests {
     @Test func CRIConfigurationRendersBoundedRebootRecovery() throws {
         let rendered = MacOSKubeadmRenderer.criShimConfiguration(
             sandboxImage: "localhost/macos-sandbox:test",
+            nodeName: "macos-ci-1",
             vmnetDisconnectRecovery: .rebootNode,
             containerServiceUserID: 501
         )
@@ -258,8 +265,10 @@ struct MacOSKubeadmRenderingTests {
         let recovery = try #require(podNetwork["vmnetRecovery"] as? [String: Any])
 
         #expect(podNetwork["vmnetDisconnectRecovery"] as? String == "reboot-node")
+        #expect(recovery["nodeName"] as? String == "macos-ci-1")
         #expect(recovery["statePath"] as? String == "/var/lib/container/vmnet-recovery/state.json")
         #expect(recovery["requestPath"] as? String == "/var/lib/container/vmnet-recovery/requests/fence.json")
+        #expect(recovery["statusPath"] as? String == "/var/lib/container/vmnet-recovery/status.json")
         #expect(recovery["requestWriterUID"] as? Int == 501)
         #expect(recovery["maxRebootAttempts"] as? Int == 2)
         #expect(recovery["minimumRebootIntervalSeconds"] as? Int == 120)
@@ -268,6 +277,33 @@ struct MacOSKubeadmRenderingTests {
         #expect(recovery["verificationTimeoutSeconds"] as? Int == 300)
         #expect(recovery["pollIntervalSeconds"] as? Int == 2)
         #expect(recovery["healthyProbeFailureThreshold"] as? Int == 3)
+    }
+
+    @Test func packagedVMNetRecoveryConfigurationMatchesRenderer() throws {
+        let rendered = MacOSKubeadmRenderer.criShimConfiguration(
+            sandboxImage: "localhost/macos-sandbox:latest",
+            nodeName: "__NODE_NAME__"
+        )
+        let renderedObject = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        let renderedPodNetwork = try #require(renderedObject["podNetwork"] as? [String: Any])
+        let renderedRecovery = try #require(renderedPodNetwork["vmnetRecovery"] as? NSDictionary)
+
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let packagedURL = repositoryRoot.appendingPathComponent(
+            "packaging/macos-node/config/container-cri-shim-macos-config.json"
+        )
+        let packagedObject = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: packagedURL)) as? [String: Any]
+        )
+        let packagedPodNetwork = try #require(packagedObject["podNetwork"] as? [String: Any])
+        let packagedRecovery = try #require(packagedPodNetwork["vmnetRecovery"] as? NSDictionary)
+
+        #expect(packagedRecovery == renderedRecovery)
     }
 
     @Test func kubeletPlistRendersDualNodeIPsAsOneArgument() throws {
@@ -318,7 +354,8 @@ struct MacOSKubeadmRenderingTests {
         #expect(object["dualStackEnabled"] as? Bool == false)
 
         let criShim = MacOSKubeadmRenderer.criShimConfiguration(
-            sandboxImage: "localhost/macos-sandbox:test"
+            sandboxImage: "localhost/macos-sandbox:test",
+            nodeName: "macos-ci-1"
         )
         let criShimObject = try #require(
             JSONSerialization.jsonObject(with: Data(criShim.utf8)) as? [String: Any]
@@ -330,6 +367,7 @@ struct MacOSKubeadmRenderingTests {
     @Test func fullModeConfigurationsRenderMatchingDualStackGate() throws {
         let criShim = MacOSKubeadmRenderer.criShimConfiguration(
             sandboxImage: "localhost/macos-sandbox:test",
+            nodeName: "macos-ci-1",
             dualStackEnabled: true
         )
         let criShimObject = try #require(
@@ -352,6 +390,7 @@ struct MacOSKubeadmRenderingTests {
     @Test func compatCRIConfigurationKeepsPodNetworkingDisabled() throws {
         let rendered = MacOSKubeadmRenderer.criShimConfiguration(
             sandboxImage: "localhost/macos-sandbox:test",
+            nodeName: "macos-ci-1",
             networkMode: .compat
         )
         let object = try #require(

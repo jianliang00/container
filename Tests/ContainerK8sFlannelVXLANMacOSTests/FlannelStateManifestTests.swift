@@ -20,6 +20,103 @@ import Testing
 @testable import ContainerK8sFlannelVXLANMacOS
 
 struct FlannelStateManifestTests {
+    @Test func legacyManagedStatePathsDecodeWithoutStatusPath() throws {
+        let data = Data(
+            """
+            {
+                "dataplaneOwnership": "/var/lib/container/flannel-vxlan/ownership.json",
+                "networkOwnership": "/var/lib/container/flannel-vxlan/network-ownership.json",
+                "hostIPv6GatewayOwnership": "/var/lib/container/flannel-vxlan/host-ipv6-gateway-ownership.json",
+                "forwardingOwnership": "/var/lib/container/flannel-vxlan/forwarding-ownership.json",
+                "ready": "/var/lib/container/flannel-vxlan/ready.json"
+            }
+            """.utf8
+        )
+
+        let paths = try JSONDecoder().decode(FlannelManagedStatePaths.self, from: data)
+
+        #expect(paths.statusPath == nil)
+        #expect(paths.all.count == 5)
+    }
+
+    @Test func configuredStatusPathParticipatesInManagedState() {
+        let config = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a",
+            statusPath: FlannelVXLANMacOSConfig.defaultStatusPath
+        )
+
+        #expect(config.managedStatePaths.statusPath == FlannelVXLANMacOSConfig.defaultStatusPath)
+        #expect(config.managedStatePaths.all.contains(FlannelVXLANMacOSConfig.defaultStatusPath))
+    }
+
+    @Test func legacyManifestCanAtomicallyAddStatusPathWhileNetworkOwnershipRemains() throws {
+        let fixture = try ManifestFixture()
+        defer { fixture.remove() }
+        let lock = try fixture.lock()
+        defer { lock.release() }
+
+        let legacyManifest = try fixture.coordinator.claim(
+            configPath: fixture.configPath,
+            config: fixture.config,
+            whileHolding: lock
+        )
+        try fixture.createState(at: fixture.config.networkOwnershipStatePath)
+        var upgradedConfig = fixture.config
+        upgradedConfig.statusPath = FlannelVXLANMacOSConfig.defaultStatusPath
+        var incompatibleUpgrade = upgradedConfig
+        incompatibleUpgrade.nodeName = "mac-b"
+
+        #expect(throws: FlannelVXLANError.self) {
+            try fixture.coordinator.validateClaim(
+                configPath: fixture.configPath,
+                config: incompatibleUpgrade,
+                whileHolding: lock
+            )
+        }
+        #expect(throws: FlannelVXLANError.self) {
+            try fixture.coordinator.claim(
+                configPath: fixture.configPath,
+                config: incompatibleUpgrade,
+                whileHolding: lock
+            )
+        }
+        #expect(try fixture.store.load() == legacyManifest)
+
+        try fixture.coordinator.validateClaim(
+            configPath: fixture.configPath,
+            config: upgradedConfig,
+            whileHolding: lock
+        )
+        #expect(try fixture.store.load() == legacyManifest)
+
+        let upgradedManifest = try fixture.coordinator.claim(
+            configPath: fixture.configPath,
+            config: upgradedConfig,
+            whileHolding: lock
+        )
+        #expect(upgradedManifest.statePaths.statusPath == FlannelVXLANMacOSConfig.defaultStatusPath)
+        #expect(try fixture.store.load() == upgradedManifest)
+        #expect(FileManager.default.fileExists(atPath: fixture.config.networkOwnershipStatePath))
+
+        #expect(throws: FlannelVXLANError.self) {
+            try fixture.coordinator.validateClaim(
+                configPath: fixture.configPath,
+                config: fixture.config,
+                whileHolding: lock
+            )
+        }
+        #expect(throws: FlannelVXLANError.self) {
+            try fixture.coordinator.claim(
+                configPath: fixture.configPath,
+                config: fixture.config,
+                whileHolding: lock
+            )
+        }
+        #expect(try fixture.store.load() == upgradedManifest)
+        #expect(FileManager.default.fileExists(atPath: fixture.config.networkOwnershipStatePath))
+    }
+
     @Test func customStateIsDiscoveredAfterConfigurationDisappears() throws {
         let fixture = try ManifestFixture()
         defer { fixture.remove() }

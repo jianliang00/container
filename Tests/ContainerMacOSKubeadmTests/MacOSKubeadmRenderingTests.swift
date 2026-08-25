@@ -142,6 +142,10 @@ struct MacOSKubeadmRenderingTests {
                 "/var/lib/container/vmnet-recovery/state.json"
             ))
         #expect(
+            MacOSKubeadmStatusRunner.inspectedFiles.contains(
+                "/var/lib/container/flannel-vxlan/status.json"
+            ))
+        #expect(
             MacOSKubeadmStatusRunner.launchdLabels.contains(
                 "com.apple.container.vmnet-recovery-macos"
             ))
@@ -159,7 +163,30 @@ struct MacOSKubeadmRenderingTests {
         #expect(object["nodeName"] as? String == "macos-ci-1")
         #expect(object["containerServiceUserID"] as? Int == 501)
         #expect(object["dualStackEnabled"] as? Bool == false)
+        #expect(
+            object["statusPath"] as? String
+                == "/var/lib/container/flannel-vxlan/status.json"
+        )
         #expect(object["underlayInterface"] == nil)
+    }
+
+    @Test func packagedFlannelStatusPathMatchesRenderedConfiguration() throws {
+        let rendered = MacOSKubeadmRenderer.flannelVXLANConfiguration(nodeName: "macos-ci-1")
+        let renderedObject = try #require(
+            JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+        )
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let packagedURL = repositoryRoot.appendingPathComponent(
+            "packaging/macos-node/config/flannel-vxlan-macos.conf"
+        )
+        let packagedObject = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: packagedURL)) as? [String: Any]
+        )
+
+        #expect(packagedObject["statusPath"] as? String == renderedObject["statusPath"] as? String)
     }
 
     @Test func flannelConfigurationRendersExplicitNetworkSourceAndUnderlay() throws {

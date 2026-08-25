@@ -24,7 +24,7 @@ import Foundation
 struct FlannelVXLANMacOS: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "container-flannel-vxlan-macos",
-        abstract: "Connect a macOS Kubernetes PodCIDR to a Flannel IPv4 VXLAN network."
+        abstract: "Connect a macOS Kubernetes Pod network to Flannel VXLAN."
     )
 
     @Option(name: [.customLong("config"), .short], help: "Path to the macOS Flannel VXLAN JSON config.")
@@ -162,6 +162,8 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             }
             return
         }
+        let statusStore = config.statusPath.map { FlannelStatusFileStore(path: $0) }
+        let statusRecorder = statusStore.map { FlannelStatusRecorder(store: $0) }
         if withdraw {
             do {
                 try requestDaemonWithdrawal()
@@ -182,6 +184,7 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 let forwardingRecovery = try FlannelOfflineForwardingRecovery(config: config)
                     .restoreIfForwardingOnly(whileHolding: lifetimeLock)
                 if case .restored(let families) = forwardingRecovery {
+                    Self.removeStatusBestEffort(statusRecorder)
                     try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
                     print(
                         "offline forwarding recovery complete families="
@@ -192,13 +195,28 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 let hasDataplaneState = config.withdrawalStatePaths.contains {
                     FileManager.default.fileExists(atPath: $0)
                 }
+                let hasStatusState = try config.statusPath.map(Self.pathEntryExists) ?? false
+                if !hasDataplaneState, hasStatusState {
+                    do {
+                        try statusStore?.remove()
+                    } catch {
+                        throw FlannelVXLANError.runtime(
+                            "offline status cleanup failed: \(error)"
+                        )
+                    }
+                    try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
+                    print("offline status cleanup complete")
+                    return
+                }
                 let hasNodeCredential = FileManager.default.fileExists(atPath: config.nodeKubeconfig)
                 guard hasDataplaneState || hasNodeCredential else {
                     print("no running or owned Flannel dataplane requires withdrawal")
                     return
                 }
                 do {
-                    let result = try await makeController(config: config).cleanup()
+                    let controller = try makeController(config: config)
+                    let result = try await controller.cleanup()
+                    Self.removeStatusBestEffort(statusRecorder)
                     try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
                     print(
                         "offline withdrawal complete routes=\(result.removedRoutes.count) "
@@ -208,6 +226,11 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                     )
                     return
                 } catch let cleanupError {
+                    Self.recordFailureBestEffort(
+                        cleanupError,
+                        config: config,
+                        recorder: statusRecorder
+                    )
                     throw FlannelVXLANError.runtime(
                         "daemon withdrawal failed: \(controlError); offline cleanup failed: \(cleanupError)"
                     )
@@ -227,10 +250,16 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 config: config,
                 whileHolding: lifetimeLock
             )
-            let result = try await FlannelHostOnlyNetworkPurger(config: config).purge()
-            try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
-            print("network purge complete present=\(result.networkWasPresent) removed=\(result.removed)")
-            return
+            do {
+                let result = try await FlannelHostOnlyNetworkPurger(config: config).purge()
+                Self.removeStatusBestEffort(statusRecorder)
+                try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
+                print("network purge complete present=\(result.networkWasPresent) removed=\(result.removed)")
+                return
+            } catch {
+                Self.recordFailureBestEffort(error, config: config, recorder: statusRecorder)
+                throw error
+            }
         }
         if checkPurge {
             let onlineDetail =
@@ -289,8 +318,14 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 config: config,
                 whileHolding: lifetimeLock
             )
-            let controller = try makeController(config: config)
-            let result = try await controller.cleanup()
+            let result: FlannelCleanupResult
+            do {
+                result = try await makeController(config: config).cleanup()
+            } catch {
+                Self.recordFailureBestEffort(error, config: config, recorder: statusRecorder)
+                throw error
+            }
+            Self.removeStatusBestEffort(statusRecorder)
             try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
             print(
                 "cleanup complete routes=\(result.removedRoutes.count) ipv6Routes=\(result.removedIPv6Routes.count) "
@@ -314,18 +349,29 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                 config: config,
                 whileHolding: lifetimeLock
             )
-            let controller = try makeController(config: config)
+            Self.recordStartingBestEffort(config: config, recorder: statusRecorder)
+            let controller: FlannelVXLANController
+            do {
+                controller = try makeController(config: config)
+            } catch {
+                Self.recordFailureBestEffort(error, generation: 1, config: config, recorder: statusRecorder)
+                throw error
+            }
             let result: FlannelVXLANReconcileResult
             do {
                 result = try await controller.runOnce()
             } catch {
+                Self.recordFailureBestEffort(error, generation: 1, config: config, recorder: statusRecorder)
                 do {
                     try await controller.shutdown()
+                    Self.removeStatusBestEffort(statusRecorder)
                 } catch let cleanupError {
+                    Self.recordFailureBestEffort(cleanupError, config: config, recorder: statusRecorder)
                     throw FlannelVXLANError.runtime("one-shot reconciliation failed: \(error); cleanup failed: \(cleanupError)")
                 }
                 throw error
             }
+            Self.recordResultBestEffort(result, generation: 1, config: config, recorder: statusRecorder)
             print(
                 "ready node=\(result.localNetwork.nodeName) podCIDR=\(result.localNetwork.podCIDR) "
                     + "underlay=\(result.underlay.ipv4Address) interface=\(result.interfaceName) "
@@ -335,7 +381,13 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
                     + "ipv6Interface=\(result.ipv6InterfaceName ?? "<none>") "
                     + "ipv6Peers=\(result.ipv6Peers.count) issues=\(result.issues.count)"
             )
-            try await controller.shutdown()
+            do {
+                try await controller.shutdown()
+                Self.removeStatusBestEffort(statusRecorder)
+            } catch {
+                Self.recordFailureBestEffort(error, config: config, recorder: statusRecorder)
+                throw error
+            }
             try manifestCoordinator.removeIfUnowned(whileHolding: lifetimeLock)
             return
         }
@@ -353,41 +405,84 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
             config: config,
             whileHolding: lifetimeLock
         )
-        let controller = try makeController(config: config)
+        Self.recordStartingBestEffort(config: config, recorder: statusRecorder)
+        let controller: FlannelVXLANController
+        do {
+            controller = try makeController(config: config)
+        } catch {
+            Self.recordFailureBestEffort(error, generation: 1, config: config, recorder: statusRecorder)
+            throw error
+        }
         let signalStream = terminationSignals()
-        let lifecycle = FlannelDaemonLifecycle(controller: controller)
-        let controlServer = FlannelControlServer(socketPath: controlSocketPath)
-        let daemonConfigPath = configPath
-        try controlServer.start(
-            withdrawalHandler: {
-                await lifecycle.withdraw()
-            },
-            checkPurgeHandler: { requestedClaim in
-                do {
-                    let activeManifest = try manifestCoordinator.requireExactClaim(
-                        configPath: daemonConfigPath,
-                        config: config,
-                        whileHolding: lifetimeLock
-                    )
-                    let activeClaim = try FlannelPurgePreflightClaim(manifest: activeManifest)
-                    guard requestedClaim == activeClaim else {
-                        throw FlannelVXLANError.invalidConfiguration(
-                            "purge preflight request does not match the active Flannel state manifest"
+        let lifecycle = FlannelDaemonLifecycle(
+            reconcile: {
+                try await controller.runForeverReportingResults(
+                    onResult: { generation, result in
+                        Self.recordResultBestEffort(
+                            result,
+                            generation: generation,
+                            config: config,
+                            recorder: statusRecorder
+                        )
+                    },
+                    onFailure: { generation, error in
+                        Self.recordFailureBestEffort(
+                            error,
+                            generation: generation,
+                            config: config,
+                            recorder: statusRecorder
                         )
                     }
-                    let result = try await FlannelHostOnlyNetworkPurger(config: config).checkPurge()
-                    return FlannelWithdrawalOutcome(
-                        succeeded: true,
-                        message: Self.formatPurgePreflight(result)
-                    )
+                )
+            },
+            cleanup: {
+                do {
+                    let result = try await controller.shutdown()
+                    Self.removeStatusBestEffort(statusRecorder)
+                    return result
                 } catch {
-                    return FlannelWithdrawalOutcome(
-                        succeeded: false,
-                        message: "network purge preflight failed: \(error)"
-                    )
+                    Self.recordFailureBestEffort(error, config: config, recorder: statusRecorder)
+                    throw error
                 }
             }
         )
+        let controlServer = FlannelControlServer(socketPath: controlSocketPath)
+        let daemonConfigPath = configPath
+        do {
+            try controlServer.start(
+                withdrawalHandler: {
+                    await lifecycle.withdraw()
+                },
+                checkPurgeHandler: { requestedClaim in
+                    do {
+                        let activeManifest = try manifestCoordinator.requireExactClaim(
+                            configPath: daemonConfigPath,
+                            config: config,
+                            whileHolding: lifetimeLock
+                        )
+                        let activeClaim = try FlannelPurgePreflightClaim(manifest: activeManifest)
+                        guard requestedClaim == activeClaim else {
+                            throw FlannelVXLANError.invalidConfiguration(
+                                "purge preflight request does not match the active Flannel state manifest"
+                            )
+                        }
+                        let result = try await FlannelHostOnlyNetworkPurger(config: config).checkPurge()
+                        return FlannelWithdrawalOutcome(
+                            succeeded: true,
+                            message: Self.formatPurgePreflight(result)
+                        )
+                    } catch {
+                        return FlannelWithdrawalOutcome(
+                            succeeded: false,
+                            message: "network purge preflight failed: \(error)"
+                        )
+                    }
+                }
+            )
+        } catch {
+            Self.recordFailureBestEffort(error, generation: 1, config: config, recorder: statusRecorder)
+            throw error
+        }
         await lifecycle.start()
         _ = await signalStream.first { _ in true }
         await lifecycle.terminateWhenClean()
@@ -397,6 +492,88 @@ struct FlannelVXLANMacOS: AsyncParsableCommand {
 
     private static var defaultStatePaths: [String] {
         FlannelVXLANMacOSConfig.defaultPersistentStatePaths
+    }
+
+    private static func pathEntryExists(_ path: String) throws -> Bool {
+        var information = stat()
+        guard lstat(path, &information) == 0 else {
+            if errno == ENOENT {
+                return false
+            }
+            throw FlannelVXLANError.persistence(
+                "failed to inspect Flannel status at \(path): \(String(cString: strerror(errno)))"
+            )
+        }
+        return true
+    }
+
+    private static func recordStartingBestEffort(
+        config: FlannelVXLANMacOSConfig,
+        recorder: FlannelStatusRecorder?
+    ) {
+        do {
+            try recorder?.recordStarting(
+                nodeName: config.nodeName,
+                networkName: config.networkName,
+                ipv6Enabled: config.dualStackEnabled,
+                syncPeriodSeconds: config.syncPeriodSeconds
+            )
+        } catch {
+            invalidateStaleStatus(recorder, after: error)
+        }
+    }
+
+    private static func recordResultBestEffort(
+        _ result: FlannelVXLANReconcileResult,
+        generation: Int,
+        config: FlannelVXLANMacOSConfig,
+        recorder: FlannelStatusRecorder?
+    ) {
+        do {
+            try recorder?.record(result: result, generation: generation, config: config)
+        } catch {
+            invalidateStaleStatus(recorder, after: error)
+        }
+    }
+
+    private static func recordFailureBestEffort(
+        _ error: Error,
+        generation: Int? = nil,
+        config: FlannelVXLANMacOSConfig,
+        recorder: FlannelStatusRecorder?
+    ) {
+        do {
+            if let generation {
+                try recorder?.recordFailure(error: error, generation: generation, config: config)
+            } else {
+                try recorder?.recordFailure(error: error, config: config)
+            }
+        } catch {
+            invalidateStaleStatus(recorder, after: error)
+        }
+    }
+
+    private static func removeStatusBestEffort(_ recorder: FlannelStatusRecorder?) {
+        do {
+            try recorder?.remove()
+        } catch {
+            fputs("container-flannel-vxlan-macos: failed to remove status: \(error)\n", stderr)
+        }
+    }
+
+    private static func invalidateStaleStatus(
+        _ recorder: FlannelStatusRecorder?,
+        after persistenceError: Error
+    ) {
+        fputs("container-flannel-vxlan-macos: \(persistenceError)\n", stderr)
+        do {
+            try recorder?.remove()
+        } catch {
+            fputs(
+                "container-flannel-vxlan-macos: failed to invalidate stale status after a persistence error: \(error)\n",
+                stderr
+            )
+        }
     }
 
     private enum OnlinePurgePreflightAttempt {

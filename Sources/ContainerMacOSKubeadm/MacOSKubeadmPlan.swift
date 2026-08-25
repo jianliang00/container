@@ -522,6 +522,7 @@ public enum MacOSKubeadmPlanner {
             ("/etc/kubernetes/pki/ca.crt", false, false),
             ("/etc/cni/net.d/10-macvmnet.conflist", false, false),
             ("/var/lib/container/flannel-vxlan/ready.json", false, false),
+            ("/var/lib/container/flannel-vxlan/status.json", false, false),
             ("/var/lib/container/kube-proxy-macos/status.json", false, false),
             ("/var/lib/container/kubernetes-credentials", true, true),
         ]
@@ -990,6 +991,15 @@ public enum MacOSKubeadmPlanner {
                 message: "remove stale pod network ready state",
                 action: .removePath(
                     path: options.rooted("/var/lib/container/flannel-vxlan/ready.json"),
+                    recursive: false,
+                    bestEffort: true,
+                    sensitive: false
+                )
+            ),
+            MacOSKubeadmStep(
+                message: "remove stale flannel VXLAN status",
+                action: .removePath(
+                    path: options.rooted("/var/lib/container/flannel-vxlan/status.json"),
                     recursive: false,
                     bestEffort: true,
                     sensitive: false

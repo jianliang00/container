@@ -29,6 +29,7 @@ struct FlannelVXLANMacOSConfigTests {
 
         #expect(config.containerServiceUserID == 0)
         #expect(!config.dualStackEnabled)
+        #expect(config.statusPath == nil)
         #expect(config.vtepMACIPv6Path == "/var/lib/container/flannel-vxlan/vtep-mac-v6")
         #expect(
             config.hostIPv6GatewayOwnershipStatePath
@@ -39,9 +40,15 @@ struct FlannelVXLANMacOSConfigTests {
                 == "/var/lib/container/flannel-vxlan/forwarding-ownership.json"
         )
         #expect(config.withdrawalStatePaths.contains(config.forwardingOwnershipStatePath))
+        #expect(!config.withdrawalStatePaths.contains(FlannelVXLANMacOSConfig.defaultStatusPath))
         #expect(
             FlannelVXLANMacOSConfig.defaultPersistentStatePaths.contains(
                 "/var/lib/container/flannel-vxlan/forwarding-ownership.json"
+            )
+        )
+        #expect(
+            FlannelVXLANMacOSConfig.defaultPersistentStatePaths.contains(
+                FlannelVXLANMacOSConfig.defaultStatusPath
             )
         )
         try config.validate()
@@ -53,7 +60,8 @@ struct FlannelVXLANMacOSConfigTests {
             nodeName: "mac-a",
             containerServiceUserID: 501,
             vtepMACPath: "/private/var/lib/container/flannel-vxlan/custom-vtep-mac",
-            dualStackEnabled: true
+            dualStackEnabled: true,
+            statusPath: FlannelVXLANMacOSConfig.defaultStatusPath
         )
 
         let decoded = try JSONDecoder().decode(
@@ -63,6 +71,10 @@ struct FlannelVXLANMacOSConfigTests {
 
         #expect(decoded.containerServiceUserID == 501)
         #expect(decoded.dualStackEnabled)
+        #expect(decoded.statusPath == FlannelVXLANMacOSConfig.defaultStatusPath)
+        #expect(!decoded.withdrawalStatePaths.contains(FlannelVXLANMacOSConfig.defaultStatusPath))
+        #expect(decoded.managedStatePaths.statusPath == FlannelVXLANMacOSConfig.defaultStatusPath)
+        #expect(decoded.managedStatePaths.all.contains(FlannelVXLANMacOSConfig.defaultStatusPath))
         #expect(decoded.vtepMACIPv6Path == "/private/var/lib/container/flannel-vxlan/vtep-mac-v6")
         #expect(decoded == original)
         try decoded.validate()
@@ -197,6 +209,29 @@ struct FlannelVXLANMacOSConfigTests {
             #expect(throws: FlannelVXLANError.self) {
                 try lockCollision.validate()
             }
+        }
+
+        var statusCollision = configPathCollision
+        statusCollision.statusPath = FlannelVXLANMacOSConfig.defaultStatusPath
+        statusCollision.ownershipStatePath = FlannelVXLANMacOSConfig.defaultStatusPath
+        #expect(throws: FlannelVXLANError.self) {
+            try statusCollision.validate()
+        }
+    }
+
+    @Test func statusPathMustUseTheFixedLocation() {
+        var config = FlannelVXLANMacOSConfig(
+            kubeconfig: "/etc/kubernetes/flannel.kubeconfig",
+            nodeName: "mac-a"
+        )
+        config.statusPath = "/var/lib/container/flannel-vxlan/other-status.json"
+
+        #expect(
+            throws: FlannelVXLANError.invalidConfiguration(
+                "statusPath must be \(FlannelVXLANMacOSConfig.defaultStatusPath)"
+            )
+        ) {
+            try config.validate()
         }
     }
 }

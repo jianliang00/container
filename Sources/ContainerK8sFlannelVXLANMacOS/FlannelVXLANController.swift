@@ -18,14 +18,21 @@ import ContainerCRIShimMacOS
 import Foundation
 
 public struct FlannelVXLANReconcileResult: Sendable, Equatable {
+    public var runtimeGeneration: UInt64
     public var localNetwork: FlannelLocalNodeNetwork
     public var underlay: FlannelUnderlayInterface
     public var interfaceName: String
     public var mtu: Int
     public var peers: [FlannelPeer]
+    public var routeCount: Int
+    public var tunnelUp: Bool
+    public var tunnelEpoch: UInt64
     public var localIPv6Network: FlannelLocalNodeIPv6Network?
     public var ipv6InterfaceName: String?
     public var ipv6Peers: [FlannelIPv6Peer]
+    public var ipv6RouteCount: Int?
+    public var ipv6TunnelUp: Bool?
+    public var ipv6TunnelEpoch: UInt64?
     public var ipv4Ready: Bool
     public var ipv6Ready: Bool?
     public var issues: [FlannelCompileIssue]
@@ -33,28 +40,42 @@ public struct FlannelVXLANReconcileResult: Sendable, Equatable {
     public var ipv6Statistics: FlannelTunnelStatistics?
 
     public init(
+        runtimeGeneration: UInt64 = 0,
         localNetwork: FlannelLocalNodeNetwork,
         underlay: FlannelUnderlayInterface,
         interfaceName: String,
         mtu: Int,
         peers: [FlannelPeer],
+        routeCount: Int = 0,
+        tunnelUp: Bool = false,
+        tunnelEpoch: UInt64 = 0,
         localIPv6Network: FlannelLocalNodeIPv6Network? = nil,
         ipv6InterfaceName: String? = nil,
         ipv6Peers: [FlannelIPv6Peer] = [],
+        ipv6RouteCount: Int? = nil,
+        ipv6TunnelUp: Bool? = nil,
+        ipv6TunnelEpoch: UInt64? = nil,
         ipv4Ready: Bool = true,
         ipv6Ready: Bool? = nil,
         issues: [FlannelCompileIssue],
         statistics: FlannelTunnelStatistics,
         ipv6Statistics: FlannelTunnelStatistics? = nil
     ) {
+        self.runtimeGeneration = runtimeGeneration
         self.localNetwork = localNetwork
         self.underlay = underlay
         self.interfaceName = interfaceName
         self.mtu = mtu
         self.peers = peers
+        self.routeCount = routeCount
+        self.tunnelUp = tunnelUp
+        self.tunnelEpoch = tunnelEpoch
         self.localIPv6Network = localIPv6Network
         self.ipv6InterfaceName = ipv6InterfaceName
         self.ipv6Peers = ipv6Peers
+        self.ipv6RouteCount = ipv6RouteCount
+        self.ipv6TunnelUp = ipv6TunnelUp
+        self.ipv6TunnelEpoch = ipv6TunnelEpoch
         self.ipv4Ready = ipv4Ready
         self.ipv6Ready = ipv6Ready
         self.issues = issues
@@ -115,9 +136,11 @@ public actor FlannelVXLANController {
 
     private var tunnel: (any FlannelTunnelControlling)?
     private var tunnelConfiguration: FlannelTunnelConfiguration?
+    private var tunnelEpoch: UInt64 = 0
     private var installedRoutes: Set<String> = []
     private var ipv6Tunnel: (any FlannelIPv6TunnelControlling)?
     private var ipv6TunnelConfiguration: FlannelIPv6TunnelConfiguration?
+    private var ipv6TunnelEpoch: UInt64 = 0
     private var installedIPv6Routes: Set<String> = []
 
     private struct IPv6ReconcileContext {
@@ -208,13 +231,31 @@ public actor FlannelVXLANController {
             fputs("container-flannel-vxlan-macos: \(error)\n", stderr)
         }
     ) async throws -> Never {
+        try await runForeverReportingResults(
+            onResult: { _, _ in },
+            onFailure: { _, _ in },
+            onError: onError
+        )
+    }
+
+    public func runForeverReportingResults(
+        onResult: @escaping @Sendable (_ generation: Int, _ result: FlannelVXLANReconcileResult) -> Void,
+        onFailure: @escaping @Sendable (_ generation: Int, _ error: Error) -> Void,
+        onError: @escaping @Sendable (Error) -> Void = { error in
+            fputs("container-flannel-vxlan-macos: \(error)\n", stderr)
+        }
+    ) async throws -> Never {
+        var generation = 1
         while true {
             try Task.checkCancellation()
             do {
-                _ = try await runOnce()
+                let result = try await runOnce()
+                onResult(generation, result)
+                generation += 1
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                onFailure(generation, error)
                 onError(error)
             }
             try await Task.sleep(for: .seconds(config.syncPeriodSeconds))
@@ -715,6 +756,55 @@ public actor FlannelVXLANController {
             )
         }
 
+        let ipv4TunnelUp = tunnel.isRunning
+        if !ipv4TunnelUp {
+            var withdrawalFailures: [String] = []
+            do {
+                try clearReadyState()
+            } catch {
+                withdrawalFailures.append("clear ready lease: \(error)")
+            }
+            do {
+                _ = try await removeNodeAnnotationsWithRetry()
+            } catch {
+                withdrawalFailures.append("remove Node annotations: \(error)")
+            }
+            let suffix =
+                withdrawalFailures.isEmpty
+                ? ""
+                : "; readiness withdrawal incomplete: \(withdrawalFailures.joined(separator: "; "))"
+            throw FlannelVXLANError.runtime(
+                "IPv4 tunnel stopped before readiness publication\(suffix)"
+            )
+        }
+        let ipv6TunnelUp: Bool?
+        if config.dualStackEnabled {
+            let running = ipv6Tunnel?.isRunning ?? false
+            if ipv6Ready == true, !running {
+                do {
+                    try clearReadyState()
+                } catch {
+                    issues.append(
+                        FlannelCompileIssue(
+                            id: "local/ipv6-ready-withdrawal",
+                            severity: .error,
+                            message: "IPv6 readiness lease withdrawal failed before degraded publication: \(error)"
+                        ))
+                }
+                ipv6Ready = false
+                ipv6Dataplane = nil
+                issues.append(
+                    FlannelCompileIssue(
+                        id: "local/ipv6-tunnel-stopped",
+                        severity: .error,
+                        message: "IPv6 tunnel stopped before readiness publication; IPv4 dataplane was retained"
+                    ))
+            }
+            ipv6TunnelUp = running
+        } else {
+            ipv6TunnelUp = nil
+        }
+
         var annotationPatch = try FlannelKubernetesClient.leaseAnnotationPatch(
             annotationPrefix: config.annotationPrefix,
             publicIP: underlay.ipv4Address,
@@ -759,14 +849,21 @@ public actor FlannelVXLANController {
             path: config.readyStatePath
         )
         return FlannelVXLANReconcileResult(
+            runtimeGeneration: runtimeState.generation,
             localNetwork: localNetwork,
             underlay: underlay,
             interfaceName: tunnel.interfaceName,
             mtu: mtu,
             peers: compilation.peers,
+            routeCount: installedRoutes.count,
+            tunnelUp: ipv4TunnelUp,
+            tunnelEpoch: tunnelEpoch,
             localIPv6Network: ipv6Context?.localNetwork,
             ipv6InterfaceName: ipv6Tunnel?.interfaceName,
             ipv6Peers: compilation.ipv6Peers,
+            ipv6RouteCount: config.dualStackEnabled ? installedIPv6Routes.count : nil,
+            ipv6TunnelUp: ipv6TunnelUp,
+            ipv6TunnelEpoch: config.dualStackEnabled ? ipv6TunnelEpoch : nil,
             ipv4Ready: true,
             ipv6Ready: ipv6Ready,
             issues: issues.sorted(),
@@ -899,6 +996,7 @@ public actor FlannelVXLANController {
         }
         tunnel = created
         tunnelConfiguration = configuration
+        tunnelEpoch += 1
     }
 
     private func replaceIPv6TunnelIfNeeded(configuration: FlannelIPv6TunnelConfiguration) throws {
@@ -934,6 +1032,7 @@ public actor FlannelVXLANController {
         }
         ipv6Tunnel = created
         ipv6TunnelConfiguration = configuration
+        ipv6TunnelEpoch += 1
     }
 
     private func reconcileRoutes(desired: Set<String>, interface: String) throws {

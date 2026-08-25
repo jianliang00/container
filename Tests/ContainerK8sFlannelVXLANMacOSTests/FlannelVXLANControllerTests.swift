@@ -34,7 +34,15 @@ struct FlannelVXLANControllerTests {
         #expect(first.underlay.ipv4Address == "192.0.2.24")
         #expect(first.mtu == 1450)
         #expect(first.peers.map(\.nodeName) == ["linux-a", "windows-a"])
+        #expect(first.runtimeGeneration == 1)
+        #expect(first.routeCount == 2)
+        #expect(first.tunnelUp)
+        #expect(first.tunnelEpoch == 1)
+        #expect(first.ipv6RouteCount == nil)
+        #expect(first.ipv6TunnelUp == nil)
+        #expect(first.ipv6TunnelEpoch == nil)
         #expect(second.interfaceName == first.interfaceName)
+        #expect(second.tunnelEpoch == first.tunnelEpoch)
         #expect(fixture.tunnelBox.createdConfigurations.count == 1)
         #expect(fixture.tunnelBox.tunnel.peerUpdates.count == 2)
         #expect(Set(fixture.system.addedRoutes.map(\.podCIDR)) == ["10.250.2.0/24", "10.250.5.0/24"])
@@ -108,6 +116,13 @@ struct FlannelVXLANControllerTests {
 
         #expect(result.ipv4Ready)
         #expect(result.ipv6Ready == true)
+        #expect(result.runtimeGeneration == 1)
+        #expect(result.routeCount == 2)
+        #expect(result.tunnelUp)
+        #expect(result.tunnelEpoch == 1)
+        #expect(result.ipv6RouteCount == 1)
+        #expect(result.ipv6TunnelUp == true)
+        #expect(result.ipv6TunnelEpoch == 1)
         #expect(result.mtu == 1_430)
         #expect(result.localIPv6Network?.podCIDR == "fd42:10:244:22::/64")
         #expect(result.ipv6InterfaceName == "utun43")
@@ -174,6 +189,141 @@ struct FlannelVXLANControllerTests {
         #expect(fixture.ipv6TunnelBox.tunnel.wasDestroyed)
         #expect(fixture.forwardingManager.restoreCalls == [.ipv4, .ipv6])
         #expect(try fixture.forwardingManager.ownedFamilies().isEmpty)
+    }
+
+    @Test
+    func refusesToPublishReadinessWhenIPv4TunnelStops() async throws {
+        let fixture = try ControllerFixture()
+        try await fixture.writeRuntimeState(podCIDR: "10.250.22.0/24")
+        let controller = try fixture.makeController()
+        let first = try await controller.runOnce()
+        fixture.tunnelBox.tunnel.stopAfterNextPeerUpdate()
+
+        await #expect(throws: FlannelVXLANError.self) {
+            try await controller.runOnce()
+        }
+
+        let patches = await fixture.kubernetes.patches
+        let keys = try FlannelAnnotationKeys(prefix: fixture.config.annotationPrefix)
+        let withdrawalPatch = try #require(patches.last)
+        #expect(withdrawalPatch.values.isEmpty)
+        #expect(withdrawalPatch.removals.contains(keys.publicIP))
+        #expect(withdrawalPatch.removals.contains(keys.backendData))
+        #expect(withdrawalPatch.removals.contains(keys.publicIPv6))
+        #expect(withdrawalPatch.removals.contains(keys.backendV6Data))
+        #expect(try await fixture.stateStore.loadReadyState(path: fixture.config.readyStatePath) == nil)
+
+        let recovered = try await controller.runOnce()
+        #expect(first.tunnelEpoch == 1)
+        #expect(recovered.tunnelEpoch == 2)
+        #expect(recovered.tunnelUp)
+    }
+
+    @Test
+    func degradesOnlyIPv6WhenReadyIPv6TunnelStops() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .ready
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+        let first = try await controller.runOnce()
+        fixture.ipv6TunnelBox.tunnel.stopAfterNextPeerUpdate()
+
+        let degraded = try await controller.runOnce()
+
+        let keys = try FlannelAnnotationKeys(prefix: fixture.config.annotationPrefix)
+        let patch = try #require(await fixture.kubernetes.patches.last)
+        #expect(patch.values[keys.publicIP] == "192.0.2.24")
+        #expect(patch.values[keys.publicIPv6] == nil)
+        #expect(patch.removals.contains(keys.publicIPv6))
+        #expect(patch.removals.contains(keys.backendV6Data))
+        #expect(degraded.ipv4Ready)
+        #expect(degraded.ipv6Ready == false)
+        #expect(degraded.tunnelUp)
+        #expect(degraded.ipv6TunnelUp == false)
+        #expect(degraded.issues.contains { $0.id == "local/ipv6-tunnel-stopped" })
+        let ready = try #require(
+            await fixture.stateStore.loadReadyState(path: fixture.config.readyStatePath)
+        )
+        #expect(ready.ipv4Ready)
+        #expect(ready.ipv6Ready == false)
+
+        let recovered = try await controller.runOnce()
+        #expect(first.ipv6TunnelEpoch == 1)
+        #expect(degraded.ipv6TunnelEpoch == 1)
+        #expect(recovered.ipv6TunnelEpoch == 2)
+        #expect(recovered.ipv6Ready == true)
+    }
+
+    @Test
+    func incrementsOnlyTheRecreatedTunnelFamilyEpoch() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        fixture.hostIPv6GatewayManager.mode = .ready
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let controller = try fixture.makeController()
+
+        let first = try await controller.runOnce()
+        fixture.tunnelBox.tunnel.stop()
+        let second = try await controller.runOnce()
+        fixture.ipv6TunnelBox.tunnel.stop()
+        let third = try await controller.runOnce()
+
+        #expect(first.tunnelEpoch == 1)
+        #expect(first.ipv6TunnelEpoch == 1)
+        #expect(second.tunnelEpoch == 2)
+        #expect(second.ipv6TunnelEpoch == 1)
+        #expect(second.tunnelUp)
+        #expect(second.ipv6TunnelUp == true)
+        #expect(second.routeCount == 2)
+        #expect(second.ipv6RouteCount == 1)
+        #expect(third.tunnelEpoch == 2)
+        #expect(third.ipv6TunnelEpoch == 2)
+        #expect(third.tunnelUp)
+        #expect(third.ipv6TunnelUp == true)
+    }
+
+    @Test
+    func runForeverReportsFailuresAndRetriesTheSameAttemptGeneration() async throws {
+        let fixture = try ControllerFixture(syncPeriodSeconds: 1)
+        try await fixture.writeRuntimeState(podCIDR: "10.250.22.0/24")
+        await fixture.kubernetes.failNextAnnotationPatches(1)
+        let controller = try fixture.makeController()
+        let attempts = RecordedFlannelReconcileAttempts()
+        let runTask = Task {
+            do {
+                try await controller.runForeverReportingResults(
+                    onResult: { generation, result in
+                        attempts.recordResult(generation: generation, result: result)
+                    },
+                    onFailure: { generation, error in
+                        attempts.recordFailure(generation: generation, error: error)
+                    },
+                    onError: { _ in }
+                )
+            } catch is CancellationError {
+            } catch {
+                Issue.record("runForever must stop only through cancellation: \(error)")
+            }
+        }
+
+        for _ in 0..<40 {
+            if attempts.results.count >= 2 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        runTask.cancel()
+        await runTask.value
+
+        #expect(attempts.failureGenerations == [1])
+        #expect(attempts.resultGenerations == [1, 2])
+        #expect(attempts.results.map(\.runtimeGeneration) == [1, 1])
+        #expect(attempts.failureMessages.count == 1)
     }
 
     @Test
@@ -1397,7 +1547,8 @@ private struct ControllerFixture {
         includeNodeInternalIPv6: Bool = true,
         nodeInternalIPv6Override: String? = nil,
         includeLinuxIPv6BackendData: Bool = true,
-        dualStackBackendMTU: Int = 1_480
+        dualStackBackendMTU: Int = 1_480,
+        syncPeriodSeconds: Int = 5
     ) throws {
         let hostIPv6GatewayOwnershipStore = ControllerGatewayOwnershipStore()
         self.hostIPv6GatewayOwnershipStore = hostIPv6GatewayOwnershipStore
@@ -1415,7 +1566,8 @@ private struct ControllerFixture {
             dualStackEnabled: dualStackEnabled,
             runtimeStatePath: root.appendingPathComponent("runtime.json").path,
             readyStatePath: root.appendingPathComponent("ready.json").path,
-            ownershipStatePath: root.appendingPathComponent("ownership.json").path
+            ownershipStatePath: root.appendingPathComponent("ownership.json").path,
+            syncPeriodSeconds: syncPeriodSeconds
         )
         kubernetes = try MockFlannelKubernetes(
             nodes: [
@@ -1497,6 +1649,44 @@ private struct ControllerFixture {
                 selectedIPv6TunnelBox.make(configuration)
             }
         )
+    }
+}
+
+private final class RecordedFlannelReconcileAttempts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resultGenerationValues: [Int] = []
+    private var resultValues: [FlannelVXLANReconcileResult] = []
+    private var failureGenerationValues: [Int] = []
+    private var failureMessageValues: [String] = []
+
+    var resultGenerations: [Int] {
+        lock.withLock { resultGenerationValues }
+    }
+
+    var results: [FlannelVXLANReconcileResult] {
+        lock.withLock { resultValues }
+    }
+
+    var failureGenerations: [Int] {
+        lock.withLock { failureGenerationValues }
+    }
+
+    var failureMessages: [String] {
+        lock.withLock { failureMessageValues }
+    }
+
+    func recordResult(generation: Int, result: FlannelVXLANReconcileResult) {
+        lock.withLock {
+            resultGenerationValues.append(generation)
+            resultValues.append(result)
+        }
+    }
+
+    func recordFailure(generation: Int, error: Error) {
+        lock.withLock {
+            failureGenerationValues.append(generation)
+            failureMessageValues.append(String(describing: error))
+        }
     }
 }
 
@@ -2066,6 +2256,7 @@ private final class MockFlannelTunnel: FlannelTunnelControlling, @unchecked Send
     private var running = true
     private var stopFails = false
     private var destroyed = false
+    private var stopOnNextPeerUpdate = false
     private var updates: [[FlannelPeer]] = []
 
     var isRunning: Bool {
@@ -2083,6 +2274,10 @@ private final class MockFlannelTunnel: FlannelTunnelControlling, @unchecked Send
     func setPeers(_ peers: [FlannelPeer]) throws {
         lock.withLock {
             updates.append(peers)
+            if stopOnNextPeerUpdate {
+                stopOnNextPeerUpdate = false
+                running = false
+            }
         }
     }
 
@@ -2113,6 +2308,12 @@ private final class MockFlannelTunnel: FlannelTunnelControlling, @unchecked Send
         }
     }
 
+    func stopAfterNextPeerUpdate() {
+        lock.withLock {
+            stopOnNextPeerUpdate = true
+        }
+    }
+
     func statistics() -> FlannelTunnelStatistics {
         FlannelTunnelStatistics(
             transmittedPackets: 0,
@@ -2134,6 +2335,7 @@ private final class MockFlannelIPv6Tunnel: FlannelIPv6TunnelControlling, @unchec
     private var destroyed = false
     private var peerUpdatesFail = false
     private var stopFails = false
+    private var stopOnNextPeerUpdate = false
     private var updates: [[FlannelIPv6Peer]] = []
 
     init(interfaceName: String = "utun43") {
@@ -2158,6 +2360,10 @@ private final class MockFlannelIPv6Tunnel: FlannelIPv6TunnelControlling, @unchec
                 throw FlannelVXLANError.runtime("injected IPv6 peer update failure")
             }
             updates.append(peers)
+            if stopOnNextPeerUpdate {
+                stopOnNextPeerUpdate = false
+                running = false
+            }
         }
     }
 
@@ -2191,6 +2397,12 @@ private final class MockFlannelIPv6Tunnel: FlannelIPv6TunnelControlling, @unchec
     func failStops(_ value: Bool) {
         lock.withLock {
             stopFails = value
+        }
+    }
+
+    func stopAfterNextPeerUpdate() {
+        lock.withLock {
+            stopOnNextPeerUpdate = true
         }
     }
 

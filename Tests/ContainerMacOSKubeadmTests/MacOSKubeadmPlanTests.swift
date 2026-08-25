@@ -128,6 +128,7 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""nodeKubeconfig": "/etc/kubernetes/kubelet.conf""#)
                     && contents.contains(#""nodeName": "macos-ci-1""#)
                     && contents.contains(#""dualStackEnabled": false"#)
+                    && contents.contains(#""statusPath": "/var/lib/container/flannel-vxlan/status.json""#)
                     && contents.contains(#""networkName": "kubernetes-pod""#)
                     && contents.contains(#""networkVariant": "reserved""#)
                     && !contents.contains("underlayInterface")
@@ -731,6 +732,7 @@ struct MacOSKubeadmPlanTests {
         let withdrawIndex = try #require(descriptions.firstIndex(of: "withdraw previous flannel VXLAN data plane"))
         let stopIndex = try #require(descriptions.firstIndex(of: "stop previous flannel VXLAN launchd job if present"))
         let stopCRIIndex = try #require(descriptions.firstIndex(of: "stop previous CRI shim launchd job if present"))
+        let removeStatusIndex = try #require(descriptions.firstIndex(of: "remove stale flannel VXLAN status"))
         let purgeIndex = try #require(descriptions.firstIndex(of: "purge owned pod network"))
         let configRemovalIndex = try #require(
             descriptions.firstIndex(of: "remove full-mode artifact /etc/kubernetes/flannel-vxlan-macos.conf")
@@ -741,7 +743,9 @@ struct MacOSKubeadmPlanTests {
         #expect(stopKubeletIndex < stopProxyIndex)
         #expect(stopProxyIndex < withdrawIndex)
         #expect(withdrawIndex < stopIndex)
+        #expect(stopIndex < removeStatusIndex)
         #expect(stopIndex < stopCRIIndex)
+        #expect(removeStatusIndex < stopCRIIndex)
         #expect(stopCRIIndex < purgeIndex)
         #expect(purgeIndex < configRemovalIndex)
         #expect(purgeIndex < credentialRemovalIndex)
@@ -1375,6 +1379,9 @@ struct MacOSKubeadmPlanTests {
         let removeProxyStatusIndex = try #require(
             descriptions.firstIndex(of: "remove /var/lib/container/kube-proxy-macos/status.json")
         )
+        let removeFlannelStatusIndex = try #require(
+            descriptions.firstIndex(of: "remove /var/lib/container/flannel-vxlan/status.json")
+        )
         let firstGeneratedRemoveIndex = try #require(
             descriptions.firstIndex(of: "remove /Library/LaunchDaemons/com.apple.container.kubelet.plist")
         )
@@ -1388,9 +1395,12 @@ struct MacOSKubeadmPlanTests {
         #expect(stopProxyIndex < withdrawProxyIndex)
         #expect(withdrawProxyIndex < removeProxyStatusIndex)
         #expect(stopProxyIndex < withdrawFlannelIndex)
+        #expect(withdrawFlannelIndex < removeFlannelStatusIndex)
         #expect(withdrawFlannelIndex < stopFlannelIndex)
+        #expect(stopFlannelIndex < removeFlannelStatusIndex)
         #expect(stopFlannelIndex < stopCRIIndex)
         #expect(stopCRIIndex < purgeIndex)
+        #expect(purgeIndex < removeFlannelStatusIndex)
         #expect(purgeIndex < removeFlannelConfigIndex)
         #expect(
             plan.steps.contains { step in

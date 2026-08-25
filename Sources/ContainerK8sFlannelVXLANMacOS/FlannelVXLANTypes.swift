@@ -24,6 +24,7 @@ import Glibc
 
 public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
     public static let defaultOwnershipStatePath = "/var/lib/container/flannel-vxlan/ownership.json"
+    public static let defaultStatusPath = "/var/lib/container/flannel-vxlan/status.json"
     public static let defaultStateManifestPath = "/private/var/lib/container/flannel-vxlan/state-manifest.json"
     public static let defaultControlSocketPath = "/var/run/container-flannel-vxlan-macos.sock"
     public static let defaultDaemonLifetimeLockPath = "/var/run/container-flannel-vxlan-daemon.lock"
@@ -37,6 +38,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             ownershipURL.deletingLastPathComponent().appendingPathComponent("host-ipv6-gateway-ownership.json").path,
             ownershipURL.deletingLastPathComponent().appendingPathComponent("forwarding-ownership.json").path,
             ownershipURL.deletingLastPathComponent().appendingPathComponent("ready.json").path,
+            defaultStatusPath,
         ]
     }
 
@@ -52,6 +54,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
     public var dualStackEnabled: Bool
     public var runtimeStatePath: String
     public var readyStatePath: String
+    public var statusPath: String?
     public var ownershipStatePath: String
     public var networkName: String
     public var networkPlugin: String
@@ -102,7 +105,8 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             networkOwnership: networkOwnershipStatePath,
             hostIPv6GatewayOwnership: hostIPv6GatewayOwnershipStatePath,
             forwardingOwnership: forwardingOwnershipStatePath,
-            ready: readyStatePath
+            ready: readyStatePath,
+            statusPath: statusPath
         )
     }
 
@@ -119,6 +123,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
         case dualStackEnabled
         case runtimeStatePath
         case readyStatePath
+        case statusPath
         case ownershipStatePath
         case networkName
         case networkPlugin
@@ -140,6 +145,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
         dualStackEnabled: Bool = false,
         runtimeStatePath: String = "/var/lib/container/cri-shim-macos/pod-network.json",
         readyStatePath: String = "/var/lib/container/flannel-vxlan/ready.json",
+        statusPath: String? = nil,
         ownershipStatePath: String = FlannelVXLANMacOSConfig.defaultOwnershipStatePath,
         networkName: String = "kubernetes-pod",
         networkPlugin: String = "container-network-vmnet",
@@ -159,6 +165,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
         self.dualStackEnabled = dualStackEnabled
         self.runtimeStatePath = runtimeStatePath
         self.readyStatePath = readyStatePath
+        self.statusPath = statusPath
         self.ownershipStatePath = ownershipStatePath
         self.networkName = networkName
         self.networkPlugin = networkPlugin
@@ -186,6 +193,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
                 ?? "/var/lib/container/cri-shim-macos/pod-network.json",
             readyStatePath: try container.decodeIfPresent(String.self, forKey: .readyStatePath)
                 ?? "/var/lib/container/flannel-vxlan/ready.json",
+            statusPath: try container.decodeIfPresent(String.self, forKey: .statusPath),
             ownershipStatePath: try container.decodeIfPresent(String.self, forKey: .ownershipStatePath)
                 ?? Self.defaultOwnershipStatePath,
             networkName: try container.decodeIfPresent(String.self, forKey: .networkName) ?? "kubernetes-pod",
@@ -235,6 +243,13 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             ("ownershipStatePath", ownershipStatePath),
         ] where !path.hasPrefix("/") {
             throw FlannelVXLANError.invalidConfiguration("\(name) must be an absolute path")
+        }
+        if let statusPath {
+            guard statusPath == Self.defaultStatusPath else {
+                throw FlannelVXLANError.invalidConfiguration(
+                    "statusPath must be \(Self.defaultStatusPath)"
+                )
+            }
         }
         guard (1...300).contains(syncPeriodSeconds) else {
             throw FlannelVXLANError.invalidConfiguration("syncPeriodSeconds must be between 1 and 300")
@@ -330,7 +345,7 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
     }
 
     private var exclusiveFilePaths: [(String, String)] {
-        [
+        var paths = [
             ("vtepMACPath", vtepMACPath),
             ("vtepMACIPv6Path", vtepMACIPv6Path),
             ("runtimeStatePath", runtimeStatePath),
@@ -343,6 +358,10 @@ public struct FlannelVXLANMacOSConfig: Codable, Sendable, Equatable {
             ("daemonLifetimeLockPath", Self.defaultDaemonLifetimeLockPath),
             ("forwardingAdvisoryLockPath", Self.defaultForwardingAdvisoryLockPath),
         ]
+        if let statusPath {
+            paths.append(("statusPath", statusPath))
+        }
+        return paths
     }
 
     private static func isAncestorFilePath(_ candidate: String, of path: String) -> Bool {

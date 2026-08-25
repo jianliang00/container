@@ -501,6 +501,7 @@ public struct MacOSKubeadmStatusRunner {
         "/var/lib/container/kubernetes-credentials/kube-proxy-macos.token",
         "/var/lib/container/kubernetes-credentials/flannel-macos.token",
         "/var/lib/container/flannel-vxlan/ready.json",
+        "/var/lib/container/flannel-vxlan/status.json",
         "/var/lib/container/vmnet-recovery/state.json",
         "/var/lib/container/vmnet-recovery/requests/fence.json",
         MacOSKubeadmContainerSystem.bootstrapLaunchdPlistPath,

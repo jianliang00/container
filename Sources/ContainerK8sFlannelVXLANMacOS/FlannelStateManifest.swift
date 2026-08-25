@@ -50,29 +50,36 @@ public struct FlannelManagedStatePaths: Codable, Sendable, Equatable {
     public var hostIPv6GatewayOwnership: String
     public var forwardingOwnership: String
     public var ready: String
+    public var statusPath: String?
 
     public init(
         dataplaneOwnership: String,
         networkOwnership: String,
         hostIPv6GatewayOwnership: String,
         forwardingOwnership: String,
-        ready: String
+        ready: String,
+        statusPath: String? = nil
     ) {
         self.dataplaneOwnership = dataplaneOwnership
         self.networkOwnership = networkOwnership
         self.hostIPv6GatewayOwnership = hostIPv6GatewayOwnership
         self.forwardingOwnership = forwardingOwnership
         self.ready = ready
+        self.statusPath = statusPath
     }
 
     public var all: [String] {
-        [
+        var paths = [
             dataplaneOwnership,
             networkOwnership,
             hostIPv6GatewayOwnership,
             forwardingOwnership,
             ready,
         ]
+        if let statusPath {
+            paths.append(statusPath)
+        }
+        return paths
     }
 }
 
@@ -169,6 +176,19 @@ public struct FlannelStateManifest: Codable, Sendable, Equatable {
             }
             canonicalPaths.append(canonicalPath)
         }
+    }
+
+    fileprivate func canAddDefaultStatusPath(to candidate: Self) -> Bool {
+        schemaVersion == candidate.schemaVersion
+            && configPath == candidate.configPath
+            && identity == candidate.identity
+            && statePaths.dataplaneOwnership == candidate.statePaths.dataplaneOwnership
+            && statePaths.networkOwnership == candidate.statePaths.networkOwnership
+            && statePaths.hostIPv6GatewayOwnership == candidate.statePaths.hostIPv6GatewayOwnership
+            && statePaths.forwardingOwnership == candidate.statePaths.forwardingOwnership
+            && statePaths.ready == candidate.statePaths.ready
+            && statePaths.statusPath == nil
+            && candidate.statePaths.statusPath == FlannelVXLANMacOSConfig.defaultStatusPath
     }
 }
 
@@ -496,6 +516,10 @@ public struct FlannelStateManifestCoordinator: Sendable {
         guard existing != candidate else {
             return existing
         }
+        if existing.canAddDefaultStatusPath(to: candidate) {
+            try store.save(candidate)
+            return candidate
+        }
 
         let remainingPaths = try (existing.statePaths.all + candidate.statePaths.all)
             .uniqued()
@@ -517,7 +541,10 @@ public struct FlannelStateManifestCoordinator: Sendable {
     ) throws {
         try lifetimeLock.requireHeld()
         let candidate = try FlannelStateManifest(configPath: configPath, config: config)
-        guard let existing = try store.load(), existing != candidate else {
+        guard let existing = try store.load(),
+            existing != candidate,
+            !existing.canAddDefaultStatusPath(to: candidate)
+        else {
             return
         }
         let remainingPaths = try (existing.statePaths.all + candidate.statePaths.all)

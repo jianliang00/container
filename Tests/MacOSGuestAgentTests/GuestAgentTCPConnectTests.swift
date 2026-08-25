@@ -151,7 +151,14 @@ struct GuestAgentTCPConnectTests {
         guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
             throw POSIXError.fromErrno()
         }
-        let ownedFD = descriptors[0]
+        let minimum = try guestAgentHighDescriptorMinimum()
+        let ownedFD = Darwin.fcntl(descriptors[0], F_DUPFD_CLOEXEC, minimum)
+        let duplicateErrno = errno
+        closeTestFD(descriptors[0])
+        guard ownedFD >= 0 else {
+            closeTestFD(descriptors[1])
+            throw POSIXError(POSIXErrorCode(rawValue: duplicateErrno) ?? .EIO)
+        }
         closeTestFD(descriptors[1])
 
         var connection: AgentConnection? = AgentConnection(fd: ownedFD)
@@ -170,17 +177,19 @@ struct GuestAgentTCPConnectTests {
         guard sourceFD >= 0 else {
             throw POSIXError.fromErrno()
         }
-        if sourceFD != ownedFD {
-            guard dup2(sourceFD, ownedFD) == ownedFD else {
-                closeTestFD(sourceFD)
-                throw POSIXError.fromErrno()
-            }
-            closeTestFD(sourceFD)
+        defer { closeTestFD(sourceFD) }
+        let reusedFD = Darwin.fcntl(sourceFD, F_DUPFD_CLOEXEC, ownedFD)
+        guard reusedFD >= 0 else {
+            throw POSIXError.fromErrno()
         }
+        guard reusedFD == ownedFD else {
+            closeTestFD(reusedFD)
+            throw POSIXError(.EBUSY)
+        }
+        defer { closeTestFD(reusedFD) }
 
         connection = nil
-        #expect(fcntl(ownedFD, F_GETFD) >= 0)
-        closeTestFD(ownedFD)
+        #expect(fcntl(reusedFD, F_GETFD) >= 0)
     }
 
     @Test
@@ -264,6 +273,18 @@ struct GuestAgentTCPConnectTests {
         #expect(error.message?.contains(messageFragment) == true)
         try harness.waitForCompletion()
     }
+}
+
+private func guestAgentHighDescriptorMinimum() throws -> Int32 {
+    var limit = rlimit()
+    guard Darwin.getrlimit(RLIMIT_NOFILE, &limit) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+    let cappedLimit = min(limit.rlim_cur, rlim_t(32_768))
+    guard cappedLimit > 96 else {
+        throw POSIXError(.EMFILE)
+    }
+    return Int32(cappedLimit - 64)
 }
 
 private func openTunnel(_ harness: TCPAgentConnectionHarness, id: String, port: UInt32) throws {

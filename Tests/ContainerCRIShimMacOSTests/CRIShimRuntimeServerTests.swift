@@ -2103,6 +2103,7 @@ struct CRIShimRuntimeServerTests {
             execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
         )
         runtimeManager.portForwardReadyOnlyPorts.insert(18_086)
+        runtimeManager.portForwardHighDescriptorPorts.insert(18_086)
         runtimeManager.portForwardResponsesAfterClientEOF[18_087] = response
 
         try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_086, 18_087]) { url in
@@ -2129,7 +2130,10 @@ struct CRIShimRuntimeServerTests {
             guard reusedFileDescriptor >= 0 else {
                 throw currentPOSIXError()
             }
-            #expect(reusedFileDescriptor == releasedFileDescriptor)
+            guard reusedFileDescriptor == releasedFileDescriptor else {
+                _ = Darwin.close(reusedFileDescriptor)
+                throw POSIXError(.EBUSY)
+            }
             let reusedHandle = FileHandle(
                 fileDescriptor: reusedFileDescriptor,
                 closeOnDealloc: true
@@ -3783,12 +3787,47 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func websocketBinaryReceiveTimeoutCancelsUnderlyingTask() async throws {
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            await #expect(throws: (any Error).self) {
+                _ = try await receiveBinaryMessage(from: task, timeout: .milliseconds(100))
+            }
+        }
+    }
+
+    @Test
     func backendControlConnectionIgnoresDelayedShutdownAfterDescriptorReuse() async throws {
         var controlledDescriptors = [Int32](repeating: -1, count: 2)
         guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &controlledDescriptors) == 0 else {
             throw currentPOSIXError()
         }
-        let controlledFileDescriptor = controlledDescriptors[0]
+        let minimum = try criShimHighDescriptorMinimum()
+        let controlledFileDescriptor = Darwin.fcntl(
+            controlledDescriptors[0],
+            F_DUPFD_CLOEXEC,
+            minimum
+        )
+        let duplicateErrno = errno
+        _ = Darwin.close(controlledDescriptors[0])
+        guard controlledFileDescriptor >= 0 else {
+            _ = Darwin.close(controlledDescriptors[1])
+            throw POSIXError(POSIXErrorCode(rawValue: duplicateErrno) ?? .EIO)
+        }
         let controlledPeerFileDescriptor = controlledDescriptors[1]
         defer { _ = Darwin.close(controlledPeerFileDescriptor) }
         let controlConnection = CRIShimBackendControlConnection(owning: controlledFileDescriptor)
@@ -3796,14 +3835,18 @@ struct CRIShimRuntimeServerTests {
         let (sentinelSource, sentinelPeer) = try makeSocketPair()
         let sentinelPeerFileDescriptor = sentinelPeer.fileDescriptor
         controlConnection.shutdownAllAndClose()
-        let reusedFileDescriptor = Darwin.dup2(
+        let reusedFileDescriptor = Darwin.fcntl(
             sentinelSource.fileDescriptor,
+            F_DUPFD_CLOEXEC,
             controlledFileDescriptor
         )
         guard reusedFileDescriptor >= 0 else {
             throw currentPOSIXError()
         }
-        #expect(reusedFileDescriptor == controlledFileDescriptor)
+        guard reusedFileDescriptor == controlledFileDescriptor else {
+            _ = Darwin.close(reusedFileDescriptor)
+            throw POSIXError(.EBUSY)
+        }
         let reusedHandle = FileHandle(
             fileDescriptor: reusedFileDescriptor,
             closeOnDealloc: true
@@ -4934,6 +4977,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private var recordedPortForwardConnections: [UInt32: RecordingPortForwardConnection] = [:]
     private var configuredPortForwardFailurePorts: Set<UInt32> = []
     private var configuredPortForwardReadyOnlyPorts: Set<UInt32> = []
+    private var configuredPortForwardHighDescriptorPorts: Set<UInt32> = []
     private var configuredPortForwardRecordingPorts: Set<UInt32> = []
     private var configuredPortForwardNoReadPorts: Set<UInt32> = []
     private var configuredPortForwardContinuousOutputPorts: Set<UInt32> = []
@@ -4977,6 +5021,15 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var portForwardReadyOnlyPorts: Set<UInt32> {
         get { portForwardStateLock.withLock { configuredPortForwardReadyOnlyPorts } }
         set { portForwardStateLock.withLock { configuredPortForwardReadyOnlyPorts = newValue } }
+    }
+
+    var portForwardHighDescriptorPorts: Set<UInt32> {
+        get { portForwardStateLock.withLock { configuredPortForwardHighDescriptorPorts } }
+        set {
+            portForwardStateLock.withLock {
+                configuredPortForwardHighDescriptorPorts = newValue
+            }
+        }
     }
 
     var portForwardRecordingPorts: Set<UInt32> {
@@ -5278,6 +5331,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             return (
                 delay: configuredPortForwardStartDelays[port],
                 fails: configuredPortForwardFailurePorts.contains(port),
+                usesHighDescriptor: configuredPortForwardHighDescriptorPorts.contains(port),
                 doesNotRead: configuredPortForwardNoReadPorts.contains(port),
                 continuouslyOutputs: configuredPortForwardContinuousOutputPorts.contains(port),
                 gate: configuredPortForwardCallGates[port],
@@ -5304,7 +5358,11 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         if behavior.fails {
             throw POSIXError(.ECONNREFUSED)
         }
-        let (forwardedHandle, peerHandle) = try makeSocketPair()
+        let (forwardedHandle, peerHandle) = try makeSocketPair(
+            firstDescriptorMinimum: behavior.usesHighDescriptor
+                ? try criShimHighDescriptorMinimum(reservedFromLimit: 128)
+                : nil
+        )
         let connection = RecordingPortForwardConnection(
             forwardedHandle: forwardedHandle,
             peerHandle: peerHandle
@@ -5766,10 +5824,27 @@ private func waitForAsyncCondition(
     }
 }
 
-private func makeSocketPair() throws -> (FileHandle, FileHandle) {
+private func makeSocketPair(
+    firstDescriptorMinimum: Int32? = nil
+) throws -> (FileHandle, FileHandle) {
     var fileDescriptors = [Int32](repeating: 0, count: 2)
     guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &fileDescriptors) == 0 else {
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    if let firstDescriptorMinimum {
+        let highDescriptor = Darwin.fcntl(
+            fileDescriptors[0],
+            F_DUPFD_CLOEXEC,
+            firstDescriptorMinimum
+        )
+        let duplicateErrno = errno
+        _ = Darwin.close(fileDescriptors[0])
+        guard highDescriptor >= 0 else {
+            _ = Darwin.close(fileDescriptors[1])
+            throw POSIXError(POSIXErrorCode(rawValue: duplicateErrno) ?? .EIO)
+        }
+        fileDescriptors[0] = highDescriptor
     }
 
     #if !os(Linux)
@@ -6724,6 +6799,20 @@ private func currentPOSIXError() -> POSIXError {
     POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
 }
 
+private func criShimHighDescriptorMinimum(
+    reservedFromLimit: rlim_t = 96
+) throws -> Int32 {
+    var limit = rlimit()
+    guard Darwin.getrlimit(RLIMIT_NOFILE, &limit) == 0 else {
+        throw currentPOSIXError()
+    }
+    let cappedLimit = min(limit.rlim_cur, rlim_t(32_768))
+    guard cappedLimit > reservedFromLimit else {
+        throw POSIXError(.EMFILE)
+    }
+    return Int32(cappedLimit - reservedFromLimit)
+}
+
 private func makeWebSocketTask(
     from urlString: String,
     protocols: [String]
@@ -6774,6 +6863,7 @@ private func receiveBinaryMessage(
         }
         group.addTask {
             try await Task.sleep(for: timeout)
+            task.cancel(with: .goingAway, reason: nil)
             throw CRIShimRuntimeServerTestError.timedOut("websocket binary message")
         }
         guard let message = try await group.next() else {

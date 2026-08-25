@@ -256,7 +256,9 @@ extension XPCMessage {
 
     public func set(key: String, value: FileHandle) {
         let fd = xpc_fd_create(value.fileDescriptor)
-        close(value.fileDescriptor)
+        // The XPC object owns a duplicate. Close through FileHandle so it no
+        // longer retains a stale descriptor number that the OS may reuse.
+        try? value.close()
         lock.withLock {
             xpc_dictionary_set_value(self.object, key, fd)
         }
@@ -290,10 +292,13 @@ extension XPCMessage {
                 )
             }
             xpc_array_append_value(fdArray, xpcFd)
-            close(fh.fileDescriptor)
         }
         lock.withLock {
             xpc_dictionary_set_value(self.object, key, fdArray)
+        }
+        for fh in value {
+            // Consume the originals only after every descriptor was boxed.
+            try? fh.close()
         }
     }
 

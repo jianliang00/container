@@ -526,6 +526,7 @@ let package = Package(
         .target(
             name: "ContainerKit",
             dependencies: [
+                .product(name: "Containerization", package: "containerization"),
                 .product(name: "SystemPackage", package: "swift-system"),
                 "ContainerAPIClient",
                 "ContainerPersistence",
@@ -547,7 +548,8 @@ let package = Package(
         .testTarget(
             name: "ContainerKitTests",
             dependencies: [
-                "ContainerKit"
+                .product(name: "Containerization", package: "containerization"),
+                "ContainerKit",
             ]
         ),
         .testTarget(

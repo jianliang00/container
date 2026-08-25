@@ -65,6 +65,13 @@ private final class VsockListener {
         guard fd >= 0 else {
             throw POSIXError.fromErrno()
         }
+        var ownsFD = true
+        defer {
+            if ownsFD {
+                closeIfValid(fd)
+            }
+        }
+        try setGuestAgentCloseOnExec(fd)
 
         var on: Int32 = 1
         guard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
@@ -95,6 +102,7 @@ private final class VsockListener {
         logAgentInfo("vsock listener listening on port \(port) backlog=16")
 
         self.listenFD = fd
+        ownsFD = false
     }
 
     deinit {
@@ -105,13 +113,14 @@ private final class VsockListener {
         while true {
             var clientAddr = sockaddr_vm()
             var clientLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
-            let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.accept(listenFD, $0, &clientLen)
+            let clientFD = try withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                try ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    try acceptGuestAgentConnection(
+                        from: listenFD,
+                        address: $0,
+                        addressLength: &clientLen
+                    )
                 }
-            }
-            guard clientFD >= 0 else {
-                throw POSIXError.fromErrno()
             }
             let peerPort = clientAddr.svm_port
             let peerCID = clientAddr.svm_cid
@@ -123,7 +132,6 @@ private final class VsockListener {
                     try connection.run()
                 } catch {
                     logAgentError("connection loop failed: \(describeError(error))")
-                    _ = Darwin.close(clientFD)
                 }
             }
         }
@@ -131,33 +139,65 @@ private final class VsockListener {
 }
 
 final class AgentConnection: @unchecked Sendable {
+    private static let tcpConnectCapability = "tcpConnectV1"
+
+    private enum FrameAction {
+        case continueReading
+        case close
+        case relayTCP(targetFD: Int32, bufferedInput: Data)
+    }
+
     private let fd: Int32
     private let lock = NSLock()
     private let socketHandle: FileHandle
+    private let relayHalfCloseIdleTimeout: TimeInterval?
+    private let relayPeerStateCheckInterval: TimeInterval
 
     private var buffer = Data()
     private var session: (any GuestAgentProcessSession)?
     private var fileTransactions: [String: GuestAgentFileTransferTransaction] = [:]
     private var fileReadTransactions: [String: FileHandle] = [:]
 
-    init(fd: Int32) {
+    init(
+        fd: Int32,
+        // Raw relay EOF represents a TCP write-half-close, so no application idle deadline is imposed by default.
+        relayHalfCloseIdleTimeout: TimeInterval? = nil,
+        relayPeerStateCheckInterval: TimeInterval = 1
+    ) {
         self.fd = fd
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        self.relayHalfCloseIdleTimeout = relayHalfCloseIdleTimeout.map { max($0, 0) }
+        self.relayPeerStateCheckInterval =
+            relayPeerStateCheckInterval.isFinite
+            ? max(relayPeerStateCheckInterval, 0.01)
+            : 1
     }
 
     func run() throws {
+        defer { cleanupConnection() }
+
         logAgentInfo("connection fd=\(fd): sending ready frame")
-        try send(frame: .ready)
+        try send(frame: .ready(capabilities: [Self.tcpConnectCapability]))
         logAgentInfo("connection fd=\(fd): ready frame sent")
         var chunkBuffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
+        connectionLoop: while true {
             guard let chunk = try readSocketChunk(into: &chunkBuffer), !chunk.isEmpty else {
                 logAgentInfo("connection fd=\(fd): peer closed stream")
                 break
             }
             buffer.append(chunk)
             do {
-                try consumeFrames()
+                switch try consumeFrames() {
+                case .continueReading:
+                    continue
+                case .close:
+                    break connectionLoop
+                case .relayTCP(let targetFD, let bufferedInput):
+                    logAgentInfo("connection fd=\(fd): switching to raw TCP relay")
+                    relayTCP(targetFD: targetFD, bufferedInput: bufferedInput)
+                    closeIfValid(targetFD)
+                    break connectionLoop
+                }
             } catch {
                 let message = "failed to consume frame: \(describeError(error))"
                 logAgentError(message)
@@ -166,6 +206,9 @@ final class AgentConnection: @unchecked Sendable {
                 break
             }
         }
+    }
+
+    private func cleanupConnection() {
         session?.cleanup()
         for transaction in fileTransactions.values {
             logFileTransaction("aborting outstanding transaction", request: transaction.request, extra: ["reason": "connection_closed"])
@@ -180,7 +223,7 @@ final class AgentConnection: @unchecked Sendable {
         try? socketHandle.close()
     }
 
-    private func consumeFrames() throws {
+    private func consumeFrames() throws -> FrameAction {
         while buffer.count >= MemoryLayout<UInt32>.size {
             let lengthBytes = buffer.prefix(MemoryLayout<UInt32>.size)
             let payloadLength = try MacOSSidecarSocketIO.frameLength(
@@ -189,7 +232,7 @@ final class AgentConnection: @unchecked Sendable {
             )
             let total = MemoryLayout<UInt32>.size + payloadLength
             guard buffer.count >= total else {
-                return
+                return .continueReading
             }
 
             let payload = buffer.subdata(in: MemoryLayout<UInt32>.size..<total)
@@ -197,11 +240,22 @@ final class AgentConnection: @unchecked Sendable {
 
             let frame = try JSONDecoder().decode(GuestAgentFrame.self, from: payload)
             logAgentInfo("connection fd=\(fd): received frame \(frame.type.rawValue)")
-            try handle(frame: frame)
+            switch try handle(frame: frame) {
+            case .continueReading:
+                continue
+            case .close:
+                buffer.removeAll(keepingCapacity: false)
+                return .close
+            case .relayTCP(let targetFD, _):
+                let bufferedInput = buffer
+                buffer.removeAll(keepingCapacity: false)
+                return .relayTCP(targetFD: targetFD, bufferedInput: bufferedInput)
+            }
         }
+        return .continueReading
     }
 
-    private func handle(frame: GuestAgentFrame) throws {
+    private func handle(frame: GuestAgentFrame) throws -> FrameAction {
         switch frame.type {
         case .exec:
             do {
@@ -214,6 +268,7 @@ final class AgentConnection: @unchecked Sendable {
                 try? send(frame: .error(message))
                 try? send(frame: .exit(1))
             }
+            return .continueReading
         case .stdin:
             if let data = frame.data {
                 do {
@@ -224,6 +279,7 @@ final class AgentConnection: @unchecked Sendable {
                     try? send(frame: .error(message))
                 }
             }
+            return .continueReading
         case .signal:
             if let signal = frame.signal {
                 do {
@@ -234,6 +290,7 @@ final class AgentConnection: @unchecked Sendable {
                     try? send(frame: .error(message))
                 }
             }
+            return .continueReading
         case .resize:
             if let width = frame.width, let height = frame.height {
                 do {
@@ -244,27 +301,124 @@ final class AgentConnection: @unchecked Sendable {
                     try? send(frame: .error(message))
                 }
             }
+            return .continueReading
         case .close:
             session?.closeStdin()
+            return .continueReading
+        case .tcpConnect:
+            return try handleTCPConnect(frame: frame)
         case .networkConfigure:
             try configureNetwork(frame: frame)
+            return .continueReading
         case .fsBegin:
             try beginFileTransaction(frame: frame)
+            return .continueReading
         case .fsChunk:
             try appendFileTransaction(frame: frame)
+            return .continueReading
         case .fsEnd:
             try finishFileTransaction(frame: frame)
+            return .continueReading
         case .fsReadBegin:
             try handleFsReadBegin(frame: frame)
+            return .continueReading
         case .fsReadChunk:
             try handleFsReadChunk(frame: frame)
+            return .continueReading
         case .fsReadEnd:
             try handleFsReadEnd(frame: frame)
+            return .continueReading
         case .fsListDir:
             try handleFsListDir(frame: frame)
+            return .continueReading
         case .stdout, .stderr, .exit, .error, .ready, .ack, .networkResult:
-            break
+            return .continueReading
         }
+    }
+
+    private func handleTCPConnect(frame: GuestAgentFrame) throws -> FrameAction {
+        guard let requestID = frame.id, !requestID.isEmpty else {
+            try send(frame: .error(id: frame.id, message: "tcpConnect requires a non-empty request id"))
+            return .close
+        }
+        guard let port = frame.port, port > 0, port <= UInt32(UInt16.max) else {
+            try send(frame: .error(id: requestID, message: "tcpConnect port must be between 1 and 65535"))
+            return .close
+        }
+
+        let targetFD: Int32
+        do {
+            targetFD = try connectLoopbackTCP(port: port)
+        } catch {
+            let message = "failed to connect to loopback TCP port \(port): \(describeError(error))"
+            logAgentError("connection fd=\(fd): \(message)")
+            try send(frame: .error(id: requestID, message: message))
+            return .close
+        }
+
+        do {
+            try send(frame: .ack(id: requestID))
+            return .relayTCP(targetFD: targetFD, bufferedInput: Data())
+        } catch {
+            closeIfValid(targetFD)
+            throw error
+        }
+    }
+
+    private func relayTCP(targetFD: Int32, bufferedInput: Data) {
+        let serverToClientDone = DispatchSemaphore(value: 0)
+        let serverToClientProgress = TCPRelayProgress()
+        let clientFD = fd
+
+        Thread.detachNewThread {
+            defer {
+                serverToClientProgress.complete()
+                serverToClientDone.signal()
+            }
+            do {
+                try relayBytes(from: targetFD, to: clientFD) {
+                    serverToClientProgress.recordActivity()
+                }
+                _ = Darwin.shutdown(clientFD, SHUT_WR)
+            } catch {
+                logAgentError("TCP relay server-to-client failed: \(describeError(error))")
+                abortRelay(clientFD: clientFD, targetFD: targetFD)
+            }
+        }
+
+        var clientHalfClosed = false
+        do {
+            if !bufferedInput.isEmpty {
+                try writeAll(bufferedInput, to: targetFD)
+            }
+            try relayBytes(from: clientFD, to: targetFD)
+            _ = Darwin.shutdown(targetFD, SHUT_WR)
+            clientHalfClosed = true
+        } catch {
+            logAgentError("TCP relay client-to-server failed: \(describeError(error))")
+            abortRelay(clientFD: clientFD, targetFD: targetFD)
+        }
+
+        if clientHalfClosed {
+            switch serverToClientProgress.waitUntilComplete(
+                idleTimeout: relayHalfCloseIdleTimeout,
+                peerStateCheckInterval: relayPeerStateCheckInterval,
+                peerIsDisconnected: { socketCannotSendToPeer(clientFD) }
+            ) {
+            case .completed:
+                break
+            case .idleTimedOut:
+                logAgentInfo(
+                    "connection fd=\(fd): raw TCP relay exceeded \(relayHalfCloseIdleTimeout ?? 0)s half-close idle timeout"
+                )
+                abortRelay(clientFD: clientFD, targetFD: targetFD)
+            case .peerDisconnected:
+                logAgentInfo("connection fd=\(fd): raw TCP relay peer fully disconnected")
+                abortRelay(clientFD: clientFD, targetFD: targetFD)
+            }
+        }
+        serverToClientDone.wait()
+        logAgentInfo("connection fd=\(fd): raw TCP relay completed")
     }
 
     private func configureNetwork(frame: GuestAgentFrame) throws {
@@ -730,6 +884,350 @@ final class AgentConnection: @unchecked Sendable {
             ]
         )
     }
+}
+
+private func connectLoopbackTCP(port: UInt32) throws -> Int32 {
+    let connectTimeoutMilliseconds: Int32 = 500
+    guard port > 0, port <= UInt32(UInt16.max) else {
+        throw POSIXError(.EINVAL)
+    }
+
+    var attemptDescriptions: [String] = []
+    var lastErrorCode = ECONNREFUSED
+    for host in ["::1", "127.0.0.1"] {
+        var hints = addrinfo()
+        hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        hints.ai_protocol = IPPROTO_TCP
+
+        var results: UnsafeMutablePointer<addrinfo>?
+        let lookupResult = getaddrinfo(host, String(port), &hints, &results)
+        guard lookupResult == 0 else {
+            attemptDescriptions.append("\(host): \(String(cString: gai_strerror(lookupResult)))")
+            continue
+        }
+        defer { freeaddrinfo(results) }
+
+        var current = results
+        while let addressInfo = current?.pointee {
+            defer { current = addressInfo.ai_next }
+            guard addressInfo.ai_family == AF_INET || addressInfo.ai_family == AF_INET6 else {
+                continue
+            }
+
+            let socketFD = Darwin.socket(addressInfo.ai_family, addressInfo.ai_socktype, addressInfo.ai_protocol)
+            guard socketFD >= 0 else {
+                lastErrorCode = errno
+                attemptDescriptions.append("\(host): \(String(cString: strerror(lastErrorCode)))")
+                continue
+            }
+
+            do {
+                try setGuestAgentCloseOnExec(socketFD)
+                try connectSocket(
+                    socketFD,
+                    address: addressInfo.ai_addr,
+                    addressLength: addressInfo.ai_addrlen,
+                    timeoutMilliseconds: connectTimeoutMilliseconds
+                )
+                return socketFD
+            } catch {
+                let nsError = error as NSError
+                lastErrorCode = Int32(nsError.code)
+                attemptDescriptions.append("\(host): \(nsError.localizedDescription)")
+                closeIfValid(socketFD)
+            }
+        }
+    }
+
+    throw NSError(
+        domain: NSPOSIXErrorDomain,
+        code: Int(lastErrorCode),
+        userInfo: [
+            NSLocalizedDescriptionKey: attemptDescriptions.isEmpty
+                ? "no IPv6 or IPv4 loopback address was available"
+                : attemptDescriptions.joined(separator: "; ")
+        ]
+    )
+}
+
+func setGuestAgentCloseOnExec(_ fd: Int32) throws {
+    let descriptorFlags = fcntl(fd, F_GETFD)
+    guard descriptorFlags >= 0 else {
+        throw POSIXError.fromErrno()
+    }
+    guard fcntl(fd, F_SETFD, descriptorFlags | FD_CLOEXEC) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+}
+
+func acceptGuestAgentConnection(
+    from listenFD: Int32,
+    address: UnsafeMutablePointer<sockaddr>?,
+    addressLength: UnsafeMutablePointer<socklen_t>?
+) throws -> Int32 {
+    while true {
+        let clientFD = Darwin.accept(listenFD, address, addressLength)
+        if clientFD >= 0 {
+            do {
+                try setGuestAgentCloseOnExec(clientFD)
+                return clientFD
+            } catch {
+                closeIfValid(clientFD)
+                throw error
+            }
+        }
+        if errno == EINTR {
+            continue
+        }
+        throw POSIXError.fromErrno()
+    }
+}
+
+private func connectSocket(
+    _ fd: Int32,
+    address: UnsafePointer<sockaddr>?,
+    addressLength: socklen_t,
+    timeoutMilliseconds: Int32
+) throws {
+    let originalFlags = fcntl(fd, F_GETFL)
+    guard originalFlags >= 0 else {
+        throw POSIXError.fromErrno()
+    }
+    guard fcntl(fd, F_SETFL, originalFlags | O_NONBLOCK) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+
+    if Darwin.connect(fd, address, addressLength) == 0 {
+        guard fcntl(fd, F_SETFL, originalFlags) == 0 else {
+            throw POSIXError.fromErrno()
+        }
+        return
+    }
+
+    let connectError = errno
+    guard connectError == EINPROGRESS || connectError == EALREADY || connectError == EINTR else {
+        throw POSIXError(POSIXErrorCode(rawValue: connectError) ?? .EIO)
+    }
+
+    let now = DispatchTime.now().uptimeNanoseconds
+    let timeoutNanoseconds = UInt64(max(timeoutMilliseconds, 0)) * 1_000_000
+    let (candidateDeadline, overflow) = now.addingReportingOverflow(timeoutNanoseconds)
+    let deadline = overflow ? UInt64.max : candidateDeadline
+    while true {
+        let currentTime = DispatchTime.now().uptimeNanoseconds
+        guard currentTime < deadline else {
+            throw POSIXError(.ETIMEDOUT)
+        }
+        let remainingNanoseconds = deadline - currentTime
+        let roundedMilliseconds = 1 + ((remainingNanoseconds - 1) / 1_000_000)
+        let remainingMilliseconds = Int32(min(roundedMilliseconds, UInt64(Int32.max)))
+        var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let pollResult = Darwin.poll(&descriptor, 1, remainingMilliseconds)
+        if pollResult > 0 {
+            break
+        }
+        if pollResult == 0 {
+            throw POSIXError(.ETIMEDOUT)
+        }
+        if errno == EINTR {
+            continue
+        }
+        throw POSIXError.fromErrno()
+    }
+
+    var socketError: Int32 = 0
+    var socketErrorLength = socklen_t(MemoryLayout<Int32>.size)
+    guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &socketErrorLength) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+    guard socketError == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: socketError) ?? .EIO)
+    }
+    guard fcntl(fd, F_SETFL, originalFlags) == 0 else {
+        throw POSIXError.fromErrno()
+    }
+}
+
+private enum TCPRelayWaitResult {
+    case completed
+    case idleTimedOut
+    case peerDisconnected
+}
+
+private final class TCPRelayProgress: @unchecked Sendable {
+    private struct Snapshot {
+        var generation: UInt64
+        var completed: Bool
+    }
+
+    private let wakeup = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var completed = false
+    private var waiterActive = false
+    private var wakeupPending = false
+
+    func recordActivity() {
+        let shouldSignal = lock.withLock {
+            if !completed {
+                generation &+= 1
+            }
+            guard waiterActive, !wakeupPending else {
+                return false
+            }
+            wakeupPending = true
+            return true
+        }
+        if shouldSignal {
+            wakeup.signal()
+        }
+    }
+
+    func complete() {
+        let shouldSignal = lock.withLock {
+            completed = true
+            guard waiterActive, !wakeupPending else {
+                return false
+            }
+            wakeupPending = true
+            return true
+        }
+        if shouldSignal {
+            wakeup.signal()
+        }
+    }
+
+    func waitUntilComplete(
+        idleTimeout: TimeInterval?,
+        peerStateCheckInterval: TimeInterval,
+        peerIsDisconnected: () -> Bool
+    ) -> TCPRelayWaitResult {
+        var snapshot = lock.withLock {
+            waiterActive = true
+            return Snapshot(generation: generation, completed: completed)
+        }
+        defer {
+            lock.withLock {
+                waiterActive = false
+                wakeupPending = false
+            }
+        }
+        var observedGeneration = snapshot.generation
+        let started = DispatchTime.now().uptimeNanoseconds
+        var idleDeadline = idleTimeout.map { tcpRelayDeadline(after: $0, now: started) }
+        var peerCheckDeadline = started
+
+        while true {
+            if snapshot.completed {
+                return .completed
+            }
+
+            let now = DispatchTime.now().uptimeNanoseconds
+            if snapshot.generation != observedGeneration {
+                observedGeneration = snapshot.generation
+                idleDeadline = idleTimeout.map { tcpRelayDeadline(after: $0, now: now) }
+            }
+            if let idleDeadline, now >= idleDeadline {
+                let latestSnapshot = lock.withLock {
+                    Snapshot(generation: generation, completed: completed)
+                }
+                if latestSnapshot.completed {
+                    return .completed
+                }
+                if latestSnapshot.generation != snapshot.generation {
+                    snapshot = latestSnapshot
+                    continue
+                }
+                return .idleTimedOut
+            }
+
+            if now >= peerCheckDeadline, peerIsDisconnected() {
+                if lock.withLock({ completed }) {
+                    return .completed
+                }
+                return .peerDisconnected
+            }
+            if now >= peerCheckDeadline {
+                peerCheckDeadline = tcpRelayDeadline(after: peerStateCheckInterval, now: now)
+            }
+
+            let nextDeadline = min(peerCheckDeadline, idleDeadline ?? UInt64.max)
+            _ = wakeup.wait(timeout: DispatchTime(uptimeNanoseconds: nextDeadline))
+            snapshot = lock.withLock {
+                wakeupPending = false
+                return Snapshot(generation: generation, completed: completed)
+            }
+        }
+    }
+}
+
+private func tcpRelayDeadline(after interval: TimeInterval, now: UInt64) -> UInt64 {
+    guard interval.isFinite else {
+        return UInt64.max
+    }
+    let clampedInterval = max(interval, 0)
+    let maximumInterval = Double(UInt64.max - now) / 1_000_000_000
+    guard clampedInterval < maximumInterval else {
+        return UInt64.max
+    }
+    return now + UInt64(clampedInterval * 1_000_000_000)
+}
+
+private func socketCannotSendToPeer(_ fd: Int32) -> Bool {
+    var descriptorInfo = socket_fdinfo()
+    let result = proc_pidfdinfo(
+        getpid(),
+        fd,
+        PROC_PIDFDSOCKETINFO,
+        &descriptorInfo,
+        Int32(MemoryLayout<socket_fdinfo>.size)
+    )
+    guard result >= Int32(MemoryLayout<socket_fdinfo>.size) else {
+        return false
+    }
+
+    let state = descriptorInfo.psi.soi_state
+    let terminalStates = Int16(SOI_S_CANTSENDMORE) | Int16(SOI_S_ISDISCONNECTED)
+    return (state & terminalStates) != 0
+}
+
+private func relayBytes(
+    from sourceFD: Int32,
+    to destinationFD: Int32,
+    didTransfer: (() -> Void)? = nil
+) throws {
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+        let bytesRead = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+            guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+            return Darwin.read(sourceFD, baseAddress, rawBuffer.count)
+        }
+        if bytesRead > 0 {
+            try writeAll(Data(buffer.prefix(bytesRead)), to: destinationFD)
+            didTransfer?()
+            continue
+        }
+        if bytesRead == 0 {
+            return
+        }
+
+        let code = errno
+        if code == EINTR {
+            continue
+        }
+        if code == EAGAIN || code == EWOULDBLOCK {
+            usleep(10_000)
+            continue
+        }
+        throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+    }
+}
+
+private func abortRelay(clientFD: Int32, targetFD: Int32) {
+    _ = Darwin.shutdown(clientFD, SHUT_RDWR)
+    _ = Darwin.shutdown(targetFD, SHUT_RDWR)
 }
 
 private protocol GuestAgentProcessSession: AnyObject {
@@ -1678,6 +2176,7 @@ struct GuestAgentFrame: Codable {
         case signal
         case resize
         case close
+        case tcpConnect
         case networkConfigure
         case networkResult
         case fsBegin
@@ -1697,6 +2196,8 @@ struct GuestAgentFrame: Codable {
 
     let type: FrameType
     let id: String?
+    let port: UInt32?
+    let capabilities: [String]?
     let executable: String?
     let arguments: [String]?
     let environment: [String]?
@@ -1728,6 +2229,8 @@ struct GuestAgentFrame: Codable {
     init(
         type: FrameType,
         id: String? = nil,
+        port: UInt32? = nil,
+        capabilities: [String]? = nil,
         executable: String? = nil,
         arguments: [String]? = nil,
         environment: [String]? = nil,
@@ -1758,6 +2261,8 @@ struct GuestAgentFrame: Codable {
     ) {
         self.type = type
         self.id = id
+        self.port = port
+        self.capabilities = capabilities
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
@@ -1787,9 +2292,9 @@ struct GuestAgentFrame: Codable {
         self.maxLength = maxLength
     }
 
-    static let ready = GuestAgentFrame(
-        type: .ready
-    )
+    static func ready(capabilities: [String]) -> Self {
+        .init(type: .ready, capabilities: capabilities)
+    }
 
     static func stdout(_ data: Data) -> Self {
         .init(type: .stdout, data: data)
@@ -1805,6 +2310,10 @@ struct GuestAgentFrame: Codable {
 
     static func error(_ message: String) -> Self {
         .init(type: .error, message: message)
+    }
+
+    static func error(id: String?, message: String) -> Self {
+        .init(type: .error, id: id, message: message)
     }
 
     static func ack(id: String, data: Data? = nil) -> Self {

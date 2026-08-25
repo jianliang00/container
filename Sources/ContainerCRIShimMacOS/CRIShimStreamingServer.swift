@@ -324,9 +324,11 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
     private let sessionStore: CRIShimStreamingSessionStore
     private let activeSessionIdleTimeout: TimeAmount?
     private let websocketMaxFrameSize: Int
+    private let maximumActivePortForwardTunnels: Int
     private let stateLock = NSLock()
     private var serverChannel: Channel?
     private var activeChannels: [ObjectIdentifier: Channel] = [:]
+    private var activePortForwardTunnelLeases: Set<UUID> = []
     private var baseURL: URL?
 
     public init(
@@ -334,7 +336,8 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
         runtimeManager: any CRIShimRuntimeManaging,
         sessionTimeoutSeconds: TimeInterval = 30,
         activeSessionIdleTimeoutSeconds: TimeInterval = 300,
-        websocketMaxFrameSize: Int = 1 << 20
+        websocketMaxFrameSize: Int = 1 << 20,
+        maximumActivePortForwardTunnels: Int = 256
     ) {
         self.config = config
         self.runtimeManager = runtimeManager
@@ -346,6 +349,7 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
                 nil
             }
         self.websocketMaxFrameSize = websocketMaxFrameSize
+        self.maximumActivePortForwardTunnels = max(maximumActivePortForwardTunnels, 1)
     }
 
     public func start(eventLoopGroup: any EventLoopGroup) async throws {
@@ -559,6 +563,29 @@ public final class CRIShimStreamingServer: @unchecked Sendable {
         }
     }
 
+    fileprivate func acquirePortForwardTunnelLease() -> UUID? {
+        stateLock.withLock {
+            guard activePortForwardTunnelLeases.count < maximumActivePortForwardTunnels else {
+                return nil
+            }
+            let lease = UUID()
+            activePortForwardTunnelLeases.insert(lease)
+            return lease
+        }
+    }
+
+    fileprivate func releasePortForwardTunnelLease(_ lease: UUID) {
+        _ = stateLock.withLock {
+            activePortForwardTunnelLeases.remove(lease)
+        }
+    }
+
+    var activePortForwardTunnelCount: Int {
+        stateLock.withLock {
+            activePortForwardTunnelLeases.count
+        }
+    }
+
     private func registerActiveChannel(_ channel: Channel) {
         stateLock.withLock {
             activeChannels[ObjectIdentifier(channel)] = channel
@@ -763,6 +790,59 @@ private final class CRIShimSPDYServerUpgrader: HTTPServerProtocolUpgrader, @unch
     }
 }
 
+final class CRIShimSPDYControlWriteGate: @unchecked Sendable {
+    private static let maximumPendingWrites = 64
+
+    private let lock = NSLock()
+    private var pendingWrites = 0
+    private var rejected = false
+
+    var isRejected: Bool {
+        lock.withLock { rejected }
+    }
+
+    func reserve(channel: Channel) -> Bool {
+        reserve(isActive: channel.isActive, isWritable: channel.isWritable)
+    }
+
+    func reserve(isActive: Bool, isWritable: Bool) -> Bool {
+        lock.withLock {
+            guard
+                !rejected,
+                isActive,
+                isWritable,
+                pendingWrites < Self.maximumPendingWrites
+            else {
+                rejected = true
+                return false
+            }
+            pendingWrites += 1
+            return true
+        }
+    }
+
+    func complete(succeeded: Bool) -> Bool {
+        lock.withLock {
+            pendingWrites -= min(pendingWrites, 1)
+            guard !succeeded, !rejected else {
+                return false
+            }
+            rejected = true
+            return true
+        }
+    }
+
+    func reject() -> Bool {
+        lock.withLock {
+            guard !rejected else {
+                return false
+            }
+            rejected = true
+            return true
+        }
+    }
+}
+
 private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
@@ -780,6 +860,7 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
     private let invocation: CRIShimExecStreamingInvocation
     private let protocolVersion: CRIShimExecStreamProtocol
     private let idleTimeout: TimeAmount?
+    private let controlWriteGate = CRIShimSPDYControlWriteGate()
     private let lock = NSLock()
     private var channel: Channel?
     private var inboundBuffer: ByteBuffer?
@@ -820,14 +901,17 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !controlWriteGate.isRejected else {
+            return
+        }
         var incoming = unwrapInboundIn(data)
         inboundBuffer?.writeBuffer(&incoming)
         recordActivity()
         do {
             try parseAvailableFrames()
         } catch {
-            Task {
-                await failSession(String(describing: error))
+            if controlWriteGate.reject() {
+                context.close(promise: nil)
             }
         }
     }
@@ -931,8 +1015,8 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
         case 6:
             try handlePing(payload: &payload)
         case 7:
-            Task {
-                await cleanup(killProcess: true)
+            if controlWriteGate.reject() {
+                channel?.close(promise: nil)
             }
         case 9:
             break
@@ -1289,6 +1373,7 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
     }
 
     private func cleanup(killProcess: Bool) async {
+        _ = controlWriteGate.reject()
         let cleanupState = lock.withLock {
             () -> (
                 process: (any CRIShimStreamingProcess)?,
@@ -1397,17 +1482,25 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
         flags: UInt8,
         payload: Data
     ) throws {
-        guard let channel, channel.isActive else {
-            return
+        guard let channel, controlWriteGate.reserve(channel: channel) else {
+            channel?.close(promise: nil)
+            throw CRIShimError.unavailable("SPDY control output is backpressured")
         }
         var buffer = channel.allocator.buffer(capacity: 8 + payload.count)
         buffer.writeInteger(UInt32(0x8000_0000) | (UInt32(3) << 16) | UInt32(type), endianness: .big)
         writeSPDYLength(flags: flags, length: payload.count, to: &buffer)
         buffer.writeBytes(payload)
         let promise = channel.eventLoop.makePromise(of: Void.self)
-        promise.futureResult.whenFailure { [weak self] _ in
-            Task {
-                await self?.handleWriteFailure()
+        promise.futureResult.whenComplete { [weak self] result in
+            let succeeded: Bool
+            switch result {
+            case .success:
+                succeeded = true
+            case .failure:
+                succeeded = false
+            }
+            if self?.controlWriteGate.complete(succeeded: succeeded) == true {
+                channel.close(promise: nil)
             }
         }
         channel.writeAndFlush(buffer, promise: promise)
@@ -1434,6 +1527,7 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
     }
 
     private func handleWriteFailure() async {
+        _ = controlWriteGate.reject()
         await cleanup(killProcess: true)
         guard let channel else {
             return
@@ -1442,9 +1536,85 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
     }
 }
 
+private let criShimPortForwardMaximumPendingOutputBytes = 256 << 10
+private let criShimPortForwardMaximumPendingOutputElements = 256
+
+struct CRIShimPendingInputBuffer {
+    private static let minimumCapacity = 16
+
+    private var storage: [Data?] = []
+    private var head = 0
+    private var elementCount = 0
+
+    var first: Data? {
+        guard elementCount > 0 else {
+            return nil
+        }
+        return storage[head]
+    }
+
+    var isEmpty: Bool {
+        elementCount == 0
+    }
+
+    var count: Int {
+        elementCount
+    }
+
+    var allocatedSlotCount: Int {
+        storage.count
+    }
+
+    mutating func append(_ data: Data) {
+        if elementCount == storage.count {
+            grow()
+        }
+        let tail = (head + elementCount) % storage.count
+        storage[tail] = data
+        elementCount += 1
+    }
+
+    @discardableResult
+    mutating func removeFirst() -> Data? {
+        guard elementCount > 0 else {
+            return nil
+        }
+        let data = storage[head]
+        storage[head] = nil
+        elementCount -= 1
+        if elementCount == 0 {
+            storage.removeAll(keepingCapacity: false)
+            head = 0
+        } else {
+            head = (head + 1) % storage.count
+        }
+        return data
+    }
+
+    private mutating func grow() {
+        let newCapacity = max(Self.minimumCapacity, storage.count * 2)
+        var newStorage = [Data?](repeating: nil, count: newCapacity)
+        if !storage.isEmpty {
+            for index in 0..<elementCount {
+                newStorage[index] = storage[(head + index) % storage.count]
+            }
+        }
+        storage = newStorage
+        head = 0
+    }
+}
+
 private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
+
+    private static let maximumPendingClientInputBytesPerPair = 1 << 20
+    private static let maximumPendingClientInputBytesPerSession = 4 << 20
+    private static let maximumPendingClientInputElementsPerPair = 256
+    private static let maximumPendingClientInputElementsPerSession = 1024
+    private static let maximumActivePairs = 64
+    private static let maximumPairTombstones = 128
+    private static let maximumRequestIDBytes = 256
 
     fileprivate enum StreamKind {
         case data
@@ -1452,31 +1622,117 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 
     private struct Stream {
-        var id: UInt32
         var requestID: String
+        var generation: UUID
         var port: UInt32
         var kind: StreamKind
     }
 
     private struct Pair {
+        var generation = UUID()
         var dataStreamID: UInt32?
         var errorStreamID: UInt32?
-        var port: UInt32?
+        var port: UInt32
+        var openingToken: UUID?
+        var writerToken: UUID?
+        var outputToken: UUID?
+        var tunnelLease: UUID?
         var handle: FileHandle?
+        var controlConnection: CRIShimBackendControlConnection?
         var input: FileHandleByteStream?
-        var closed = false
+        var pendingInput = CRIShimPendingInputBuffer()
+        var pendingInputBytes = 0
+        var clientWriteClosed = false
+        var backendWriteShutdown = false
+        var inputRejected = false
+        var terminating = false
+        var terminal: PairTerminal?
+
+        init(port: UInt32) {
+            self.port = port
+        }
+    }
+
+    private enum PairTerminal {
+        case success
+        case failure(String)
+    }
+
+    private struct PairIdentity: Hashable {
+        var requestID: String
+        var generation: UUID
+    }
+
+    private struct DialLaunch {
+        var identity: PairIdentity
+        var token: UUID
+        var port: UInt32
+        var dataStreamID: UInt32
+        var tunnelLease: UUID
+    }
+
+    private struct WriterLaunch {
+        var identity: PairIdentity
+        var token: UUID
+        var handle: FileHandle
+        var controlConnection: CRIShimBackendControlConnection
+    }
+
+    private struct OutputLaunch {
+        var identity: PairIdentity
+        var token: UUID
+        var input: FileHandleByteStream?
+        var backendEOFMeansSuccess: Bool
+    }
+
+    private struct PairFailure {
+        var identity: PairIdentity
+        var message: String
+    }
+
+    private enum ClientInputAction {
+        case none
+        case startWriter(WriterLaunch)
+        case fail(PairFailure)
+    }
+
+    private enum BackendWriterAction {
+        case stop
+        case write(Data)
+        case shutdown
+    }
+
+    private struct PairTerminalFrames {
+        var terminal: PairTerminal
+        var dataStreamID: UInt32?
+        var errorStreamID: UInt32?
+    }
+
+    private final class TrackedTask: @unchecked Sendable {
+        let owner: PairIdentity?
+        var task: Task<Void, Never>?
+
+        init(owner: PairIdentity?) {
+            self.owner = owner
+        }
     }
 
     private let server: CRIShimStreamingServer
     private let runtimeManager: any CRIShimRuntimeManaging
     private let invocation: CRIShimPortForwardInvocation
     private let idleTimeout: TimeAmount?
+    private let controlWriteGate = CRIShimSPDYControlWriteGate()
     private let lock = NSLock()
     private var channel: Channel?
     private var inboundBuffer: ByteBuffer?
+    private var highestAcceptedClientStreamID: UInt32 = 0
     private var streams: [UInt32: Stream] = [:]
     private var pairs: [String: Pair] = [:]
-    private var tasks: [Task<Void, Never>] = []
+    private var sessionPendingInputBytes = 0
+    private var sessionPendingInputElements = 0
+    private var pairTombstones: Set<String> = []
+    private var pairTombstoneOrder: [String] = []
+    private var tasks: [UUID: TrackedTask] = [:]
     private var cleanupPerformed = false
     private var idleTimeoutTask: Scheduled<Void>?
     private var inflater = try! CRIShimSPDYHeaderInflater()
@@ -1501,14 +1757,17 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !controlWriteGate.isRejected else {
+            return
+        }
         var incoming = unwrapInboundIn(data)
         inboundBuffer?.writeBuffer(&incoming)
         recordActivity()
         do {
             try parseAvailableFrames()
         } catch {
-            Task {
-                await failSession(String(describing: error))
+            if controlWriteGate.reject() {
+                context.close(promise: nil)
             }
         }
     }
@@ -1595,8 +1854,8 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         case 6:
             try handlePing(payload: &payload)
         case 7:
-            Task {
-                await cleanup()
+            if controlWriteGate.reject() {
+                channel?.close(promise: nil)
             }
         case 9:
             break
@@ -1610,16 +1869,21 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         payload: inout ByteBuffer
     ) throws {
         guard
-            let streamID = payload.readInteger(endianness: .big, as: UInt32.self),
+            let encodedStreamID = payload.readInteger(endianness: .big, as: UInt32.self),
             payload.readInteger(endianness: .big, as: UInt32.self) != nil,
             payload.readInteger(endianness: .big, as: UInt8.self) != nil,
             payload.readInteger(endianness: .big, as: UInt8.self) != nil
         else {
             throw CRIShimError.invalidArgument("SPDY SYN_STREAM payload is truncated")
         }
+        let streamID = encodedStreamID & 0x7FFF_FFFF
 
         let headerData = Data(payload.readableBytesView)
         let headers = try parseSPDYHeaders(try inflater.decompress(headerData))
+        guard streamID > 0, streamID.isMultiple(of: 2) == false else {
+            try writeResetFrame(streamID: streamID, status: 1)
+            return
+        }
         guard let streamType = headers["streamtype"]?.first else {
             try writeResetFrame(streamID: streamID, status: 1)
             return
@@ -1637,25 +1901,111 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
             return
         }
 
-        let requestID = headers["requestid"]?.first ?? fallbackRequestID(streamID: streamID, kind: kind)
-        let stream = Stream(id: streamID, requestID: requestID, port: port, kind: kind)
-        lock.withLock {
-            streams[streamID] = stream
-            var pair = pairs[requestID] ?? Pair()
-            pair.port = pair.port ?? port
-            switch kind {
-            case .data:
-                pair.dataStreamID = streamID
-            case .error:
-                pair.errorStreamID = streamID
+        let requestID: String
+        if let explicitRequestIDs = headers["requestid"] {
+            guard
+                explicitRequestIDs.count == 1,
+                let explicitRequestID = explicitRequestIDs.first,
+                !explicitRequestID.isEmpty,
+                explicitRequestID.utf8.count <= Self.maximumRequestIDBytes
+            else {
+                try writeResetFrame(streamID: streamID, status: 1)
+                return
             }
-            pairs[requestID] = pair
+            requestID = explicitRequestID
+        } else if let inferredRequestID = fallbackRequestID(streamID: streamID, kind: kind) {
+            requestID = inferredRequestID
+        } else {
+            try writeResetFrame(streamID: streamID, status: 1)
+            return
         }
 
-        try writeSynReplyFrame(streamID: streamID)
+        let accepted = lock.withLock { () -> (PairIdentity, DialLaunch?)? in
+            guard
+                !cleanupPerformed,
+                streamID > highestAcceptedClientStreamID,
+                streams[streamID] == nil,
+                !pairTombstones.contains(requestID)
+            else {
+                return nil
+            }
 
-        if kind == .data {
-            startPortForwardIfNeeded(requestID: requestID, port: port, dataStreamID: streamID)
+            var pair: Pair
+            if let existingPair = pairs[requestID] {
+                guard
+                    existingPair.port == port,
+                    existingPair.terminal == nil,
+                    !existingPair.terminating
+                else {
+                    return nil
+                }
+                pair = existingPair
+            } else {
+                guard pairs.count < Self.maximumActivePairs else {
+                    return nil
+                }
+                pair = Pair(port: port)
+            }
+
+            switch kind {
+            case .data:
+                guard pair.dataStreamID == nil else {
+                    return nil
+                }
+                pair.dataStreamID = streamID
+            case .error:
+                guard pair.errorStreamID == nil else {
+                    return nil
+                }
+                pair.errorStreamID = streamID
+            }
+
+            let identity = PairIdentity(requestID: requestID, generation: pair.generation)
+            var dialLaunch: DialLaunch?
+            if kind == .data {
+                guard pair.handle == nil, pair.openingToken == nil else {
+                    return nil
+                }
+                guard let tunnelLease = server.acquirePortForwardTunnelLease() else {
+                    return nil
+                }
+                let token = UUID()
+                pair.openingToken = token
+                dialLaunch = DialLaunch(
+                    identity: identity,
+                    token: token,
+                    port: port,
+                    dataStreamID: streamID,
+                    tunnelLease: tunnelLease
+                )
+            }
+
+            streams[streamID] = Stream(
+                requestID: requestID,
+                generation: pair.generation,
+                port: port,
+                kind: kind
+            )
+            highestAcceptedClientStreamID = streamID
+            pairs[requestID] = pair
+            return (identity, dialLaunch)
+        }
+        guard let accepted else {
+            try writeResetFrame(streamID: streamID, status: 1)
+            return
+        }
+
+        do {
+            try writeSynReplyFrame(streamID: streamID)
+        } catch {
+            if let dialLaunch = accepted.1 {
+                server.releasePortForwardTunnelLease(dialLaunch.tunnelLease)
+            }
+            throw error
+        }
+
+        if let dialLaunch = accepted.1 {
+            startPortForward(dialLaunch)
         }
 
         if (flags & 0x01) != 0 {
@@ -1667,7 +2017,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         guard let streamID = payload.readInteger(endianness: .big, as: UInt32.self) else {
             return
         }
-        handleStreamFinished(streamID & 0x7FFF_FFFF)
+        abortPair(for: streamID & 0x7FFF_FFFF)
     }
 
     private func handlePing(payload: inout ByteBuffer) throws {
@@ -1684,14 +2034,18 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     ) {
         let data = Data(payload.readableBytesView)
         let stream = lock.withLock { streams[streamID] }
-        if case .data? = stream?.kind, !data.isEmpty {
-            let handle = lock.withLock { pairs[stream!.requestID]?.handle }
-            do {
-                try handle?.write(contentsOf: data)
-            } catch {
-                Task {
-                    await failSession(String(describing: error))
-                }
+        if let stream, case .data = stream.kind, !data.isEmpty {
+            switch enqueueClientInput(
+                requestID: stream.requestID,
+                generation: stream.generation,
+                data: data
+            ) {
+            case .none:
+                break
+            case .startWriter(let launch):
+                startBackendWriter(launch)
+            case .fail(let failure):
+                failPair(failure.identity, message: failure.message)
             }
         }
 
@@ -1700,86 +2054,232 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         }
     }
 
-    private func startPortForwardIfNeeded(
-        requestID: String,
-        port: UInt32,
-        dataStreamID: UInt32
-    ) {
-        let shouldStart = lock.withLock { () -> Bool in
-            guard !cleanupPerformed else {
-                return false
-            }
-            var pair = pairs[requestID] ?? Pair()
-            if pair.handle != nil || pair.closed {
-                return false
-            }
-            pair.port = port
-            pair.dataStreamID = dataStreamID
-            pairs[requestID] = pair
-            return true
-        }
-        guard shouldStart else {
-            return
-        }
-
-        let task = Task {
-            var handle: FileHandle?
-            do {
-                let openedHandle = try await runtimeManager.streamPortForward(sandboxID: invocation.sandboxID, port: port)
-                handle = openedHandle
-                let input = try fileHandleStream(openedHandle)
-                let registered = lock.withLock { () -> Bool in
-                    guard !cleanupPerformed, var pair = pairs[requestID], !pair.closed else {
-                        return false
-                    }
-                    pair.port = port
-                    pair.dataStreamID = dataStreamID
-                    pair.handle = openedHandle
-                    pair.input = input
-                    pairs[requestID] = pair
-                    return true
+    private func startPortForward(_ launch: DialLaunch) {
+        let tunnelLeaseServer = server
+        let started = startTrackedTask(owner: launch.identity) { [weak self] in
+            var ownsTunnelLease = true
+            defer {
+                if ownsTunnelLease {
+                    tunnelLeaseServer.releasePortForwardTunnelLease(launch.tunnelLease)
                 }
-                guard registered else {
-                    input.cancel()
-                    try? openedHandle.close()
-                    return
-                }
-                await pumpPortForward(requestID: requestID, dataStreamID: dataStreamID, input: input)
-            } catch {
-                try? handle?.close()
-                await sendPortForwardError(requestID: requestID, message: String(describing: error))
             }
-        }
-        appendTask(task)
-    }
-
-    private func pumpPortForward(
-        requestID: String,
-        dataStreamID: UInt32,
-        input: FileHandleByteStream
-    ) async {
-        for await data in input.bytes {
-            do {
-                try await writeDataFrame(streamID: dataStreamID, data: data)
-                recordActivity()
-            } catch {
-                await failSession(String(describing: error))
+            guard let self else {
                 return
             }
+            var unownedHandle: FileHandle?
+            var unownedControlConnection: CRIShimBackendControlConnection?
+            do {
+                let openedHandle = try await runtimeManager.streamPortForward(
+                    sandboxID: invocation.sandboxID,
+                    port: launch.port
+                )
+                unownedHandle = openedHandle
+                let controlConnection = try CRIShimBackendControlConnection(
+                    duplicating: openedHandle.fileDescriptor
+                )
+                unownedControlConnection = controlConnection
+                let input = try fileHandleStream(
+                    openedHandle,
+                    maximumPendingBytes: criShimPortForwardMaximumPendingOutputBytes,
+                    maximumPendingElements: criShimPortForwardMaximumPendingOutputElements
+                )
+                let registration = lock.withLock { () -> (OutputLaunch, WriterLaunch?)? in
+                    guard
+                        !cleanupPerformed,
+                        var pair = pairs[launch.identity.requestID],
+                        pair.generation == launch.identity.generation,
+                        pair.openingToken == launch.token,
+                        pair.port == launch.port,
+                        pair.dataStreamID == launch.dataStreamID,
+                        !pair.terminating,
+                        !pair.inputRejected,
+                        pair.terminal == nil
+                    else {
+                        return nil
+                    }
+                    pair.openingToken = nil
+                    pair.handle = openedHandle
+                    pair.controlConnection = controlConnection
+                    pair.input = input
+                    pair.tunnelLease = launch.tunnelLease
+                    let outputToken = UUID()
+                    pair.outputToken = outputToken
+                    let writerLaunch = makeWriterLaunchIfNeeded(
+                        identity: launch.identity,
+                        pair: &pair
+                    )
+                    pairs[launch.identity.requestID] = pair
+                    return (
+                        OutputLaunch(
+                            identity: launch.identity,
+                            token: outputToken,
+                            input: input,
+                            backendEOFMeansSuccess: true
+                        ),
+                        writerLaunch
+                    )
+                }
+                guard let registration else {
+                    input.cancel()
+                    controlConnection.shutdownAllAndClose()
+                    try? openedHandle.close()
+                    unownedHandle = nil
+                    unownedControlConnection = nil
+                    return
+                }
+                ownsTunnelLease = false
+                unownedHandle = nil
+                unownedControlConnection = nil
+                startOutputPump(registration.0)
+                if let writerLaunch = registration.1 {
+                    startBackendWriter(writerLaunch)
+                }
+            } catch {
+                let stillOpening = lock.withLock {
+                    guard let pair = pairs[launch.identity.requestID] else {
+                        return false
+                    }
+                    return pair.generation == launch.identity.generation
+                        && pair.openingToken == launch.token
+                }
+                if stillOpening {
+                    failPair(launch.identity, message: String(describing: error))
+                }
+                unownedControlConnection?.shutdownAllAndClose()
+                try? unownedHandle?.close()
+            }
         }
-        try? await writeDataFrame(streamID: dataStreamID, data: Data(), flags: 0x01)
-        finishPair(requestID: requestID)
+        if !started {
+            server.releasePortForwardTunnelLease(launch.tunnelLease)
+        }
     }
 
-    private func sendPortForwardError(
-        requestID: String,
-        message: String
-    ) async {
-        let errorStreamID = lock.withLock { pairs[requestID]?.errorStreamID }
-        guard let errorStreamID else {
+    private func startOutputPump(_ launch: OutputLaunch) {
+        startTrackedTask(owner: launch.identity) { [weak self] in
+            guard let self else {
+                return
+            }
+            if let input = launch.input {
+                for await data in input.bytes {
+                    let dataStreamID = lock.withLock { () -> UInt32? in
+                        guard let pair = pairs[launch.identity.requestID] else {
+                            return nil
+                        }
+                        guard
+                            pair.generation == launch.identity.generation,
+                            pair.outputToken == launch.token,
+                            pair.terminal == nil
+                        else {
+                            return nil
+                        }
+                        return pair.dataStreamID
+                    }
+                    guard let dataStreamID else {
+                        break
+                    }
+                    do {
+                        try await writeDataFrame(streamID: dataStreamID, data: data)
+                        input.acknowledge(data.count)
+                        recordActivity()
+                    } catch {
+                        return
+                    }
+                }
+            }
+            await emitPairTerminal(launch)
+        }
+    }
+
+    private func emitPairTerminal(_ launch: OutputLaunch) async {
+        let frames = lock.withLock { () -> PairTerminalFrames? in
+            guard
+                var pair = pairs[launch.identity.requestID],
+                pair.generation == launch.identity.generation,
+                pair.outputToken == launch.token
+            else {
+                return nil
+            }
+            if pair.terminal == nil {
+                guard launch.backendEOFMeansSuccess, !pair.inputRejected else {
+                    return nil
+                }
+                pair.terminal = .success
+                pair.terminating = true
+                pairs[launch.identity.requestID] = pair
+            }
+            guard let terminal = pair.terminal else {
+                return nil
+            }
+            return PairTerminalFrames(
+                terminal: terminal,
+                dataStreamID: pair.dataStreamID,
+                errorStreamID: pair.errorStreamID
+            )
+        }
+        guard let frames else {
             return
         }
-        try? await writeDataFrame(streamID: errorStreamID, data: Data(message.utf8), flags: 0x01)
+
+        do {
+            switch frames.terminal {
+            case .success:
+                if let dataStreamID = frames.dataStreamID {
+                    try await writeDataFrame(streamID: dataStreamID, data: Data(), flags: 0x01)
+                }
+                if let errorStreamID = frames.errorStreamID {
+                    try await writeDataFrame(streamID: errorStreamID, data: Data(), flags: 0x01)
+                }
+            case .failure(let message):
+                if let errorStreamID = frames.errorStreamID {
+                    try await writeDataFrame(
+                        streamID: errorStreamID,
+                        data: Data(message.utf8),
+                        flags: 0x01
+                    )
+                }
+                if let dataStreamID = frames.dataStreamID {
+                    try await writeDataFrame(streamID: dataStreamID, data: Data(), flags: 0x01)
+                }
+            }
+        } catch {
+            return
+        }
+        finishPair(launch.identity)
+    }
+
+    private func failPair(_ identity: PairIdentity, message: String) {
+        let failure = lock.withLock { () -> (FileHandleByteStream?, OutputLaunch?)? in
+            guard
+                var pair = pairs[identity.requestID],
+                pair.generation == identity.generation,
+                pair.terminal == nil
+            else {
+                return nil
+            }
+            pair.inputRejected = true
+            pair.terminating = true
+            pair.terminal = .failure(message)
+            var outputLaunch: OutputLaunch?
+            if pair.outputToken == nil {
+                let token = UUID()
+                pair.outputToken = token
+                outputLaunch = OutputLaunch(
+                    identity: identity,
+                    token: token,
+                    input: nil,
+                    backendEOFMeansSuccess: false
+                )
+            }
+            pairs[identity.requestID] = pair
+            return (pair.input, outputLaunch)
+        }
+        guard let failure else {
+            return
+        }
+        failure.0?.cancel()
+        if let outputLaunch = failure.1 {
+            startOutputPump(outputLaunch)
+        }
     }
 
     private func handleStreamFinished(_ streamID: UInt32) {
@@ -1790,35 +2290,273 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
             return
         }
         if case .data = stream.kind {
-            finishPair(requestID: stream.requestID)
+            let writerLaunch = lock.withLock { () -> WriterLaunch? in
+                guard
+                    var pair = pairs[stream.requestID],
+                    pair.generation == stream.generation,
+                    !pair.terminating,
+                    !pair.inputRejected
+                else {
+                    return nil
+                }
+                pair.clientWriteClosed = true
+                let identity = PairIdentity(
+                    requestID: stream.requestID,
+                    generation: stream.generation
+                )
+                let launch = makeWriterLaunchIfNeeded(identity: identity, pair: &pair)
+                pairs[stream.requestID] = pair
+                return launch
+            }
+            if let writerLaunch {
+                startBackendWriter(writerLaunch)
+            }
         }
     }
 
-    private func finishPair(requestID: String) {
-        let (handle, input) = lock.withLock { () -> (FileHandle?, FileHandleByteStream?) in
-            guard var pair = pairs[requestID] else {
-                return (nil, nil)
+    private func enqueueClientInput(
+        requestID: String,
+        generation: UUID,
+        data: Data
+    ) -> ClientInputAction {
+        lock.withLock {
+            guard
+                var pair = pairs[requestID],
+                pair.generation == generation,
+                !pair.terminating,
+                !pair.inputRejected,
+                !pair.clientWriteClosed
+            else {
+                return .none
             }
-            let handle = pair.handle
-            let input = pair.input
-            pair.handle = nil
-            pair.input = nil
-            pair.closed = true
+            let identity = PairIdentity(requestID: requestID, generation: generation)
+            guard
+                pair.pendingInputBytes <= Self.maximumPendingClientInputBytesPerPair,
+                data.count
+                    <= Self.maximumPendingClientInputBytesPerPair - pair.pendingInputBytes
+            else {
+                pair.inputRejected = true
+                pairs[requestID] = pair
+                return .fail(
+                    PairFailure(
+                        identity: identity,
+                        message: "port-forward pending client input exceeded \(Self.maximumPendingClientInputBytesPerPair) bytes"
+                    )
+                )
+            }
+            guard
+                sessionPendingInputBytes <= Self.maximumPendingClientInputBytesPerSession,
+                data.count
+                    <= Self.maximumPendingClientInputBytesPerSession - sessionPendingInputBytes
+            else {
+                pair.inputRejected = true
+                pairs[requestID] = pair
+                return .fail(
+                    PairFailure(
+                        identity: identity,
+                        message: "port-forward session pending client input exceeded \(Self.maximumPendingClientInputBytesPerSession) bytes"
+                    )
+                )
+            }
+            guard pair.pendingInput.count < Self.maximumPendingClientInputElementsPerPair else {
+                pair.inputRejected = true
+                pairs[requestID] = pair
+                return .fail(
+                    PairFailure(
+                        identity: identity,
+                        message: "port-forward pending client input exceeded \(Self.maximumPendingClientInputElementsPerPair) chunks"
+                    )
+                )
+            }
+            guard sessionPendingInputElements < Self.maximumPendingClientInputElementsPerSession else {
+                pair.inputRejected = true
+                pairs[requestID] = pair
+                return .fail(
+                    PairFailure(
+                        identity: identity,
+                        message: "port-forward session pending client input exceeded \(Self.maximumPendingClientInputElementsPerSession) chunks"
+                    )
+                )
+            }
+            pair.pendingInput.append(data)
+            pair.pendingInputBytes += data.count
+            sessionPendingInputBytes += data.count
+            sessionPendingInputElements += 1
+            let writerLaunch = makeWriterLaunchIfNeeded(identity: identity, pair: &pair)
             pairs[requestID] = pair
-            return (handle, input)
+            if let writerLaunch {
+                return .startWriter(writerLaunch)
+            }
+            return .none
         }
-        input?.cancel()
-        try? handle?.close()
+    }
+
+    private func makeWriterLaunchIfNeeded(
+        identity: PairIdentity,
+        pair: inout Pair
+    ) -> WriterLaunch? {
+        guard
+            pair.generation == identity.generation,
+            pair.writerToken == nil,
+            pair.terminal == nil,
+            !pair.inputRejected,
+            let handle = pair.handle,
+            let controlConnection = pair.controlConnection,
+            !pair.pendingInput.isEmpty || (pair.clientWriteClosed && !pair.backendWriteShutdown)
+        else {
+            return nil
+        }
+        let token = UUID()
+        pair.writerToken = token
+        return WriterLaunch(
+            identity: identity,
+            token: token,
+            handle: handle,
+            controlConnection: controlConnection
+        )
+    }
+
+    private func startBackendWriter(_ launch: WriterLaunch) {
+        startTrackedTask(owner: launch.identity, detached: true) { [weak self] in
+            self?.runBackendWriter(launch)
+        }
+    }
+
+    private func runBackendWriter(_ launch: WriterLaunch) {
+        var completedBytes = 0
+        while true {
+            let action = lock.withLock { () -> BackendWriterAction in
+                guard
+                    var pair = pairs[launch.identity.requestID],
+                    pair.generation == launch.identity.generation,
+                    pair.writerToken == launch.token,
+                    pair.handle === launch.handle
+                else {
+                    return .stop
+                }
+                if completedBytes > 0 {
+                    assert(pair.pendingInputBytes >= completedBytes)
+                    assert(sessionPendingInputBytes >= completedBytes)
+                    assert(sessionPendingInputElements > 0)
+                    assert(pair.pendingInput.first?.count == completedBytes)
+                    pair.pendingInput.removeFirst()
+                    pair.pendingInputBytes -= min(pair.pendingInputBytes, completedBytes)
+                    sessionPendingInputBytes -= min(sessionPendingInputBytes, completedBytes)
+                    sessionPendingInputElements -= 1
+                    completedBytes = 0
+                }
+                guard !pair.terminating, !pair.inputRejected, pair.terminal == nil else {
+                    pair.writerToken = nil
+                    pairs[launch.identity.requestID] = pair
+                    return .stop
+                }
+                if let data = pair.pendingInput.first {
+                    pairs[launch.identity.requestID] = pair
+                    return .write(data)
+                }
+
+                if pair.clientWriteClosed, !pair.backendWriteShutdown {
+                    pair.backendWriteShutdown = true
+                    pair.writerToken = nil
+                    pairs[launch.identity.requestID] = pair
+                    return .shutdown
+                }
+                pair.writerToken = nil
+                pairs[launch.identity.requestID] = pair
+                return .stop
+            }
+
+            switch action {
+            case .stop:
+                return
+            case .write(let data):
+                do {
+                    try launch.handle.write(contentsOf: data)
+                    completedBytes = data.count
+                } catch {
+                    failPair(launch.identity, message: String(describing: error))
+                    return
+                }
+            case .shutdown:
+                do {
+                    try launch.controlConnection.shutdownWrite()
+                } catch {
+                    failPair(launch.identity, message: String(describing: error))
+                }
+                return
+            }
+        }
+    }
+
+    private func abortPair(for streamID: UInt32) {
+        let identity = lock.withLock { () -> PairIdentity? in
+            guard let stream = streams[streamID] else {
+                return nil
+            }
+            return PairIdentity(requestID: stream.requestID, generation: stream.generation)
+        }
+        guard let identity else {
+            return
+        }
+        finishPair(identity)
+    }
+
+    private func finishPair(_ identity: PairIdentity) {
+        let resources = lock.withLock {
+            () -> (FileHandle?, CRIShimBackendControlConnection?, FileHandleByteStream?, UUID?, [Task<Void, Never>]) in
+            guard
+                let pair = pairs[identity.requestID],
+                pair.generation == identity.generation
+            else {
+                return (nil, nil, nil, nil, [])
+            }
+            pairs.removeValue(forKey: identity.requestID)
+            streams = streams.filter { $0.value.generation != identity.generation }
+            assert(sessionPendingInputBytes >= pair.pendingInputBytes)
+            sessionPendingInputBytes -= min(sessionPendingInputBytes, pair.pendingInputBytes)
+            assert(sessionPendingInputElements >= pair.pendingInput.count)
+            sessionPendingInputElements -= min(
+                sessionPendingInputElements,
+                pair.pendingInput.count
+            )
+            addPairTombstoneLocked(identity.requestID)
+
+            let taskIDs = tasks.compactMap { id, trackedTask in
+                trackedTask.owner == identity ? id : nil
+            }
+            let tasksToCancel = taskIDs.compactMap { id in
+                tasks.removeValue(forKey: id)?.task
+            }
+            return (
+                pair.handle,
+                pair.controlConnection,
+                pair.input,
+                pair.tunnelLease,
+                tasksToCancel
+            )
+        }
+        resources.1?.shutdownAllAndClose()
+        for task in resources.4 {
+            task.cancel()
+        }
+        resources.2?.cancel()
+        try? resources.0?.close()
+        if let tunnelLease = resources.3 {
+            server.releasePortForwardTunnelLease(tunnelLease)
+        }
+    }
+
+    private func addPairTombstoneLocked(_ requestID: String) {
+        if pairTombstones.insert(requestID).inserted {
+            pairTombstoneOrder.append(requestID)
+        }
+        while pairTombstoneOrder.count > Self.maximumPairTombstones {
+            pairTombstones.remove(pairTombstoneOrder.removeFirst())
+        }
     }
 
     private func failSession(_ message: String) async {
         fputs("container-cri-shim-macos SPDY port-forward failed: \(message)\n", stderr)
-        let errorStreams = lock.withLock {
-            pairs.values.compactMap(\.errorStreamID)
-        }
-        for streamID in errorStreams {
-            try? await writeDataFrame(streamID: streamID, data: Data(message.utf8), flags: 0x01)
-        }
         await cleanup()
         if let channel {
             try? await channel.close().get()
@@ -1826,42 +2564,94 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 
     private func cleanup() async {
-        let (connections, tasksToCancel): ([(FileHandle, FileHandleByteStream?)], [Task<Void, Never>]) = lock.withLock {
-            if cleanupPerformed {
-                return ([], [])
+        _ = controlWriteGate.reject()
+        let (connections, tunnelLeases, tasksToCancel):
+            (
+                [(FileHandle?, CRIShimBackendControlConnection?, FileHandleByteStream?)],
+                [UUID],
+                [Task<Void, Never>]
+            ) = lock.withLock {
+                if cleanupPerformed {
+                    return ([], [], [])
+                }
+                cleanupPerformed = true
+                idleTimeoutTask?.cancel()
+                idleTimeoutTask = nil
+                let connections = pairs.values.map {
+                    ($0.handle, $0.controlConnection, $0.input)
+                }
+                let tunnelLeases = pairs.values.compactMap(\.tunnelLease)
+                pairs.removeAll()
+                streams.removeAll()
+                highestAcceptedClientStreamID = 0
+                sessionPendingInputBytes = 0
+                sessionPendingInputElements = 0
+                pairTombstones.removeAll()
+                pairTombstoneOrder.removeAll()
+                let tasksToCancel = tasks.values.compactMap(\.task)
+                tasks.removeAll()
+                return (connections, tunnelLeases, tasksToCancel)
             }
-            cleanupPerformed = true
-            idleTimeoutTask?.cancel()
-            idleTimeoutTask = nil
-            let connections = pairs.values.compactMap { pair in
-                pair.handle.map { ($0, pair.input) }
-            }
-            pairs.removeAll()
-            streams.removeAll()
-            let tasksToCancel = tasks
-            tasks.removeAll()
-            return (connections, tasksToCancel)
-        }
 
+        for (_, controlConnection, _) in connections {
+            controlConnection?.shutdownAllAndClose()
+        }
         for task in tasksToCancel {
             task.cancel()
         }
-        for (handle, input) in connections {
+        for (handle, _, input) in connections {
             input?.cancel()
-            try? handle.close()
+            try? handle?.close()
+        }
+        for tunnelLease in tunnelLeases {
+            server.releasePortForwardTunnelLease(tunnelLease)
         }
     }
 
-    private func appendTask(_ task: Task<Void, Never>) {
-        let shouldCancel = lock.withLock { () -> Bool in
+    @discardableResult
+    private func startTrackedTask(
+        owner: PairIdentity?,
+        detached: Bool = false,
+        operation: @escaping @Sendable () async -> Void
+    ) -> Bool {
+        let id = UUID()
+        let trackedTask = TrackedTask(owner: owner)
+        let shouldStart = lock.withLock {
             guard !cleanupPerformed else {
-                return true
+                return false
             }
-            tasks.append(task)
+            tasks[id] = trackedTask
+            return true
+        }
+        guard shouldStart else {
             return false
+        }
+
+        let task: Task<Void, Never>
+        if detached {
+            task = Task.detached { [weak self] in
+                await operation()
+                self?.trackedTaskFinished(id)
+            }
+        } else {
+            task = Task { [weak self] in
+                await operation()
+                self?.trackedTaskFinished(id)
+            }
+        }
+        let shouldCancel = lock.withLock {
+            trackedTask.task = task
+            return cleanupPerformed || tasks[id] !== trackedTask
         }
         if shouldCancel {
             task.cancel()
+        }
+        return true
+    }
+
+    private func trackedTaskFinished(_ id: UUID) {
+        _ = lock.withLock {
+            tasks.removeValue(forKey: id)
         }
     }
 
@@ -1915,17 +2705,25 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         flags: UInt8,
         payload: Data
     ) throws {
-        guard let channel, channel.isActive else {
-            return
+        guard let channel, controlWriteGate.reserve(channel: channel) else {
+            channel?.close(promise: nil)
+            throw CRIShimError.unavailable("SPDY control output is backpressured")
         }
         var buffer = channel.allocator.buffer(capacity: 8 + payload.count)
         buffer.writeInteger(UInt32(0x8000_0000) | (UInt32(3) << 16) | UInt32(type), endianness: .big)
         writeSPDYLength(flags: flags, length: payload.count, to: &buffer)
         buffer.writeBytes(payload)
         let promise = channel.eventLoop.makePromise(of: Void.self)
-        promise.futureResult.whenFailure { [weak self] _ in
-            Task {
-                await self?.handleWriteFailure()
+        promise.futureResult.whenComplete { [weak self] result in
+            let succeeded: Bool
+            switch result {
+            case .success:
+                succeeded = true
+            case .failure:
+                succeeded = false
+            }
+            if self?.controlWriteGate.complete(succeeded: succeeded) == true {
+                channel.close(promise: nil)
             }
         }
         channel.writeAndFlush(buffer, promise: promise)
@@ -1952,6 +2750,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 
     private func handleWriteFailure() async {
+        _ = controlWriteGate.reject()
         await cleanup()
         guard let channel else {
             return
@@ -1960,10 +2759,134 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 }
 
+final class CRIShimPortForwardOutboundSequence: @unchecked Sendable {
+    private final class Work: @unchecked Sendable {
+        let id = UUID()
+        private let lock = NSLock()
+        var task: Task<Void, Never>?
+        private var result = false
+
+        func record(_ result: Bool) {
+            lock.withLock {
+                self.result = result
+            }
+        }
+
+        var recordedResult: Bool {
+            lock.withLock { result }
+        }
+    }
+
+    private let lock = NSLock()
+    private var tail: Work?
+    private var works: [UUID: Work] = [:]
+    private var terminalRequested = false
+    private var stopped = false
+
+    func sendData(
+        _ operation: @escaping @Sendable () async -> Bool
+    ) async -> Bool? {
+        guard let work = enqueue(terminal: false, operation: operation) else {
+            return nil
+        }
+        await work.task?.value
+        let result = work.recordedResult
+        workFinished(work)
+        return result
+    }
+
+    func sendTerminal(
+        _ operation: @escaping @Sendable () async -> Void
+    ) async {
+        guard
+            let work = enqueue(
+                terminal: true,
+                operation: {
+                    await operation()
+                    return true
+                })
+        else {
+            return
+        }
+        await work.task?.value
+        workFinished(work)
+    }
+
+    func stop() {
+        let tasks = lock.withLock { () -> [Task<Void, Never>] in
+            guard !stopped else {
+                return []
+            }
+            stopped = true
+            terminalRequested = true
+            let tasks = works.values.compactMap(\.task)
+            works.removeAll()
+            tail = nil
+            return tasks
+        }
+        for task in tasks {
+            task.cancel()
+        }
+    }
+
+    private func enqueue(
+        terminal: Bool,
+        operation: @escaping @Sendable () async -> Bool
+    ) -> Work? {
+        lock.withLock {
+            guard !stopped, terminal || !terminalRequested else {
+                return nil
+            }
+            guard !terminal || !terminalRequested else {
+                return nil
+            }
+            if terminal {
+                terminalRequested = true
+            }
+            let previousTask = tail?.task
+            let work = Work()
+            let task = Task.detached { [weak work] in
+                if let previousTask {
+                    await previousTask.value
+                }
+                guard let work, !Task.isCancelled else {
+                    return
+                }
+                work.record(await operation())
+            }
+            work.task = task
+            works[work.id] = work
+            tail = work
+            return work
+        }
+    }
+
+    private func workFinished(_ work: Work) {
+        lock.withLock {
+            works.removeValue(forKey: work.id)
+            if tail === work {
+                tail = nil
+            }
+        }
+    }
+
+    var pendingWorkCount: Int {
+        lock.withLock { works.count }
+    }
+}
+
 private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = WebSocketFrame
     typealias OutboundIn = WebSocketFrame
     typealias OutboundOut = WebSocketFrame
+
+    private static let maximumInboundBinaryFrameBytes = 4 << 20
+
+    private enum InboundBinaryFrameAdmission {
+        case accepted
+        case reject
+        case ignored
+    }
 
     private enum SessionState {
         case exec(CRIShimExecSessionState)
@@ -1995,10 +2918,89 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         }
     }
 
-    private final class CRIShimPortForwardState {
+    private final class CRIShimPortForwardState: @unchecked Sendable {
+        private static let maximumPendingInputBytesPerStream = 1 << 20
+        private static let maximumPendingInputBytesPerSession = 4 << 20
+        private static let maximumPendingInputElementsPerStream = 256
+        private static let maximumPendingInputElementsPerSession = 1024
+
+        struct StreamIdentity: Hashable, Sendable {
+            var stream: UInt8
+            var generation: UUID
+        }
+
+        struct Connection {
+            var handle: FileHandle
+            var controlConnection: CRIShimBackendControlConnection
+            var input: FileHandleByteStream
+            var tunnelLease: UUID
+        }
+
+        struct OpenLaunch {
+            var identity: StreamIdentity
+            var token: UUID
+            var port: UInt32
+        }
+
+        struct WriterLaunch {
+            var identity: StreamIdentity
+            var token: UUID
+            var port: UInt32
+            var handle: FileHandle
+        }
+
+        struct StreamFailure {
+            var identity: StreamIdentity
+            var port: UInt32
+            var message: String
+        }
+
+        struct CommitResult {
+            var identity: StreamIdentity
+            var writer: WriterLaunch?
+        }
+
+        struct Removal {
+            var connection: Connection?
+            var outputSequence: CRIShimPortForwardOutboundSequence
+        }
+
+        enum InputAction {
+            case none
+            case open(OpenLaunch)
+            case startWriter(WriterLaunch)
+            case fail(StreamFailure)
+            case portMismatch(UInt32)
+            case closed
+        }
+
+        enum WriterAction {
+            case stop
+            case write(Data)
+        }
+
+        private struct StreamState {
+            var generation = UUID()
+            var port: UInt32
+            var openingToken: UUID?
+            var connection: Connection?
+            var pendingInput = CRIShimPendingInputBuffer()
+            var pendingInputBytes = 0
+            var writerToken: UUID?
+            var rejected = false
+            let outputSequence = CRIShimPortForwardOutboundSequence()
+
+            init(port: UInt32) {
+                self.port = port
+            }
+        }
+
         let invocation: CRIShimPortForwardInvocation
         private let lock = NSLock()
-        private var streams: [UInt8: (port: UInt32, handle: FileHandle, input: FileHandleByteStream)] = [:]
+        private var streams: [UInt8: StreamState] = [:]
+        private var closedStreams: Set<UInt8> = []
+        private var pendingInputBytes = 0
+        private var pendingInputElements = 0
 
         init(invocation: CRIShimPortForwardInvocation) {
             self.invocation = invocation
@@ -2025,38 +3027,228 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             return invocation.ports[index]
         }
 
-        func stream(for stream: UInt8) -> (port: UInt32, handle: FileHandle)? {
-            lock.withLock {
-                streams[stream].map { (port: $0.port, handle: $0.handle) }
-            }
-        }
-
-        func register(
+        func enqueue(
             stream: UInt8,
             port: UInt32,
-            handle: FileHandle,
-            input: FileHandleByteStream
-        ) {
+            input: Data
+        ) -> InputAction {
             lock.withLock {
-                streams[stream] = (port: port, handle: handle, input: input)
+                guard !closedStreams.contains(stream) else {
+                    return .closed
+                }
+                let isNewStream = streams[stream] == nil
+                var state = streams[stream] ?? StreamState(port: port)
+                guard state.port == port else {
+                    return .portMismatch(state.port)
+                }
+                let identity = StreamIdentity(stream: stream, generation: state.generation)
+                guard
+                    state.pendingInputBytes <= Self.maximumPendingInputBytesPerStream,
+                    input.count <= Self.maximumPendingInputBytesPerStream - state.pendingInputBytes
+                else {
+                    state.rejected = true
+                    streams[stream] = state
+                    return .fail(
+                        StreamFailure(
+                            identity: identity,
+                            port: port,
+                            message: "websocket port-forward stream pending input exceeded \(Self.maximumPendingInputBytesPerStream) bytes"
+                        ))
+                }
+                guard
+                    pendingInputBytes <= Self.maximumPendingInputBytesPerSession,
+                    input.count <= Self.maximumPendingInputBytesPerSession - pendingInputBytes
+                else {
+                    state.rejected = true
+                    streams[stream] = state
+                    return .fail(
+                        StreamFailure(
+                            identity: identity,
+                            port: port,
+                            message: "websocket port-forward session pending input exceeded \(Self.maximumPendingInputBytesPerSession) bytes"
+                        ))
+                }
+                if !input.isEmpty {
+                    guard state.pendingInput.count < Self.maximumPendingInputElementsPerStream else {
+                        state.rejected = true
+                        streams[stream] = state
+                        return .fail(
+                            StreamFailure(
+                                identity: identity,
+                                port: port,
+                                message: "websocket port-forward stream pending input exceeded \(Self.maximumPendingInputElementsPerStream) chunks"
+                            ))
+                    }
+                    guard pendingInputElements < Self.maximumPendingInputElementsPerSession else {
+                        state.rejected = true
+                        streams[stream] = state
+                        return .fail(
+                            StreamFailure(
+                                identity: identity,
+                                port: port,
+                                message: "websocket port-forward session pending input exceeded \(Self.maximumPendingInputElementsPerSession) chunks"
+                            ))
+                    }
+                    state.pendingInput.append(input)
+                    state.pendingInputBytes += input.count
+                    pendingInputBytes += input.count
+                    pendingInputElements += 1
+                }
+                if isNewStream {
+                    let token = UUID()
+                    state.openingToken = token
+                    streams[stream] = state
+                    return .open(OpenLaunch(identity: identity, token: token, port: port))
+                }
+                if let writer = makeWriterLaunchIfNeeded(identity: identity, state: &state) {
+                    streams[stream] = state
+                    return .startWriter(writer)
+                }
+                streams[stream] = state
+                return .none
             }
         }
 
-        func close(stream: UInt8) {
-            let entry = lock.withLock {
-                streams.removeValue(forKey: stream)
+        func commitOpening(
+            _ launch: OpenLaunch,
+            connection: Connection
+        ) -> CommitResult? {
+            lock.withLock {
+                guard
+                    var state = streams[launch.identity.stream],
+                    state.generation == launch.identity.generation,
+                    state.openingToken == launch.token,
+                    state.port == launch.port,
+                    state.connection == nil,
+                    !state.rejected
+                else {
+                    return nil
+                }
+                state.openingToken = nil
+                state.connection = connection
+                let writer = makeWriterLaunchIfNeeded(identity: launch.identity, state: &state)
+                streams[launch.identity.stream] = state
+                return CommitResult(identity: launch.identity, writer: writer)
             }
-            entry?.input.cancel()
-            try? entry?.handle.close()
         }
 
-        func takeConnections() -> [(FileHandle, FileHandleByteStream)] {
+        func nextWriterAction(
+            _ launch: WriterLaunch,
+            completedBytes: Int
+        ) -> WriterAction {
             lock.withLock {
-                let connections = streams.values.map { ($0.handle, $0.input) }
+                guard
+                    var state = streams[launch.identity.stream],
+                    state.generation == launch.identity.generation,
+                    state.writerToken == launch.token,
+                    state.connection?.handle === launch.handle
+                else {
+                    return .stop
+                }
+                if completedBytes > 0 {
+                    assert(state.pendingInputBytes >= completedBytes)
+                    assert(pendingInputBytes >= completedBytes)
+                    assert(pendingInputElements > 0)
+                    assert(state.pendingInput.first?.count == completedBytes)
+                    state.pendingInput.removeFirst()
+                    state.pendingInputBytes -= min(state.pendingInputBytes, completedBytes)
+                    pendingInputBytes -= min(pendingInputBytes, completedBytes)
+                    pendingInputElements -= 1
+                }
+                guard !state.rejected else {
+                    state.writerToken = nil
+                    streams[launch.identity.stream] = state
+                    return .stop
+                }
+                if let input = state.pendingInput.first {
+                    streams[launch.identity.stream] = state
+                    return .write(input)
+                }
+                state.writerToken = nil
+                streams[launch.identity.stream] = state
+                return .stop
+            }
+        }
+
+        func remove(_ identity: StreamIdentity) -> Removal? {
+            lock.withLock {
+                guard
+                    let state = streams[identity.stream],
+                    state.generation == identity.generation
+                else {
+                    return nil
+                }
+                streams.removeValue(forKey: identity.stream)
+                assert(pendingInputBytes >= state.pendingInputBytes)
+                pendingInputBytes -= min(pendingInputBytes, state.pendingInputBytes)
+                assert(pendingInputElements >= state.pendingInput.count)
+                pendingInputElements -= min(pendingInputElements, state.pendingInput.count)
+                closedStreams.insert(identity.stream)
+                return Removal(
+                    connection: state.connection,
+                    outputSequence: state.outputSequence
+                )
+            }
+        }
+
+        func outputSequence(for identity: StreamIdentity) -> CRIShimPortForwardOutboundSequence? {
+            lock.withLock {
+                guard
+                    let state = streams[identity.stream],
+                    state.generation == identity.generation
+                else {
+                    return nil
+                }
+                return state.outputSequence
+            }
+        }
+
+        func takeRemovals() -> [Removal] {
+            lock.withLock {
+                let removals = streams.values.map {
+                    Removal(
+                        connection: $0.connection,
+                        outputSequence: $0.outputSequence
+                    )
+                }
                 streams.removeAll()
-                return connections
+                closedStreams.removeAll()
+                pendingInputBytes = 0
+                pendingInputElements = 0
+                return removals
             }
         }
+
+        private func makeWriterLaunchIfNeeded(
+            identity: StreamIdentity,
+            state: inout StreamState
+        ) -> WriterLaunch? {
+            guard
+                state.generation == identity.generation,
+                state.writerToken == nil,
+                !state.rejected,
+                !state.pendingInput.isEmpty,
+                let handle = state.connection?.handle
+            else {
+                return nil
+            }
+            let token = UUID()
+            state.writerToken = token
+            return WriterLaunch(identity: identity, token: token, port: state.port, handle: handle)
+        }
+    }
+
+    private final class PortForwardTrackedTask: @unchecked Sendable {
+        let owner: CRIShimPortForwardState.StreamIdentity
+        var task: Task<Void, Never>?
+
+        init(owner: CRIShimPortForwardState.StreamIdentity) {
+            self.owner = owner
+        }
+    }
+
+    private final class TrackedPongTask: @unchecked Sendable {
+        var task: Task<Void, Never>?
     }
 
     private let server: CRIShimStreamingServer
@@ -2065,9 +3257,16 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     private let negotiatedSubprotocol: String
     private let idleTimeout: TimeAmount?
     private let stateLock = NSLock()
+    private let inboundBinaryFrames: AsyncStream<ByteBuffer>
+    private let inboundBinaryFrameContinuation: AsyncStream<ByteBuffer>.Continuation
     private var channel: Channel?
     private var cleanupPerformed = false
+    private var terminalCloseStarted = false
+    private var inboundBinaryFrameBytes = 0
+    private var inboundBinaryInputRejected = false
     private var backgroundTasks: [Task<Void, Never>] = []
+    private var portForwardTasks: [UUID: PortForwardTrackedTask] = [:]
+    private var pongTask: TrackedPongTask?
     private var sessionState: SessionState?
     private var idleTimeoutTask: Scheduled<Void>?
 
@@ -2083,6 +3282,12 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         self.session = session
         self.negotiatedSubprotocol = negotiatedSubprotocol
         self.idleTimeout = idleTimeout
+        let inboundFrames = AsyncStream.makeStream(
+            of: ByteBuffer.self,
+            bufferingPolicy: .bufferingOldest(256)
+        )
+        self.inboundBinaryFrames = inboundFrames.stream
+        self.inboundBinaryFrameContinuation = inboundFrames.continuation
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -2092,32 +3297,53 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !terminalCloseSnapshot() else {
+            return
+        }
         let frame = unwrapInboundIn(data)
         recordActivity()
 
         switch frame.opcode {
         case .binary:
-            Task {
-                await handleBinaryFrame(frame.unmaskedData)
+            let payload = frame.unmaskedData
+            switch reserveInboundBinaryFrame(payload) {
+            case .ignored:
+                return
+            case .reject:
+                closeSessionSynchronously(context: context)
+                return
+            case .accepted:
+                break
+            }
+            switch inboundBinaryFrameContinuation.yield(payload) {
+            case .enqueued:
+                break
+            case .dropped(let droppedPayload):
+                if rejectInboundBinaryInput(releasing: droppedPayload.readableBytes) {
+                    closeSessionSynchronously(context: context)
+                }
+            case .terminated:
+                releaseInboundBinaryFrame(payload)
+                break
+            @unknown default:
+                if rejectInboundBinaryInput(releasing: payload.readableBytes) {
+                    closeSessionSynchronously(context: context)
+                }
             }
         case .ping:
-            Task {
-                try? await writeFrame(opcode: .pong, payload: frame.unmaskedData)
+            guard context.channel.isWritable else {
+                closeSessionSynchronously(context: context)
+                return
             }
+            startPong(frame.unmaskedData)
         case .connectionClose:
-            Task {
-                await closeWebSocket(killProcess: true)
-            }
+            closeSessionSynchronously(context: context)
         case .text, .continuation:
-            Task {
-                await failSession("unsupported websocket frame")
-            }
+            closeSessionSynchronously(context: context)
         case .pong:
             break
         default:
-            Task {
-                await failSession("unsupported websocket opcode")
-            }
+            closeSessionSynchronously(context: context)
         }
     }
 
@@ -2144,16 +3370,25 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func startSession() {
-        let task = Task {
+        let frames = inboundBinaryFrames
+        let session = session
+        let task = Task { [weak self] in
             do {
                 switch session {
                 case .exec(let invocation):
-                    try await startExecSession(invocation)
+                    try await self?.startExecSession(invocation)
                 case .portForward(let invocation):
-                    try await startPortForwardSession(invocation)
+                    try await self?.startPortForwardSession(invocation)
+                }
+                for await payload in frames {
+                    self?.releaseInboundBinaryFrame(payload)
+                    guard !Task.isCancelled else {
+                        return
+                    }
+                    await self?.handleBinaryFrame(payload)
                 }
             } catch {
-                await failSession(String(describing: error))
+                await self?.failSession(String(describing: error))
             }
         }
         appendTask(task)
@@ -2247,8 +3482,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                     for task in outputTasks {
                         _ = await task.result
                     }
-                    await sendExecExitStatus(protocolVersion: protocolVersion, exitCode: exitCode)
-                    await closeWebSocket(killProcess: false)
+                    await finishExecSession(protocolVersion: protocolVersion, exitCode: exitCode)
                 } catch {
                     await failSession(String(describing: error))
                 }
@@ -2256,6 +3490,9 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func startPortForwardSession(_ invocation: CRIShimPortForwardInvocation) async throws {
+        guard invocation.ports.count <= 128 else {
+            throw CRIShimError.invalidArgument("websocket port-forward supports at most 128 ports")
+        }
         let state = CRIShimPortForwardState(invocation: invocation)
         let sessionRegistered = stateLock.withLock { () -> Bool in
             guard !cleanupPerformed else {
@@ -2269,31 +3506,22 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         }
 
         for (index, port) in invocation.ports.enumerated() {
-            var openedHandle: FileHandle?
-            do {
-                let handle = try await runtimeManager.streamPortForward(sandboxID: invocation.sandboxID, port: port)
-                openedHandle = handle
-                let input = try fileHandleStream(handle)
-                let stream = UInt8(index * 2)
-                let registered = stateLock.withLock { () -> Bool in
-                    guard !cleanupPerformed else {
-                        return false
-                    }
-                    state.register(stream: stream, port: port, handle: handle, input: input)
-                    return true
-                }
-                guard registered else {
-                    input.cancel()
-                    try? handle.close()
-                    return
-                }
-                appendTask(
-                    Task {
-                        await pumpPortForward(stream: stream, port: port, input: input)
-                    })
-            } catch {
-                try? openedHandle?.close()
-                try await sendPortForwardError(port: port, message: String(describing: error))
+            guard let stream = UInt8(exactly: index * 2) else {
+                throw CRIShimError.invalidArgument("websocket port-forward stream index is out of range")
+            }
+            switch state.enqueue(stream: stream, port: port, input: Data()) {
+            case .open(let launch):
+                await openPortForwardStream(state: state, launch: launch)
+            case .fail(let failure):
+                await failPortForwardStream(state: state, failure: failure)
+            case .portMismatch(let existingPort):
+                throw CRIShimError.invalidArgument(
+                    "portforward stream \(stream) changed port from \(existingPort) to \(port)"
+                )
+            case .closed:
+                continue
+            case .none, .startWriter:
+                break
             }
         }
 
@@ -2390,51 +3618,150 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             port = configuredPort
         }
 
-        let handle: FileHandle
-        if let existing = state.stream(for: stream) {
-            guard existing.port == port else {
-                await failSession("portforward stream \(stream) changed port from \(existing.port) to \(port)")
+        let data = Data(payload.readableBytesView)
+        switch state.enqueue(stream: stream, port: port, input: data) {
+        case .none:
+            return
+        case .open(let launch):
+            startPortForwardTask(owner: launch.identity) { [weak self] in
+                await self?.openPortForwardStream(state: state, launch: launch)
+            }
+        case .startWriter(let launch):
+            startPortForwardWriter(state: state, launch: launch)
+        case .fail(let failure):
+            await failPortForwardStream(state: state, failure: failure)
+        case .portMismatch(let existingPort):
+            await failSession("portforward stream \(stream) changed port from \(existingPort) to \(port)")
+        case .closed:
+            try? await sendPortForwardError(
+                stream: stream,
+                port: port,
+                message: "websocket port-forward stream is closed"
+            )
+        }
+    }
+
+    private func openPortForwardStream(
+        state: CRIShimPortForwardState,
+        launch: CRIShimPortForwardState.OpenLaunch
+    ) async {
+        var openedHandle: FileHandle?
+        var unownedControlConnection: CRIShimBackendControlConnection?
+        var unownedTunnelLease: UUID?
+        do {
+            guard let tunnelLease = server.acquirePortForwardTunnelLease() else {
+                await failPortForwardStream(
+                    state: state,
+                    failure: CRIShimPortForwardState.StreamFailure(
+                        identity: launch.identity,
+                        port: launch.port,
+                        message: "port-forward server active tunnel limit reached"
+                    )
+                )
                 return
             }
-            handle = existing.handle
-        } else {
-            var openedHandle: FileHandle?
-            do {
-                let newHandle = try await runtimeManager.streamPortForward(sandboxID: state.invocation.sandboxID, port: port)
-                openedHandle = newHandle
-                let input = try fileHandleStream(newHandle)
-                let registered = stateLock.withLock { () -> Bool in
-                    guard !cleanupPerformed else {
-                        return false
-                    }
-                    state.register(stream: stream, port: port, handle: newHandle, input: input)
-                    return true
+            unownedTunnelLease = tunnelLease
+            let handle = try await runtimeManager.streamPortForward(
+                sandboxID: state.invocation.sandboxID,
+                port: launch.port
+            )
+            openedHandle = handle
+            let controlConnection = try CRIShimBackendControlConnection(
+                duplicating: handle.fileDescriptor
+            )
+            unownedControlConnection = controlConnection
+            let input = try fileHandleStream(
+                handle,
+                maximumPendingBytes: criShimPortForwardMaximumPendingOutputBytes,
+                maximumPendingElements: criShimPortForwardMaximumPendingOutputElements
+            )
+            let connection = CRIShimPortForwardState.Connection(
+                handle: handle,
+                controlConnection: controlConnection,
+                input: input,
+                tunnelLease: tunnelLease
+            )
+            let registration = stateLock.withLock { () -> CRIShimPortForwardState.CommitResult? in
+                guard !cleanupPerformed else {
+                    return nil
                 }
-                guard registered else {
-                    input.cancel()
-                    try? newHandle.close()
+                return state.commitOpening(launch, connection: connection)
+            }
+            guard let registration else {
+                input.cancel()
+                controlConnection.shutdownAllAndClose()
+                try? handle.close()
+                server.releasePortForwardTunnelLease(tunnelLease)
+                openedHandle = nil
+                unownedControlConnection = nil
+                unownedTunnelLease = nil
+                return
+            }
+            openedHandle = nil
+            unownedControlConnection = nil
+            unownedTunnelLease = nil
+            startPortForwardTask(owner: registration.identity) { [weak self] in
+                await self?.pumpPortForward(
+                    state: state,
+                    identity: registration.identity,
+                    port: launch.port,
+                    input: input
+                )
+            }
+            if let writer = registration.writer {
+                startPortForwardWriter(state: state, launch: writer)
+            }
+        } catch {
+            if let unownedTunnelLease {
+                server.releasePortForwardTunnelLease(unownedTunnelLease)
+            }
+            unownedControlConnection?.shutdownAllAndClose()
+            try? openedHandle?.close()
+            await failPortForwardStream(
+                state: state,
+                failure: CRIShimPortForwardState.StreamFailure(
+                    identity: launch.identity,
+                    port: launch.port,
+                    message: String(describing: error)
+                )
+            )
+        }
+    }
+
+    private func startPortForwardWriter(
+        state: CRIShimPortForwardState,
+        launch: CRIShimPortForwardState.WriterLaunch
+    ) {
+        startPortForwardTask(owner: launch.identity, detached: true) { [weak self] in
+            await self?.runPortForwardWriter(state: state, launch: launch)
+        }
+    }
+
+    private func runPortForwardWriter(
+        state: CRIShimPortForwardState,
+        launch: CRIShimPortForwardState.WriterLaunch
+    ) async {
+        var completedBytes = 0
+        while true {
+            switch state.nextWriterAction(launch, completedBytes: completedBytes) {
+            case .stop:
+                return
+            case .write(let data):
+                do {
+                    try launch.handle.write(contentsOf: data)
+                    completedBytes = data.count
+                } catch {
+                    await failPortForwardStream(
+                        state: state,
+                        failure: CRIShimPortForwardState.StreamFailure(
+                            identity: launch.identity,
+                            port: launch.port,
+                            message: String(describing: error)
+                        )
+                    )
                     return
                 }
-                handle = newHandle
-                appendTask(
-                    Task {
-                        await pumpPortForward(stream: stream, port: port, input: input)
-                    })
-            } catch {
-                try? openedHandle?.close()
-                try? await sendPortForwardError(stream: stream, port: port, message: String(describing: error))
-                return
             }
-        }
-
-        let data = Data(payload.readableBytesView)
-        guard !data.isEmpty else {
-            return
-        }
-        do {
-            try handle.write(contentsOf: data)
-        } catch {
-            await failSession(String(describing: error))
         }
     }
 
@@ -2453,40 +3780,101 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func pumpPortForward(
-        stream: UInt8,
+        state: CRIShimPortForwardState,
+        identity: CRIShimPortForwardState.StreamIdentity,
         port: UInt32,
         input: FileHandleByteStream
     ) async {
-        defer {
-            Task {
-                await finishPortForward(stream: stream)
-            }
-        }
-
         for await data in input.bytes {
-            do {
-                try await writeBinaryMessage(
-                    stream: stream,
-                    payload: portPrefix(port: port) + data
-                )
-            } catch {
-                await failSession(String(describing: error))
+            guard let outputSequence = state.outputSequence(for: identity) else {
                 return
             }
-        }
-    }
-
-    private func finishPortForward(stream: UInt8) async {
-        guard case .portForward(let state) = sessionStateSnapshot() else {
+            let writeSucceeded = await outputSequence.sendData { [weak self] in
+                guard let self else {
+                    return false
+                }
+                do {
+                    try await writeBinaryMessage(
+                        stream: identity.stream,
+                        payload: portPrefix(port: port) + data
+                    )
+                    return true
+                } catch {
+                    return false
+                }
+            }
+            guard let writeSucceeded else {
+                return
+            }
+            if writeSucceeded {
+                input.acknowledge(data.count)
+                continue
+            }
+            await failSession("websocket port-forward output write failed")
             return
         }
-        state.close(stream: stream)
+        finishPortForward(state: state, identity: identity)
     }
 
-    private func sendExecExitStatus(
+    private func finishPortForward(
+        state: CRIShimPortForwardState,
+        identity: CRIShimPortForwardState.StreamIdentity
+    ) {
+        guard let removal = state.remove(identity) else {
+            return
+        }
+        closePortForwardStream(identity: identity, removal: removal)
+    }
+
+    private func failPortForwardStream(
+        state: CRIShimPortForwardState,
+        failure: CRIShimPortForwardState.StreamFailure
+    ) async {
+        guard let removal = state.remove(failure.identity) else {
+            return
+        }
+        closePortForwardStream(
+            identity: failure.identity,
+            removal: removal,
+            stopOutput: false
+        )
+        await removal.outputSequence.sendTerminal { [weak self] in
+            try? await self?.sendPortForwardError(
+                stream: failure.identity.stream,
+                port: failure.port,
+                message: failure.message
+            )
+        }
+        removal.outputSequence.stop()
+    }
+
+    private func closePortForwardStream(
+        identity: CRIShimPortForwardState.StreamIdentity,
+        removal: CRIShimPortForwardState.Removal,
+        stopOutput: Bool = true
+    ) {
+        removal.connection?.controlConnection.shutdownAllAndClose()
+        let tasks = takePortForwardTasks(owner: identity)
+        for task in tasks {
+            task.cancel()
+        }
+        removal.connection?.input.cancel()
+        try? removal.connection?.handle.close()
+        if let tunnelLease = removal.connection?.tunnelLease {
+            server.releasePortForwardTunnelLease(tunnelLease)
+        }
+        if stopOutput {
+            removal.outputSequence.stop()
+        }
+    }
+
+    private func finishExecSession(
         protocolVersion: CRIShimExecStreamProtocol,
         exitCode: Int32
     ) async {
+        guard beginTerminalClose() else {
+            return
+        }
         let payload: Data
         if protocolVersion.supportsStructuredExitStatus {
             payload = makeStructuredExecStatus(exitCode: exitCode)
@@ -2496,23 +3884,14 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             payload = Data("command terminated with exit code \(exitCode)".utf8)
         }
 
+        await cleanup(killProcess: false)
         if !payload.isEmpty {
-            try? await writeBinaryMessage(stream: 3, payload: payload)
+            writeBinaryMessageBestEffortAndClose(stream: 3, payload: payload)
+        } else if let closePayload = makeWebSocketClosePayload() {
+            writeFrameBestEffortAndClose(opcode: .connectionClose, payload: closePayload)
+        } else {
+            channel?.close(promise: nil)
         }
-    }
-
-    private func sendPortForwardError(
-        port: UInt32,
-        message: String
-    ) async throws {
-        guard case .portForward(let state) = session else {
-            return
-        }
-        guard let index = state.ports.firstIndex(of: port) else {
-            return
-        }
-        let stream = UInt8(index * 2 + 1)
-        try await writeBinaryMessage(stream: stream, payload: portPrefix(port: port) + Data(message.utf8))
     }
 
     private func sendPortForwardError(
@@ -2524,6 +3903,10 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func failSession(_ message: String) async {
+        guard beginTerminalClose() else {
+            return
+        }
+        let execFailureFrame: (stream: UInt8, payload: Data)?
         switch sessionStateSnapshot() {
         case .exec(let state):
             let payload =
@@ -2532,55 +3915,72 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 } else {
                     Data(message.utf8)
                 }
-            if !payload.isEmpty {
-                try? await writeBinaryMessage(stream: 3, payload: payload)
-            }
-        case .portForward(let state):
-            for port in state.invocation.ports {
-                try? await sendPortForwardError(port: port, message: message)
-            }
-        case .none:
-            break
+            execFailureFrame = payload.isEmpty ? nil : (3, payload)
+        case .portForward, .none:
+            execFailureFrame = nil
         }
-        await closeWebSocket(killProcess: true)
+        await cleanup(killProcess: true)
+        if let execFailureFrame {
+            writeBinaryMessageBestEffortAndClose(
+                stream: execFailureFrame.stream,
+                payload: execFailureFrame.payload
+            )
+        } else {
+            channel?.close(promise: nil)
+        }
     }
 
     private func closeWebSocket(killProcess: Bool) async {
-        if let closePayload = makeWebSocketClosePayload() {
-            try? await writeFrame(opcode: .connectionClose, payload: closePayload)
+        guard beginTerminalClose() else {
+            return
         }
         await cleanup(killProcess: killProcess)
-        if let channel {
-            try? await channel.close().get()
+        if let closePayload = makeWebSocketClosePayload() {
+            writeFrameBestEffortAndClose(opcode: .connectionClose, payload: closePayload)
+        } else {
+            channel?.close(promise: nil)
         }
     }
 
     private func cleanup(killProcess: Bool) async {
         let cleanupState = stateLock.withLock {
-            () -> (tasks: [Task<Void, Never>], sessionState: SessionState?)? in
+            () -> (
+                backgroundTasks: [Task<Void, Never>],
+                portForwardTasks: [Task<Void, Never>],
+                pongTask: Task<Void, Never>?,
+                sessionState: SessionState?
+            )? in
             if cleanupPerformed {
                 return nil
             }
             cleanupPerformed = true
+            inboundBinaryFrameBytes = 0
             idleTimeoutTask?.cancel()
             idleTimeoutTask = nil
             let cleanupState = (
-                tasks: backgroundTasks,
+                backgroundTasks: backgroundTasks,
+                portForwardTasks: portForwardTasks.values.compactMap(\.task),
+                pongTask: pongTask?.task,
                 sessionState: sessionState
             )
             backgroundTasks.removeAll()
+            portForwardTasks.removeAll()
+            pongTask = nil
             return cleanupState
         }
         guard let cleanupState else {
             return
         }
 
-        for task in cleanupState.tasks {
-            task.cancel()
-        }
+        inboundBinaryFrameContinuation.finish()
 
         switch cleanupState.sessionState {
         case .exec(let state):
+            for task in cleanupState.backgroundTasks + cleanupState.portForwardTasks
+                + [cleanupState.pongTask].compactMap({ $0 })
+            {
+                task.cancel()
+            }
             try? state.stdinPipe?.fileHandleForReading.close()
             try? state.stdinPipe?.fileHandleForWriting.close()
             try? state.stdoutPipe?.fileHandleForReading.close()
@@ -2591,12 +3991,29 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 try? await state.process.kill(SIGTERM)
             }
         case .portForward(let state):
-            for (handle, input) in state.takeConnections() {
-                input.cancel()
-                try? handle.close()
+            let removals = state.takeRemovals()
+            for removal in removals {
+                removal.connection?.controlConnection.shutdownAllAndClose()
+                removal.outputSequence.stop()
+            }
+            for task in cleanupState.backgroundTasks + cleanupState.portForwardTasks
+                + [cleanupState.pongTask].compactMap({ $0 })
+            {
+                task.cancel()
+            }
+            for removal in removals {
+                removal.connection?.input.cancel()
+                try? removal.connection?.handle.close()
+                if let tunnelLease = removal.connection?.tunnelLease {
+                    server.releasePortForwardTunnelLease(tunnelLease)
+                }
             }
         case .none:
-            break
+            for task in cleanupState.backgroundTasks + cleanupState.portForwardTasks
+                + [cleanupState.pongTask].compactMap({ $0 })
+            {
+                task.cancel()
+            }
         }
     }
 
@@ -2610,6 +4027,171 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         }
         if shouldCancel {
             task.cancel()
+        }
+    }
+
+    private func reserveInboundBinaryFrame(
+        _ payload: ByteBuffer
+    ) -> InboundBinaryFrameAdmission {
+        stateLock.withLock {
+            guard !cleanupPerformed, !inboundBinaryInputRejected else {
+                return .ignored
+            }
+            let byteCount = payload.readableBytes
+            guard
+                inboundBinaryFrameBytes <= Self.maximumInboundBinaryFrameBytes,
+                byteCount <= Self.maximumInboundBinaryFrameBytes - inboundBinaryFrameBytes
+            else {
+                inboundBinaryInputRejected = true
+                return .reject
+            }
+            inboundBinaryFrameBytes += byteCount
+            return .accepted
+        }
+    }
+
+    private func terminalCloseSnapshot() -> Bool {
+        stateLock.withLock {
+            cleanupPerformed || terminalCloseStarted
+        }
+    }
+
+    private func beginTerminalClose() -> Bool {
+        stateLock.withLock {
+            guard !cleanupPerformed, !terminalCloseStarted else {
+                return false
+            }
+            terminalCloseStarted = true
+            return true
+        }
+    }
+
+    private func closeSessionSynchronously(context: ChannelHandlerContext) {
+        guard beginTerminalClose() else {
+            return
+        }
+        context.close(promise: nil)
+    }
+
+    private func startPong(_ payload: ByteBuffer) {
+        let trackedTask = TrackedPongTask()
+        let shouldStart = stateLock.withLock { () -> Bool in
+            guard
+                !cleanupPerformed,
+                !terminalCloseStarted,
+                pongTask == nil
+            else {
+                return false
+            }
+            pongTask = trackedTask
+            return true
+        }
+        guard shouldStart else {
+            return
+        }
+
+        let task = Task { [weak self, weak trackedTask] in
+            guard let self, let trackedTask else {
+                return
+            }
+            do {
+                try await writeFrame(opcode: .pong, payload: payload)
+            } catch {
+                if beginTerminalClose() {
+                    channel?.close(promise: nil)
+                }
+            }
+            pongFinished(trackedTask)
+        }
+        let shouldCancel = stateLock.withLock {
+            trackedTask.task = task
+            return cleanupPerformed || pongTask !== trackedTask
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    private func pongFinished(_ trackedTask: TrackedPongTask) {
+        stateLock.withLock {
+            if pongTask === trackedTask {
+                pongTask = nil
+            }
+        }
+    }
+
+    private func releaseInboundBinaryFrame(_ payload: ByteBuffer) {
+        stateLock.withLock {
+            inboundBinaryFrameBytes -= min(inboundBinaryFrameBytes, payload.readableBytes)
+        }
+    }
+
+    private func rejectInboundBinaryInput(releasing byteCount: Int) -> Bool {
+        stateLock.withLock {
+            inboundBinaryFrameBytes -= min(inboundBinaryFrameBytes, byteCount)
+            guard !cleanupPerformed, !inboundBinaryInputRejected else {
+                return false
+            }
+            inboundBinaryInputRejected = true
+            return true
+        }
+    }
+
+    private func startPortForwardTask(
+        owner: CRIShimPortForwardState.StreamIdentity,
+        detached: Bool = false,
+        operation: @escaping @Sendable () async -> Void
+    ) {
+        let id = UUID()
+        let trackedTask = PortForwardTrackedTask(owner: owner)
+        let shouldStart = stateLock.withLock {
+            guard !cleanupPerformed else {
+                return false
+            }
+            portForwardTasks[id] = trackedTask
+            return true
+        }
+        guard shouldStart else {
+            return
+        }
+
+        let task: Task<Void, Never>
+        if detached {
+            task = Task.detached { [weak self] in
+                await operation()
+                self?.portForwardTaskFinished(id)
+            }
+        } else {
+            task = Task { [weak self] in
+                await operation()
+                self?.portForwardTaskFinished(id)
+            }
+        }
+        let shouldCancel = stateLock.withLock {
+            trackedTask.task = task
+            return cleanupPerformed || portForwardTasks[id] !== trackedTask
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    private func takePortForwardTasks(
+        owner: CRIShimPortForwardState.StreamIdentity
+    ) -> [Task<Void, Never>] {
+        stateLock.withLock {
+            let taskIDs = portForwardTasks.compactMap { id, trackedTask in
+                trackedTask.owner == owner ? id : nil
+            }
+            return taskIDs.compactMap { id in
+                portForwardTasks.removeValue(forKey: id)?.task
+            }
+        }
+    }
+
+    private func portForwardTaskFinished(_ id: UUID) {
+        _ = stateLock.withLock {
+            portForwardTasks.removeValue(forKey: id)
         }
     }
 
@@ -2649,11 +4231,49 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         stream: UInt8,
         payload: Data
     ) async throws {
+        guard !terminalCloseSnapshot() else {
+            throw CancellationError()
+        }
         guard let buffer = makeFramePayload(stream: stream, payload: payload) else {
             return
         }
         try await writeFrame(opcode: .binary, payload: buffer)
         recordActivity()
+    }
+
+    private func writeBinaryMessageBestEffortAndClose(
+        stream: UInt8,
+        payload: Data
+    ) {
+        guard let buffer = makeFramePayload(stream: stream, payload: payload) else {
+            channel?.close(promise: nil)
+            return
+        }
+        writeFrameBestEffortAndClose(opcode: .binary, payload: buffer)
+    }
+
+    private func writeFrameBestEffortAndClose(
+        opcode: WebSocketOpcode,
+        payload: ByteBuffer
+    ) {
+        guard let channel, channel.isActive, channel.isWritable else {
+            channel?.close(promise: nil)
+            return
+        }
+        let frame = WebSocketFrame(
+            fin: true,
+            opcode: opcode,
+            maskKey: nil,
+            data: payload
+        )
+        let closeTimeout = channel.eventLoop.scheduleTask(in: .milliseconds(100)) {
+            channel.close(promise: nil)
+        }
+        let writeFuture: EventLoopFuture<Void> = channel.writeAndFlush(frame)
+        writeFuture.whenComplete { _ in
+            closeTimeout.cancel()
+            channel.close(promise: nil)
+        }
     }
 
     private func writeFrame(
@@ -2745,13 +4365,82 @@ private func execStreamKind(_ value: String) -> CRIShimExecSPDYHandler.StreamKin
 private func fallbackRequestID(
     streamID: UInt32,
     kind: CRIShimPortForwardSPDYHandler.StreamKind
-) -> String {
+) -> String? {
     switch kind {
     case .error:
-        "\(streamID)"
+        guard streamID > 0 else {
+            return nil
+        }
+        return "\(streamID)"
     case .data:
-        "\(streamID - 2)"
+        guard streamID >= 3 else {
+            return nil
+        }
+        return "\(streamID - 2)"
     }
+}
+
+final class CRIShimBackendControlConnection: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fileDescriptor: Int32?
+
+    init(duplicating fileDescriptor: Int32) throws {
+        let duplicatedFileDescriptor = Darwin.fcntl(fileDescriptor, F_DUPFD_CLOEXEC, 0)
+        guard duplicatedFileDescriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        self.fileDescriptor = duplicatedFileDescriptor
+        configureBackendSocketNoSIGPIPE(duplicatedFileDescriptor)
+    }
+
+    init(owning fileDescriptor: Int32) {
+        self.fileDescriptor = fileDescriptor
+        configureBackendSocketNoSIGPIPE(fileDescriptor)
+    }
+
+    deinit {
+        shutdownAllAndClose()
+    }
+
+    func shutdownWrite() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let fileDescriptor else {
+            return
+        }
+        guard Darwin.shutdown(fileDescriptor, SHUT_WR) != 0 else {
+            return
+        }
+        let code = errno
+        if code == ENOTCONN || code == EPIPE {
+            return
+        }
+        throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+    }
+
+    func shutdownAllAndClose() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let fileDescriptor else {
+            return
+        }
+        self.fileDescriptor = nil
+        _ = Darwin.shutdown(fileDescriptor, SHUT_RDWR)
+        _ = Darwin.close(fileDescriptor)
+    }
+}
+
+private func configureBackendSocketNoSIGPIPE(_ fileDescriptor: Int32) {
+    #if !os(Linux)
+    var noSignal = CInt(1)
+    _ = setsockopt(
+        fileDescriptor,
+        SOL_SOCKET,
+        SO_NOSIGPIPE,
+        &noSignal,
+        socklen_t(MemoryLayout<CInt>.size)
+    )
+    #endif
 }
 
 private func writeSPDYLength(
@@ -2789,19 +4478,31 @@ private func readSPDYUInt32(
 }
 
 private func parseSPDYHeaders(_ data: Data) throws -> [String: [String]] {
+    let maximumHeaderCount: UInt32 = 256
+    let maximumHeaderNameBytes = 8 * 1024
+    let maximumHeaderValueBytes = 32 * 1024
     var offset = 0
     let headerCount = try readSPDYUInt32(data, &offset)
+    guard headerCount <= maximumHeaderCount else {
+        throw CRIShimError.invalidArgument("SPDY header count exceeds \(maximumHeaderCount)")
+    }
     var headers: [String: [String]] = [:]
     for _ in 0..<headerCount {
         let nameLength = Int(try readSPDYUInt32(data, &offset))
-        guard offset + nameLength <= data.count else {
+        guard nameLength <= maximumHeaderNameBytes else {
+            throw CRIShimError.invalidArgument("SPDY header name exceeds \(maximumHeaderNameBytes) bytes")
+        }
+        guard nameLength <= data.count - offset else {
             throw CRIShimError.invalidArgument("SPDY header name is truncated")
         }
         let name = String(decoding: data[offset..<(offset + nameLength)], as: UTF8.self).lowercased()
         offset += nameLength
 
         let valueLength = Int(try readSPDYUInt32(data, &offset))
-        guard offset + valueLength <= data.count else {
+        guard valueLength <= maximumHeaderValueBytes else {
+            throw CRIShimError.invalidArgument("SPDY header value exceeds \(maximumHeaderValueBytes) bytes")
+        }
+        guard valueLength <= data.count - offset else {
             throw CRIShimError.invalidArgument("SPDY header value is truncated")
         }
         let value = String(decoding: data[offset..<(offset + valueLength)], as: UTF8.self)
@@ -2811,7 +4512,7 @@ private func parseSPDYHeaders(_ data: Data) throws -> [String: [String]] {
     return headers
 }
 
-private func makeSPDYHeaderBlock(_ headers: [String: [String]]) -> Data {
+func makeSPDYHeaderBlock(_ headers: [String: [String]]) -> Data {
     var data = Data(spdyUInt32(UInt32(headers.count)))
     for (name, values) in headers.sorted(by: { $0.key < $1.key }) {
         let normalizedName = Data(name.lowercased().utf8)
@@ -2824,7 +4525,9 @@ private func makeSPDYHeaderBlock(_ headers: [String: [String]]) -> Data {
     return data
 }
 
-private final class CRIShimSPDYHeaderInflater {
+final class CRIShimSPDYHeaderInflater {
+    private static let maximumDecompressedHeaderBytes = 64 * 1024
+
     private var stream = z_stream()
     private var initialized = false
 
@@ -2863,6 +4566,14 @@ private final class CRIShimSPDYHeaderInflater {
                     return (pointer.count - Int(stream.avail_out), result)
                 }
                 if produced.0 > 0 {
+                    guard
+                        output.count <= Self.maximumDecompressedHeaderBytes,
+                        produced.0 <= Self.maximumDecompressedHeaderBytes - output.count
+                    else {
+                        throw CRIShimError.invalidArgument(
+                            "SPDY decompressed header block exceeds \(Self.maximumDecompressedHeaderBytes) bytes"
+                        )
+                    }
                     output.append(contentsOf: chunk.prefix(produced.0))
                 }
                 guard produced.1 == Z_OK || produced.1 == Z_STREAM_END || produced.1 == Z_BUF_ERROR else {
@@ -2890,7 +4601,7 @@ private final class CRIShimSPDYHeaderInflater {
     }
 }
 
-private final class CRIShimSPDYHeaderDeflater {
+final class CRIShimSPDYHeaderDeflater {
     private var stream = z_stream()
     private var initialized = false
 
@@ -3013,33 +4724,51 @@ private func isLoopbackHost(_ host: String) -> Bool {
 
 final class FileHandleByteStream: @unchecked Sendable {
     private static let maximumReadSize = 64 * 1024
-    private static let queue = DispatchQueue(
+    private static let workerQueue = DispatchQueue(
         label: "com.apple.container.cri-shim.streaming-read",
         attributes: .concurrent
     )
 
     private let fileDescriptor: Int32
+    private let queue: DispatchQueue
     private let source: DispatchSourceRead
+    private let maximumPendingBytes: Int?
+    private let maximumPendingElements: Int?
     private let lock = NSLock()
     private var continuation: AsyncStream<Data>.Continuation?
+    private var pendingBytes = 0
+    private var pendingElements = 0
+    private var sourceSuspended = false
+    private var sourceResumeScheduled = false
     private var stopped = false
     let bytes: AsyncStream<Data>
 
-    init(handle: FileHandle) throws {
+    init(
+        handle: FileHandle,
+        maximumPendingBytes: Int? = nil,
+        maximumPendingElements: Int? = nil
+    ) throws {
         let duplicate = Darwin.fcntl(handle.fileDescriptor, F_DUPFD_CLOEXEC, 0)
         guard duplicate >= 0 else {
             throw CRIShimError.internalError("failed to duplicate streaming file descriptor: errno \(errno)")
         }
 
+        let queue = DispatchQueue(
+            label: "com.apple.container.cri-shim.streaming-read.\(UUID().uuidString)",
+            target: Self.workerQueue
+        )
+        self.maximumPendingBytes = maximumPendingBytes.map { max($0, 1) }
+        self.maximumPendingElements = maximumPendingElements.map { max($0, 1) }
         var capturedContinuation: AsyncStream<Data>.Continuation?
         self.bytes = AsyncStream { continuation in
             capturedContinuation = continuation
         }
         self.fileDescriptor = duplicate
+        self.queue = queue
         self.continuation = capturedContinuation
         self.source = DispatchSource.makeReadSource(
             fileDescriptor: duplicate,
-            queue: Self.queue
+            queue: queue
         )
         source.setEventHandler { [weak self] in
             self?.readAvailableData()
@@ -3061,13 +4790,76 @@ final class FileHandleByteStream: @unchecked Sendable {
         stop()
     }
 
+    var pendingByteCount: Int {
+        lock.withLock { pendingBytes }
+    }
+
+    var pendingElementCount: Int {
+        lock.withLock { pendingElements }
+    }
+
+    func acknowledge(_ byteCount: Int) {
+        guard byteCount > 0 else {
+            return
+        }
+        let shouldScheduleResume = lock.withLock {
+            guard
+                !stopped,
+                maximumPendingBytes != nil || maximumPendingElements != nil
+            else {
+                return false
+            }
+            assert(pendingBytes >= byteCount)
+            assert(pendingElements > 0)
+            pendingBytes -= min(pendingBytes, byteCount)
+            pendingElements -= 1
+            if sourceSuspended, !sourceResumeScheduled {
+                sourceResumeScheduled = true
+                return true
+            }
+            return false
+        }
+        if shouldScheduleResume {
+            queue.async { [weak self] in
+                self?.resumeSourceAfterAcknowledgement()
+            }
+        }
+    }
+
+    private func resumeSourceAfterAcknowledgement() {
+        lock.withLock {
+            guard !stopped, sourceSuspended, sourceResumeScheduled else {
+                sourceResumeScheduled = false
+                return
+            }
+            sourceResumeScheduled = false
+            sourceSuspended = false
+            source.resume()
+        }
+    }
+
     private func readAvailableData() {
         let estimatedSize = source.data
         guard estimatedSize > 0 else {
             stop()
             return
         }
-        let readSize = Int(min(estimatedSize, UInt(Self.maximumReadSize)))
+        let readSize = lock.withLock { () -> Int in
+            guard !stopped else {
+                return 0
+            }
+            let estimatedReadSize = Int(min(estimatedSize, UInt(Self.maximumReadSize)))
+            if let maximumPendingElements, pendingElements >= maximumPendingElements {
+                return 0
+            }
+            guard let maximumPendingBytes else {
+                return estimatedReadSize
+            }
+            return min(estimatedReadSize, max(maximumPendingBytes - pendingBytes, 0))
+        }
+        guard readSize > 0 else {
+            return
+        }
         var bytes = [UInt8](repeating: 0, count: readSize)
 
         while true {
@@ -3077,7 +4869,20 @@ final class FileHandleByteStream: @unchecked Sendable {
             if result > 0 {
                 let data = Data(bytes.prefix(Int(result)))
                 let continuation: AsyncStream<Data>.Continuation? = lock.withLock {
-                    stopped ? nil : self.continuation
+                    guard !stopped else {
+                        return nil
+                    }
+                    if maximumPendingBytes != nil || maximumPendingElements != nil {
+                        pendingBytes += data.count
+                        pendingElements += 1
+                        let reachedByteLimit = maximumPendingBytes.map { pendingBytes >= $0 } ?? false
+                        let reachedElementLimit = maximumPendingElements.map { pendingElements >= $0 } ?? false
+                        if reachedByteLimit || reachedElementLimit, !sourceSuspended {
+                            sourceSuspended = true
+                            source.suspend()
+                        }
+                    }
+                    return self.continuation
                 }
                 guard let continuation else {
                     return
@@ -3110,6 +4915,13 @@ final class FileHandleByteStream: @unchecked Sendable {
                 return nil
             }
             stopped = true
+            pendingBytes = 0
+            pendingElements = 0
+            sourceResumeScheduled = false
+            if sourceSuspended {
+                sourceSuspended = false
+                source.resume()
+            }
             let continuation = self.continuation
             self.continuation = nil
             return continuation
@@ -3125,8 +4937,16 @@ final class FileHandleByteStream: @unchecked Sendable {
     }
 }
 
-func fileHandleStream(_ handle: FileHandle) throws -> FileHandleByteStream {
-    try FileHandleByteStream(handle: handle)
+func fileHandleStream(
+    _ handle: FileHandle,
+    maximumPendingBytes: Int? = nil,
+    maximumPendingElements: Int? = nil
+) throws -> FileHandleByteStream {
+    try FileHandleByteStream(
+        handle: handle,
+        maximumPendingBytes: maximumPendingBytes,
+        maximumPendingElements: maximumPendingElements
+    )
 }
 
 extension NSLock {

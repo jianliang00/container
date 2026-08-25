@@ -60,12 +60,12 @@ Optional:
   CONTAINER_CRI_MACOS_STATIC_CONTAINER_NAME
                                        static Pod workload container name
                                        default: static-workload
-  CONTAINER_CRI_MACOS_PORT_FORWARD_GUEST_PORT
-                                       guest vsock port used for kubectl port-forward
-                                       default: 27000
+  CONTAINER_CRI_MACOS_PORT_FORWARD_TARGET_PORT
+                                       workload TCP port used for kubectl port-forward
+                                       default: 8080
   CONTAINER_CRI_MACOS_PORT_FORWARD_LOCAL_PORT
                                        local host port for kubectl port-forward
-                                       default: randomly selected high port
+                                       default: kubectl-selected ephemeral port
   CONTAINER_CRI_MACOS_SKIP_PORT_FORWARD=1
                                        skip kubectl port-forward validation
   CONTAINER_CRI_MACOS_KEEP_WORKDIR=1   keep the generated temp directory
@@ -74,7 +74,7 @@ Optional:
   BUILD_CONFIGURATION=debug|release    Swift build configuration
   CRICTL=/path/to/crictl               crictl executable
   CRICTL_TIMEOUT=120s                  crictl request timeout
-  PYTHON=/path/to/python3              Python used to validate port-forward frames
+  PYTHON=/path/to/python3              Python used to validate forwarded HTTP responses
   SWIFT=/path/to/swift                 Swift executable
 
 Prerequisites:
@@ -118,7 +118,7 @@ POD_NAME="${CONTAINER_CRI_MACOS_POD_NAME:-macos-api-smoke}"
 CONTAINER_NAME="${CONTAINER_CRI_MACOS_CONTAINER_NAME:-workload}"
 STATIC_POD_NAME="${CONTAINER_CRI_MACOS_STATIC_POD_NAME:-macos-static-smoke}"
 STATIC_CONTAINER_NAME="${CONTAINER_CRI_MACOS_STATIC_CONTAINER_NAME:-static-workload}"
-PORT_FORWARD_GUEST_PORT="${CONTAINER_CRI_MACOS_PORT_FORWARD_GUEST_PORT:-27000}"
+PORT_FORWARD_TARGET_PORT="${CONTAINER_CRI_MACOS_PORT_FORWARD_TARGET_PORT:-8080}"
 PORT_FORWARD_LOCAL_PORT="${CONTAINER_CRI_MACOS_PORT_FORWARD_LOCAL_PORT:-}"
 SKIP_PORT_FORWARD="${CONTAINER_CRI_MACOS_SKIP_PORT_FORWARD:-0}"
 
@@ -157,8 +157,8 @@ if [[ ! "${SANDBOX_MEMORY_BYTES}" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-if [[ ! "${PORT_FORWARD_GUEST_PORT}" =~ ^[1-9][0-9]*$ || "${PORT_FORWARD_GUEST_PORT}" -gt 65535 ]]; then
-    echo "error: CONTAINER_CRI_MACOS_PORT_FORWARD_GUEST_PORT must be between 1 and 65535" >&2
+if [[ ! "${PORT_FORWARD_TARGET_PORT}" =~ ^[1-9][0-9]*$ || "${PORT_FORWARD_TARGET_PORT}" -gt 65535 ]]; then
+    echo "error: CONTAINER_CRI_MACOS_PORT_FORWARD_TARGET_PORT must be between 1 and 65535" >&2
     exit 2
 fi
 
@@ -189,31 +189,17 @@ select_node_ip() {
         ifconfig | awk '/inet / && $2 != "127.0.0.1" {print $2; exit}'
 }
 
-choose_local_port() {
-    if [[ -n "${PORT_FORWARD_LOCAL_PORT}" ]]; then
-        printf '%s\n' "${PORT_FORWARD_LOCAL_PORT}"
-        return
-    fi
-    for _ in $(seq 1 200); do
-        local port=$((46000 + RANDOM % 10000))
-        if ! lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
-            printf '%s\n' "${port}"
-            return
-        fi
-    done
-    echo "error: failed to find an unused local port for kubectl port-forward" >&2
-    exit 2
-}
-
 NODE_IP="$(select_node_ip)"
 if [[ -z "${NODE_IP}" ]]; then
     echo "error: failed to detect node IP; set CONTAINER_CRI_MACOS_NODE_IP" >&2
     exit 2
 fi
-PORT_FORWARD_LOCAL_PORT="$(choose_local_port)"
 
 WORK_DIR="$(mktemp -d "${WORKDIR_PARENT%/}/container-kubelet-api-e2e.XXXXXX")"
 ln -sfn "${WORK_DIR}" "${WORKDIR_PARENT%/}/container-kubelet-api-e2e.latest"
+SMOKE_RUN_TOKEN="${WORK_DIR##*.}"
+API_PORT_FORWARD_RESPONSE_TOKEN="api-${SMOKE_RUN_TOKEN}"
+STATIC_PORT_FORWARD_RESPONSE_TOKEN="static-${SMOKE_RUN_TOKEN}"
 CERT_DIR="${WORK_DIR}/certs"
 ETCD_DATA="${WORK_DIR}/etcd-data"
 SHIM_STATE="${WORK_DIR}/shim-state"
@@ -243,6 +229,7 @@ APISERVER_PID=""
 SHIM_PID=""
 KUBELET_PID=""
 PORT_FORWARD_PID=""
+PORT_FORWARD_ACTIVE_LOCAL_PORT=""
 
 run_crictl() {
     "${CRICTL_BIN}" \
@@ -319,44 +306,64 @@ wait_for_process() {
     fi
 }
 
+port_forward_mapping() {
+    if [[ -n "${PORT_FORWARD_LOCAL_PORT}" ]]; then
+        printf '%s:%s\n' "${PORT_FORWARD_LOCAL_PORT}" "${PORT_FORWARD_TARGET_PORT}"
+    else
+        printf ':%s\n' "${PORT_FORWARD_TARGET_PORT}"
+    fi
+}
+
 wait_for_port_forward_ready() {
     local pid=$1
-    local local_port=$2
-    local process_name=$3
+    local output_log=$2
+    local expected_token=$3
+    local process_name=$4
+    local local_port=""
+
+    PORT_FORWARD_ACTIVE_LOCAL_PORT=""
     for _ in $(seq 1 60); do
-        if "${PYTHON_BIN}" - "${local_port}" <<'PY' >/dev/null 2>&1
-import json
+        wait_for_process "${pid}" "${process_name}"
+
+        if [[ -n "${PORT_FORWARD_LOCAL_PORT}" ]]; then
+            if grep -Fxq "Forwarding from 127.0.0.1:${PORT_FORWARD_LOCAL_PORT} -> ${PORT_FORWARD_TARGET_PORT}" "${output_log}" 2>/dev/null; then
+                local_port="${PORT_FORWARD_LOCAL_PORT}"
+            fi
+        else
+            local_port="$({ sed -nE "s/^Forwarding from 127\\.0\\.0\\.1:([0-9]+) -> ${PORT_FORWARD_TARGET_PORT}$/\\1/p" "${output_log}" 2>/dev/null || true; } | head -n 1)"
+        fi
+
+        if [[ -n "${local_port}" ]]; then
+            wait_for_process "${pid}" "${process_name}"
+            if "${PYTHON_BIN}" - "${local_port}" "${expected_token}" <<'PY' >/dev/null 2>&1
 import socket
-import struct
 import sys
 
-def recv_exact(sock, count):
-    chunks = []
-    remaining = count
-    while remaining:
-        chunk = sock.recv(remaining)
-        if not chunk:
-            raise RuntimeError("unexpected EOF")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
-
 port = int(sys.argv[1])
+expected_body = sys.argv[2].encode("ascii")
 with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
-    header = recv_exact(sock, 4)
-    length = struct.unpack(">I", header)[0]
-    payload = recv_exact(sock, length)
-    frame = json.loads(payload.decode("utf-8"))
-    if frame.get("type") != "ready":
-        raise RuntimeError(f"unexpected frame: {frame!r}")
+    sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    chunks = []
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    response = b"".join(chunks)
+    headers, separator, body = response.partition(b"\r\n\r\n")
+    if not separator or not headers.startswith(b"HTTP/1.1 200") or body != expected_body:
+        raise RuntimeError(f"unexpected HTTP response: {response!r}")
 PY
-        then
-            return 0
+            then
+                wait_for_process "${pid}" "${process_name}"
+                PORT_FORWARD_ACTIVE_LOCAL_PORT="${local_port}"
+                return 0
+            fi
+            wait_for_process "${pid}" "${process_name}"
         fi
-        wait_for_process "${pid}" "${process_name}"
         sleep 1
     done
-    fail "timed out waiting for ${process_name} to return a guest-agent ready frame"
+    fail "timed out waiting for ${process_name} to publish its exact forwarding address and return the expected workload HTTP response"
 }
 
 log "workdir=${WORK_DIR}"
@@ -379,7 +386,9 @@ RUNTIME_ENDPOINT=${RUNTIME_ENDPOINT}
 ADMIN_KUBECONFIG=${ADMIN_KUBECONFIG}
 KUBELET_KUBECONFIG=${KUBELET_KUBECONFIG}
 PORT_FORWARD_LOCAL_PORT=${PORT_FORWARD_LOCAL_PORT}
-PORT_FORWARD_GUEST_PORT=${PORT_FORWARD_GUEST_PORT}
+PORT_FORWARD_TARGET_PORT=${PORT_FORWARD_TARGET_PORT}
+API_PORT_FORWARD_RESPONSE_TOKEN=${API_PORT_FORWARD_RESPONSE_TOKEN}
+STATIC_PORT_FORWARD_RESPONSE_TOKEN=${STATIC_PORT_FORWARD_RESPONSE_TOKEN}
 ETCD_LOG=${ETCD_LOG}
 APISERVER_LOG=${APISERVER_LOG}
 SHIM_LOG=${SHIM_LOG}
@@ -616,17 +625,19 @@ spec:
         echo "nc not found" >&2
         exit 1
       fi
+      response_token='${API_PORT_FORWARD_RESPONSE_TOKEN}'
+      response_length="\${#response_token}"
       while true; do
-        printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok' | "\${nc_bin}" -l 8080
+        printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "\${response_length}" "\${response_token}" | "\${nc_bin}" -l ${PORT_FORWARD_TARGET_PORT}
       done &
       echo kubelet-api-ready
       while true; do sleep 30; done
     ports:
     - name: probe-http
-      containerPort: 8080
+      containerPort: ${PORT_FORWARD_TARGET_PORT}
     startupProbe:
       tcpSocket:
-        port: 8080
+        port: ${PORT_FORWARD_TARGET_PORT}
       periodSeconds: 2
       failureThreshold: 60
     readinessProbe:
@@ -640,7 +651,7 @@ spec:
     livenessProbe:
       httpGet:
         path: /healthz
-        port: 8080
+        port: ${PORT_FORWARD_TARGET_PORT}
       periodSeconds: 2
       failureThreshold: 30
 EOF
@@ -670,9 +681,10 @@ fi
 
 if [[ "${SKIP_PORT_FORWARD}" != "1" && "${SKIP_PORT_FORWARD}" != "true" ]]; then
     log "validating kubectl port-forward"
-    "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" port-forward --address 127.0.0.1 "pod/${POD_NAME}" "${PORT_FORWARD_LOCAL_PORT}:${PORT_FORWARD_GUEST_PORT}" >"${PORT_FORWARD_LOG}" 2>&1 &
+    "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" port-forward --address 127.0.0.1 "pod/${POD_NAME}" "$(port_forward_mapping)" >"${PORT_FORWARD_LOG}" 2>&1 &
     PORT_FORWARD_PID=$!
-    wait_for_port_forward_ready "${PORT_FORWARD_PID}" "${PORT_FORWARD_LOCAL_PORT}" "kubectl port-forward"
+    wait_for_port_forward_ready "${PORT_FORWARD_PID}" "${PORT_FORWARD_LOG}" "${API_PORT_FORWARD_RESPONSE_TOKEN}" "kubectl port-forward"
+    log "kubectl port-forward validated on 127.0.0.1:${PORT_FORWARD_ACTIVE_LOCAL_PORT}"
     terminate_pid "${PORT_FORWARD_PID}"
     PORT_FORWARD_PID=""
 fi
@@ -714,7 +726,22 @@ spec:
     command:
     - /bin/sh
     - -c
-    - 'echo kubelet-static-mirror-ready; while true; do sleep 30; done'
+    - |
+      nc_bin="\$(command -v nc || true)"
+      if [ -z "\${nc_bin}" ]; then
+        echo "nc not found" >&2
+        exit 1
+      fi
+      response_token='${STATIC_PORT_FORWARD_RESPONSE_TOKEN}'
+      response_length="\${#response_token}"
+      while true; do
+        printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "\${response_length}" "\${response_token}" | "\${nc_bin}" -l ${PORT_FORWARD_TARGET_PORT}
+      done &
+      echo kubelet-static-mirror-ready
+      while true; do sleep 30; done
+    ports:
+    - name: forwarded-http
+      containerPort: ${PORT_FORWARD_TARGET_PORT}
 EOF
 
 log "waiting for static Pod mirror"
@@ -740,9 +767,10 @@ fi
 
 if [[ "${SKIP_PORT_FORWARD}" != "1" && "${SKIP_PORT_FORWARD}" != "true" ]]; then
     log "validating static Pod mirror kubectl port-forward"
-    "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" port-forward --address 127.0.0.1 "pod/${STATIC_MIRROR_POD_NAME}" "${PORT_FORWARD_LOCAL_PORT}:${PORT_FORWARD_GUEST_PORT}" >"${STATIC_PORT_FORWARD_LOG}" 2>&1 &
+    "${KUBECTL_BIN}" --kubeconfig "${ADMIN_KUBECONFIG}" port-forward --address 127.0.0.1 "pod/${STATIC_MIRROR_POD_NAME}" "$(port_forward_mapping)" >"${STATIC_PORT_FORWARD_LOG}" 2>&1 &
     PORT_FORWARD_PID=$!
-    wait_for_port_forward_ready "${PORT_FORWARD_PID}" "${PORT_FORWARD_LOCAL_PORT}" "kubectl static Pod port-forward"
+    wait_for_port_forward_ready "${PORT_FORWARD_PID}" "${STATIC_PORT_FORWARD_LOG}" "${STATIC_PORT_FORWARD_RESPONSE_TOKEN}" "kubectl static Pod port-forward"
+    log "kubectl static Pod port-forward validated on 127.0.0.1:${PORT_FORWARD_ACTIVE_LOCAL_PORT}"
     terminate_pid "${PORT_FORWARD_PID}"
     PORT_FORWARD_PID=""
 fi

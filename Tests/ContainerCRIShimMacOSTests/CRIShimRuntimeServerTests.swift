@@ -32,6 +32,7 @@ import Glibc
 import Darwin
 #endif
 
+@Suite
 struct CRIShimRuntimeServerTests {
     @Test
     func runnerCreatesServerAndRunsItAfterValidation() async throws {
@@ -1925,6 +1926,1908 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func spdyPortForwardClientWriteFINPreservesBackendResponse() async throws {
+        let response = Data("port-forward-response-ready\n".utf8)
+        #expect(response.count == 28)
+
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardStartDelays[18_080] = .milliseconds(50)
+        runtimeManager.portForwardResponsesAfterClientEOF[18_080] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_080]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.openPortForwardPair(
+                requestID: "0",
+                port: 18_080,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: true
+            )
+
+            let result = try await connection.readPortForwardResult(errorStreamID: 1, dataStreamID: 3)
+            #expect(result.error.isEmpty)
+            #expect(result.data == response)
+            #expect(result.errorFinished)
+            #expect(result.dataFinished)
+            #expect(!result.receivedBackendDataAfterTerminal)
+        }
+
+        #expect(
+            runtimeManager.portForwardCalls == [
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 18_080)
+            ]
+        )
+    }
+
+    @Test
+    func spdyPortForwardBuffersClientDataUntilDelayedDialCompletes() async throws {
+        let request = Data("GET /ready HTTP/1.1\r\nHost: pod\r\n\r\n".utf8)
+        let response = Data("port-forward-response-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardStartDelays[18_083] = .milliseconds(50)
+        runtimeManager.portForwardResponsesAfterClientEOF[18_083] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_083]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.openPortForwardPair(
+                requestID: "0",
+                port: 18_083,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                clientDataChunks: [
+                    Data(request.prefix(9)),
+                    Data(request.dropFirst(9).prefix(17)),
+                    Data(request.dropFirst(26)),
+                ],
+                closeClientWrite: true
+            )
+
+            let result = try await connection.readPortForwardResult(errorStreamID: 1, dataStreamID: 3)
+            #expect(result.error.isEmpty)
+            #expect(result.data == response)
+            #expect(result.dataFinished)
+            #expect(!result.receivedBackendDataAfterTerminal)
+            let backend = try #require(runtimeManager.portForwardConnections[18_083])
+            #expect(backend.receivedInput() == request)
+        }
+    }
+
+    @Test
+    func spdyPortForwardPendingInputOverflowFailsOnlyThatPair() async throws {
+        let response = Data("port-forward-response-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardStartDelays[18_084] = .milliseconds(100)
+        runtimeManager.portForwardResponsesAfterClientEOF[18_085] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_084, 18_085]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.openPortForwardPair(
+                requestID: "0",
+                port: 18_084,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                clientDataChunks: [Data(repeating: 0x61, count: (1 << 20) + 1)],
+                closeClientWrite: true
+            )
+
+            let overflow = try await connection.readPortForwardResult(errorStreamID: 1, dataStreamID: 3)
+            #expect(String(decoding: overflow.error, as: UTF8.self).contains("1048576"))
+            #expect(overflow.data.isEmpty)
+            #expect(overflow.terminalStreamOrder == [1, 3])
+            #expect(!overflow.receivedBackendDataAfterTerminal)
+
+            try await connection.openPortForwardPair(
+                requestID: "1",
+                port: 18_085,
+                errorStreamID: 5,
+                dataStreamID: 7,
+                closeClientWrite: true
+            )
+            let recovery = try await connection.readPortForwardResult(errorStreamID: 5, dataStreamID: 7)
+            #expect(recovery.error.isEmpty)
+            #expect(recovery.data == response)
+        }
+    }
+
+    @Test
+    func spdyPortForwardTinyFrameBacklogIsElementBoundedAndReturnsQuota() async throws {
+        let blockedPort: UInt32 = 18_091
+        let recoveryPort: UInt32 = 18_092
+        let response = Data("port-forward-response-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts.insert(blockedPort)
+        runtimeManager.portForwardResponsesAfterClientEOF[recoveryPort] = response
+
+        try await withSPDYPortForwardServer(
+            runtimeManager: runtimeManager,
+            ports: [blockedPort, recoveryPort]
+        ) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.openPortForwardPair(
+                requestID: "tiny-backlog",
+                port: blockedPort,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                clientDataChunks: [Data(repeating: 0x61, count: 64 * 1024)],
+                closeClientWrite: false
+            )
+            let blockedConnection = try await waitForValue(
+                description: "SPDY tiny-frame blocked backend"
+            ) {
+                runtimeManager.portForwardConnections[blockedPort]
+            }
+            try await waitForCondition(description: "SPDY tiny-frame writer blocked") {
+                blockedConnection.hasUnreadPeerData()
+            }
+
+            for index in 0..<256 {
+                try await connection.writeClientData(
+                    dataStreamID: 3,
+                    payload: Data([UInt8(truncatingIfNeeded: index)])
+                )
+            }
+            let overflow = try await connection.readPortForwardResult(errorStreamID: 1, dataStreamID: 3)
+            #expect(String(decoding: overflow.error, as: UTF8.self).contains("256 chunks"))
+            #expect(overflow.data.isEmpty)
+            #expect(overflow.terminalStreamOrder == [1, 3])
+            #expect(!overflow.receivedBackendDataAfterTerminal)
+            try await waitForCondition(description: "SPDY tiny-frame writer teardown") {
+                blockedConnection.drainPeerAndCheckEOF()
+            }
+
+            try await connection.openPortForwardPair(
+                requestID: "tiny-backlog-recovery",
+                port: recoveryPort,
+                errorStreamID: 5,
+                dataStreamID: 7,
+                closeClientWrite: true
+            )
+            let recovery = try await connection.readPortForwardResult(errorStreamID: 5, dataStreamID: 7)
+            #expect(recovery.error.isEmpty)
+            #expect(recovery.data == response)
+        }
+    }
+
+    @Test
+    func spdyPortForwardBackendWriteFailureFailsOnlyThatPair() async throws {
+        let response = Data("port-forward-response-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardReadyOnlyPorts.insert(18_086)
+        runtimeManager.portForwardResponsesAfterClientEOF[18_087] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_086, 18_087]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.openPortForwardPair(
+                requestID: "0",
+                port: 18_086,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: false
+            )
+            #expect(try await connection.readDataPayload(dataStreamID: 3) == Data("R".utf8))
+
+            let backend = try #require(runtimeManager.portForwardConnections[18_086])
+            let (sentinelSource, sentinelPeer) = try makeSocketPair()
+            let sentinelSourceFileDescriptor = sentinelSource.fileDescriptor
+            let sentinelPeerFileDescriptor = sentinelPeer.fileDescriptor
+            let releasedFileDescriptor = backend.closeForwardedHandle()
+            let reusedFileDescriptor = Darwin.fcntl(
+                sentinelSourceFileDescriptor,
+                F_DUPFD_CLOEXEC,
+                releasedFileDescriptor
+            )
+            guard reusedFileDescriptor >= 0 else {
+                throw currentPOSIXError()
+            }
+            #expect(reusedFileDescriptor == releasedFileDescriptor)
+            let reusedHandle = FileHandle(
+                fileDescriptor: reusedFileDescriptor,
+                closeOnDealloc: true
+            )
+            try await connection.writeClientData(dataStreamID: 3, payload: Data("request".utf8))
+
+            let failure = try await connection.readPortForwardResult(errorStreamID: 1, dataStreamID: 3)
+            #expect(!failure.error.isEmpty)
+            #expect(failure.terminalStreamOrder == [1, 3])
+            #expect(!failure.receivedBackendDataAfterTerminal)
+
+            var sentinelByte: UInt8 = 0
+            let sentinelRead = Darwin.recv(
+                sentinelPeerFileDescriptor,
+                &sentinelByte,
+                1,
+                MSG_DONTWAIT
+            )
+            let sentinelErrno = errno
+            #expect(sentinelRead == -1)
+            #expect(sentinelErrno == EAGAIN || sentinelErrno == EWOULDBLOCK)
+            _ = reusedHandle
+
+            try await connection.openPortForwardPair(
+                requestID: "1",
+                port: 18_087,
+                errorStreamID: 5,
+                dataStreamID: 7,
+                closeClientWrite: true
+            )
+            let recovery = try await connection.readPortForwardResult(errorStreamID: 5, dataStreamID: 7)
+            #expect(recovery.error.isEmpty)
+            #expect(recovery.data == response)
+        }
+    }
+
+    @Test
+    func spdyPortForwardDialFailureFinishesDataStreamAndKeepsSessionUsable() async throws {
+        let recoveryResponse = Data("port-forward-response-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardFailurePorts.insert(18_081)
+        runtimeManager.portForwardResponsesAfterClientEOF[18_082] = recoveryResponse
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_081, 18_082]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.openPortForwardPair(
+                requestID: "0",
+                port: 18_081,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: false
+            )
+
+            // client-go v1.27.2 waits for the remote data copy to finish before
+            // it consumes the error stream. This helper follows that ordering.
+            let failure = try await connection.readPortForwardResult(errorStreamID: 1, dataStreamID: 3)
+            #expect(!failure.error.isEmpty)
+            #expect(failure.data.isEmpty)
+            #expect(failure.errorFinished)
+            #expect(failure.dataFinished)
+            #expect(failure.terminalStreamOrder == [1, 3])
+            #expect(!failure.receivedBackendDataAfterTerminal)
+
+            try await connection.openPortForwardPair(
+                requestID: "1",
+                port: 18_082,
+                errorStreamID: 5,
+                dataStreamID: 7,
+                closeClientWrite: true
+            )
+            let recovery = try await connection.readPortForwardResult(errorStreamID: 5, dataStreamID: 7)
+            #expect(recovery.error.isEmpty)
+            #expect(recovery.data == recoveryResponse)
+            #expect(recovery.dataFinished)
+        }
+
+        #expect(
+            runtimeManager.portForwardCalls == [
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 18_081),
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 18_082),
+            ]
+        )
+    }
+
+    @Test
+    func spdyPortForwardBlockedBackendDoesNotBlockPingOrAnotherPair() async throws {
+        let response = Data("second-pair-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardReadyOnlyPorts.insert(18_088)
+        runtimeManager.portForwardResponsesAfterClientEOF[18_089] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_088, 18_089]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.openPortForwardPair(
+                requestID: "blocked",
+                port: 18_088,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: false
+            )
+            #expect(try await connection.readDataPayload(dataStreamID: 3) == Data("R".utf8))
+
+            try await connection.writeClientData(
+                dataStreamID: 3,
+                payload: Data(repeating: 0x61, count: 1 << 20)
+            )
+            try await connection.writePing(id: 42)
+            try await connection.readPing(id: 42)
+
+            try await connection.openPortForwardPair(
+                requestID: "second",
+                port: 18_089,
+                errorStreamID: 5,
+                dataStreamID: 7,
+                closeClientWrite: true
+            )
+            let second = try await connection.readPortForwardResult(errorStreamID: 5, dataStreamID: 7)
+            #expect(second.error.isEmpty)
+            #expect(second.data == response)
+            #expect(!second.receivedBackendDataAfterTerminal)
+        }
+    }
+
+    @Test
+    func spdyPortForwardRejectsDuplicateOrMismatchedSYNWithoutStartingExtraDial() async throws {
+        let response = Data("validated-pair-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardResponsesAfterClientEOF[18_090] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_090, 18_091]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.writePortForwardSYN(
+                streamID: 1,
+                requestID: "validated",
+                port: 18_090,
+                kind: "error",
+                closeStream: true
+            )
+            try await connection.writePortForwardSYN(
+                streamID: 1,
+                requestID: "other",
+                port: 18_090,
+                kind: "error"
+            )
+            try await connection.writePortForwardSYN(
+                streamID: 3,
+                requestID: "validated",
+                port: 18_090,
+                kind: "error"
+            )
+            try await connection.writePortForwardSYN(
+                streamID: 5,
+                requestID: "validated",
+                port: 18_091,
+                kind: "data"
+            )
+
+            #expect(try await connection.readControlStreamID(type: 3) == 1)
+            #expect(try await connection.readControlStreamID(type: 3) == 3)
+            #expect(try await connection.readControlStreamID(type: 3) == 5)
+
+            try await connection.writePortForwardSYN(
+                streamID: 7,
+                requestID: "",
+                port: 18_090,
+                kind: "error"
+            )
+            try await connection.writePortForwardSYN(
+                streamID: 9,
+                requestID: String(repeating: "x", count: 257),
+                port: 18_090,
+                kind: "error"
+            )
+            #expect(try await connection.readControlStreamID(type: 3) == 7)
+            #expect(try await connection.readControlStreamID(type: 3) == 9)
+
+            try await connection.writePortForwardSYN(
+                streamID: 11,
+                requestID: "validated",
+                port: 18_090,
+                kind: "data",
+                closeStream: true
+            )
+            let result = try await connection.readPortForwardResult(errorStreamID: 1, dataStreamID: 11)
+            #expect(result.error.isEmpty)
+            #expect(result.data == response)
+            #expect(!result.receivedBackendDataAfterTerminal)
+        }
+
+        #expect(
+            runtimeManager.portForwardCalls == [
+                RecordingPortForwardCall(sandboxID: "sandbox-1", port: 18_090)
+            ]
+        )
+    }
+
+    @Test
+    func spdyPortForwardEnforcesAggregatePendingInputLimitPerSession() async throws {
+        let blockedPorts = Array(UInt32(18_100)...UInt32(18_104))
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardReadyOnlyPorts = Set(blockedPorts)
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: blockedPorts) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            for index in 0..<4 {
+                let firstStreamID = UInt32(1 + index * 4)
+                try await connection.openPortForwardPair(
+                    requestID: "aggregate-\(index)",
+                    port: blockedPorts[index],
+                    errorStreamID: firstStreamID,
+                    dataStreamID: firstStreamID + 2,
+                    clientDataChunks: [Data(repeating: UInt8(index), count: 1 << 20)],
+                    closeClientWrite: false
+                )
+            }
+
+            try await connection.openPortForwardPair(
+                requestID: "aggregate-overflow",
+                port: blockedPorts[4],
+                errorStreamID: 17,
+                dataStreamID: 19,
+                clientDataChunks: [Data([0xFF])],
+                closeClientWrite: false
+            )
+            let overflow = try await connection.readPortForwardResult(errorStreamID: 17, dataStreamID: 19)
+            #expect(String(decoding: overflow.error, as: UTF8.self).contains("4194304"))
+            #expect(overflow.data.isEmpty)
+            #expect(overflow.terminalStreamOrder == [17, 19])
+            #expect(!overflow.receivedBackendDataAfterTerminal)
+
+            try await connection.writePing(id: 43)
+            try await connection.readPing(id: 43)
+        }
+    }
+
+    @Test
+    func spdyPortForwardBoundsAggregateTinyFrameBacklogAndReturnsQuota() async throws {
+        let blockedPorts = Array(UInt32(18_105)...UInt32(18_108))
+        let overflowPort: UInt32 = 18_109
+        let recoveryPort: UInt32 = 18_111
+        let response = Data("aggregate-elements-recovered\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts = Set(blockedPorts)
+        runtimeManager.portForwardResponsesAfterClientEOF[recoveryPort] = response
+
+        try await withSPDYPortForwardServer(
+            runtimeManager: runtimeManager,
+            ports: blockedPorts + [overflowPort, recoveryPort]
+        ) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            var blockedConnections: [RecordingPortForwardConnection] = []
+            for (index, port) in blockedPorts.enumerated() {
+                let errorStreamID = UInt32(1 + index * 4)
+                let dataStreamID = errorStreamID + 2
+                try await connection.openPortForwardPair(
+                    requestID: "aggregate-elements-\(index)",
+                    port: port,
+                    errorStreamID: errorStreamID,
+                    dataStreamID: dataStreamID,
+                    clientDataChunks: [Data(repeating: UInt8(index), count: 64 * 1024)],
+                    closeClientWrite: false
+                )
+                let backend = try await waitForValue(
+                    description: "SPDY aggregate tiny-frame backend \(port)"
+                ) {
+                    runtimeManager.portForwardConnections[port]
+                }
+                try await waitForCondition(description: "SPDY aggregate writer blocked \(port)") {
+                    backend.hasUnreadPeerData()
+                }
+                blockedConnections.append(backend)
+                for tinyIndex in 0..<255 {
+                    try await connection.writeClientData(
+                        dataStreamID: dataStreamID,
+                        payload: Data([UInt8(truncatingIfNeeded: tinyIndex)])
+                    )
+                }
+            }
+
+            try await connection.openPortForwardPair(
+                requestID: "aggregate-elements-overflow",
+                port: overflowPort,
+                errorStreamID: 17,
+                dataStreamID: 19,
+                clientDataChunks: [Data([0xFF])],
+                closeClientWrite: false
+            )
+            let overflow = try await connection.readPortForwardResult(errorStreamID: 17, dataStreamID: 19)
+            #expect(String(decoding: overflow.error, as: UTF8.self).contains("1024 chunks"))
+            #expect(overflow.terminalStreamOrder == [17, 19])
+
+            try await connection.writeRSTStream(streamID: 3)
+            try await waitForCondition(description: "SPDY aggregate tiny-frame quota return") {
+                blockedConnections[0].drainPeerAndCheckEOF()
+            }
+
+            try await connection.openPortForwardPair(
+                requestID: "aggregate-elements-recovery",
+                port: recoveryPort,
+                errorStreamID: 21,
+                dataStreamID: 23,
+                closeClientWrite: true
+            )
+            let recovery = try await connection.readPortForwardResult(errorStreamID: 21, dataStreamID: 23)
+            #expect(recovery.error.isEmpty)
+            #expect(recovery.data == response)
+        }
+    }
+
+    @Test
+    func spdyPortForwardCapsActivePairsAndReturnsQuotaAfterRST() async throws {
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_110]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            for index in 0..<64 {
+                try await connection.writePortForwardSYN(
+                    streamID: UInt32(1 + index * 2),
+                    requestID: "active-\(index)",
+                    port: 18_110,
+                    kind: "error",
+                    closeStream: true
+                )
+            }
+            try await connection.writePortForwardSYN(
+                streamID: 129,
+                requestID: "active-overflow",
+                port: 18_110,
+                kind: "error"
+            )
+            #expect(try await connection.readControlStreamID(type: 3) == 129)
+
+            try await connection.writeRSTStream(streamID: 1)
+            try await connection.writePortForwardSYN(
+                streamID: 131,
+                requestID: "active-replacement",
+                port: 18_110,
+                kind: "error"
+            )
+            #expect(try await connection.readControlStreamID(type: 2) == 131)
+            #expect(runtimeManager.portForwardCalls.isEmpty)
+        }
+    }
+
+    @Test
+    func spdyPortForwardEnforcesAndReturnsServerWideTunnelLeaseAcrossSessions() async throws {
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardReadyOnlyPorts.insert(18_115)
+
+        try await withSPDYPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[18_115], [18_115]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let first = try await TestSPDYConnection(url: urls[0])
+            let second = try await TestSPDYConnection(url: urls[1])
+
+            try await first.openPortForwardPair(
+                requestID: "first-session",
+                port: 18_115,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: false
+            )
+            #expect(try await first.readDataPayload(dataStreamID: 3) == Data("R".utf8))
+
+            try await second.writePortForwardSYN(
+                streamID: 1,
+                requestID: "second-session",
+                port: 18_115,
+                kind: "error",
+                closeStream: true
+            )
+            try await second.writePortForwardSYN(
+                streamID: 3,
+                requestID: "second-session",
+                port: 18_115,
+                kind: "data"
+            )
+            #expect(try await second.readControlStreamID(type: 3) == 3)
+
+            try await first.writeRSTStream(streamID: 3)
+            try await first.writePing(id: 44)
+            try await first.readPing(id: 44)
+
+            try await second.writePortForwardSYN(
+                streamID: 5,
+                requestID: "second-session",
+                port: 18_115,
+                kind: "data"
+            )
+            #expect(try await second.readDataPayload(dataStreamID: 5) == Data("R".utf8))
+        }
+
+        #expect(runtimeManager.portForwardCalls.count == 2)
+    }
+
+    @Test
+    func spdyOpeningTunnelLeaseSurvivesRSTUntilCancellationInsensitiveDialReturns() async throws {
+        let delayedPort: UInt32 = 18_116
+        let recoveryPort: UInt32 = 18_117
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let delayedCallGate = RecordingPortForwardCallGate()
+        defer { delayedCallGate.release() }
+        runtimeManager.portForwardCallGates[delayedPort] = delayedCallGate
+        runtimeManager.portForwardReadyOnlyPorts.insert(recoveryPort)
+
+        try await withSPDYPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[delayedPort], [recoveryPort]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let delayed = try await TestSPDYConnection(url: urls[0])
+            try await delayed.openPortForwardPair(
+                requestID: "cancellation-insensitive-opening",
+                port: delayedPort,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: false
+            )
+            try await waitForCondition(description: "SPDY delayed dial entered") {
+                delayedCallGate.hasEntered
+            }
+            try await delayed.writeRSTStream(streamID: 3)
+
+            let recovery = try await TestSPDYConnection(url: urls[1])
+            try await recovery.writePortForwardSYN(
+                streamID: 1,
+                requestID: "opening-lease-recovery",
+                port: recoveryPort,
+                kind: "error",
+                closeStream: true
+            )
+            try await recovery.writePortForwardSYN(
+                streamID: 3,
+                requestID: "opening-lease-recovery",
+                port: recoveryPort,
+                kind: "data"
+            )
+            #expect(try await recovery.readControlStreamID(type: 3) == 3)
+            #expect(
+                runtimeManager.portForwardCalls.filter { $0.port == recoveryPort }.isEmpty
+            )
+
+            delayedCallGate.release()
+            let abandonedBackend = try await waitForValue(
+                description: "SPDY cancellation-insensitive dial returned",
+                timeout: .seconds(2)
+            ) {
+                runtimeManager.portForwardConnections[delayedPort]
+            }
+            try await waitForCondition(description: "SPDY abandoned backend closed") {
+                abandonedBackend.drainPeerAndCheckEOF()
+            }
+            try await Task.sleep(for: .milliseconds(10))
+
+            try await recovery.writePortForwardSYN(
+                streamID: 5,
+                requestID: "opening-lease-recovery",
+                port: recoveryPort,
+                kind: "data"
+            )
+            #expect(try await recovery.readDataPayload(dataStreamID: 5) == Data("R".utf8))
+        }
+    }
+
+    @Test
+    func spdyPortForwardRejectsMalformedFallbackStreamIDsWithoutLosingCompressionState() async throws {
+        let response = Data("fallback-ready\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardResponsesAfterClientEOF[18_120] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_120]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.writePortForwardSYN(
+                streamID: 0,
+                requestID: nil,
+                port: 18_120,
+                kind: "data"
+            )
+            try await connection.writePortForwardSYN(
+                streamID: 1,
+                requestID: nil,
+                port: 18_120,
+                kind: "data"
+            )
+            try await connection.writePortForwardSYN(
+                streamID: 2,
+                requestID: nil,
+                port: 18_120,
+                kind: "error"
+            )
+            #expect(try await connection.readControlStreamID(type: 3) == 0)
+            #expect(try await connection.readControlStreamID(type: 3) == 1)
+            #expect(try await connection.readControlStreamID(type: 3) == 2)
+
+            try await connection.writePortForwardSYN(
+                streamID: 3,
+                requestID: nil,
+                port: 18_120,
+                kind: "error",
+                closeStream: true
+            )
+            try await connection.writePortForwardSYN(
+                streamID: 5,
+                requestID: nil,
+                port: 18_120,
+                kind: "data",
+                closeStream: true
+            )
+            let result = try await connection.readPortForwardResult(errorStreamID: 3, dataStreamID: 5)
+            #expect(result.error.isEmpty)
+            #expect(result.data == response)
+            #expect(!result.receivedBackendDataAfterTerminal)
+        }
+    }
+
+    @Test
+    func spdyPortForwardRejectsCompressedHeaderExpansionBeforeDial() async throws {
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_121]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            try await connection.writePortForwardSYN(
+                streamID: 1,
+                requestID: String(repeating: "x", count: 70 * 1024),
+                port: 18_121,
+                kind: "error"
+            )
+            try await connection.waitForTransportEOF()
+        }
+
+        #expect(runtimeManager.portForwardCalls.isEmpty)
+    }
+
+    @Test
+    func spdyHeaderInflaterRejectsDecompressedBlocksLargerThan64KiB() throws {
+        let deflater = try CRIShimSPDYHeaderDeflater()
+        let inflater = try CRIShimSPDYHeaderInflater()
+        let compressed = try deflater.compress(Data(repeating: 0x41, count: 70 * 1024))
+        #expect(compressed.count < 1024)
+        #expect(throws: (any Error).self) {
+            _ = try inflater.decompress(compressed)
+        }
+    }
+
+    @Test
+    func spdyPortForwardReclaimsCompletedPairsAcrossManySequentialConnections() async throws {
+        let response = Data("x".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardResponsesAfterClientEOF[18_130] = response
+
+        try await withSPDYPortForwardServer(runtimeManager: runtimeManager, ports: [18_130]) { url in
+            let connection = try await TestSPDYConnection(url: url)
+            for index in 0..<70 {
+                let errorStreamID = UInt32(1 + index * 4)
+                let dataStreamID = errorStreamID + 2
+                try await connection.openPortForwardPair(
+                    requestID: "sequential-\(index)",
+                    port: 18_130,
+                    errorStreamID: errorStreamID,
+                    dataStreamID: dataStreamID,
+                    closeClientWrite: true
+                )
+                let result = try await connection.readPortForwardResult(
+                    errorStreamID: errorStreamID,
+                    dataStreamID: dataStreamID
+                )
+                #expect(result.error.isEmpty)
+                #expect(result.data == response)
+                #expect(result.dataFinished)
+                #expect(result.errorFinished)
+                #expect(!result.receivedBackendDataAfterTerminal)
+            }
+        }
+
+        #expect(runtimeManager.portForwardCalls.count == 70)
+    }
+
+    @Test
+    func spdyPendingInputStorageCompactsWithContinuousBacklog() {
+        verifyPendingInputStorageCompaction(seed: 0x51)
+    }
+
+    @Test
+    func websocketPendingInputStorageCompactsWithContinuousBacklog() {
+        verifyPendingInputStorageCompaction(seed: 0xA7)
+    }
+
+    @Test
+    func websocketDynamicPortForwardSerializesInitialFramesAndReturnsTunnelQuota() async throws {
+        let firstPort: UInt16 = 18_140
+        let secondPort: UInt16 = 18_141
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let firstCallGate = RecordingPortForwardCallGate()
+        defer { firstCallGate.release() }
+        runtimeManager.portForwardCallGates[UInt32(firstPort)] = firstCallGate
+        runtimeManager.portForwardRecordingPorts.insert(UInt32(firstPort))
+
+        try await withObservedWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls, server in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            try await task.send(
+                .data(Data([0]) + portPrefixData(firstPort) + Data("first-".utf8))
+            )
+            try await waitForCondition(description: "first websocket port-forward dial entered") {
+                firstCallGate.hasEntered
+            }
+            try await task.send(
+                .data(Data([0]) + portPrefixData(firstPort) + Data("second".utf8))
+            )
+            try await task.send(
+                .data(Data([2]) + portPrefixData(secondPort) + Data("quota".utf8))
+            )
+
+            #expect(
+                runtimeManager.portForwardCalls.filter { $0.port == UInt32(firstPort) }.count == 1
+            )
+            #expect(
+                ObservedPortForwardMessage(
+                    try await receiveBinaryMessage(from: task, timeout: .seconds(2))
+                )
+                    == ObservedPortForwardMessage(
+                        stream: 3,
+                        forwardedPort: secondPort,
+                        payload: "port-forward server active tunnel limit reached"
+                    )
+            )
+            #expect(runtimeManager.portForwardCalls.count == 1)
+
+            firstCallGate.release()
+            try await waitForCondition(description: "ordered websocket port-forward input") {
+                runtimeManager.portForwardConnections[UInt32(firstPort)]?.receivedInput()
+                    == Data("first-second".utf8)
+            }
+
+            let firstConnection = try #require(
+                runtimeManager.portForwardConnections[UInt32(firstPort)]
+            )
+            firstConnection.closePeerConnection()
+            try await waitForCondition(description: "websocket port-forward tunnel lease returned") {
+                server.activePortForwardTunnelCount == 0
+            }
+
+            try await task.send(
+                .data(Data([4]) + portPrefixData(secondPort) + Data("second-stream".utf8))
+            )
+            #expect(
+                ObservedPortForwardMessage(
+                    try await receiveBinaryMessage(from: task, timeout: .seconds(2))
+                )
+                    == ObservedPortForwardMessage(
+                        stream: 4,
+                        forwardedPort: secondPort,
+                        payload: "echo:\(secondPort):second-stream"
+                    )
+            )
+            #expect(runtimeManager.portForwardCalls.count == 2)
+        }
+    }
+
+    @Test
+    func websocketPortForwardBlockedStreamDoesNotBlockAnotherStreamAndTearsDownWriter() async throws {
+        let blockedPort: UInt16 = 18_145
+        let healthyPort: UInt16 = 18_146
+        let reuseFirstPort: UInt16 = 18_147
+        let reuseSecondPort: UInt16 = 18_148
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts.insert(UInt32(blockedPort))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[], []],
+            maximumActivePortForwardTunnels: 2
+        ) { urls in
+            let blockedTask = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(blockedTask)
+
+            let blockedInput = Data(repeating: 0x41, count: (1 << 20) - 3)
+            try await blockedTask.send(
+                .data(Data([0]) + portPrefixData(blockedPort) + blockedInput)
+            )
+            let blockedConnection = try await waitForValue(
+                description: "blocked websocket port-forward connection"
+            ) {
+                runtimeManager.portForwardConnections[UInt32(blockedPort)]
+            }
+            try await waitForCondition(description: "blocked websocket backend input") {
+                blockedConnection.hasUnreadPeerData()
+            }
+
+            try await blockedTask.send(
+                .data(Data([2]) + portPrefixData(healthyPort) + Data("healthy".utf8))
+            )
+            let healthyResponse = try await receiveBinaryMessage(
+                from: blockedTask,
+                timeout: .seconds(2)
+            )
+            #expect(
+                ObservedPortForwardMessage(healthyResponse)
+                    == ObservedPortForwardMessage(
+                        stream: 2,
+                        forwardedPort: healthyPort,
+                        payload: "echo:\(healthyPort):healthy"
+                    )
+            )
+
+            blockedTask.cancel(with: .normalClosure, reason: nil)
+            try await waitForCondition(description: "blocked websocket writer teardown") {
+                blockedConnection.drainPeerAndCheckEOF()
+            }
+
+            let reuseTask = try makeWebSocketTask(
+                from: urls[1],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(reuseTask)
+            defer { reuseTask.cancel(with: .normalClosure, reason: nil) }
+
+            try await reuseTask.send(
+                .data(Data([0]) + portPrefixData(reuseFirstPort) + Data("one".utf8))
+            )
+            let firstReuseResponse = try await receiveBinaryMessage(
+                from: reuseTask,
+                timeout: .seconds(2)
+            )
+            #expect(
+                ObservedPortForwardMessage(firstReuseResponse)
+                    == ObservedPortForwardMessage(
+                        stream: 0,
+                        forwardedPort: reuseFirstPort,
+                        payload: "echo:\(reuseFirstPort):one"
+                    )
+            )
+
+            try await reuseTask.send(
+                .data(Data([2]) + portPrefixData(reuseSecondPort) + Data("two".utf8))
+            )
+            let secondReuseResponse = try await receiveBinaryMessage(
+                from: reuseTask,
+                timeout: .seconds(2)
+            )
+            #expect(
+                ObservedPortForwardMessage(secondReuseResponse)
+                    == ObservedPortForwardMessage(
+                        stream: 2,
+                        forwardedPort: reuseSecondPort,
+                        payload: "echo:\(reuseSecondPort):two"
+                    )
+            )
+        }
+    }
+
+    @Test
+    func websocketPortForwardPendingInputOverflowFailsOnlyTheAffectedStream() async throws {
+        let blockedPort: UInt16 = 18_149
+        let healthyPort: UInt16 = 18_150
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts.insert(UInt32(blockedPort))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[]],
+            maximumActivePortForwardTunnels: 2
+        ) { urls in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            try await task.send(
+                .data(
+                    Data([0]) + portPrefixData(blockedPort)
+                        + Data(repeating: 0x42, count: 768 * 1024)
+                )
+            )
+            let blockedConnection = try await waitForValue(
+                description: "quota websocket port-forward connection"
+            ) {
+                runtimeManager.portForwardConnections[UInt32(blockedPort)]
+            }
+            try await waitForCondition(description: "quota websocket backend input") {
+                blockedConnection.hasUnreadPeerData()
+            }
+
+            try await task.send(
+                .data(
+                    Data([0]) + portPrefixData(blockedPort)
+                        + Data(repeating: 0x43, count: 300 * 1024)
+                )
+            )
+            try await task.send(
+                .data(Data([2]) + portPrefixData(healthyPort) + Data("still-healthy".utf8))
+            )
+
+            let messages = try await [
+                receiveBinaryMessage(from: task, timeout: .seconds(2)),
+                receiveBinaryMessage(from: task, timeout: .seconds(2)),
+            ]
+            let observed = messages.map(ObservedPortForwardMessage.init)
+            let failure = try #require(observed.first { $0.stream == 1 })
+            #expect(failure.forwardedPort == blockedPort)
+            #expect(failure.payload.contains("pending input exceeded 1048576 bytes"))
+            #expect(
+                observed.contains(
+                    ObservedPortForwardMessage(
+                        stream: 2,
+                        forwardedPort: healthyPort,
+                        payload: "echo:\(healthyPort):still-healthy"
+                    ))
+            )
+            try await waitForCondition(description: "overflowed websocket writer teardown") {
+                blockedConnection.drainPeerAndCheckEOF()
+            }
+        }
+    }
+
+    @Test
+    func websocketPortForwardTinyFrameBacklogIsElementBoundedAndReturnsQuota() async throws {
+        let blockedPort: UInt16 = 18_157
+        let healthyPort: UInt16 = 18_158
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts.insert(UInt32(blockedPort))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[]],
+            maximumActivePortForwardTunnels: 2
+        ) { urls in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            try await task.send(
+                .data(
+                    Data([0]) + portPrefixData(blockedPort)
+                        + Data(repeating: 0x41, count: 64 * 1024)
+                )
+            )
+            let blockedConnection = try await waitForValue(
+                description: "tiny-frame websocket blocked backend"
+            ) {
+                runtimeManager.portForwardConnections[UInt32(blockedPort)]
+            }
+            try await waitForCondition(description: "tiny-frame websocket writer blocked") {
+                blockedConnection.hasUnreadPeerData()
+            }
+
+            for index in 0..<256 {
+                try await task.send(
+                    .data(
+                        Data([0]) + portPrefixData(blockedPort)
+                            + Data([UInt8(truncatingIfNeeded: index)])
+                    )
+                )
+            }
+            try await task.send(
+                .data(Data([2]) + portPrefixData(healthyPort) + Data("healthy".utf8))
+            )
+
+            let messages = try await [
+                receiveBinaryMessage(from: task, timeout: .seconds(2)),
+                receiveBinaryMessage(from: task, timeout: .seconds(2)),
+            ]
+            let observed = messages.map(ObservedPortForwardMessage.init)
+            let failure = try #require(observed.first { $0.stream == 1 })
+            #expect(failure.forwardedPort == blockedPort)
+            #expect(failure.payload.contains("256 chunks"))
+            #expect(
+                observed.contains(
+                    ObservedPortForwardMessage(
+                        stream: 2,
+                        forwardedPort: healthyPort,
+                        payload: "echo:\(healthyPort):healthy"
+                    ))
+            )
+            try await waitForCondition(description: "tiny-frame websocket writer teardown") {
+                blockedConnection.drainPeerAndCheckEOF()
+            }
+        }
+    }
+
+    @Test
+    func websocketPortForwardAggregatePendingInputOverflowFailsOnlyNewStream() async throws {
+        let blockedPorts: [UInt16] = [18_151, 18_152, 18_153, 18_154]
+        let overflowPort: UInt16 = 18_155
+        let healthyPort: UInt16 = 18_156
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts = Set(blockedPorts.map(UInt32.init))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[]],
+            maximumActivePortForwardTunnels: 5
+        ) { urls in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            var blockedConnections: [RecordingPortForwardConnection] = []
+            for (index, port) in blockedPorts.enumerated() {
+                let stream = UInt8(index * 2)
+                try await task.send(
+                    .data(
+                        Data([stream]) + portPrefixData(port)
+                            + Data(repeating: stream, count: (1 << 20) - 3)
+                    )
+                )
+                let connection = try await waitForValue(
+                    description: "aggregate websocket port-forward connection \(port)"
+                ) {
+                    runtimeManager.portForwardConnections[UInt32(port)]
+                }
+                try await waitForCondition(
+                    description: "aggregate websocket backend input \(port)"
+                ) {
+                    connection.hasUnreadPeerData()
+                }
+                blockedConnections.append(connection)
+            }
+
+            try await task.send(
+                .data(Data([8]) + portPrefixData(overflowPort) + Data(repeating: 0x45, count: 13))
+            )
+            try await task.send(
+                .data(Data([10]) + portPrefixData(healthyPort) + Data("x".utf8))
+            )
+
+            let messages = try await [
+                receiveBinaryMessage(from: task, timeout: .seconds(2)),
+                receiveBinaryMessage(from: task, timeout: .seconds(2)),
+            ]
+            let observed = messages.map(ObservedPortForwardMessage.init)
+            let failure = try #require(observed.first { $0.stream == 9 })
+            #expect(failure.forwardedPort == overflowPort)
+            #expect(failure.payload.contains("session pending input exceeded 4194304 bytes"))
+            #expect(
+                observed.contains(
+                    ObservedPortForwardMessage(
+                        stream: 10,
+                        forwardedPort: healthyPort,
+                        payload: "echo:\(healthyPort):x"
+                    ))
+            )
+
+            task.cancel(with: .normalClosure, reason: nil)
+            for (index, connection) in blockedConnections.enumerated() {
+                try await waitForCondition(
+                    description: "aggregate websocket writer teardown \(blockedPorts[index])"
+                ) {
+                    connection.drainPeerAndCheckEOF()
+                }
+            }
+        }
+    }
+
+    @Test
+    func websocketPortForwardBoundsAggregateTinyFramesAndReusesReleasedQuota() async throws {
+        let blockedPorts: [UInt16] = [18_160, 18_161, 18_162, 18_163]
+        let overflowPort: UInt16 = 18_164
+        let healthyPort: UInt16 = 18_165
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts = Set(blockedPorts.map(UInt32.init))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[]],
+            maximumActivePortForwardTunnels: 5
+        ) { urls in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            var blockedConnections: [RecordingPortForwardConnection] = []
+            for (index, port) in blockedPorts.enumerated() {
+                let stream = UInt8(index * 2)
+                try await task.send(
+                    .data(
+                        Data([stream]) + portPrefixData(port)
+                            + Data(repeating: stream, count: 64 * 1024)
+                    )
+                )
+                let connection = try await waitForValue(
+                    description: "aggregate tiny-frame websocket backend \(port)"
+                ) {
+                    runtimeManager.portForwardConnections[UInt32(port)]
+                }
+                try await waitForCondition(
+                    description: "aggregate tiny-frame websocket writer \(port)"
+                ) {
+                    connection.hasUnreadPeerData()
+                }
+                blockedConnections.append(connection)
+                for tinyIndex in 0..<255 {
+                    try await task.send(
+                        .data(
+                            Data([stream]) + portPrefixData(port)
+                                + Data([UInt8(truncatingIfNeeded: tinyIndex)])
+                        )
+                    )
+                }
+            }
+
+            try await task.send(
+                .data(Data([8]) + portPrefixData(overflowPort) + Data([0xFF]))
+            )
+            let failureMessage = try await receiveBinaryMessage(from: task, timeout: .seconds(2))
+            let failure = ObservedPortForwardMessage(failureMessage)
+            #expect(failure.stream == 9)
+            #expect(failure.forwardedPort == overflowPort)
+            #expect(failure.payload.contains("1024 chunks"))
+
+            blockedConnections[0].closePeerConnection()
+            try await Task.sleep(for: .milliseconds(250))
+            try await task.send(
+                .data(Data([10]) + portPrefixData(healthyPort) + Data("recovered".utf8))
+            )
+            let recoveryMessage = try await receiveBinaryMessage(from: task, timeout: .seconds(2))
+            #expect(
+                ObservedPortForwardMessage(recoveryMessage)
+                    == ObservedPortForwardMessage(
+                        stream: 10,
+                        forwardedPort: healthyPort,
+                        payload: "echo:\(healthyPort):recovered"
+                    )
+            )
+        }
+    }
+
+    @Test
+    func websocketFixedPortSlowDialBoundsPredispatchBytesAndReturnsLease() async throws {
+        let delayedPort: UInt16 = 18_300
+        let recoveryPort: UInt16 = 18_301
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardStartDelays[UInt32(delayedPort)] = .seconds(5)
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[UInt32(delayedPort)], [UInt32(recoveryPort)]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let delayed = try await TestRawWebSocketConnection(
+                url: urls[0],
+                protocolName: "portforward.k8s.io"
+            )
+            let fullFrame =
+                Data([0]) + portPrefixData(delayedPort)
+                + Data(repeating: 0x41, count: (1 << 20) - 3)
+            for _ in 0..<4 {
+                try await delayed.sendBinary(fullFrame)
+            }
+            try? await delayed.sendBinary(Data([0]) + portPrefixData(delayedPort) + Data([0x42]))
+
+            try await waitForCondition(
+                description: "websocket predispatch byte overflow cancels dial",
+                timeout: .seconds(5)
+            ) {
+                runtimeManager.cancelledPortForwardCalls.contains(
+                    RecordingPortForwardCall(
+                        sandboxID: "sandbox-1",
+                        port: UInt32(delayedPort)
+                    ))
+            }
+
+            let recovery = try makeWebSocketTask(
+                from: urls[1],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(recovery)
+            defer { recovery.cancel(with: .normalClosure, reason: nil) }
+            try await recovery.send(
+                .data(Data([0]) + portPrefixData(recoveryPort) + Data("recovered".utf8))
+            )
+            let message = try await receiveBinaryMessage(from: recovery, timeout: .seconds(2))
+            #expect(
+                ObservedPortForwardMessage(message)
+                    == ObservedPortForwardMessage(
+                        stream: 0,
+                        forwardedPort: recoveryPort,
+                        payload: "echo:\(recoveryPort):recovered"
+                    )
+            )
+        }
+    }
+
+    @Test
+    func websocketFixedPortSlowDialBoundsPredispatchFrameCountAndReturnsLease() async throws {
+        let delayedPort: UInt16 = 18_302
+        let recoveryPort: UInt16 = 18_303
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardStartDelays[UInt32(delayedPort)] = .seconds(5)
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[UInt32(delayedPort)], [UInt32(recoveryPort)]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let delayed = try await TestRawWebSocketConnection(
+                url: urls[0],
+                protocolName: "portforward.k8s.io"
+            )
+            let tinyFrame = Data([0]) + portPrefixData(delayedPort)
+            for _ in 0..<257 {
+                try? await delayed.sendBinary(tinyFrame)
+            }
+
+            try await waitForCondition(
+                description: "websocket predispatch frame overflow cancels dial",
+                timeout: .seconds(5)
+            ) {
+                runtimeManager.cancelledPortForwardCalls.contains(
+                    RecordingPortForwardCall(
+                        sandboxID: "sandbox-1",
+                        port: UInt32(delayedPort)
+                    ))
+            }
+
+            let recovery = try makeWebSocketTask(
+                from: urls[1],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(recovery)
+            defer { recovery.cancel(with: .normalClosure, reason: nil) }
+            try await recovery.send(
+                .data(Data([0]) + portPrefixData(recoveryPort) + Data("recovered".utf8))
+            )
+            let message = try await receiveBinaryMessage(from: recovery, timeout: .seconds(2))
+            #expect(
+                ObservedPortForwardMessage(message)
+                    == ObservedPortForwardMessage(
+                        stream: 0,
+                        forwardedPort: recoveryPort,
+                        payload: "echo:\(recoveryPort):recovered"
+                    )
+            )
+        }
+    }
+
+    @Test
+    func websocketSlowReaderFatalFrameStopsBackendOutputAndReturnsLease() async throws {
+        let outputPort: UInt16 = 18_304
+        let recoveryPort: UInt16 = 18_305
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardContinuousOutputPorts.insert(UInt32(outputPort))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[UInt32(outputPort)], [UInt32(recoveryPort)]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let slowReader = try await TestRawWebSocketConnection(
+                url: urls[0],
+                protocolName: "portforward.k8s.io"
+            )
+            try await slowReader.limitReceiveBuffer(to: 4 * 1024)
+            let outputConnection = try await waitForValue(
+                description: "websocket continuous-output backend"
+            ) {
+                runtimeManager.portForwardConnections[UInt32(outputPort)]
+            }
+
+            var lastByteCount = -1
+            var stableSamples = 0
+            try await waitForCondition(
+                description: "websocket slow-reader output backpressure",
+                timeout: .seconds(5),
+                pollInterval: .milliseconds(50)
+            ) {
+                let byteCount = outputConnection.outputByteCount
+                if byteCount > 0, byteCount == lastByteCount {
+                    stableSamples += 1
+                } else {
+                    stableSamples = 0
+                    lastByteCount = byteCount
+                }
+                return stableSamples >= 4
+            }
+
+            try await slowReader.sendText("unsupported")
+            try await waitForCondition(
+                description: "websocket slow-reader backend output teardown",
+                timeout: .seconds(5)
+            ) {
+                outputConnection.outputHasStopped
+            }
+
+            let recovery = try makeWebSocketTask(
+                from: urls[1],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(recovery)
+            defer { recovery.cancel(with: .normalClosure, reason: nil) }
+            try await recovery.send(
+                .data(Data([0]) + portPrefixData(recoveryPort) + Data("recovered".utf8))
+            )
+            let message = try await receiveBinaryMessage(from: recovery, timeout: .seconds(2))
+            #expect(
+                ObservedPortForwardMessage(message)
+                    == ObservedPortForwardMessage(
+                        stream: 0,
+                        forwardedPort: recoveryPort,
+                        payload: "echo:\(recoveryPort):recovered"
+                    )
+            )
+        }
+    }
+
+    @Test
+    func websocketStreamFailureOrdersTerminalAfterInflightDataAndRejectsLateData() async throws {
+        let failingPort: UInt16 = 18_310
+        let recoveryPort: UInt16 = 18_311
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardContinuousOutputPorts.insert(UInt32(failingPort))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[UInt32(failingPort)], [UInt32(recoveryPort)]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let slowReader = try await TestRawWebSocketConnection(
+                url: urls[0],
+                protocolName: "portforward.k8s.io"
+            )
+            try await slowReader.limitReceiveBuffer(to: 4 * 1024)
+            let failingConnection = try await waitForValue(
+                description: "websocket ordered-terminal backend"
+            ) {
+                runtimeManager.portForwardConnections[UInt32(failingPort)]
+            }
+
+            var lastByteCount = -1
+            var stableSamples = 0
+            try await waitForCondition(
+                description: "websocket ordered-terminal blocked output",
+                timeout: .seconds(5),
+                pollInterval: .milliseconds(50)
+            ) {
+                let byteCount = failingConnection.outputByteCount
+                if byteCount > 0, byteCount == lastByteCount {
+                    stableSamples += 1
+                } else {
+                    stableSamples = 0
+                    lastByteCount = byteCount
+                }
+                return stableSamples >= 4
+            }
+
+            try await slowReader.sendBinary(
+                Data([0]) + portPrefixData(failingPort)
+                    + Data(repeating: 0x61, count: (1 << 20) - 3)
+            )
+            try await slowReader.sendBinary(
+                Data([0]) + portPrefixData(failingPort) + Data(repeating: 0x62, count: 4)
+            )
+
+            var sawDataBeforeTerminal = false
+            var sawTerminal = false
+            for _ in 0..<256 {
+                let frame = try await slowReader.readServerFrame()
+                guard frame.opcode == 0x02, let stream = frame.payload.first else {
+                    continue
+                }
+                if stream == 0 {
+                    sawDataBeforeTerminal = true
+                } else if stream == 1 {
+                    sawTerminal = true
+                    break
+                }
+            }
+            #expect(sawDataBeforeTerminal)
+            #expect(sawTerminal)
+
+            try await slowReader.sendPing()
+            var sawLateData = false
+            var sawPong = false
+            for _ in 0..<32 {
+                let frame = try await slowReader.readServerFrame()
+                if frame.opcode == 0x0A {
+                    sawPong = true
+                    break
+                }
+                if frame.opcode == 0x02, frame.payload.first == 0 {
+                    sawLateData = true
+                }
+            }
+            #expect(sawPong)
+            #expect(!sawLateData)
+            try await waitForCondition(description: "websocket ordered-terminal backend stopped") {
+                failingConnection.outputHasStopped
+            }
+
+            let recovery = try makeWebSocketTask(
+                from: urls[1],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(recovery)
+            defer { recovery.cancel(with: .normalClosure, reason: nil) }
+            try await recovery.send(
+                .data(Data([0]) + portPrefixData(recoveryPort) + Data("recovered".utf8))
+            )
+            let recoveryMessage = try await receiveBinaryMessage(
+                from: recovery,
+                timeout: .seconds(2)
+            )
+            #expect(
+                ObservedPortForwardMessage(recoveryMessage)
+                    == ObservedPortForwardMessage(
+                        stream: 0,
+                        forwardedPort: recoveryPort,
+                        payload: "echo:\(recoveryPort):recovered"
+                    )
+            )
+        }
+    }
+
+    @Test
+    func websocketPortForwardOutboundSequenceOrdersTerminalAndCancelsQueuedWork() async throws {
+        let sequence = CRIShimPortForwardOutboundSequence()
+        let dataGate = RecordingPortForwardCallGate()
+        let recorder = PortForwardOutboundOperationRecorder()
+
+        let dataTask = Task {
+            await sequence.sendData {
+                await dataGate.wait()
+                recorder.append("data")
+                return true
+            }
+        }
+        try await waitForCondition(description: "outbound DATA operation entered") {
+            dataGate.hasEntered
+        }
+
+        let terminalTask = Task {
+            await sequence.sendTerminal {
+                recorder.append("terminal")
+            }
+        }
+        try await waitForCondition(description: "outbound terminal queued") {
+            sequence.pendingWorkCount == 2
+        }
+        #expect(recorder.events.isEmpty)
+
+        dataGate.release()
+        let dataResult = await dataTask.value
+        await terminalTask.value
+        #expect(dataResult == true)
+        #expect(recorder.events == ["data", "terminal"])
+
+        let lateResult = await sequence.sendData {
+            recorder.append("late-data")
+            return true
+        }
+        #expect(lateResult == nil)
+        #expect(recorder.events == ["data", "terminal"])
+
+        let stoppedSequence = CRIShimPortForwardOutboundSequence()
+        let stoppedGate = RecordingPortForwardCallGate()
+        let stoppedRecorder = PortForwardOutboundOperationRecorder()
+        let blockingTask = Task {
+            await stoppedSequence.sendData {
+                await stoppedGate.wait()
+                stoppedRecorder.append("blocking-data")
+                return true
+            }
+        }
+        try await waitForCondition(description: "stopped outbound DATA operation entered") {
+            stoppedGate.hasEntered
+        }
+        let queuedTask = Task {
+            await stoppedSequence.sendData {
+                stoppedRecorder.append("queued-data")
+                return true
+            }
+        }
+        try await waitForCondition(description: "stopped outbound work queued") {
+            stoppedSequence.pendingWorkCount == 2
+        }
+
+        stoppedSequence.stop()
+        #expect(stoppedSequence.pendingWorkCount == 0)
+        stoppedGate.release()
+        _ = await blockingTask.value
+        _ = await queuedTask.value
+        #expect(!stoppedRecorder.events.contains("queued-data"))
+    }
+
+    @Test
+    func spdyControlWriteGateCapsPendingResponsesAndFailsOnce() {
+        let capacityGate = CRIShimSPDYControlWriteGate()
+        for _ in 0..<64 {
+            #expect(capacityGate.reserve(isActive: true, isWritable: true))
+        }
+        #expect(!capacityGate.reserve(isActive: true, isWritable: true))
+        for _ in 0..<64 {
+            #expect(!capacityGate.complete(succeeded: true))
+        }
+
+        let failureGate = CRIShimSPDYControlWriteGate()
+        #expect(failureGate.reserve(isActive: true, isWritable: true))
+        #expect(failureGate.complete(succeeded: false))
+        #expect(!failureGate.complete(succeeded: false))
+        #expect(!failureGate.reserve(isActive: true, isWritable: true))
+
+        let unwritableGate = CRIShimSPDYControlWriteGate()
+        #expect(!unwritableGate.reserve(isActive: true, isWritable: false))
+        #expect(!unwritableGate.reserve(isActive: true, isWritable: true))
+    }
+
+    @Test
+    func spdyPingFloodWithoutReadsRemainsBoundedAndReturnsLease() async throws {
+        let floodPort: UInt32 = 18_306
+        let recoveryPort: UInt32 = 18_307
+        let response = Data("spdy-control-recovered\n".utf8)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardNoReadPorts.insert(floodPort)
+        runtimeManager.portForwardResponsesAfterClientEOF[recoveryPort] = response
+
+        try await withSPDYPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[floodPort], [recoveryPort]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let flooded = try await TestSPDYConnection(url: urls[0])
+            try await flooded.limitReceiveBuffer(to: 4 * 1024)
+            try await flooded.openPortForwardPair(
+                requestID: "control-flood",
+                port: floodPort,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: false
+            )
+            let floodBackend = try await waitForValue(description: "SPDY control-flood backend") {
+                runtimeManager.portForwardConnections[floodPort]
+            }
+            try await flooded.writePingBurst(count: 256)
+            flooded.closeTransport()
+            try await waitForCondition(
+                description: "SPDY control-flood cleanup",
+                timeout: .seconds(5)
+            ) {
+                floodBackend.drainPeerAndCheckEOF()
+            }
+
+            let recovery = try await TestSPDYConnection(url: urls[1])
+            try await recovery.openPortForwardPair(
+                requestID: "control-flood-recovery",
+                port: recoveryPort,
+                errorStreamID: 1,
+                dataStreamID: 3,
+                closeClientWrite: true
+            )
+            let result = try await recovery.readPortForwardResult(errorStreamID: 1, dataStreamID: 3)
+            #expect(result.error.isEmpty)
+            #expect(result.data == response)
+        }
+    }
+
+    @Test
+    func websocketPingFloodWithoutReadsRemainsBoundedAndReturnsLease() async throws {
+        let floodPort: UInt16 = 18_308
+        let recoveryPort: UInt16 = 18_309
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        runtimeManager.portForwardRecordingPorts.insert(UInt32(floodPort))
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[UInt32(floodPort)], [UInt32(recoveryPort)]],
+            maximumActivePortForwardTunnels: 1
+        ) { urls in
+            let flooded = try await TestRawWebSocketConnection(
+                url: urls[0],
+                protocolName: "portforward.k8s.io"
+            )
+            try await flooded.limitReceiveBuffer(to: 4 * 1024)
+            let floodBackend = try await waitForValue(description: "websocket ping-flood backend") {
+                runtimeManager.portForwardConnections[UInt32(floodPort)]
+            }
+            try await flooded.sendPingBurst(count: 256)
+            try await flooded.sendBinary(
+                Data([0]) + portPrefixData(floodPort) + Data("after-flood".utf8)
+            )
+            try await waitForCondition(
+                description: "websocket ping-flood input remains live",
+                timeout: .seconds(5)
+            ) {
+                floodBackend.receivedInput() == Data("after-flood".utf8)
+            }
+            flooded.closeTransport()
+            try await waitForCondition(description: "websocket ping-flood cleanup") {
+                floodBackend.drainPeerAndCheckEOF()
+            }
+
+            let recovery = try makeWebSocketTask(
+                from: urls[1],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(recovery)
+            defer { recovery.cancel(with: .normalClosure, reason: nil) }
+            try await recovery.send(
+                .data(Data([0]) + portPrefixData(recoveryPort) + Data("recovered".utf8))
+            )
+            let message = try await receiveBinaryMessage(from: recovery, timeout: .seconds(2))
+            #expect(
+                ObservedPortForwardMessage(message)
+                    == ObservedPortForwardMessage(
+                        stream: 0,
+                        forwardedPort: recoveryPort,
+                        payload: "echo:\(recoveryPort):recovered"
+                    )
+            )
+        }
+    }
+
+    @Test
+    func websocketDynamicPortForwardRejectsPortChangeWithoutSecondDial() async throws {
+        let firstPort: UInt16 = 18_143
+        let changedPort: UInt16 = 18_144
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [[]],
+            maximumActivePortForwardTunnels: 2
+        ) { urls in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            try await task.send(
+                .data(Data([0]) + portPrefixData(firstPort) + Data("first".utf8))
+            )
+            let response = try await receiveBinaryMessage(from: task)
+            #expect(
+                ObservedPortForwardMessage(response)
+                    == ObservedPortForwardMessage(
+                        stream: 0,
+                        forwardedPort: firstPort,
+                        payload: "echo:\(firstPort):first"
+                    )
+            )
+
+            try await task.send(
+                .data(Data([0]) + portPrefixData(changedPort) + Data("changed".utf8))
+            )
+            await #expect(throws: (any Error).self) {
+                _ = try await task.receive()
+            }
+            #expect(runtimeManager.portForwardCalls.count == 1)
+        }
+    }
+
+    @Test
+    func websocketPortForwardRejectsMoreThanRepresentableStreams() async throws {
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let ports = Array(UInt32(18_200)...UInt32(18_328))
+        #expect(ports.count == 129)
+
+        try await withWebSocketPortForwardServer(
+            runtimeManager: runtimeManager,
+            portSets: [ports],
+            maximumActivePortForwardTunnels: 256
+        ) { urls in
+            let task = try makeWebSocketTask(
+                from: urls[0],
+                protocols: ["portforward.k8s.io"]
+            )
+            try await resumeWebSocketTask(task)
+            defer { task.cancel(with: .normalClosure, reason: nil) }
+
+            await #expect(throws: (any Error).self) {
+                _ = try await task.receive()
+            }
+            #expect(runtimeManager.portForwardCalls.isEmpty)
+        }
+    }
+
+    @Test
+    func backendControlConnectionIgnoresDelayedShutdownAfterDescriptorReuse() async throws {
+        var controlledDescriptors = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &controlledDescriptors) == 0 else {
+            throw currentPOSIXError()
+        }
+        let controlledFileDescriptor = controlledDescriptors[0]
+        let controlledPeerFileDescriptor = controlledDescriptors[1]
+        defer { _ = Darwin.close(controlledPeerFileDescriptor) }
+        let controlConnection = CRIShimBackendControlConnection(owning: controlledFileDescriptor)
+
+        let (sentinelSource, sentinelPeer) = try makeSocketPair()
+        let sentinelPeerFileDescriptor = sentinelPeer.fileDescriptor
+        controlConnection.shutdownAllAndClose()
+        let reusedFileDescriptor = Darwin.dup2(
+            sentinelSource.fileDescriptor,
+            controlledFileDescriptor
+        )
+        guard reusedFileDescriptor >= 0 else {
+            throw currentPOSIXError()
+        }
+        #expect(reusedFileDescriptor == controlledFileDescriptor)
+        let reusedHandle = FileHandle(
+            fileDescriptor: reusedFileDescriptor,
+            closeOnDealloc: true
+        )
+
+        let delayedShutdown = Task.detached {
+            try? controlConnection.shutdownWrite()
+        }
+        _ = await delayedShutdown.result
+
+        var sentinelByte: UInt8 = 0
+        let sentinelRead = Darwin.recv(
+            sentinelPeerFileDescriptor,
+            &sentinelByte,
+            1,
+            MSG_DONTWAIT
+        )
+        let sentinelErrno = errno
+        #expect(sentinelRead == -1)
+        #expect(sentinelErrno == EAGAIN || sentinelErrno == EWOULDBLOCK)
+        _ = reusedHandle
+    }
+
+    @Test
     func fileHandleStreamYieldsSmallWriteBeforeEOFAndCancels() async throws {
         let pipe = Pipe()
         let input = try fileHandleStream(pipe.fileHandleForReading)
@@ -1958,6 +3861,131 @@ struct CRIShimRuntimeServerTests {
         _ = await consumer.result
 
         #expect(recorder.snapshot().data == expected)
+    }
+
+    @Test
+    func fileHandleStreamBoundsPendingBytesAndElementsAndResumesAfterAcknowledgement() async throws {
+        do {
+            let (source, sink) = try makeSocketPair()
+            let input = try fileHandleStream(
+                source,
+                maximumPendingBytes: 4,
+                maximumPendingElements: 256
+            )
+            defer {
+                input.cancel()
+                try? source.close()
+                try? sink.close()
+            }
+
+            try sink.write(contentsOf: Data([1, 2, 3, 4]))
+            try await waitForCondition(description: "file stream byte quota") {
+                input.pendingByteCount == 4 && input.pendingElementCount == 1
+            }
+            try sink.write(contentsOf: Data([5, 6, 7, 8]))
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(input.pendingByteCount == 4)
+            #expect(input.pendingElementCount == 1)
+
+            var iterator = input.bytes.makeAsyncIterator()
+            let first = await iterator.next()
+            #expect(first == Data([1, 2, 3, 4]))
+            input.acknowledge(first?.count ?? 0)
+            try await waitForCondition(description: "file stream byte quota resume") {
+                input.pendingByteCount == 4 && input.pendingElementCount == 1
+            }
+
+            input.cancel()
+            #expect(input.pendingByteCount == 0)
+            #expect(input.pendingElementCount == 0)
+        }
+
+        do {
+            let (source, sink) = try makeSocketPair()
+            let input = try fileHandleStream(
+                source,
+                maximumPendingBytes: 1 << 20,
+                maximumPendingElements: 4
+            )
+            defer {
+                input.cancel()
+                try? source.close()
+                try? sink.close()
+            }
+
+            for index in 0..<4 {
+                try sink.write(contentsOf: Data([UInt8(index)]))
+                try await waitForCondition(description: "file stream element quota \(index)") {
+                    input.pendingElementCount == index + 1
+                }
+            }
+            #expect(input.pendingByteCount == 4)
+            #expect(input.pendingElementCount == 4)
+
+            try sink.write(contentsOf: Data([4]))
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(input.pendingByteCount == 4)
+            #expect(input.pendingElementCount == 4)
+
+            var iterator = input.bytes.makeAsyncIterator()
+            let first = await iterator.next()
+            #expect(first == Data([0]))
+            input.acknowledge(first?.count ?? 0)
+            try await waitForCondition(description: "file stream element quota resume") {
+                input.pendingByteCount == 4 && input.pendingElementCount == 4
+            }
+
+            input.cancel()
+            #expect(input.pendingByteCount == 0)
+            #expect(input.pendingElementCount == 0)
+        }
+    }
+
+    @Test
+    func fileHandleStreamReadsDataWrittenAfterAcknowledgementAndIdleGap() async throws {
+        let (source, sink) = try makeSocketPair()
+        let input = try fileHandleStream(
+            source,
+            maximumPendingBytes: 4,
+            maximumPendingElements: 1
+        )
+        let recorder = FileHandleStreamRecorder()
+        let consumer = Task {
+            for await data in input.bytes {
+                recorder.append(data)
+                input.acknowledge(data.count)
+            }
+            recorder.markConsumerFinished()
+        }
+        defer {
+            input.cancel()
+            consumer.cancel()
+            try? source.close()
+            try? sink.close()
+        }
+
+        let first = Data([1, 2, 3, 4])
+        try sink.write(contentsOf: first)
+        try await waitForCondition(description: "file stream first acknowledged write") {
+            recorder.snapshot().data == first
+                && input.pendingByteCount == 0
+                && input.pendingElementCount == 0
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        let second = Data([5, 6, 7, 8])
+        try sink.write(contentsOf: second)
+        try await waitForCondition(description: "file stream write after idle gap") {
+            recorder.snapshot().data == first + second
+                && input.pendingByteCount == 0
+                && input.pendingElementCount == 0
+        }
+
+        input.cancel()
+        try await waitForCondition(description: "file stream idle-gap cancellation") {
+            recorder.snapshot().consumerFinished
+        }
+        _ = await consumer.result
     }
 
     @Test
@@ -2284,6 +4312,21 @@ private final class StreamingOperationRecorder: @unchecked Sendable {
     }
 }
 
+private final class PortForwardOutboundOperationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedEvents: [String] = []
+
+    var events: [String] {
+        lock.withLock { recordedEvents }
+    }
+
+    func append(_ event: String) {
+        lock.withLock {
+            recordedEvents.append(event)
+        }
+    }
+}
+
 private final class ControlledStreamingProcess: CRIShimStreamingProcess, @unchecked Sendable {
     private let lock = NSLock()
     private var startContinuation: CheckedContinuation<Void, Error>?
@@ -2557,12 +4600,13 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
             guard terminationSignal == nil else {
                 return (false, nil)
             }
-            return (true, try stdin.map(fileHandleStream))
+            return (true, try stdin.map { try fileHandleStream($0) })
         }
         guard inputState.shouldStart else {
             return
         }
         let stdinInput = inputState.input
+        let outputQueue = DispatchQueue(label: "container.cri.tests.streaming-process-output.\(UUID().uuidString)")
         let task = Task<Int32, Never> {
             if let stderr {
                 try? stderr.close()
@@ -2570,7 +4614,9 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
 
             if let stdinInput, let stdout {
                 for await data in stdinInput.bytes {
-                    try? stdout.write(contentsOf: Data("stdout:".utf8) + data)
+                    try? await performBlockingIO(on: outputQueue) {
+                        try stdout.write(contentsOf: Data("stdout:".utf8) + data)
+                    }
                 }
             }
 
@@ -2637,8 +4683,15 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
 private final class RecordingPortForwardConnection: @unchecked Sendable {
     let forwardedHandle: FileHandle
     let peerHandle: FileHandle
+    private let stateLock = NSLock()
+    private let ioQueue = DispatchQueue(label: "container.cri.tests.port-forward-backend.\(UUID().uuidString)")
     private var input: FileHandleByteStream?
     private var task: Task<Void, Never>?
+    private var continuousOutputWorkItem: DispatchWorkItem?
+    private var continuousOutputCancelled = false
+    private var received = Data()
+    private var continuousOutputBytes = 0
+    private var continuousOutputStopped = false
 
     init(forwardedHandle: FileHandle, peerHandle: FileHandle) {
         self.forwardedHandle = forwardedHandle
@@ -2648,17 +4701,225 @@ private final class RecordingPortForwardConnection: @unchecked Sendable {
     deinit {
         input?.cancel()
         task?.cancel()
+        continuousOutputWorkItem?.cancel()
     }
 
     func startEcho(port: UInt32) throws {
         let input = try fileHandleStream(peerHandle)
         let peerHandle = peerHandle
+        let ioQueue = ioQueue
         self.input = input
         self.task = Task {
             for await data in input.bytes {
-                try? peerHandle.write(contentsOf: Data("echo:\(port):".utf8) + data)
+                try? await performBlockingIO(on: ioQueue) {
+                    try peerHandle.write(contentsOf: Data("echo:\(port):".utf8) + data)
+                }
             }
         }
+    }
+
+    func startResponseAfterClientEOF(_ response: Data) throws {
+        let input = try fileHandleStream(peerHandle)
+        let peerHandle = peerHandle
+        let ioQueue = ioQueue
+        self.input = input
+        self.task = Task { [weak self] in
+            for await data in input.bytes {
+                guard let self else {
+                    return
+                }
+                self.stateLock.withLock {
+                    self.received.append(data)
+                }
+            }
+            try? await performBlockingIO(on: ioQueue) {
+                try peerHandle.write(contentsOf: response)
+                try peerHandle.close()
+            }
+        }
+    }
+
+    func startRecording() throws {
+        let input = try fileHandleStream(peerHandle)
+        self.input = input
+        self.task = Task { [weak self] in
+            for await data in input.bytes {
+                guard let self else {
+                    return
+                }
+                self.stateLock.withLock {
+                    self.received.append(data)
+                }
+            }
+        }
+    }
+
+    func receivedInput() -> Data {
+        stateLock.withLock { received }
+    }
+
+    func sendReadyByte() throws {
+        try peerHandle.write(contentsOf: Data("R".utf8))
+    }
+
+    func startContinuousOutput() {
+        let peerHandle = peerHandle
+        var sendBufferSize: Int32 = 4 * 1024
+        _ = Darwin.setsockopt(
+            peerHandle.fileDescriptor,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &sendBufferSize,
+            socklen_t(MemoryLayout.size(ofValue: sendBufferSize))
+        )
+        let chunk = Data(repeating: 0x5A, count: 64 * 1024)
+        let workItem = DispatchWorkItem { [weak self] in
+            defer {
+                self?.stateLock.withLock {
+                    self?.continuousOutputStopped = true
+                }
+            }
+            while true {
+                guard
+                    let self,
+                    !self.stateLock.withLock({ self.continuousOutputCancelled })
+                else {
+                    return
+                }
+                do {
+                    try peerHandle.write(contentsOf: chunk)
+                    self.stateLock.withLock {
+                        self.continuousOutputBytes += chunk.count
+                    }
+                } catch {
+                    return
+                }
+            }
+        }
+        stateLock.withLock {
+            continuousOutputWorkItem = workItem
+        }
+        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+    }
+
+    var outputByteCount: Int {
+        stateLock.withLock { continuousOutputBytes }
+    }
+
+    var outputHasStopped: Bool {
+        stateLock.withLock { continuousOutputStopped }
+    }
+
+    func limitForwardedSendBuffer(to byteCount: Int32) throws {
+        var byteCount = byteCount
+        guard
+            Darwin.setsockopt(
+                forwardedHandle.fileDescriptor,
+                SOL_SOCKET,
+                SO_SNDBUF,
+                &byteCount,
+                socklen_t(MemoryLayout.size(ofValue: byteCount))
+            ) == 0
+        else {
+            throw currentPOSIXError()
+        }
+    }
+
+    func hasUnreadPeerData() -> Bool {
+        var byte: UInt8 = 0
+        return Darwin.recv(
+            peerHandle.fileDescriptor,
+            &byte,
+            1,
+            MSG_DONTWAIT | MSG_PEEK
+        ) > 0
+    }
+
+    func drainPeerAndCheckEOF() -> Bool {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let received = Darwin.recv(
+                peerHandle.fileDescriptor,
+                &buffer,
+                buffer.count,
+                MSG_DONTWAIT
+            )
+            if received > 0 {
+                continue
+            }
+            if received == 0 {
+                return true
+            }
+            if errno == EINTR {
+                continue
+            }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                return false
+            }
+            return errno == ECONNRESET || errno == ENOTCONN
+        }
+    }
+
+    func closeForwardedHandle() -> Int32 {
+        let fileDescriptor = forwardedHandle.fileDescriptor
+        try? forwardedHandle.close()
+        return fileDescriptor
+    }
+
+    func closePeerConnection() {
+        let resources = stateLock.withLock {
+            () -> (FileHandleByteStream?, Task<Void, Never>?, DispatchWorkItem?) in
+            continuousOutputCancelled = true
+            let resources = (input, task, continuousOutputWorkItem)
+            input = nil
+            task = nil
+            continuousOutputWorkItem = nil
+            return resources
+        }
+        resources.0?.cancel()
+        resources.1?.cancel()
+        resources.2?.cancel()
+        try? peerHandle.close()
+    }
+}
+
+private final class RecordingPortForwardCallGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = false
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    var hasEntered: Bool {
+        lock.withLock { entered }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let resumeImmediately = lock.withLock { () -> Bool in
+                entered = true
+                guard !released else {
+                    return true
+                }
+                self.continuation = continuation
+                return false
+            }
+            if resumeImmediately {
+                continuation.resume()
+            }
+        }
+    }
+
+    func release() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            guard !released else {
+                return nil
+            }
+            released = true
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        continuation?.resume()
     }
 }
 
@@ -2669,7 +4930,18 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private var workloadConfigurations: [String: WorkloadConfiguration] = [:]
     private var workloadSnapshots: [String: WorkloadSnapshot] = [:]
     private(set) var streamExecProcesses: [String: RecordingStreamingProcess] = [:]
-    private(set) var portForwardConnections: [UInt32: RecordingPortForwardConnection] = [:]
+    private let portForwardStateLock = NSLock()
+    private var recordedPortForwardConnections: [UInt32: RecordingPortForwardConnection] = [:]
+    private var configuredPortForwardFailurePorts: Set<UInt32> = []
+    private var configuredPortForwardReadyOnlyPorts: Set<UInt32> = []
+    private var configuredPortForwardRecordingPorts: Set<UInt32> = []
+    private var configuredPortForwardNoReadPorts: Set<UInt32> = []
+    private var configuredPortForwardContinuousOutputPorts: Set<UInt32> = []
+    private var configuredPortForwardCallGates: [UInt32: RecordingPortForwardCallGate] = [:]
+    private var configuredPortForwardStartDelays: [UInt32: Duration] = [:]
+    private var configuredPortForwardResponsesAfterClientEOF: [UInt32: Data] = [:]
+    private var recordedPortForwardCalls: [RecordingPortForwardCall] = []
+    private var recordedCancelledPortForwardCalls: [RecordingPortForwardCall] = []
     private(set) var createSandboxCalls: [ContainerConfiguration] = []
     private(set) var startSandboxCalls: [(id: String, presentGUI: Bool)] = []
     private(set) var stopSandboxCalls: [(id: String, options: ContainerStopOptions)] = []
@@ -2682,7 +4954,6 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var removeWorkloadCalls: [(sandboxID: String, workloadID: String)] = []
     private(set) var execSyncCalls: [RecordingExecSyncCall] = []
     private(set) var streamExecCalls: [RecordingStreamExecCall] = []
-    private(set) var portForwardCalls: [RecordingPortForwardCall] = []
     var stopSandboxChangesState = true
     var stopSandboxError: (any Error)?
     var stopWorkloadChangesState = true
@@ -2693,6 +4964,62 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var streamExecWaitsForStartPermission = false
     var streamExecRejectsResizeBeforeStart = false
     var createSandboxHook: (@Sendable () throws -> Void)?
+
+    var portForwardConnections: [UInt32: RecordingPortForwardConnection] {
+        portForwardStateLock.withLock { recordedPortForwardConnections }
+    }
+
+    var portForwardFailurePorts: Set<UInt32> {
+        get { portForwardStateLock.withLock { configuredPortForwardFailurePorts } }
+        set { portForwardStateLock.withLock { configuredPortForwardFailurePorts = newValue } }
+    }
+
+    var portForwardReadyOnlyPorts: Set<UInt32> {
+        get { portForwardStateLock.withLock { configuredPortForwardReadyOnlyPorts } }
+        set { portForwardStateLock.withLock { configuredPortForwardReadyOnlyPorts = newValue } }
+    }
+
+    var portForwardRecordingPorts: Set<UInt32> {
+        get { portForwardStateLock.withLock { configuredPortForwardRecordingPorts } }
+        set { portForwardStateLock.withLock { configuredPortForwardRecordingPorts = newValue } }
+    }
+
+    var portForwardNoReadPorts: Set<UInt32> {
+        get { portForwardStateLock.withLock { configuredPortForwardNoReadPorts } }
+        set { portForwardStateLock.withLock { configuredPortForwardNoReadPorts = newValue } }
+    }
+
+    var portForwardContinuousOutputPorts: Set<UInt32> {
+        get { portForwardStateLock.withLock { configuredPortForwardContinuousOutputPorts } }
+        set { portForwardStateLock.withLock { configuredPortForwardContinuousOutputPorts = newValue } }
+    }
+
+    var portForwardCallGates: [UInt32: RecordingPortForwardCallGate] {
+        get { portForwardStateLock.withLock { configuredPortForwardCallGates } }
+        set { portForwardStateLock.withLock { configuredPortForwardCallGates = newValue } }
+    }
+
+    var portForwardStartDelays: [UInt32: Duration] {
+        get { portForwardStateLock.withLock { configuredPortForwardStartDelays } }
+        set { portForwardStateLock.withLock { configuredPortForwardStartDelays = newValue } }
+    }
+
+    var portForwardResponsesAfterClientEOF: [UInt32: Data] {
+        get { portForwardStateLock.withLock { configuredPortForwardResponsesAfterClientEOF } }
+        set {
+            portForwardStateLock.withLock {
+                configuredPortForwardResponsesAfterClientEOF = newValue
+            }
+        }
+    }
+
+    var portForwardCalls: [RecordingPortForwardCall] {
+        portForwardStateLock.withLock { recordedPortForwardCalls }
+    }
+
+    var cancelledPortForwardCalls: [RecordingPortForwardCall] {
+        portForwardStateLock.withLock { recordedCancelledPortForwardCalls }
+    }
 
     init(
         execSyncResult: ExecSyncResult,
@@ -2944,14 +5271,60 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         port: UInt32
     ) async throws -> FileHandle {
+        let behavior = portForwardStateLock.withLock {
+            recordedPortForwardCalls.append(
+                RecordingPortForwardCall(sandboxID: sandboxID, port: port)
+            )
+            return (
+                delay: configuredPortForwardStartDelays[port],
+                fails: configuredPortForwardFailurePorts.contains(port),
+                doesNotRead: configuredPortForwardNoReadPorts.contains(port),
+                continuouslyOutputs: configuredPortForwardContinuousOutputPorts.contains(port),
+                gate: configuredPortForwardCallGates[port],
+                responseAfterEOF: configuredPortForwardResponsesAfterClientEOF[port],
+                recordsInput: configuredPortForwardRecordingPorts.contains(port),
+                sendsReadyByte: configuredPortForwardReadyOnlyPorts.contains(port)
+            )
+        }
+        if let gate = behavior.gate {
+            await gate.wait()
+        }
+        if let delay = behavior.delay {
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                portForwardStateLock.withLock {
+                    recordedCancelledPortForwardCalls.append(
+                        RecordingPortForwardCall(sandboxID: sandboxID, port: port)
+                    )
+                }
+                throw error
+            }
+        }
+        if behavior.fails {
+            throw POSIXError(.ECONNREFUSED)
+        }
         let (forwardedHandle, peerHandle) = try makeSocketPair()
         let connection = RecordingPortForwardConnection(
             forwardedHandle: forwardedHandle,
             peerHandle: peerHandle
         )
-        try connection.startEcho(port: port)
-        portForwardCalls.append(RecordingPortForwardCall(sandboxID: sandboxID, port: port))
-        portForwardConnections[port] = connection
+        if behavior.doesNotRead {
+            try connection.limitForwardedSendBuffer(to: 4 * 1024)
+        } else if behavior.continuouslyOutputs {
+            connection.startContinuousOutput()
+        } else if let response = behavior.responseAfterEOF {
+            try connection.startResponseAfterClientEOF(response)
+        } else if behavior.recordsInput {
+            try connection.startRecording()
+        } else if behavior.sendsReadyByte {
+            try connection.sendReadyByte()
+        } else {
+            try connection.startEcho(port: port)
+        }
+        portForwardStateLock.withLock {
+            recordedPortForwardConnections[port] = connection
+        }
         return forwardedHandle
     }
 
@@ -3279,6 +5652,43 @@ private func waitForSocket(at path: String) async throws {
     throw CRIShimRuntimeServerTestError.socketDidNotStart(path)
 }
 
+private func verifyPendingInputStorageCompaction(seed: UInt8) {
+    var buffer = CRIShimPendingInputBuffer()
+    for index in 0..<256 {
+        buffer.append(Data([seed &+ UInt8(truncatingIfNeeded: index)]))
+    }
+    #expect(buffer.count == 256)
+    #expect(buffer.allocatedSlotCount == 256)
+    for index in 0..<256 {
+        #expect(buffer.removeFirst() == Data([seed &+ UInt8(truncatingIfNeeded: index)]))
+    }
+    #expect(buffer.isEmpty)
+    #expect(buffer.allocatedSlotCount == 0)
+
+    var expected = Data([seed])
+    var orderPreserved = true
+    var maximumAllocatedSlotCount = 0
+    buffer.append(expected)
+
+    for index in 1...10_000 {
+        let next = Data([seed &+ UInt8(truncatingIfNeeded: index)])
+        buffer.append(next)
+        orderPreserved = orderPreserved && buffer.removeFirst() == expected
+        orderPreserved = orderPreserved && buffer.first == next && !buffer.isEmpty
+        maximumAllocatedSlotCount = max(
+            maximumAllocatedSlotCount,
+            buffer.allocatedSlotCount
+        )
+        expected = next
+    }
+
+    #expect(orderPreserved)
+    #expect(maximumAllocatedSlotCount == 16)
+    #expect(buffer.removeFirst() == expected)
+    #expect(buffer.isEmpty)
+    #expect(buffer.allocatedSlotCount == 0)
+}
+
 private func waitForFileContent(
     at path: String,
     containing expectedFragments: [String]
@@ -3362,10 +5772,956 @@ private func makeSocketPair() throws -> (FileHandle, FileHandle) {
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
+    #if !os(Linux)
+    var noSignal = CInt(1)
+    for fileDescriptor in fileDescriptors {
+        _ = setsockopt(
+            fileDescriptor,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSignal,
+            socklen_t(MemoryLayout<CInt>.size)
+        )
+    }
+    #endif
+
     return (
         FileHandle(fileDescriptor: fileDescriptors[0], closeOnDealloc: true),
         FileHandle(fileDescriptor: fileDescriptors[1], closeOnDealloc: true)
     )
+}
+
+private func withSPDYPortForwardServer(
+    runtimeManager: RecordingRuntimeManager,
+    ports: [UInt32],
+    body: (String) async throws -> Void
+) async throws {
+    let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    let server = CRIShimStreamingServer(
+        config: config,
+        runtimeManager: runtimeManager,
+        activeSessionIdleTimeoutSeconds: 0
+    )
+
+    do {
+        try await server.start(eventLoopGroup: group)
+    } catch {
+        await shutdown(group)
+        throw error
+    }
+
+    do {
+        let url = try await server.registerPortForwardURL(
+            CRIShimPortForwardInvocation(sandboxID: "sandbox-1", ports: ports)
+        )
+        try await body(url)
+        await server.stop()
+        await shutdown(group)
+    } catch {
+        await server.stop()
+        await shutdown(group)
+        throw error
+    }
+}
+
+private func withObservedSPDYPortForwardServer(
+    runtimeManager: RecordingRuntimeManager,
+    portSets: [[UInt32]],
+    maximumActivePortForwardTunnels: Int,
+    body: ([String], CRIShimStreamingServer) async throws -> Void
+) async throws {
+    let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    let server = CRIShimStreamingServer(
+        config: config,
+        runtimeManager: runtimeManager,
+        activeSessionIdleTimeoutSeconds: 0,
+        maximumActivePortForwardTunnels: maximumActivePortForwardTunnels
+    )
+
+    do {
+        try await server.start(eventLoopGroup: group)
+    } catch {
+        await shutdown(group)
+        throw error
+    }
+
+    do {
+        var urls: [String] = []
+        for ports in portSets {
+            urls.append(
+                try await server.registerPortForwardURL(
+                    CRIShimPortForwardInvocation(sandboxID: "sandbox-1", ports: ports)
+                ))
+        }
+        try await body(urls, server)
+        await server.stop()
+        await shutdown(group)
+    } catch {
+        await server.stop()
+        await shutdown(group)
+        throw error
+    }
+}
+
+private func withSPDYPortForwardServer(
+    runtimeManager: RecordingRuntimeManager,
+    portSets: [[UInt32]],
+    maximumActivePortForwardTunnels: Int,
+    body: ([String]) async throws -> Void
+) async throws {
+    try await withObservedSPDYPortForwardServer(
+        runtimeManager: runtimeManager,
+        portSets: portSets,
+        maximumActivePortForwardTunnels: maximumActivePortForwardTunnels
+    ) { urls, _ in
+        try await body(urls)
+    }
+}
+
+private func withWebSocketPortForwardServer(
+    runtimeManager: RecordingRuntimeManager,
+    portSets: [[UInt32]],
+    maximumActivePortForwardTunnels: Int,
+    body: ([String]) async throws -> Void
+) async throws {
+    try await withSPDYPortForwardServer(
+        runtimeManager: runtimeManager,
+        portSets: portSets,
+        maximumActivePortForwardTunnels: maximumActivePortForwardTunnels,
+        body: body
+    )
+}
+
+private func withObservedWebSocketPortForwardServer(
+    runtimeManager: RecordingRuntimeManager,
+    portSets: [[UInt32]],
+    maximumActivePortForwardTunnels: Int,
+    body: ([String], CRIShimStreamingServer) async throws -> Void
+) async throws {
+    try await withObservedSPDYPortForwardServer(
+        runtimeManager: runtimeManager,
+        portSets: portSets,
+        maximumActivePortForwardTunnels: maximumActivePortForwardTunnels,
+        body: body
+    )
+}
+
+private struct TestSPDYPortForwardResult: Sendable {
+    var error = Data()
+    var data = Data()
+    var errorFinished = false
+    var dataFinished = false
+    var terminalStreamOrder: [UInt32] = []
+    var receivedBackendDataAfterTerminal = false
+}
+
+private struct TestSPDYFrame: Sendable {
+    var streamID: UInt32?
+    var controlType: UInt16?
+    var flags: UInt8
+    var payload: Data
+}
+
+private struct TestRawWebSocketFrame: Sendable {
+    var opcode: UInt8
+    var payload: Data
+}
+
+private final class TestRawWebSocketConnection: @unchecked Sendable {
+    private let fd: Int32
+    private let ioQueue: DispatchQueue
+    private let stateLock = NSLock()
+    private var closed = false
+
+    init(url urlString: String, protocolName: String) async throws {
+        guard
+            let url = URL(string: urlString),
+            let host = url.host,
+            let port = url.port
+        else {
+            throw CRIShimRuntimeServerTestError.invalidHTTPResponse
+        }
+
+        #if os(Linux)
+        let socketType = CInt(SOCK_STREAM.rawValue)
+        #else
+        let socketType = SOCK_STREAM
+        #endif
+        let fd = socket(AF_INET, socketType, 0)
+        guard fd >= 0 else {
+            throw currentPOSIXError()
+        }
+        self.fd = fd
+        self.ioQueue = DispatchQueue(label: "container.cri.tests.websocket.\(UUID().uuidString)")
+
+        do {
+            try await performBlockingIO(on: ioQueue) { [self] in
+                var timeout = timeval(tv_sec: 15, tv_usec: 0)
+                guard
+                    setsockopt(
+                        fd,
+                        SOL_SOCKET,
+                        SO_RCVTIMEO,
+                        &timeout,
+                        socklen_t(MemoryLayout<timeval>.size)
+                    ) == 0
+                else {
+                    throw currentPOSIXError()
+                }
+                #if !os(Linux)
+                var noSignal: Int32 = 1
+                guard
+                    setsockopt(
+                        fd,
+                        SOL_SOCKET,
+                        SO_NOSIGPIPE,
+                        &noSignal,
+                        socklen_t(MemoryLayout<Int32>.size)
+                    ) == 0
+                else {
+                    throw currentPOSIXError()
+                }
+                #endif
+                let address = try SocketAddress(ipAddress: host, port: port)
+                try address.withSockAddr { pointer, size in
+                    guard connect(fd, pointer, UInt32(size)) == 0 else {
+                        throw currentPOSIXError()
+                    }
+                }
+                try upgrade(url: url, host: host, port: port, protocolName: protocolName)
+            }
+        } catch {
+            _ = Darwin.close(fd)
+            throw error
+        }
+    }
+
+    deinit {
+        closeTransport()
+    }
+
+    func limitReceiveBuffer(to byteCount: Int32) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var byteCount = byteCount
+            guard
+                Darwin.setsockopt(
+                    fd,
+                    SOL_SOCKET,
+                    SO_RCVBUF,
+                    &byteCount,
+                    socklen_t(MemoryLayout.size(ofValue: byteCount))
+                ) == 0
+            else {
+                throw currentPOSIXError()
+            }
+        }
+    }
+
+    func sendBinary(_ payload: Data) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            try writeAll(makeMaskedFrame(opcode: 0x02, payload: payload))
+        }
+    }
+
+    func sendText(_ text: String) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            try writeAll(makeMaskedFrame(opcode: 0x01, payload: Data(text.utf8)))
+        }
+    }
+
+    func sendPingBurst(count: Int) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            let frame = makeMaskedFrame(opcode: 0x09, payload: Data())
+            var burst = Data()
+            burst.reserveCapacity(frame.count * count)
+            for _ in 0..<count {
+                burst.append(frame)
+            }
+            try writeAll(burst)
+        }
+    }
+
+    func sendPing() async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            try writeAll(makeMaskedFrame(opcode: 0x09, payload: Data()))
+        }
+    }
+
+    func readServerFrame() async throws -> TestRawWebSocketFrame {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            try readServerFrameBlocking()
+        }
+    }
+
+    private func readServerFrameBlocking() throws -> TestRawWebSocketFrame {
+        let header = try readExactly(2)
+        let opcode = header[0] & 0x0F
+        let masked = (header[1] & 0x80) != 0
+        let shortLength = Int(header[1] & 0x7F)
+        let payloadLength: Int
+        switch shortLength {
+        case 126:
+            let extended = try readExactly(2)
+            payloadLength = (Int(extended[0]) << 8) | Int(extended[1])
+        case 127:
+            let extended = try readExactly(8)
+            var length: UInt64 = 0
+            for byte in extended {
+                length = (length << 8) | UInt64(byte)
+            }
+            guard length <= UInt64(Int.max) else {
+                throw CRIShimRuntimeServerTestError.unexpectedFrame
+            }
+            payloadLength = Int(length)
+        default:
+            payloadLength = shortLength
+        }
+        let mask = masked ? try readExactly(4) : Data()
+        var payload = try readExactly(payloadLength)
+        if masked {
+            for index in payload.indices {
+                payload[index] ^= mask[index % mask.count]
+            }
+        }
+        return TestRawWebSocketFrame(opcode: opcode, payload: payload)
+    }
+
+    func closeTransport() {
+        let shouldClose = stateLock.withLock { () -> Bool in
+            guard !closed else {
+                return false
+            }
+            closed = true
+            return true
+        }
+        guard shouldClose else {
+            return
+        }
+        _ = Darwin.shutdown(fd, SHUT_RDWR)
+        _ = Darwin.close(fd)
+    }
+
+    private func upgrade(
+        url: URL,
+        host: String,
+        port: Int,
+        protocolName: String
+    ) throws {
+        var path = url.path.isEmpty ? "/" : url.path
+        if let query = url.query, !query.isEmpty {
+            path += "?\(query)"
+        }
+        let request = Data(
+            """
+            GET \(path) HTTP/1.1\r
+            Host: \(host):\(port)\r
+            Connection: Upgrade\r
+            Upgrade: websocket\r
+            Sec-WebSocket-Version: 13\r
+            Sec-WebSocket-Key: AAECAwQFBgcICQoLDA0ODw==\r
+            Sec-WebSocket-Protocol: \(protocolName)\r
+            \r
+
+            """.utf8
+        )
+        try writeAll(request)
+
+        let terminator = Data("\r\n\r\n".utf8)
+        var response = Data()
+        while response.range(of: terminator) == nil {
+            guard response.count < 16 * 1024 else {
+                throw CRIShimRuntimeServerTestError.invalidHTTPResponse
+            }
+            response.append(try readExactly(1))
+        }
+        let text = String(decoding: response, as: UTF8.self).lowercased()
+        guard
+            text.contains("http/1.1 101"),
+            text.contains("sec-websocket-protocol: \(protocolName.lowercased())")
+        else {
+            throw CRIShimRuntimeServerTestError.invalidHTTPResponse
+        }
+    }
+
+    private func makeMaskedFrame(opcode: UInt8, payload: Data) -> Data {
+        let mask: [UInt8] = [0x17, 0x29, 0x3B, 0x4D]
+        var frame = Data([0x80 | opcode])
+        switch payload.count {
+        case 0...125:
+            frame.append(0x80 | UInt8(payload.count))
+        case 126...Int(UInt16.max):
+            frame.append(0x80 | 126)
+            frame.append(UInt8((payload.count >> 8) & 0xFF))
+            frame.append(UInt8(payload.count & 0xFF))
+        default:
+            frame.append(0x80 | 127)
+            let count = UInt64(payload.count)
+            for shift in stride(from: 56, through: 0, by: -8) {
+                frame.append(UInt8((count >> UInt64(shift)) & 0xFF))
+            }
+        }
+        frame.append(contentsOf: mask)
+        for (index, byte) in payload.enumerated() {
+            frame.append(byte ^ mask[index % mask.count])
+        }
+        return frame
+    }
+
+    private func writeAll(_ data: Data) throws {
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let result = Darwin.write(
+                    fd,
+                    bytes.baseAddress?.advanced(by: offset),
+                    bytes.count - offset
+                )
+                if result > 0 {
+                    offset += result
+                    continue
+                }
+                if result < 0, errno == EINTR {
+                    continue
+                }
+                throw currentPOSIXError()
+            }
+        }
+    }
+
+    private func readExactly(_ length: Int) throws -> Data {
+        var result = Data(count: length)
+        try result.withUnsafeMutableBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.read(
+                    fd,
+                    bytes.baseAddress?.advanced(by: offset),
+                    bytes.count - offset
+                )
+                if count > 0 {
+                    offset += count
+                    continue
+                }
+                if count == 0 {
+                    throw CRIShimRuntimeServerTestError.unexpectedEOF
+                }
+                if errno == EINTR {
+                    continue
+                }
+                throw currentPOSIXError()
+            }
+        }
+        return result
+    }
+}
+
+private final class TestSPDYConnection: @unchecked Sendable {
+    private let fd: Int32
+    private let deflater: CRIShimSPDYHeaderDeflater
+    private let ioQueue: DispatchQueue
+    private let stateLock = NSLock()
+    private var closed = false
+
+    init(url urlString: String) async throws {
+        guard
+            let url = URL(string: urlString),
+            let host = url.host,
+            let port = url.port
+        else {
+            throw CRIShimRuntimeServerTestError.invalidHTTPResponse
+        }
+
+        #if os(Linux)
+        let socketType = CInt(SOCK_STREAM.rawValue)
+        #else
+        let socketType = SOCK_STREAM
+        #endif
+        let fd = socket(AF_INET, socketType, 0)
+        guard fd >= 0 else {
+            throw currentPOSIXError()
+        }
+        self.fd = fd
+        self.deflater = try CRIShimSPDYHeaderDeflater()
+        self.ioQueue = DispatchQueue(label: "container.cri.tests.spdy.\(UUID().uuidString)")
+
+        do {
+            try await performBlockingIO(on: ioQueue) { [self] in
+                // Keep the socket timeout bounded without making these
+                // loopback protocol tests depend on scheduler latency.
+                var timeout = timeval(tv_sec: 15, tv_usec: 0)
+                guard
+                    setsockopt(
+                        fd,
+                        SOL_SOCKET,
+                        SO_RCVTIMEO,
+                        &timeout,
+                        socklen_t(MemoryLayout<timeval>.size)
+                    ) == 0
+                else {
+                    throw currentPOSIXError()
+                }
+                #if !os(Linux)
+                var noSignal: Int32 = 1
+                guard
+                    setsockopt(
+                        fd,
+                        SOL_SOCKET,
+                        SO_NOSIGPIPE,
+                        &noSignal,
+                        socklen_t(MemoryLayout<Int32>.size)
+                    ) == 0
+                else {
+                    throw currentPOSIXError()
+                }
+                #endif
+
+                let address = try SocketAddress(ipAddress: host, port: port)
+                try address.withSockAddr { pointer, size in
+                    guard connect(fd, pointer, UInt32(size)) == 0 else {
+                        throw currentPOSIXError()
+                    }
+                }
+                try upgrade(url: url, host: host, port: port)
+            }
+        } catch {
+            _ = Darwin.close(fd)
+            throw error
+        }
+    }
+
+    deinit {
+        closeTransport()
+    }
+
+    func closeTransport() {
+        let shouldClose = stateLock.withLock { () -> Bool in
+            guard !closed else {
+                return false
+            }
+            closed = true
+            return true
+        }
+        guard shouldClose else {
+            return
+        }
+        _ = Darwin.shutdown(fd, SHUT_RDWR)
+        _ = Darwin.close(fd)
+    }
+
+    func openPortForwardPair(
+        requestID: String,
+        port: UInt32,
+        errorStreamID: UInt32,
+        dataStreamID: UInt32,
+        clientDataChunks: [Data] = [],
+        closeClientWrite: Bool
+    ) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            try writeSYNStream(
+                streamID: errorStreamID,
+                headers: [
+                    "port": [String(port)],
+                    "requestid": [requestID],
+                    "streamtype": ["error"],
+                ]
+            )
+            try writeDataFrame(streamID: errorStreamID, flags: 0x01, payload: Data())
+
+            try writeSYNStream(
+                streamID: dataStreamID,
+                headers: [
+                    "port": [String(port)],
+                    "requestid": [requestID],
+                    "streamtype": ["data"],
+                ]
+            )
+            if clientDataChunks.isEmpty {
+                if closeClientWrite {
+                    try writeDataFrame(streamID: dataStreamID, flags: 0x01, payload: Data())
+                }
+                return
+            }
+            for (index, chunk) in clientDataChunks.enumerated() {
+                let isLast = index == clientDataChunks.count - 1
+                try writeDataFrame(
+                    streamID: dataStreamID,
+                    flags: closeClientWrite && isLast ? 0x01 : 0,
+                    payload: chunk
+                )
+            }
+        }
+    }
+
+    func writePortForwardSYN(
+        streamID: UInt32,
+        requestID: String?,
+        port: UInt32,
+        kind: String,
+        closeStream: Bool = false
+    ) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var headers = [
+                "port": [String(port)],
+                "streamtype": [kind],
+            ]
+            if let requestID {
+                headers["requestid"] = [requestID]
+            }
+            try writeSYNStream(streamID: streamID, headers: headers, flags: closeStream ? 0x01 : 0)
+        }
+    }
+
+    func writeRSTStream(streamID: UInt32, status: UInt32 = 5) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var payload = Data()
+            appendSPDYUInt32(streamID & 0x7FFF_FFFF, to: &payload)
+            appendSPDYUInt32(status, to: &payload)
+            try writeControlFrame(type: 3, payload: payload)
+        }
+    }
+
+    func writePing(id: UInt32) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var payload = Data()
+            appendSPDYUInt32(id, to: &payload)
+            try writeControlFrame(type: 6, payload: payload)
+        }
+    }
+
+    func writePingBurst(count: Int) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var frame = Data()
+            appendSPDYUInt32(0x8000_0000 | (UInt32(3) << 16) | UInt32(6), to: &frame)
+            appendSPDYFlagsAndLength(flags: 0, length: 4, to: &frame)
+            appendSPDYUInt32(1, to: &frame)
+            var burst = Data()
+            burst.reserveCapacity(frame.count * count)
+            for _ in 0..<count {
+                burst.append(frame)
+            }
+            try writeAll(burst)
+        }
+    }
+
+    func limitReceiveBuffer(to byteCount: Int32) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var byteCount = byteCount
+            guard
+                Darwin.setsockopt(
+                    fd,
+                    SOL_SOCKET,
+                    SO_RCVBUF,
+                    &byteCount,
+                    socklen_t(MemoryLayout.size(ofValue: byteCount))
+                ) == 0
+            else {
+                throw currentPOSIXError()
+            }
+        }
+    }
+
+    func waitForTransportEOF() async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let count = Darwin.read(fd, &buffer, buffer.count)
+                if count > 0 {
+                    continue
+                }
+                if count == 0 {
+                    return
+                }
+                if errno == EINTR {
+                    continue
+                }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw CRIShimRuntimeServerTestError.timedOut("SPDY transport EOF")
+                }
+                throw currentPOSIXError()
+            }
+        }
+    }
+
+    func readControlStreamID(type: UInt16) async throws -> UInt32 {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            for _ in 0..<256 {
+                let frame = try readFrame()
+                guard frame.controlType == type, frame.payload.count >= 4 else {
+                    continue
+                }
+                return readSPDYUInt32(from: frame.payload, offset: 0) & 0x7FFF_FFFF
+            }
+            throw CRIShimRuntimeServerTestError.invalidSPDYFrame
+        }
+    }
+
+    func readPing(id: UInt32) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            for _ in 0..<256 {
+                let frame = try readFrame()
+                guard frame.controlType == 6, frame.payload.count == 4 else {
+                    continue
+                }
+                if readSPDYUInt32(from: frame.payload, offset: 0) == id {
+                    return
+                }
+            }
+            throw CRIShimRuntimeServerTestError.invalidSPDYFrame
+        }
+    }
+
+    func readPortForwardResult(
+        errorStreamID: UInt32,
+        dataStreamID: UInt32
+    ) async throws -> TestSPDYPortForwardResult {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            var result = TestSPDYPortForwardResult()
+            for _ in 0..<32 {
+                let frame = try readFrame()
+                guard let streamID = frame.streamID else {
+                    continue
+                }
+                if !frame.payload.isEmpty, streamID == dataStreamID, !result.terminalStreamOrder.isEmpty {
+                    result.receivedBackendDataAfterTerminal = true
+                }
+                if streamID == errorStreamID {
+                    result.error.append(frame.payload)
+                    if (frame.flags & 0x01) != 0, !result.errorFinished {
+                        result.errorFinished = true
+                        result.terminalStreamOrder.append(streamID)
+                    }
+                } else if streamID == dataStreamID {
+                    result.data.append(frame.payload)
+                    if (frame.flags & 0x01) != 0, !result.dataFinished {
+                        result.dataFinished = true
+                        result.terminalStreamOrder.append(streamID)
+                    }
+                }
+
+                // client-go v1.27.2 first waits for the remote data copy and then
+                // waits for the error reader. Both streams must therefore finish.
+                if result.dataFinished && result.errorFinished {
+                    return result
+                }
+            }
+            throw CRIShimRuntimeServerTestError.invalidSPDYFrame
+        }
+    }
+
+    func readDataPayload(dataStreamID: UInt32) async throws -> Data {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            for _ in 0..<32 {
+                let frame = try readFrame()
+                if frame.streamID == dataStreamID, !frame.payload.isEmpty {
+                    return frame.payload
+                }
+            }
+            throw CRIShimRuntimeServerTestError.invalidSPDYFrame
+        }
+    }
+
+    func writeClientData(
+        dataStreamID: UInt32,
+        payload: Data,
+        closeClientWrite: Bool = false
+    ) async throws {
+        try await performBlockingIO(on: ioQueue) { [self] in
+            try writeDataFrame(
+                streamID: dataStreamID,
+                flags: closeClientWrite ? 0x01 : 0,
+                payload: payload
+            )
+        }
+    }
+
+    private func upgrade(url: URL, host: String, port: Int) throws {
+        let path = url.path.isEmpty ? "/" : url.path
+        let request = Data(
+            """
+            GET \(path) HTTP/1.1\r
+            Host: \(host):\(port)\r
+            Connection: Upgrade\r
+            Upgrade: SPDY/3.1\r
+            X-Stream-Protocol-Version: portforward.k8s.io\r
+            \r
+
+            """.utf8
+        )
+        try writeAll(request)
+
+        let terminator = Data("\r\n\r\n".utf8)
+        var response = Data()
+        while response.range(of: terminator) == nil {
+            guard response.count < 16 * 1024 else {
+                throw CRIShimRuntimeServerTestError.invalidHTTPResponse
+            }
+            response.append(try readExactly(1))
+        }
+        let text = String(decoding: response, as: UTF8.self).lowercased()
+        guard
+            text.contains("http/1.1 101"),
+            text.contains("x-stream-protocol-version: portforward.k8s.io")
+        else {
+            throw CRIShimRuntimeServerTestError.invalidHTTPResponse
+        }
+    }
+
+    private func writeSYNStream(
+        streamID: UInt32,
+        headers: [String: [String]],
+        flags: UInt8 = 0
+    ) throws {
+        var payload = Data()
+        appendSPDYUInt32(streamID & 0x7FFF_FFFF, to: &payload)
+        appendSPDYUInt32(0, to: &payload)
+        payload.append(contentsOf: [0, 0])
+        payload.append(try deflater.compress(makeSPDYHeaderBlock(headers)))
+
+        var frame = Data()
+        appendSPDYUInt32(0x8000_0000 | (UInt32(3) << 16) | UInt32(1), to: &frame)
+        appendSPDYFlagsAndLength(flags: flags, length: payload.count, to: &frame)
+        frame.append(payload)
+        try writeAll(frame)
+    }
+
+    private func writeControlFrame(type: UInt16, payload: Data) throws {
+        var frame = Data()
+        appendSPDYUInt32(0x8000_0000 | (UInt32(3) << 16) | UInt32(type), to: &frame)
+        appendSPDYFlagsAndLength(flags: 0, length: payload.count, to: &frame)
+        frame.append(payload)
+        try writeAll(frame)
+    }
+
+    private func writeDataFrame(
+        streamID: UInt32,
+        flags: UInt8,
+        payload: Data
+    ) throws {
+        var frame = Data()
+        appendSPDYUInt32(streamID & 0x7FFF_FFFF, to: &frame)
+        appendSPDYFlagsAndLength(flags: flags, length: payload.count, to: &frame)
+        frame.append(payload)
+        try writeAll(frame)
+    }
+
+    private func readFrame() throws -> TestSPDYFrame {
+        let header = try readExactly(8)
+        let firstWord = readSPDYUInt32(from: header, offset: 0)
+        let flags = header[4]
+        let length =
+            (Int(header[5]) << 16)
+            | (Int(header[6]) << 8)
+            | Int(header[7])
+        let payload = try readExactly(length)
+        let isControl = (firstWord & 0x8000_0000) != 0
+        return TestSPDYFrame(
+            streamID: isControl ? nil : firstWord & 0x7FFF_FFFF,
+            controlType: isControl ? UInt16(firstWord & 0xFFFF) : nil,
+            flags: flags,
+            payload: payload
+        )
+    }
+
+    private func writeAll(_ data: Data) throws {
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let result = Darwin.write(
+                    fd,
+                    bytes.baseAddress?.advanced(by: offset),
+                    bytes.count - offset
+                )
+                if result > 0 {
+                    offset += result
+                    continue
+                }
+                if result < 0, errno == EINTR {
+                    continue
+                }
+                throw currentPOSIXError()
+            }
+        }
+    }
+
+    private func readExactly(_ length: Int) throws -> Data {
+        guard length > 0 else {
+            return Data()
+        }
+        var result = Data(count: length)
+        try result.withUnsafeMutableBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.read(
+                    fd,
+                    bytes.baseAddress?.advanced(by: offset),
+                    bytes.count - offset
+                )
+                if count > 0 {
+                    offset += count
+                    continue
+                }
+                if count == 0 {
+                    throw CRIShimRuntimeServerTestError.unexpectedEOF
+                }
+                if errno == EINTR {
+                    continue
+                }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw CRIShimRuntimeServerTestError.timedOut("SPDY frame")
+                }
+                throw currentPOSIXError()
+            }
+        }
+        return result
+    }
+}
+
+private func performBlockingIO<Value: Sendable>(
+    on queue: DispatchQueue,
+    _ operation: @escaping @Sendable () throws -> Value
+) async throws -> Value {
+    try await withCheckedThrowingContinuation { continuation in
+        queue.async {
+            do {
+                continuation.resume(returning: try operation())
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+}
+
+private func appendSPDYUInt32(_ value: UInt32, to data: inout Data) {
+    data.append(contentsOf: [
+        UInt8((value >> 24) & 0xFF),
+        UInt8((value >> 16) & 0xFF),
+        UInt8((value >> 8) & 0xFF),
+        UInt8(value & 0xFF),
+    ])
+}
+
+private func appendSPDYFlagsAndLength(
+    flags: UInt8,
+    length: Int,
+    to data: inout Data
+) {
+    data.append(flags)
+    data.append(UInt8((length >> 16) & 0xFF))
+    data.append(UInt8((length >> 8) & 0xFF))
+    data.append(UInt8(length & 0xFF))
+}
+
+private func readSPDYUInt32(from data: Data, offset: Int) -> UInt32 {
+    (UInt32(data[offset]) << 24)
+        | (UInt32(data[offset + 1]) << 16)
+        | (UInt32(data[offset + 2]) << 8)
+        | UInt32(data[offset + 3])
+}
+
+private func currentPOSIXError() -> POSIXError {
+    POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
 }
 
 private func makeWebSocketTask(
@@ -3408,6 +6764,26 @@ private func receiveBinaryMessage(
     }
 }
 
+private func receiveBinaryMessage(
+    from task: URLSessionWebSocketTask,
+    timeout: Duration
+) async throws -> Data {
+    try await withThrowingTaskGroup(of: Data.self) { group in
+        group.addTask {
+            try await receiveBinaryMessage(from: task)
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw CRIShimRuntimeServerTestError.timedOut("websocket binary message")
+        }
+        guard let message = try await group.next() else {
+            throw CRIShimRuntimeServerTestError.unexpectedEOF
+        }
+        group.cancelAll()
+        return message
+    }
+}
+
 private func portPrefixData(_ port: UInt16) -> Data {
     Data(
         [
@@ -3423,6 +6799,9 @@ private enum CRIShimRuntimeServerTestError: Error {
     case timedOut(String)
     case unexpectedTextFrame(String)
     case unexpectedFrame
+    case unexpectedEOF
+    case invalidHTTPResponse
+    case invalidSPDYFrame
 }
 
 extension NSLock {

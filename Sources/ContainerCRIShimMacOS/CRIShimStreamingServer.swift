@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Dispatch
 import Foundation
 import NIO
 import NIOHTTP1
@@ -154,17 +155,29 @@ private actor CRIShimStreamingSessionStore {
     }
 }
 
-private actor CRIShimStartSynchronizedStreamingProcess: CRIShimStreamingProcess {
+actor CRIShimStartSynchronizedStreamingProcess: CRIShimStreamingProcess {
+    private struct TerminationAttempt {
+        let id: UUID
+        let task: Task<Void, Error>
+    }
+
     private enum State {
         case created
         case starting
         case started
         case failed
+        case terminated
     }
 
     private let process: any CRIShimStreamingProcess
     private var state = State.created
     private var pendingResizes: [CRIShimTerminalSize]
+    private var terminationAttempt: TerminationAttempt?
+    private var terminationWaiterCount = 0
+
+    var isWaitingForTerminationOutcome: Bool {
+        terminationWaiterCount > 0
+    }
 
     init(
         process: any CRIShimStreamingProcess,
@@ -175,40 +188,129 @@ private actor CRIShimStartSynchronizedStreamingProcess: CRIShimStreamingProcess 
     }
 
     func start() async throws {
-        guard case .created = state else {
+        guard case .created = state, terminationAttempt == nil else {
             throw CRIShimError.internalError("streaming process start was requested more than once")
         }
         state = .starting
 
         do {
             try await process.start()
+            let terminatedWhileStarting = await terminationCompletedSuccessfully()
+            guard !terminatedWhileStarting, case .starting = state else {
+                throw CRIShimError.internalError("streaming process was terminated while starting")
+            }
             while !pendingResizes.isEmpty {
                 let resizes = pendingResizes
                 pendingResizes.removeAll(keepingCapacity: true)
                 for size in resizes {
                     try await process.resize(size)
+                    let terminatedWhileResizing = await terminationCompletedSuccessfully()
+                    guard !terminatedWhileResizing, case .starting = state else {
+                        throw CRIShimError.internalError("streaming process was terminated while applying resize")
+                    }
                 }
             }
             state = .started
         } catch {
+            if case .terminated = state {
+                throw error
+            }
             state = .failed
             throw error
         }
     }
 
     func resize(_ size: CRIShimTerminalSize) async throws {
+        let terminationCompleted = await terminationCompletedSuccessfully()
+        guard !terminationCompleted else {
+            throw CRIShimError.internalError("streaming process was terminated")
+        }
         switch state {
         case .created, .starting:
             pendingResizes.append(size)
         case .started:
             try await process.resize(size)
+            let terminationCompleted = await terminationCompletedSuccessfully()
+            guard !terminationCompleted else {
+                throw CRIShimError.internalError("streaming process was terminated")
+            }
         case .failed:
             throw CRIShimError.internalError("streaming process did not start")
+        case .terminated:
+            throw CRIShimError.internalError("streaming process was terminated")
         }
     }
 
     func kill(_ signal: Int32) async throws {
-        try await process.kill(signal)
+        if case .terminated = state {
+            return
+        }
+
+        let attempt: TerminationAttempt
+        if let terminationAttempt {
+            attempt = terminationAttempt
+        } else {
+            let process = process
+            attempt = TerminationAttempt(
+                id: UUID(),
+                task: Task {
+                    try await process.kill(signal)
+                }
+            )
+            terminationAttempt = attempt
+        }
+
+        do {
+            try await attempt.task.value
+            guard terminationAttempt?.id == attempt.id else {
+                return
+            }
+            terminationAttempt = nil
+            state = .terminated
+            pendingResizes.removeAll()
+        } catch {
+            if terminationAttempt?.id == attempt.id {
+                terminationAttempt = nil
+            }
+            throw error
+        }
+    }
+
+    private func terminationCompletedSuccessfully() async -> Bool {
+        while let attempt = terminationAttempt {
+            terminationWaiterCount += 1
+            let result: Result<Void, Error>
+            do {
+                try await attempt.task.value
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            terminationWaiterCount -= 1
+
+            switch result {
+            case .success:
+                guard terminationAttempt?.id == attempt.id else {
+                    if case .terminated = state {
+                        return true
+                    }
+                    continue
+                }
+                terminationAttempt = nil
+                state = .terminated
+                pendingResizes.removeAll()
+                return true
+            case .failure:
+                if terminationAttempt?.id == attempt.id {
+                    terminationAttempt = nil
+                }
+            }
+        }
+
+        if case .terminated = state {
+            return true
+        }
+        return false
     }
 
     func wait() async throws -> Int32 {
@@ -1046,21 +1148,48 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
                 stdio: stdio
             )
 
-            let startupState = lock.withLock {
-                let process = CRIShimStartSynchronizedStreamingProcess(
-                    process: rawProcess,
-                    pendingResizes: pendingResizes
-                )
-                self.process = process
-                pendingResizes.removeAll()
-                return (
-                    process: process,
-                    stdinWriter: stdinPipe?.fileHandleForWriting,
-                    stdoutReader: stdoutPipe?.fileHandleForReading,
-                    stderrReader: stderrPipe?.fileHandleForReading,
-                    pendingStdin: pendingStdin,
-                    stdinClosed: stdinClosed
-                )
+            let startupState:
+                (
+                    process: CRIShimStartSynchronizedStreamingProcess,
+                    stdinWriter: FileHandle?,
+                    stdoutStream: FileHandleByteStream?,
+                    stderrStream: FileHandleByteStream?,
+                    pendingStdin: Data,
+                    stdinClosed: Bool
+                )?
+            do {
+                startupState = try lock.withLock {
+                    guard !cleanupPerformed else {
+                        return nil
+                    }
+                    let stdoutStream = try stdoutPipe.map {
+                        try fileHandleStream($0.fileHandleForReading)
+                    }
+                    let stderrStream = try stderrPipe.map {
+                        try fileHandleStream($0.fileHandleForReading)
+                    }
+                    let process = CRIShimStartSynchronizedStreamingProcess(
+                        process: rawProcess,
+                        pendingResizes: pendingResizes
+                    )
+                    self.process = process
+                    pendingResizes.removeAll()
+                    return (
+                        process: process,
+                        stdinWriter: stdinPipe?.fileHandleForWriting,
+                        stdoutStream: stdoutStream,
+                        stderrStream: stderrStream,
+                        pendingStdin: pendingStdin,
+                        stdinClosed: stdinClosed
+                    )
+                }
+            } catch {
+                try? await rawProcess.kill(SIGTERM)
+                throw error
+            }
+            guard let startupState else {
+                try? await rawProcess.kill(SIGTERM)
+                return
             }
 
             if let stdinWriter = startupState.stdinWriter {
@@ -1073,16 +1202,16 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
             }
 
             var outputTasks: [Task<Void, Never>] = []
-            if let stdoutReader = startupState.stdoutReader {
+            if let stdoutStream = startupState.stdoutStream {
                 outputTasks.append(
                     Task {
-                        await pumpExecOutput(kind: .stdout, handle: stdoutReader)
+                        await pumpExecOutput(kind: .stdout, input: stdoutStream)
                     })
             }
-            if let stderrReader = startupState.stderrReader {
+            if let stderrStream = startupState.stderrStream {
                 outputTasks.append(
                     Task {
-                        await pumpExecOutput(kind: .stderr, handle: stderrReader)
+                        await pumpExecOutput(kind: .stderr, input: stderrStream)
                     })
             }
             for task in outputTasks {
@@ -1106,12 +1235,12 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
 
     private func pumpExecOutput(
         kind: StreamKind,
-        handle: FileHandle
+        input: FileHandleByteStream
     ) async {
         guard let streamID = lock.withLock({ streamIDsByKind[kind] }) else {
             return
         }
-        for await data in fileHandleStream(handle) {
+        for await data in input.bytes {
             do {
                 try await writeDataFrame(streamID: streamID, data: data)
                 recordActivity()
@@ -1206,8 +1335,15 @@ private final class CRIShimExecSPDYHandler: ChannelInboundHandler, RemovableChan
     }
 
     private func appendTask(_ task: Task<Void, Never>) {
-        lock.withLock {
+        let shouldCancel = lock.withLock { () -> Bool in
+            guard !cleanupPerformed else {
+                return true
+            }
             tasks.append(task)
+            return false
+        }
+        if shouldCancel {
+            task.cancel()
         }
     }
 
@@ -1327,6 +1463,8 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         var errorStreamID: UInt32?
         var port: UInt32?
         var handle: FileHandle?
+        var input: FileHandleByteStream?
+        var closed = false
     }
 
     private let server: CRIShimStreamingServer
@@ -1568,8 +1706,11 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         dataStreamID: UInt32
     ) {
         let shouldStart = lock.withLock { () -> Bool in
+            guard !cleanupPerformed else {
+                return false
+            }
             var pair = pairs[requestID] ?? Pair()
-            if pair.handle != nil {
+            if pair.handle != nil || pair.closed {
                 return false
             }
             pair.port = port
@@ -1582,17 +1723,30 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         }
 
         let task = Task {
+            var handle: FileHandle?
             do {
-                let handle = try await runtimeManager.streamPortForward(sandboxID: invocation.sandboxID, port: port)
-                lock.withLock {
-                    var pair = pairs[requestID] ?? Pair()
+                let openedHandle = try await runtimeManager.streamPortForward(sandboxID: invocation.sandboxID, port: port)
+                handle = openedHandle
+                let input = try fileHandleStream(openedHandle)
+                let registered = lock.withLock { () -> Bool in
+                    guard !cleanupPerformed, var pair = pairs[requestID], !pair.closed else {
+                        return false
+                    }
                     pair.port = port
                     pair.dataStreamID = dataStreamID
-                    pair.handle = handle
+                    pair.handle = openedHandle
+                    pair.input = input
                     pairs[requestID] = pair
+                    return true
                 }
-                await pumpPortForward(requestID: requestID, dataStreamID: dataStreamID, handle: handle)
+                guard registered else {
+                    input.cancel()
+                    try? openedHandle.close()
+                    return
+                }
+                await pumpPortForward(requestID: requestID, dataStreamID: dataStreamID, input: input)
             } catch {
+                try? handle?.close()
                 await sendPortForwardError(requestID: requestID, message: String(describing: error))
             }
         }
@@ -1602,9 +1756,9 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     private func pumpPortForward(
         requestID: String,
         dataStreamID: UInt32,
-        handle: FileHandle
+        input: FileHandleByteStream
     ) async {
-        for await data in fileHandleStream(handle) {
+        for await data in input.bytes {
             do {
                 try await writeDataFrame(streamID: dataStreamID, data: data)
                 recordActivity()
@@ -1641,15 +1795,19 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 
     private func finishPair(requestID: String) {
-        let handle = lock.withLock { () -> FileHandle? in
+        let (handle, input) = lock.withLock { () -> (FileHandle?, FileHandleByteStream?) in
             guard var pair = pairs[requestID] else {
-                return nil
+                return (nil, nil)
             }
             let handle = pair.handle
+            let input = pair.input
             pair.handle = nil
+            pair.input = nil
+            pair.closed = true
             pairs[requestID] = pair
-            return handle
+            return (handle, input)
         }
+        input?.cancel()
         try? handle?.close()
     }
 
@@ -1668,32 +1826,42 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     }
 
     private func cleanup() async {
-        let (handles, tasksToCancel): ([FileHandle], [Task<Void, Never>]) = lock.withLock {
+        let (connections, tasksToCancel): ([(FileHandle, FileHandleByteStream?)], [Task<Void, Never>]) = lock.withLock {
             if cleanupPerformed {
                 return ([], [])
             }
             cleanupPerformed = true
             idleTimeoutTask?.cancel()
             idleTimeoutTask = nil
-            let handles = pairs.values.compactMap(\.handle)
+            let connections = pairs.values.compactMap { pair in
+                pair.handle.map { ($0, pair.input) }
+            }
             pairs.removeAll()
             streams.removeAll()
             let tasksToCancel = tasks
             tasks.removeAll()
-            return (handles, tasksToCancel)
+            return (connections, tasksToCancel)
         }
 
         for task in tasksToCancel {
             task.cancel()
         }
-        for handle in handles {
+        for (handle, input) in connections {
+            input?.cancel()
             try? handle.close()
         }
     }
 
     private func appendTask(_ task: Task<Void, Never>) {
-        lock.withLock {
+        let shouldCancel = lock.withLock { () -> Bool in
+            guard !cleanupPerformed else {
+                return true
+            }
             tasks.append(task)
+            return false
+        }
+        if shouldCancel {
+            task.cancel()
         }
     }
 
@@ -1830,7 +1998,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     private final class CRIShimPortForwardState {
         let invocation: CRIShimPortForwardInvocation
         private let lock = NSLock()
-        private var streams: [UInt8: (port: UInt32, handle: FileHandle)] = [:]
+        private var streams: [UInt8: (port: UInt32, handle: FileHandle, input: FileHandleByteStream)] = [:]
 
         init(invocation: CRIShimPortForwardInvocation) {
             self.invocation = invocation
@@ -1859,13 +2027,18 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
 
         func stream(for stream: UInt8) -> (port: UInt32, handle: FileHandle)? {
             lock.withLock {
-                streams[stream]
+                streams[stream].map { (port: $0.port, handle: $0.handle) }
             }
         }
 
-        func register(stream: UInt8, port: UInt32, handle: FileHandle) {
+        func register(
+            stream: UInt8,
+            port: UInt32,
+            handle: FileHandle,
+            input: FileHandleByteStream
+        ) {
             lock.withLock {
-                streams[stream] = (port: port, handle: handle)
+                streams[stream] = (port: port, handle: handle, input: input)
             }
         }
 
@@ -1873,12 +2046,15 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             let entry = lock.withLock {
                 streams.removeValue(forKey: stream)
             }
+            entry?.input.cancel()
             try? entry?.handle.close()
         }
 
-        func handles() -> [FileHandle] {
+        func takeConnections() -> [(FileHandle, FileHandleByteStream)] {
             lock.withLock {
-                streams.values.map(\.handle)
+                let connections = streams.values.map { ($0.handle, $0.input) }
+                streams.removeAll()
+                return connections
             }
         }
     }
@@ -1991,6 +2167,12 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         let stdinPipe = invocation.stdin ? Pipe() : nil
         let stdoutPipe = invocation.stdout ? Pipe() : nil
         let stderrPipe = invocation.stderr && !invocation.tty ? Pipe() : nil
+        let stdoutInput = try stdoutPipe.map {
+            try fileHandleStream($0.fileHandleForReading)
+        }
+        let stderrInput = try stderrPipe.map {
+            try fileHandleStream($0.fileHandleForReading)
+        }
         let rawProcess = try await runtimeManager.streamExec(
             containerID: invocation.containerID,
             workloadID: invocation.workloadID,
@@ -2002,33 +2184,51 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             ]
         )
         let process = CRIShimStartSynchronizedStreamingProcess(process: rawProcess)
-        sessionState = .exec(
-            CRIShimExecSessionState(
-                protocolVersion: protocolVersion,
-                invocation: invocation,
-                process: process,
-                stdinPipe: stdinPipe,
-                stdoutPipe: stdoutPipe,
-                stderrPipe: stderrPipe
+        let registered = stateLock.withLock { () -> Bool in
+            guard !cleanupPerformed else {
+                return false
+            }
+            sessionState = .exec(
+                CRIShimExecSessionState(
+                    protocolVersion: protocolVersion,
+                    invocation: invocation,
+                    process: process,
+                    stdinPipe: stdinPipe,
+                    stdoutPipe: stdoutPipe,
+                    stderrPipe: stderrPipe
+                )
             )
-        )
+            return true
+        }
+        guard registered else {
+            stdoutInput?.cancel()
+            stderrInput?.cancel()
+            try? stdinPipe?.fileHandleForReading.close()
+            try? stdinPipe?.fileHandleForWriting.close()
+            try? stdoutPipe?.fileHandleForReading.close()
+            try? stdoutPipe?.fileHandleForWriting.close()
+            try? stderrPipe?.fileHandleForReading.close()
+            try? stderrPipe?.fileHandleForWriting.close()
+            try? await process.kill(SIGTERM)
+            return
+        }
 
         var outputTasks: [Task<Void, Never>] = []
-        if let stdoutPipe {
+        if let stdoutInput {
             outputTasks.append(
                 Task {
                     await pumpExecOutput(
                         stream: 1,
-                        handle: stdoutPipe.fileHandleForReading
+                        input: stdoutInput
                     )
                 })
         }
-        if let stderrPipe {
+        if let stderrInput {
             outputTasks.append(
                 Task {
                     await pumpExecOutput(
                         stream: 2,
-                        handle: stderrPipe.fileHandleForReading
+                        input: stderrInput
                     )
                 })
         }
@@ -2057,18 +2257,42 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
 
     private func startPortForwardSession(_ invocation: CRIShimPortForwardInvocation) async throws {
         let state = CRIShimPortForwardState(invocation: invocation)
-        sessionState = .portForward(state)
+        let sessionRegistered = stateLock.withLock { () -> Bool in
+            guard !cleanupPerformed else {
+                return false
+            }
+            sessionState = .portForward(state)
+            return true
+        }
+        guard sessionRegistered else {
+            return
+        }
 
         for (index, port) in invocation.ports.enumerated() {
+            var openedHandle: FileHandle?
             do {
                 let handle = try await runtimeManager.streamPortForward(sandboxID: invocation.sandboxID, port: port)
+                openedHandle = handle
+                let input = try fileHandleStream(handle)
                 let stream = UInt8(index * 2)
-                state.register(stream: stream, port: port, handle: handle)
+                let registered = stateLock.withLock { () -> Bool in
+                    guard !cleanupPerformed else {
+                        return false
+                    }
+                    state.register(stream: stream, port: port, handle: handle, input: input)
+                    return true
+                }
+                guard registered else {
+                    input.cancel()
+                    try? handle.close()
+                    return
+                }
                 appendTask(
                     Task {
-                        await pumpPortForward(stream: stream, port: port, handle: handle)
+                        await pumpPortForward(stream: stream, port: port, input: input)
                     })
             } catch {
+                try? openedHandle?.close()
                 try await sendPortForwardError(port: port, message: String(describing: error))
             }
         }
@@ -2085,7 +2309,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             return
         }
 
-        switch sessionState {
+        switch sessionStateSnapshot() {
         case .exec(let state):
             await handleExecFrame(stream: stream, payload: payload, state: state)
         case .portForward(let state):
@@ -2174,14 +2398,30 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             }
             handle = existing.handle
         } else {
+            var openedHandle: FileHandle?
             do {
-                handle = try await runtimeManager.streamPortForward(sandboxID: state.invocation.sandboxID, port: port)
-                state.register(stream: stream, port: port, handle: handle)
+                let newHandle = try await runtimeManager.streamPortForward(sandboxID: state.invocation.sandboxID, port: port)
+                openedHandle = newHandle
+                let input = try fileHandleStream(newHandle)
+                let registered = stateLock.withLock { () -> Bool in
+                    guard !cleanupPerformed else {
+                        return false
+                    }
+                    state.register(stream: stream, port: port, handle: newHandle, input: input)
+                    return true
+                }
+                guard registered else {
+                    input.cancel()
+                    try? newHandle.close()
+                    return
+                }
+                handle = newHandle
                 appendTask(
                     Task {
-                        await pumpPortForward(stream: stream, port: port, handle: handle)
+                        await pumpPortForward(stream: stream, port: port, input: input)
                     })
             } catch {
+                try? openedHandle?.close()
                 try? await sendPortForwardError(stream: stream, port: port, message: String(describing: error))
                 return
             }
@@ -2200,9 +2440,9 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
 
     private func pumpExecOutput(
         stream: UInt8,
-        handle: FileHandle
+        input: FileHandleByteStream
     ) async {
-        for await data in fileHandleStream(handle) {
+        for await data in input.bytes {
             do {
                 try await writeBinaryMessage(stream: stream, payload: data)
             } catch {
@@ -2215,7 +2455,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     private func pumpPortForward(
         stream: UInt8,
         port: UInt32,
-        handle: FileHandle
+        input: FileHandleByteStream
     ) async {
         defer {
             Task {
@@ -2223,7 +2463,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             }
         }
 
-        for await data in fileHandleStream(handle) {
+        for await data in input.bytes {
             do {
                 try await writeBinaryMessage(
                     stream: stream,
@@ -2237,7 +2477,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func finishPortForward(stream: UInt8) async {
-        guard case .portForward(let state) = sessionState else {
+        guard case .portForward(let state) = sessionStateSnapshot() else {
             return
         }
         state.close(stream: stream)
@@ -2284,7 +2524,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func failSession(_ message: String) async {
-        switch sessionState {
+        switch sessionStateSnapshot() {
         case .exec(let state):
             let payload =
                 if state.protocolVersion.supportsStructuredExitStatus {
@@ -2316,24 +2556,30 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func cleanup(killProcess: Bool) async {
-        let shouldRun = stateLock.withLock {
+        let cleanupState = stateLock.withLock {
+            () -> (tasks: [Task<Void, Never>], sessionState: SessionState?)? in
             if cleanupPerformed {
-                return false
+                return nil
             }
             cleanupPerformed = true
             idleTimeoutTask?.cancel()
             idleTimeoutTask = nil
-            return true
+            let cleanupState = (
+                tasks: backgroundTasks,
+                sessionState: sessionState
+            )
+            backgroundTasks.removeAll()
+            return cleanupState
         }
-        guard shouldRun else {
+        guard let cleanupState else {
             return
         }
 
-        for task in backgroundTasks {
+        for task in cleanupState.tasks {
             task.cancel()
         }
 
-        switch sessionState {
+        switch cleanupState.sessionState {
         case .exec(let state):
             try? state.stdinPipe?.fileHandleForReading.close()
             try? state.stdinPipe?.fileHandleForWriting.close()
@@ -2345,7 +2591,8 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 try? await state.process.kill(SIGTERM)
             }
         case .portForward(let state):
-            for handle in state.handles() {
+            for (handle, input) in state.takeConnections() {
+                input.cancel()
                 try? handle.close()
             }
         case .none:
@@ -2354,8 +2601,21 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     }
 
     private func appendTask(_ task: Task<Void, Never>) {
-        stateLock.withLock {
+        let shouldCancel = stateLock.withLock { () -> Bool in
+            guard !cleanupPerformed else {
+                return true
+            }
             backgroundTasks.append(task)
+            return false
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    private func sessionStateSnapshot() -> SessionState? {
+        stateLock.withLock {
+            sessionState
         }
     }
 
@@ -2751,18 +3011,122 @@ private func isLoopbackHost(_ host: String) -> Bool {
     }
 }
 
-private func fileHandleStream(_ handle: FileHandle) -> AsyncStream<Data> {
-    AsyncStream { continuation in
-        handle.readabilityHandler = { fileHandle in
-            let data = fileHandle.availableData
-            if data.isEmpty {
-                fileHandle.readabilityHandler = nil
-                continuation.finish()
+final class FileHandleByteStream: @unchecked Sendable {
+    private static let maximumReadSize = 64 * 1024
+    private static let queue = DispatchQueue(
+        label: "com.apple.container.cri-shim.streaming-read",
+        attributes: .concurrent
+    )
+
+    private let fileDescriptor: Int32
+    private let source: DispatchSourceRead
+    private let lock = NSLock()
+    private var continuation: AsyncStream<Data>.Continuation?
+    private var stopped = false
+    let bytes: AsyncStream<Data>
+
+    init(handle: FileHandle) throws {
+        let duplicate = Darwin.fcntl(handle.fileDescriptor, F_DUPFD_CLOEXEC, 0)
+        guard duplicate >= 0 else {
+            throw CRIShimError.internalError("failed to duplicate streaming file descriptor: errno \(errno)")
+        }
+
+        var capturedContinuation: AsyncStream<Data>.Continuation?
+        self.bytes = AsyncStream { continuation in
+            capturedContinuation = continuation
+        }
+        self.fileDescriptor = duplicate
+        self.continuation = capturedContinuation
+        self.source = DispatchSource.makeReadSource(
+            fileDescriptor: duplicate,
+            queue: Self.queue
+        )
+        source.setEventHandler { [weak self] in
+            self?.readAvailableData()
+        }
+        source.setCancelHandler { [fileDescriptor] in
+            _ = Darwin.close(fileDescriptor)
+        }
+        continuation?.onTermination = { [weak self] _ in
+            self?.stop()
+        }
+        source.resume()
+    }
+
+    deinit {
+        stop()
+    }
+
+    func cancel() {
+        stop()
+    }
+
+    private func readAvailableData() {
+        let estimatedSize = source.data
+        guard estimatedSize > 0 else {
+            stop()
+            return
+        }
+        let readSize = Int(min(estimatedSize, UInt(Self.maximumReadSize)))
+        var bytes = [UInt8](repeating: 0, count: readSize)
+
+        while true {
+            let result = bytes.withUnsafeMutableBytes { buffer in
+                Darwin.read(fileDescriptor, buffer.baseAddress, buffer.count)
+            }
+            if result > 0 {
+                let data = Data(bytes.prefix(Int(result)))
+                let continuation: AsyncStream<Data>.Continuation? = lock.withLock {
+                    stopped ? nil : self.continuation
+                }
+                guard let continuation else {
+                    return
+                }
+                if case .terminated = continuation.yield(data) {
+                    stop()
+                }
                 return
             }
-            continuation.yield(data)
+            if result == 0 {
+                stop()
+                return
+            }
+
+            let readError = errno
+            if readError == EINTR {
+                continue
+            }
+            if readError == EAGAIN || readError == EWOULDBLOCK {
+                return
+            }
+            stop()
+            return
         }
     }
+
+    private func stop() {
+        let continuation = lock.withLock { () -> AsyncStream<Data>.Continuation? in
+            guard !stopped else {
+                return nil
+            }
+            stopped = true
+            let continuation = self.continuation
+            self.continuation = nil
+            return continuation
+        }
+        guard let continuation else {
+            return
+        }
+
+        continuation.onTermination = nil
+        source.setEventHandler {}
+        source.cancel()
+        continuation.finish()
+    }
+}
+
+func fileHandleStream(_ handle: FileHandle) throws -> FileHandleByteStream {
+    try FileHandleByteStream(handle: handle)
 }
 
 extension NSLock {

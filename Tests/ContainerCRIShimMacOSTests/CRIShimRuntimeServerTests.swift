@@ -1925,6 +1925,241 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func fileHandleStreamYieldsSmallWriteBeforeEOFAndCancels() async throws {
+        let pipe = Pipe()
+        let input = try fileHandleStream(pipe.fileHandleForReading)
+        let recorder = FileHandleStreamRecorder()
+        let consumer = Task {
+            for await data in input.bytes {
+                recorder.append(data)
+            }
+            recorder.markConsumerFinished()
+        }
+        defer {
+            input.cancel()
+            consumer.cancel()
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+
+        let expected = Data("small-output".utf8)
+        try pipe.fileHandleForWriting.write(contentsOf: expected)
+        try await waitForCondition(description: "small file handle stream write") {
+            recorder.snapshot().data == expected
+        }
+
+        input.cancel()
+        try await waitForCondition(description: "file handle stream cancellation") {
+            recorder.snapshot().consumerFinished
+        }
+        _ = await consumer.result
+
+        #expect(recorder.snapshot().data == expected)
+    }
+
+    @Test
+    func fileHandleStreamOwnsDuplicateAfterOriginalHandleCloses() async throws {
+        let pipe = Pipe()
+        let input = try fileHandleStream(pipe.fileHandleForReading)
+        let recorder = FileHandleStreamRecorder()
+        let consumer = Task {
+            for await data in input.bytes {
+                recorder.append(data)
+            }
+            recorder.markConsumerFinished()
+        }
+        defer {
+            input.cancel()
+            consumer.cancel()
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+
+        try pipe.fileHandleForReading.close()
+        let expected = Data("duplicate-owned-output".utf8)
+        try pipe.fileHandleForWriting.write(contentsOf: expected)
+        try pipe.fileHandleForWriting.close()
+
+        try await waitForCondition(description: "duplicate file descriptor EOF") {
+            recorder.snapshot().consumerFinished
+        }
+        _ = await consumer.result
+
+        #expect(recorder.snapshot().data == expected)
+    }
+
+    @Test
+    func fileHandleStreamReadsPastChunkBoundaryAndFinishesAtEOF() async throws {
+        let pipe = Pipe()
+        let input = try fileHandleStream(pipe.fileHandleForReading)
+        let recorder = FileHandleStreamRecorder()
+        let consumer = Task {
+            for await data in input.bytes {
+                recorder.append(data)
+            }
+            recorder.markConsumerFinished()
+        }
+        defer {
+            input.cancel()
+            consumer.cancel()
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+
+        let expected = Data(repeating: 0xA5, count: 128 * 1024 + 17)
+        let producer = Task {
+            do {
+                try pipe.fileHandleForWriting.write(contentsOf: expected)
+                try pipe.fileHandleForWriting.close()
+                recorder.markProducerFinished(errorDescription: nil)
+            } catch {
+                recorder.markProducerFinished(errorDescription: String(describing: error))
+            }
+        }
+
+        do {
+            try await waitForCondition(
+                description: "large file handle stream transfer",
+                timeout: .seconds(5)
+            ) {
+                let snapshot = recorder.snapshot()
+                return snapshot.producerFinished && snapshot.consumerFinished
+            }
+        } catch {
+            input.cancel()
+            consumer.cancel()
+            producer.cancel()
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+            _ = await producer.result
+            _ = await consumer.result
+            throw error
+        }
+        _ = await producer.result
+        _ = await consumer.result
+
+        let snapshot = recorder.snapshot()
+        #expect(snapshot.producerErrorDescription == nil)
+        #expect(snapshot.data == expected)
+    }
+
+    @Test
+    func fileHandleStreamSurvivesCancellationAndCloseRaces() async throws {
+        for iteration in 0..<256 {
+            let pipe = Pipe()
+            let input = try fileHandleStream(pipe.fileHandleForReading)
+            let recorder = FileHandleStreamRecorder()
+            let consumer = Task {
+                for await data in input.bytes {
+                    recorder.append(data)
+                }
+                recorder.markConsumerFinished()
+            }
+
+            try pipe.fileHandleForWriting.write(contentsOf: Data([UInt8(iteration & 0xFF)]))
+            async let cancelInput: Void = input.cancel()
+            async let closeReader: Void = { try? pipe.fileHandleForReading.close() }()
+            async let closeWriter: Void = { try? pipe.fileHandleForWriting.close() }()
+            _ = await (cancelInput, closeReader, closeWriter)
+
+            try await waitForCondition(
+                description: "file handle stream close race iteration \(iteration)",
+                timeout: .seconds(1)
+            ) {
+                recorder.snapshot().consumerFinished
+            }
+            _ = await consumer.result
+        }
+    }
+
+    @Test
+    func streamingProcessKillWhileStartIsBlockedDoesNotReadClosedHandle() async throws {
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let process = RecordingStreamingProcess(
+            stdin: stdinPipe.fileHandleForReading,
+            stdout: stdoutPipe.fileHandleForWriting,
+            stderr: nil,
+            waitsForStartPermission: true
+        )
+        let startTask = Task {
+            try await process.start()
+        }
+        defer {
+            process.permitStart()
+            startTask.cancel()
+            try? stdinPipe.fileHandleForReading.close()
+            try? stdinPipe.fileHandleForWriting.close()
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+        }
+
+        try await waitForCondition(description: "blocked streaming process start") {
+            process.startCalled
+        }
+        try await process.kill(SIGTERM)
+        process.permitStart()
+        try await startTask.value
+
+        #expect(try await process.wait() == 128 + SIGTERM)
+    }
+
+    @Test
+    func synchronizedStreamingProcessCompletesStartAfterConcurrentKillFails() async throws {
+        let rawProcess = ControlledStreamingProcess()
+        let process = CRIShimStartSynchronizedStreamingProcess(process: rawProcess)
+        let startRecorder = StreamingOperationRecorder()
+        let startTask = Task {
+            do {
+                try await process.start()
+                startRecorder.finish(errorDescription: nil)
+            } catch {
+                startRecorder.finish(errorDescription: String(describing: error))
+            }
+        }
+        var killTask: Task<String?, Never>?
+        defer {
+            rawProcess.completeStart()
+            rawProcess.failKill()
+            startTask.cancel()
+            killTask?.cancel()
+        }
+
+        try await waitForCondition(description: "controlled streaming process start") {
+            rawProcess.startCallCount == 1
+        }
+        killTask = Task {
+            do {
+                try await process.kill(SIGTERM)
+                return nil
+            } catch {
+                return String(describing: error)
+            }
+        }
+        try await waitForCondition(description: "controlled streaming process kill") {
+            rawProcess.killCallCount == 1
+        }
+
+        rawProcess.completeStart()
+        try await waitForAsyncCondition(description: "start waiting for kill outcome") {
+            await process.isWaitingForTerminationOutcome
+        }
+        #expect(!startRecorder.snapshot().finished)
+
+        rawProcess.failKill()
+        try await waitForCondition(description: "streaming process start after failed kill") {
+            startRecorder.snapshot().finished
+        }
+        _ = await startTask.result
+        #expect(startRecorder.snapshot().errorDescription == nil)
+        #expect(await killTask?.value != nil)
+
+        let size = CRIShimTerminalSize(width: 120, height: 40)
+        try await process.resize(size)
+        #expect(rawProcess.resizeCalls == [size])
+    }
+
+    @Test
     func runtimeOperationSurfaceHasDeterministicUnsupportedMessages() {
         for operation in CRIRuntimeOperationSurface.all {
             #expect(!CRIRuntimeOperationSurface.unsupportedReason(for: operation).isEmpty)
@@ -1934,6 +2169,168 @@ struct CRIShimRuntimeServerTests {
         #expect(CRIRuntimeOperationSurface.all.contains(.runPodSandbox))
         #expect(CRIRuntimeOperationSurface.all.contains(.stopPodSandbox))
         #expect(CRIRuntimeOperationSurface.all.contains(.portForward))
+    }
+}
+
+private final class FileHandleStreamRecorder: @unchecked Sendable {
+    struct Snapshot {
+        var data: Data
+        var consumerFinished: Bool
+        var producerFinished: Bool
+        var producerErrorDescription: String?
+    }
+
+    private let lock = NSLock()
+    private var data = Data()
+    private var consumerFinished = false
+    private var producerFinished = false
+    private var producerErrorDescription: String?
+
+    func append(_ data: Data) {
+        lock.withLock {
+            self.data.append(data)
+        }
+    }
+
+    func markConsumerFinished() {
+        lock.withLock {
+            consumerFinished = true
+        }
+    }
+
+    func markProducerFinished(errorDescription: String?) {
+        lock.withLock {
+            producerFinished = true
+            producerErrorDescription = errorDescription
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(
+                data: data,
+                consumerFinished: consumerFinished,
+                producerFinished: producerFinished,
+                producerErrorDescription: producerErrorDescription
+            )
+        }
+    }
+}
+
+private final class StreamingOperationRecorder: @unchecked Sendable {
+    struct Snapshot {
+        var finished: Bool
+        var errorDescription: String?
+    }
+
+    private let lock = NSLock()
+    private var finished = false
+    private var errorDescription: String?
+
+    func finish(errorDescription: String?) {
+        lock.withLock {
+            finished = true
+            self.errorDescription = errorDescription
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(finished: finished, errorDescription: errorDescription)
+        }
+    }
+}
+
+private final class ControlledStreamingProcess: CRIShimStreamingProcess, @unchecked Sendable {
+    private let lock = NSLock()
+    private var startContinuation: CheckedContinuation<Void, Error>?
+    private var killContinuation: CheckedContinuation<Void, Error>?
+    private var recordedResizeCalls: [CRIShimTerminalSize] = []
+    private var recordedStartCallCount = 0
+    private var recordedKillCallCount = 0
+    private var completeStartWhenRegistered = false
+    private var failKillWhenRegistered = false
+
+    var startCallCount: Int {
+        lock.withLock { recordedStartCallCount }
+    }
+
+    var killCallCount: Int {
+        lock.withLock { recordedKillCallCount }
+    }
+
+    var resizeCalls: [CRIShimTerminalSize] {
+        lock.withLock { recordedResizeCalls }
+    }
+
+    func start() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let shouldComplete = lock.withLock { () -> Bool in
+                recordedStartCallCount += 1
+                if completeStartWhenRegistered {
+                    completeStartWhenRegistered = false
+                    return true
+                }
+                startContinuation = continuation
+                return false
+            }
+            if shouldComplete {
+                continuation.resume()
+            }
+        }
+    }
+
+    func resize(_ size: CRIShimTerminalSize) async throws {
+        lock.withLock {
+            recordedResizeCalls.append(size)
+        }
+    }
+
+    func kill(_ signal: Int32) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let shouldFail = lock.withLock { () -> Bool in
+                recordedKillCallCount += 1
+                if failKillWhenRegistered {
+                    failKillWhenRegistered = false
+                    return true
+                }
+                killContinuation = continuation
+                return false
+            }
+            if shouldFail {
+                continuation.resume(throwing: OpaqueCRIShimError(description: "controlled kill failure"))
+            }
+        }
+    }
+
+    func wait() async throws -> Int32 {
+        0
+    }
+
+    func completeStart() {
+        let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
+            guard let startContinuation else {
+                completeStartWhenRegistered = true
+                return nil
+            }
+            let continuation = startContinuation
+            self.startContinuation = nil
+            return continuation
+        }
+        continuation?.resume()
+    }
+
+    func failKill() {
+        let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
+            guard let killContinuation else {
+                failKillWhenRegistered = true
+                return nil
+            }
+            let continuation = killContinuation
+            self.killContinuation = nil
+            return continuation
+        }
+        continuation?.resume(throwing: OpaqueCRIShimError(description: "controlled kill failure"))
     }
 }
 
@@ -2057,6 +2454,8 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
     private var recordedResizeCalls: [CRIShimTerminalSize] = []
     private var recordedResizeAttemptsBeforeStart = 0
     private var recordedKillSignals: [Int32] = []
+    private var terminationSignal: Int32?
+    private var stdinInput: FileHandleByteStream?
     private var waitTask: Task<Int32, Never>?
 
     var started: Bool {
@@ -2097,17 +2496,37 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
         stateLock.withLock {
             hasReceivedStart = true
         }
-        while !stateLock.withLock({ startPermitted }) {
+        while true {
+            let startState = stateLock.withLock {
+                (permitted: startPermitted, terminated: terminationSignal != nil)
+            }
+            if startState.terminated {
+                return
+            }
+            if startState.permitted {
+                break
+            }
             try await Task.sleep(for: .milliseconds(5))
         }
 
+        let inputState = try stateLock.withLock {
+            () throws -> (shouldStart: Bool, input: FileHandleByteStream?) in
+            guard terminationSignal == nil else {
+                return (false, nil)
+            }
+            return (true, try stdin.map(fileHandleStream))
+        }
+        guard inputState.shouldStart else {
+            return
+        }
+        let stdinInput = inputState.input
         let task = Task<Int32, Never> {
             if let stderr {
                 try? stderr.close()
             }
 
-            if let stdin, let stdout {
-                for await data in fileHandleStream(stdin) {
+            if let stdinInput, let stdout {
+                for await data in stdinInput.bytes {
                     try? stdout.write(contentsOf: Data("stdout:".utf8) + data)
                 }
             }
@@ -2116,9 +2535,18 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
             try? stdin?.close()
             return Int32(0)
         }
-        stateLock.withLock {
+        let shouldCancel = stateLock.withLock { () -> Bool in
             hasStarted = true
+            guard waitTask == nil else {
+                return true
+            }
+            self.stdinInput = stdinInput
             waitTask = task
+            return false
+        }
+        if shouldCancel {
+            stdinInput?.cancel()
+            task.cancel()
         }
     }
 
@@ -2139,17 +2567,22 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
     }
 
     func kill(_ signal: Int32) async throws {
-        stateLock.withLock {
+        let cancellationState = stateLock.withLock {
+            () -> (input: FileHandleByteStream?, task: Task<Int32, Never>?) in
             recordedKillSignals.append(signal)
-        }
-        try? stdin?.close()
-        try? stdout?.close()
-        try? stderr?.close()
-        stateLock.withLock {
+            terminationSignal = signal
             if waitTask == nil {
                 waitTask = Task<Int32, Never> { 128 + signal }
             }
+            let cancellationState = (input: stdinInput, task: waitTask)
+            stdinInput = nil
+            return cancellationState
         }
+        cancellationState.input?.cancel()
+        cancellationState.task?.cancel()
+        try? stdin?.close()
+        try? stdout?.close()
+        try? stderr?.close()
     }
 
     func wait() async throws -> Int32 {
@@ -2161,15 +2594,25 @@ private final class RecordingStreamingProcess: CRIShimStreamingProcess, @uncheck
 private final class RecordingPortForwardConnection: @unchecked Sendable {
     let forwardedHandle: FileHandle
     let peerHandle: FileHandle
+    private var input: FileHandleByteStream?
+    private var task: Task<Void, Never>?
 
     init(forwardedHandle: FileHandle, peerHandle: FileHandle) {
         self.forwardedHandle = forwardedHandle
         self.peerHandle = peerHandle
     }
 
-    func startEcho(port: UInt32) {
-        Task {
-            for await data in fileHandleStream(peerHandle) {
+    deinit {
+        input?.cancel()
+        task?.cancel()
+    }
+
+    func startEcho(port: UInt32) throws {
+        let input = try fileHandleStream(peerHandle)
+        let peerHandle = peerHandle
+        self.input = input
+        self.task = Task {
+            for await data in input.bytes {
                 try? peerHandle.write(contentsOf: Data("echo:\(port):".utf8) + data)
             }
         }
@@ -2463,7 +2906,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             forwardedHandle: forwardedHandle,
             peerHandle: peerHandle
         )
-        connection.startEcho(port: port)
+        try connection.startEcho(port: port)
         portForwardCalls.append(RecordingPortForwardCall(sandboxID: sandboxID, port: port))
         portForwardConnections[port] = connection
         return forwardedHandle
@@ -2850,18 +3293,21 @@ private func waitForCondition(
     }
 }
 
-private func fileHandleStream(_ handle: FileHandle) -> AsyncStream<Data> {
-    AsyncStream { continuation in
-        handle.readabilityHandler = { fileHandle in
-            let data = fileHandle.availableData
-            if data.isEmpty {
-                fileHandle.readabilityHandler = nil
-                continuation.finish()
-                return
-            }
-            continuation.yield(data)
+private func waitForAsyncCondition(
+    description: String,
+    timeout: Duration = .seconds(2),
+    pollInterval: Duration = .milliseconds(10),
+    _ body: () async -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now <= deadline {
+        if await body() {
+            return
         }
+        try await Task.sleep(for: pollInterval)
     }
+    throw CRIShimRuntimeServerTestError.timedOut(description)
 }
 
 private func makeSocketPair() throws -> (FileHandle, FileHandle) {

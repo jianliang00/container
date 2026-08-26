@@ -3739,7 +3739,7 @@ struct CRIShimRuntimeServerTests {
             try await task.send(
                 .data(Data([0]) + portPrefixData(firstPort) + Data("first".utf8))
             )
-            let response = try await receiveBinaryMessage(from: task)
+            let response = try await receiveBinaryMessage(from: task, timeout: .seconds(2))
             #expect(
                 ObservedPortForwardMessage(response)
                     == ObservedPortForwardMessage(
@@ -3752,9 +3752,7 @@ struct CRIShimRuntimeServerTests {
             try await task.send(
                 .data(Data([0]) + portPrefixData(changedPort) + Data("changed".utf8))
             )
-            await #expect(throws: (any Error).self) {
-                _ = try await task.receive()
-            }
+            try await expectWebSocketReceiveFailure(task)
             #expect(runtimeManager.portForwardCalls.count == 1)
         }
     }
@@ -3779,9 +3777,7 @@ struct CRIShimRuntimeServerTests {
             try await resumeWebSocketTask(task)
             defer { task.cancel(with: .normalClosure, reason: nil) }
 
-            await #expect(throws: (any Error).self) {
-                _ = try await task.receive()
-            }
+            try await expectWebSocketReceiveFailure(task)
             #expect(runtimeManager.portForwardCalls.isEmpty)
         }
     }
@@ -3804,8 +3800,13 @@ struct CRIShimRuntimeServerTests {
             try await resumeWebSocketTask(task)
             defer { task.cancel(with: .normalClosure, reason: nil) }
 
-            await #expect(throws: (any Error).self) {
+            do {
                 _ = try await receiveBinaryMessage(from: task, timeout: .milliseconds(100))
+                Issue.record("expected websocket receive to time out")
+            } catch CRIShimRuntimeServerTestError.timedOut(let description) {
+                #expect(description == "websocket binary message")
+            } catch {
+                Issue.record("expected websocket receive timeout, got \(error)")
             }
         }
     }
@@ -6840,22 +6841,8 @@ private func resumeWebSocketTask(
 }
 
 private func receiveBinaryMessage(
-    from task: URLSessionWebSocketTask
-) async throws -> Data {
-    let message = try await task.receive()
-    switch message {
-    case .data(let data):
-        return data
-    case .string(let string):
-        throw CRIShimRuntimeServerTestError.unexpectedTextFrame(string)
-    @unknown default:
-        throw CRIShimRuntimeServerTestError.unexpectedFrame
-    }
-}
-
-private func receiveBinaryMessage(
     from task: URLSessionWebSocketTask,
-    timeout: Duration
+    timeout: Duration = .seconds(2)
 ) async throws -> Data {
     try await withCheckedThrowingContinuation { continuation in
         let completion = WebSocketBinaryReceiveCompletion(continuation: continuation)
@@ -6879,13 +6866,28 @@ private func receiveBinaryMessage(
             } catch {
                 return
             }
-            if completion.resume(
-                with: .failure(CRIShimRuntimeServerTestError.timedOut("websocket binary message"))
-            ) {
-                task.cancel(with: .goingAway, reason: nil)
-            }
+            completion.resume(
+                with: .failure(CRIShimRuntimeServerTestError.timedOut("websocket binary message")),
+                beforeContinuationResume: {
+                    task.cancel(with: .goingAway, reason: nil)
+                }
+            )
         }
         completion.install(timeoutTask: timeoutTask)
+    }
+}
+
+private func expectWebSocketReceiveFailure(
+    _ task: URLSessionWebSocketTask,
+    timeout: Duration = .seconds(2)
+) async throws {
+    do {
+        _ = try await receiveBinaryMessage(from: task, timeout: timeout)
+        Issue.record("expected websocket receive to fail")
+    } catch CRIShimRuntimeServerTestError.timedOut {
+        throw CRIShimRuntimeServerTestError.timedOut("websocket close")
+    } catch {
+        return
     }
 }
 
@@ -6911,8 +6913,10 @@ private final class WebSocketBinaryReceiveCompletion: @unchecked Sendable {
         }
     }
 
-    @discardableResult
-    func resume(with result: Result<Data, any Error>) -> Bool {
+    func resume(
+        with result: Result<Data, any Error>,
+        beforeContinuationResume: () -> Void = {}
+    ) {
         let resources = lock.withLock {
             () -> (CheckedContinuation<Data, any Error>?, Task<Void, Never>?) in
             let continuation = self.continuation
@@ -6922,11 +6926,11 @@ private final class WebSocketBinaryReceiveCompletion: @unchecked Sendable {
             return (continuation, timeoutTask)
         }
         guard let continuation = resources.0 else {
-            return false
+            return
         }
         resources.1?.cancel()
+        beforeContinuationResume()
         continuation.resume(with: result)
-        return true
     }
 }
 

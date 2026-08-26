@@ -2121,7 +2121,7 @@ struct CRIShimRuntimeServerTests {
             let (sentinelSource, sentinelPeer) = try makeSocketPair()
             let sentinelSourceFileDescriptor = sentinelSource.fileDescriptor
             let sentinelPeerFileDescriptor = sentinelPeer.fileDescriptor
-            let releasedFileDescriptor = backend.closeForwardedHandle()
+            let releasedFileDescriptor = backend.shutdownForwardedWriteAndCloseHandle()
             let reusedFileDescriptor = Darwin.fcntl(
                 sentinelSourceFileDescriptor,
                 F_DUPFD_CLOEXEC,
@@ -3152,11 +3152,11 @@ struct CRIShimRuntimeServerTests {
         )
         runtimeManager.portForwardNoReadPorts = Set(blockedPorts.map(UInt32.init))
 
-        try await withWebSocketPortForwardServer(
+        try await withObservedWebSocketPortForwardServer(
             runtimeManager: runtimeManager,
             portSets: [[]],
             maximumActivePortForwardTunnels: 5
-        ) { urls in
+        ) { urls, server in
             let task = try makeWebSocketTask(
                 from: urls[0],
                 protocols: ["portforward.k8s.io"]
@@ -3204,13 +3204,26 @@ struct CRIShimRuntimeServerTests {
             #expect(failure.payload.contains("1024 chunks"))
 
             blockedConnections[0].closePeerConnection()
-            try await Task.sleep(for: .milliseconds(250))
+            try await waitForCondition(description: "aggregate tiny-frame quota return") {
+                server.activePortForwardTunnelCount == 3
+            }
             try await task.send(
                 .data(Data([10]) + portPrefixData(healthyPort) + Data("recovered".utf8))
             )
-            let recoveryMessage = try await receiveBinaryMessage(from: task, timeout: .seconds(2))
+            var recoveryMessage: ObservedPortForwardMessage?
+            for _ in 0..<2 {
+                let message = ObservedPortForwardMessage(
+                    try await receiveBinaryMessage(from: task, timeout: .seconds(2))
+                )
+                if message.stream == 10 {
+                    recoveryMessage = message
+                    break
+                }
+                #expect(message.stream == 1)
+                #expect(message.forwardedPort == blockedPorts[0])
+            }
             #expect(
-                ObservedPortForwardMessage(recoveryMessage)
+                recoveryMessage
                     == ObservedPortForwardMessage(
                         stream: 10,
                         forwardedPort: healthyPort,
@@ -4904,8 +4917,9 @@ private final class RecordingPortForwardConnection: @unchecked Sendable {
         }
     }
 
-    func closeForwardedHandle() -> Int32 {
+    func shutdownForwardedWriteAndCloseHandle() -> Int32 {
         let fileDescriptor = forwardedHandle.fileDescriptor
+        _ = Darwin.shutdown(fileDescriptor, SHUT_WR)
         try? forwardedHandle.close()
         return fileDescriptor
     }

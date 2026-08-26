@@ -1639,6 +1639,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         var tunnelLease: UUID?
         var handle: FileHandle?
         var controlConnection: CRIShimBackendControlConnection?
+        var writer: FileHandleByteWriter?
         var input: FileHandleByteStream?
         var pendingInput = CRIShimPendingInputBuffer()
         var pendingInputBytes = 0
@@ -1674,7 +1675,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     private struct WriterLaunch {
         var identity: PairIdentity
         var token: UUID
-        var handle: FileHandle
+        var writer: FileHandleByteWriter
         var controlConnection: CRIShimBackendControlConnection
     }
 
@@ -2068,6 +2069,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
             }
             var unownedHandle: FileHandle?
             var unownedControlConnection: CRIShimBackendControlConnection?
+            var unownedWriter: FileHandleByteWriter?
             do {
                 let openedHandle = try await runtimeManager.streamPortForward(
                     sandboxID: invocation.sandboxID,
@@ -2078,6 +2080,8 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                     duplicating: openedHandle.fileDescriptor
                 )
                 unownedControlConnection = controlConnection
+                let writer = try FileHandleByteWriter(handle: openedHandle)
+                unownedWriter = writer
                 let input = try fileHandleStream(
                     openedHandle,
                     maximumPendingBytes: criShimPortForwardMaximumPendingOutputBytes,
@@ -2100,6 +2104,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                     pair.openingToken = nil
                     pair.handle = openedHandle
                     pair.controlConnection = controlConnection
+                    pair.writer = writer
                     pair.input = input
                     pair.tunnelLease = launch.tunnelLease
                     let outputToken = UUID()
@@ -2122,14 +2127,17 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                 guard let registration else {
                     input.cancel()
                     controlConnection.shutdownAllAndClose()
+                    writer.cancel()
                     try? openedHandle.close()
                     unownedHandle = nil
                     unownedControlConnection = nil
+                    unownedWriter = nil
                     return
                 }
                 ownsTunnelLease = false
                 unownedHandle = nil
                 unownedControlConnection = nil
+                unownedWriter = nil
                 startOutputPump(registration.0)
                 if let writerLaunch = registration.1 {
                     startBackendWriter(writerLaunch)
@@ -2146,6 +2154,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                     failPair(launch.identity, message: String(describing: error))
                 }
                 unownedControlConnection?.shutdownAllAndClose()
+                unownedWriter?.cancel()
                 try? unownedHandle?.close()
             }
         }
@@ -2400,7 +2409,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
             pair.writerToken == nil,
             pair.terminal == nil,
             !pair.inputRejected,
-            let handle = pair.handle,
+            let writer = pair.writer,
             let controlConnection = pair.controlConnection,
             !pair.pendingInput.isEmpty || (pair.clientWriteClosed && !pair.backendWriteShutdown)
         else {
@@ -2411,18 +2420,18 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         return WriterLaunch(
             identity: identity,
             token: token,
-            handle: handle,
+            writer: writer,
             controlConnection: controlConnection
         )
     }
 
     private func startBackendWriter(_ launch: WriterLaunch) {
-        startTrackedTask(owner: launch.identity, detached: true) { [weak self] in
-            self?.runBackendWriter(launch)
+        startTrackedTask(owner: launch.identity) { [weak self] in
+            await self?.runBackendWriter(launch)
         }
     }
 
-    private func runBackendWriter(_ launch: WriterLaunch) {
+    private func runBackendWriter(_ launch: WriterLaunch) async {
         var completedBytes = 0
         while true {
             let action = lock.withLock { () -> BackendWriterAction in
@@ -2430,7 +2439,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                     var pair = pairs[launch.identity.requestID],
                     pair.generation == launch.identity.generation,
                     pair.writerToken == launch.token,
-                    pair.handle === launch.handle
+                    pair.writer === launch.writer
                 else {
                     return .stop
                 }
@@ -2471,7 +2480,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                 return
             case .write(let data):
                 do {
-                    try launch.handle.write(contentsOf: data)
+                    try await launch.writer.write(data)
                     completedBytes = data.count
                 } catch {
                     failPair(launch.identity, message: String(describing: error))
@@ -2503,12 +2512,19 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
 
     private func finishPair(_ identity: PairIdentity) {
         let resources = lock.withLock {
-            () -> (FileHandle?, CRIShimBackendControlConnection?, FileHandleByteStream?, UUID?, [Task<Void, Never>]) in
+            () -> (
+                FileHandle?,
+                CRIShimBackendControlConnection?,
+                FileHandleByteWriter?,
+                FileHandleByteStream?,
+                UUID?,
+                [Task<Void, Never>]
+            ) in
             guard
                 let pair = pairs[identity.requestID],
                 pair.generation == identity.generation
             else {
-                return (nil, nil, nil, nil, [])
+                return (nil, nil, nil, nil, nil, [])
             }
             pairs.removeValue(forKey: identity.requestID)
             streams = streams.filter { $0.value.generation != identity.generation }
@@ -2530,18 +2546,20 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
             return (
                 pair.handle,
                 pair.controlConnection,
+                pair.writer,
                 pair.input,
                 pair.tunnelLease,
                 tasksToCancel
             )
         }
         resources.1?.shutdownAllAndClose()
-        for task in resources.4 {
+        resources.2?.cancel()
+        for task in resources.5 {
             task.cancel()
         }
-        resources.2?.cancel()
+        resources.3?.cancel()
         try? resources.0?.close()
-        if let tunnelLease = resources.3 {
+        if let tunnelLease = resources.4 {
             server.releasePortForwardTunnelLease(tunnelLease)
         }
     }
@@ -2567,7 +2585,12 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
         _ = controlWriteGate.reject()
         let (connections, tunnelLeases, tasksToCancel):
             (
-                [(FileHandle?, CRIShimBackendControlConnection?, FileHandleByteStream?)],
+                [(
+                    FileHandle?,
+                    CRIShimBackendControlConnection?,
+                    FileHandleByteWriter?,
+                    FileHandleByteStream?
+                )],
                 [UUID],
                 [Task<Void, Never>]
             ) = lock.withLock {
@@ -2578,7 +2601,7 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                 idleTimeoutTask?.cancel()
                 idleTimeoutTask = nil
                 let connections = pairs.values.map {
-                    ($0.handle, $0.controlConnection, $0.input)
+                    ($0.handle, $0.controlConnection, $0.writer, $0.input)
                 }
                 let tunnelLeases = pairs.values.compactMap(\.tunnelLease)
                 pairs.removeAll()
@@ -2593,13 +2616,14 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
                 return (connections, tunnelLeases, tasksToCancel)
             }
 
-        for (_, controlConnection, _) in connections {
+        for (_, controlConnection, writer, _) in connections {
             controlConnection?.shutdownAllAndClose()
+            writer?.cancel()
         }
         for task in tasksToCancel {
             task.cancel()
         }
-        for (handle, _, input) in connections {
+        for (handle, _, _, input) in connections {
             input?.cancel()
             try? handle?.close()
         }
@@ -2611,7 +2635,6 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
     @discardableResult
     private func startTrackedTask(
         owner: PairIdentity?,
-        detached: Bool = false,
         operation: @escaping @Sendable () async -> Void
     ) -> Bool {
         let id = UUID()
@@ -2627,17 +2650,9 @@ private final class CRIShimPortForwardSPDYHandler: ChannelInboundHandler, Remova
             return false
         }
 
-        let task: Task<Void, Never>
-        if detached {
-            task = Task.detached { [weak self] in
-                await operation()
-                self?.trackedTaskFinished(id)
-            }
-        } else {
-            task = Task { [weak self] in
-                await operation()
-                self?.trackedTaskFinished(id)
-            }
+        let task = Task { [weak self] in
+            await operation()
+            self?.trackedTaskFinished(id)
         }
         let shouldCancel = lock.withLock {
             trackedTask.task = task
@@ -2932,6 +2947,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         struct Connection {
             var handle: FileHandle
             var controlConnection: CRIShimBackendControlConnection
+            var writer: FileHandleByteWriter
             var input: FileHandleByteStream
             var tunnelLease: UUID
         }
@@ -2946,7 +2962,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             var identity: StreamIdentity
             var token: UUID
             var port: UInt32
-            var handle: FileHandle
+            var writer: FileHandleByteWriter
         }
 
         struct StreamFailure {
@@ -3141,7 +3157,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                     var state = streams[launch.identity.stream],
                     state.generation == launch.identity.generation,
                     state.writerToken == launch.token,
-                    state.connection?.handle === launch.handle
+                    state.connection?.writer === launch.writer
                 else {
                     return .stop
                 }
@@ -3228,13 +3244,13 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 state.writerToken == nil,
                 !state.rejected,
                 !state.pendingInput.isEmpty,
-                let handle = state.connection?.handle
+                let writer = state.connection?.writer
             else {
                 return nil
             }
             let token = UUID()
             state.writerToken = token
-            return WriterLaunch(identity: identity, token: token, port: state.port, handle: handle)
+            return WriterLaunch(identity: identity, token: token, port: state.port, writer: writer)
         }
     }
 
@@ -3647,6 +3663,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
     ) async {
         var openedHandle: FileHandle?
         var unownedControlConnection: CRIShimBackendControlConnection?
+        var unownedWriter: FileHandleByteWriter?
         var unownedTunnelLease: UUID?
         do {
             guard let tunnelLease = server.acquirePortForwardTunnelLease() else {
@@ -3670,6 +3687,8 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 duplicating: handle.fileDescriptor
             )
             unownedControlConnection = controlConnection
+            let writer = try FileHandleByteWriter(handle: handle)
+            unownedWriter = writer
             let input = try fileHandleStream(
                 handle,
                 maximumPendingBytes: criShimPortForwardMaximumPendingOutputBytes,
@@ -3678,6 +3697,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             let connection = CRIShimPortForwardState.Connection(
                 handle: handle,
                 controlConnection: controlConnection,
+                writer: writer,
                 input: input,
                 tunnelLease: tunnelLease
             )
@@ -3690,15 +3710,18 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             guard let registration else {
                 input.cancel()
                 controlConnection.shutdownAllAndClose()
+                writer.cancel()
                 try? handle.close()
                 server.releasePortForwardTunnelLease(tunnelLease)
                 openedHandle = nil
                 unownedControlConnection = nil
+                unownedWriter = nil
                 unownedTunnelLease = nil
                 return
             }
             openedHandle = nil
             unownedControlConnection = nil
+            unownedWriter = nil
             unownedTunnelLease = nil
             startPortForwardTask(owner: registration.identity) { [weak self] in
                 await self?.pumpPortForward(
@@ -3716,6 +3739,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 server.releasePortForwardTunnelLease(unownedTunnelLease)
             }
             unownedControlConnection?.shutdownAllAndClose()
+            unownedWriter?.cancel()
             try? openedHandle?.close()
             await failPortForwardStream(
                 state: state,
@@ -3732,7 +3756,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         state: CRIShimPortForwardState,
         launch: CRIShimPortForwardState.WriterLaunch
     ) {
-        startPortForwardTask(owner: launch.identity, detached: true) { [weak self] in
+        startPortForwardTask(owner: launch.identity) { [weak self] in
             await self?.runPortForwardWriter(state: state, launch: launch)
         }
     }
@@ -3748,7 +3772,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
                 return
             case .write(let data):
                 do {
-                    try launch.handle.write(contentsOf: data)
+                    try await launch.writer.write(data)
                     completedBytes = data.count
                 } catch {
                     await failPortForwardStream(
@@ -3854,6 +3878,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
         stopOutput: Bool = true
     ) {
         removal.connection?.controlConnection.shutdownAllAndClose()
+        removal.connection?.writer.cancel()
         let tasks = takePortForwardTasks(owner: identity)
         for task in tasks {
             task.cancel()
@@ -3994,6 +4019,7 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             let removals = state.takeRemovals()
             for removal in removals {
                 removal.connection?.controlConnection.shutdownAllAndClose()
+                removal.connection?.writer.cancel()
                 removal.outputSequence.stop()
             }
             for task in cleanupState.backgroundTasks + cleanupState.portForwardTasks
@@ -4139,7 +4165,6 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
 
     private func startPortForwardTask(
         owner: CRIShimPortForwardState.StreamIdentity,
-        detached: Bool = false,
         operation: @escaping @Sendable () async -> Void
     ) {
         let id = UUID()
@@ -4155,17 +4180,9 @@ private final class CRIShimStreamingWebSocketHandler: ChannelDuplexHandler, Remo
             return
         }
 
-        let task: Task<Void, Never>
-        if detached {
-            task = Task.detached { [weak self] in
-                await operation()
-                self?.portForwardTaskFinished(id)
-            }
-        } else {
-            task = Task { [weak self] in
-                await operation()
-                self?.portForwardTaskFinished(id)
-            }
+        let task = Task { [weak self] in
+            await operation()
+            self?.portForwardTaskFinished(id)
         }
         let shouldCancel = stateLock.withLock {
             trackedTask.task = task
@@ -4719,6 +4736,188 @@ private func isLoopbackHost(_ host: String) -> Bool {
         true
     default:
         false
+    }
+}
+
+final class FileHandleByteWriter: @unchecked Sendable {
+    private final class PendingWrite: @unchecked Sendable {
+        let data: Data
+        var offset = 0
+        let continuation: CheckedContinuation<Void, any Error>
+
+        init(
+            data: Data,
+            continuation: CheckedContinuation<Void, any Error>
+        ) {
+            self.data = data
+            self.continuation = continuation
+        }
+    }
+
+    private enum DrainAction {
+        case stop
+        case retry
+        case wait
+        case complete(CheckedContinuation<Void, any Error>)
+        case fail(CheckedContinuation<Void, any Error>, any Error)
+    }
+
+    private enum WriterError: Error {
+        case closed
+        case concurrentWrite
+    }
+
+    private static let workerQueue = DispatchQueue(
+        label: "com.apple.container.cri-shim.streaming-write",
+        attributes: .concurrent
+    )
+
+    private let fileDescriptor: Int32
+    private let source: DispatchSourceWrite
+    private let lock = NSLock()
+    private var pendingWrite: PendingWrite?
+    private var sourceSuspended = true
+    private var stopped = false
+
+    init(handle: FileHandle) throws {
+        let duplicate = Darwin.fcntl(handle.fileDescriptor, F_DUPFD_CLOEXEC, 0)
+        guard duplicate >= 0 else {
+            throw CRIShimError.internalError("failed to duplicate streaming write descriptor: errno \(errno)")
+        }
+
+        let flags = Darwin.fcntl(duplicate, F_GETFL)
+        guard flags >= 0, Darwin.fcntl(duplicate, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            let code = errno
+            _ = Darwin.close(duplicate)
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        configureBackendSocketNoSIGPIPE(duplicate)
+
+        let queue = DispatchQueue(
+            label: "com.apple.container.cri-shim.streaming-write.\(UUID().uuidString)",
+            target: Self.workerQueue
+        )
+        self.fileDescriptor = duplicate
+        self.source = DispatchSource.makeWriteSource(
+            fileDescriptor: duplicate,
+            queue: queue
+        )
+        source.setEventHandler { [weak self] in
+            self?.writeAvailableData()
+        }
+        source.setCancelHandler { [fileDescriptor] in
+            _ = Darwin.close(fileDescriptor)
+        }
+    }
+
+    deinit {
+        cancel()
+    }
+
+    func write(_ data: Data) async throws {
+        guard !data.isEmpty else {
+            return
+        }
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let failure = lock.withLock { () -> (any Error)? in
+                    guard !stopped else {
+                        return WriterError.closed
+                    }
+                    guard pendingWrite == nil else {
+                        return WriterError.concurrentWrite
+                    }
+                    pendingWrite = PendingWrite(data: data, continuation: continuation)
+                    if sourceSuspended {
+                        sourceSuspended = false
+                        source.resume()
+                    }
+                    return nil
+                }
+                if let failure {
+                    continuation.resume(throwing: failure)
+                }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func cancel() {
+        let continuation = lock.withLock {
+            () -> CheckedContinuation<Void, any Error>? in
+            guard !stopped else {
+                return nil
+            }
+            stopped = true
+            let continuation = pendingWrite?.continuation
+            pendingWrite = nil
+            if sourceSuspended {
+                sourceSuspended = false
+                source.resume()
+            }
+            source.setEventHandler {}
+            source.cancel()
+            return continuation
+        }
+        continuation?.resume(throwing: CancellationError())
+    }
+
+    private func writeAvailableData() {
+        while true {
+            let action = lock.withLock { () -> DrainAction in
+                guard !stopped, let pendingWrite else {
+                    return .stop
+                }
+                let result = pendingWrite.data.withUnsafeBytes { buffer in
+                    Darwin.write(
+                        fileDescriptor,
+                        buffer.baseAddress?.advanced(by: pendingWrite.offset),
+                        buffer.count - pendingWrite.offset
+                    )
+                }
+                let code = result < 0 ? errno : EIO
+                if result > 0 {
+                    pendingWrite.offset += result
+                    guard pendingWrite.offset == pendingWrite.data.count else {
+                        return .retry
+                    }
+                    self.pendingWrite = nil
+                    sourceSuspended = true
+                    source.suspend()
+                    return .complete(pendingWrite.continuation)
+                }
+                if result < 0, code == EINTR {
+                    return .retry
+                }
+                if result < 0, code == EAGAIN || code == EWOULDBLOCK {
+                    return .wait
+                }
+
+                self.pendingWrite = nil
+                stopped = true
+                source.setEventHandler {}
+                source.cancel()
+                return .fail(
+                    pendingWrite.continuation,
+                    POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+                )
+            }
+
+            switch action {
+            case .stop, .wait:
+                return
+            case .retry:
+                continue
+            case .complete(let continuation):
+                continuation.resume()
+                return
+            case .fail(let continuation, let error):
+                continuation.resume(throwing: error)
+                return
+            }
+        }
     }
 }
 

@@ -238,20 +238,21 @@ struct GuestAgentTCPConnectTests {
         let reservation = try ClosedLoopbackPortReservation()
         let harness = try TCPAgentConnectionHarness()
         defer { harness.closePeer() }
+        try withExtendedLifetime(reservation) {
+            let ready = try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: harness.peerFD)
+            #expect(ready.type == .ready)
+            #expect(ready.capabilities?.contains("tcpConnectV1") == true)
+            try MacOSSidecarSocketIO.writeJSONFrame(
+                GuestAgentFrame(type: .tcpConnect, id: "closed-port", port: reservation.port),
+                fd: harness.peerFD
+            )
 
-        let ready = try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: harness.peerFD)
-        #expect(ready.type == .ready)
-        #expect(ready.capabilities?.contains("tcpConnectV1") == true)
-        try MacOSSidecarSocketIO.writeJSONFrame(
-            GuestAgentFrame(type: .tcpConnect, id: "closed-port", port: reservation.port),
-            fd: harness.peerFD
-        )
-
-        let error = try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: harness.peerFD)
-        #expect(error.type == .error)
-        #expect(error.id == "closed-port")
-        #expect(error.message?.contains("failed to connect to loopback TCP port") == true)
-        try harness.waitForCompletion()
+            let error = try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: harness.peerFD)
+            #expect(error.type == .error)
+            #expect(error.id == "closed-port")
+            #expect(error.message?.contains("failed to connect to loopback TCP port") == true)
+            try harness.waitForCompletion()
+        }
     }
 
     private func expectTCPConnectError(port: UInt32, messageFragment: String) throws {
@@ -424,39 +425,64 @@ private final class ClosedLoopbackPortReservation {
     private let ipv4FD: Int32
 
     init() throws {
-        let ipv6FD = Darwin.socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP)
-        guard ipv6FD >= 0 else {
-            throw POSIXError.fromErrno()
-        }
-        self.ipv6FD = ipv6FD
-
-        var ipv6Only: Int32 = 1
-        guard setsockopt(ipv6FD, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6Only, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
-            closeTestFD(ipv6FD)
-            throw POSIXError.fromErrno()
-        }
-
-        let port = try bindLoopbackSocket(ipv6FD, family: AF_INET6, port: 0)
-        self.port = port
-
-        let ipv4FD = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-        guard ipv4FD >= 0 else {
-            closeTestFD(ipv6FD)
-            throw POSIXError.fromErrno()
-        }
-        self.ipv4FD = ipv4FD
-        do {
-            _ = try bindLoopbackSocket(ipv4FD, family: AF_INET, port: port)
-        } catch {
-            closeTestFD(ipv4FD)
-            closeTestFD(ipv6FD)
-            throw error
-        }
+        let reservation = try Self.reserveBothFamilies()
+        self.port = reservation.port
+        self.ipv6FD = reservation.ipv6FD
+        self.ipv4FD = reservation.ipv4FD
     }
 
     deinit {
         closeTestFD(ipv4FD)
         closeTestFD(ipv6FD)
+    }
+
+    private static func reserveBothFamilies() throws -> (
+        port: UInt32,
+        ipv6FD: Int32,
+        ipv4FD: Int32
+    ) {
+        for _ in 0..<32 {
+            let ipv4FD = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+            guard ipv4FD >= 0 else {
+                throw POSIXError.fromErrno()
+            }
+
+            do {
+                let port = try bindLoopbackSocket(ipv4FD, family: AF_INET, port: 0)
+                let ipv6FD = Darwin.socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP)
+                guard ipv6FD >= 0 else {
+                    throw POSIXError.fromErrno()
+                }
+                var ownsIPv6FD = true
+                defer {
+                    if ownsIPv6FD {
+                        closeTestFD(ipv6FD)
+                    }
+                }
+                var ipv6Only: Int32 = 1
+                guard
+                    setsockopt(
+                        ipv6FD,
+                        IPPROTO_IPV6,
+                        IPV6_V6ONLY,
+                        &ipv6Only,
+                        socklen_t(MemoryLayout<Int32>.size)
+                    ) == 0
+                else {
+                    throw POSIXError.fromErrno()
+                }
+                _ = try bindLoopbackSocket(ipv6FD, family: AF_INET6, port: port)
+                ownsIPv6FD = false
+                return (port: port, ipv6FD: ipv6FD, ipv4FD: ipv4FD)
+            } catch let error as POSIXError where error.code == .EADDRINUSE {
+                closeTestFD(ipv4FD)
+                continue
+            } catch {
+                closeTestFD(ipv4FD)
+                throw error
+            }
+        }
+        throw POSIXError(.EADDRINUSE)
     }
 }
 

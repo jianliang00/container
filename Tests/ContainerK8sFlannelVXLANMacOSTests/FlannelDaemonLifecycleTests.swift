@@ -368,13 +368,10 @@ struct FlannelDaemonLifecycleTests {
         defer { server.stop() }
 
         let response = try await runControlClient {
-            try FlannelControlClient.requestWithdrawal(
-                socketPath: socketPath,
-                requiredPeerUID: geteuid()
-            )
+            try readControlResponseWithoutRequest(socketPath: socketPath)
         }
-        #expect(!response.succeeded)
-        #expect(response.message.contains("control request denied for uid"))
+        #expect(!response.outcome.succeeded)
+        #expect(response.outcome.message.contains("control request denied for uid"))
         #expect(await outcomes.calls == 0)
     }
 }
@@ -458,6 +455,73 @@ private func runControlClient<T: Sendable>(
             continuation.resume(with: Result(catching: operation))
         }
     }
+}
+
+private func readControlResponseWithoutRequest(socketPath: String) throws -> FlannelControlResponse {
+    let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else {
+        throw currentPOSIXError()
+    }
+    defer { Darwin.close(fd) }
+    var timeout = timeval(tv_sec: 5, tv_usec: 0)
+    guard
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        ) == 0
+    else {
+        throw currentPOSIXError()
+    }
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = Array(socketPath.utf8)
+    guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
+        throw POSIXError(.ENAMETOOLONG)
+    }
+    withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+        buffer.initializeMemory(as: CChar.self, repeating: 0)
+        for (index, byte) in pathBytes.enumerated() {
+            buffer[index] = byte
+        }
+    }
+    let addressLength = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count + 1)
+    let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.connect(fd, $0, addressLength)
+        }
+    }
+    guard connected == 0 else {
+        throw currentPOSIXError()
+    }
+
+    var frame = Data()
+    var byte: UInt8 = 0
+    while frame.count < 4_096 {
+        let count = Darwin.read(fd, &byte, 1)
+        if count == 1 {
+            if byte == 0x0a {
+                return try JSONDecoder().decode(FlannelControlResponse.self, from: frame)
+            }
+            frame.append(byte)
+            continue
+        }
+        if count < 0, errno == EINTR {
+            continue
+        }
+        if count == 0 {
+            throw POSIXError(.ECONNRESET)
+        }
+        throw currentPOSIXError()
+    }
+    throw POSIXError(.EMSGSIZE)
+}
+
+private func currentPOSIXError() -> POSIXError {
+    POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
 }
 
 private func makePurgePreflightClaim() throws -> FlannelPurgePreflightClaim {

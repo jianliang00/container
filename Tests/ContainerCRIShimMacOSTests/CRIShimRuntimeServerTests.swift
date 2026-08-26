@@ -6857,20 +6857,76 @@ private func receiveBinaryMessage(
     from task: URLSessionWebSocketTask,
     timeout: Duration
 ) async throws -> Data {
-    try await withThrowingTaskGroup(of: Data.self) { group in
-        group.addTask {
-            try await receiveBinaryMessage(from: task)
+    try await withCheckedThrowingContinuation { continuation in
+        let completion = WebSocketBinaryReceiveCompletion(continuation: continuation)
+        task.receive { result in
+            switch result {
+            case .success(.data(let data)):
+                completion.resume(with: .success(data))
+            case .success(.string(let string)):
+                completion.resume(
+                    with: .failure(CRIShimRuntimeServerTestError.unexpectedTextFrame(string))
+                )
+            case .failure(let error):
+                completion.resume(with: .failure(error))
+            @unknown default:
+                completion.resume(with: .failure(CRIShimRuntimeServerTestError.unexpectedFrame))
+            }
         }
-        group.addTask {
-            try await Task.sleep(for: timeout)
-            task.cancel(with: .goingAway, reason: nil)
-            throw CRIShimRuntimeServerTestError.timedOut("websocket binary message")
+        let timeoutTask = Task.detached {
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            if completion.resume(
+                with: .failure(CRIShimRuntimeServerTestError.timedOut("websocket binary message"))
+            ) {
+                task.cancel(with: .goingAway, reason: nil)
+            }
         }
-        guard let message = try await group.next() else {
-            throw CRIShimRuntimeServerTestError.unexpectedEOF
+        completion.install(timeoutTask: timeoutTask)
+    }
+}
+
+private final class WebSocketBinaryReceiveCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, any Error>?
+    private var timeoutTask: Task<Void, Never>?
+
+    init(continuation: CheckedContinuation<Data, any Error>) {
+        self.continuation = continuation
+    }
+
+    func install(timeoutTask: Task<Void, Never>) {
+        let shouldCancel = lock.withLock { () -> Bool in
+            guard continuation != nil else {
+                return true
+            }
+            self.timeoutTask = timeoutTask
+            return false
         }
-        group.cancelAll()
-        return message
+        if shouldCancel {
+            timeoutTask.cancel()
+        }
+    }
+
+    @discardableResult
+    func resume(with result: Result<Data, any Error>) -> Bool {
+        let resources = lock.withLock {
+            () -> (CheckedContinuation<Data, any Error>?, Task<Void, Never>?) in
+            let continuation = self.continuation
+            self.continuation = nil
+            let timeoutTask = self.timeoutTask
+            self.timeoutTask = nil
+            return (continuation, timeoutTask)
+        }
+        guard let continuation = resources.0 else {
+            return false
+        }
+        resources.1?.cancel()
+        continuation.resume(with: result)
+        return true
     }
 }
 

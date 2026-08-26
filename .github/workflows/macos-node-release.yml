@@ -923,7 +923,8 @@ jobs:
 
       - name: Publish GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Old-target draft promotion requires Contents and Workflows write permissions.
+          GH_TOKEN: ${{ secrets.MACOS_NODE_RELEASE_TOKEN || github.token }}
         run: |
           set -euo pipefail
 

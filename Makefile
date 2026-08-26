@@ -17,6 +17,7 @@ BUILD_CONFIGURATION ?= debug
 WARNINGS_AS_ERRORS ?= true
 CONTAINER_SKIP_VIRTUALIZATION_TESTS ?= 0
 SWIFT_CONFIGURATION := $(if $(filter-out false,$(WARNINGS_AS_ERRORS)),-Xswiftc -warnings-as-errors) -Xswiftc -enable-testing
+FORK_ISOLATED_UNIT_TEST_SUITE := GuestAgentProcessStartupTests
 SKIP_VIRTUALIZATION_TESTS := $(filter 1 true TRUE yes YES,$(CONTAINER_SKIP_VIRTUALIZATION_TESTS))
 # Code-coverage instrumentation, layered onto the shared build stages. Empty for
 # ordinary builds; the coverage-* targets opt in via a target-specific value so
@@ -231,7 +232,8 @@ dsym:
 
 .PHONY: test
 test: build-tests
-	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests
+	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests --skip $(FORK_ISOLATED_UNIT_TEST_SUITE)
+	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter $(FORK_ISOLATED_UNIT_TEST_SUITE)
 
 .PHONY: install-kernel
 install-kernel:
@@ -250,6 +252,7 @@ endif
 COV_DATA_DIR = $(shell $(SWIFT) test --show-coverage-path | xargs dirname)
 COV_REPORT_FILE = $(ROOT_DIR)/code-coverage-report
 COVERAGE_OUTPUT_DIR := $(ROOT_DIR)/coverage-reports
+UNIT_COVERAGE_RAW_DIR := $(COVERAGE_OUTPUT_DIR)/unit/raw
 TEST_BINARY = $(BUILD_BIN_DIR)/containerPackageTests.xctest/Contents/MacOS/containerPackageTests
 # All product binaries that may be instrumented for coverage.
 # Used as additional -object args to llvm-cov for integration/combined reports.
@@ -430,11 +433,12 @@ endif
 .PHONY: coverage-unit
 coverage-unit: build-tests
 	@echo Running unit test coverage...
-	@rm -f $(COV_DATA_DIR)/*.profraw
-	@mkdir -p $(COVERAGE_OUTPUT_DIR)/unit
-	@$(SWIFT) test --skip-build --enable-code-coverage -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests
+	@mkdir -p $(UNIT_COVERAGE_RAW_DIR)
+	@rm -f $(UNIT_COVERAGE_RAW_DIR)/*.profraw
+	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-main-%p-%m.profraw" $(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests --skip $(FORK_ISOLATED_UNIT_TEST_SUITE)
+	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-guest-process-%p-%m.profraw" $(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter $(FORK_ISOLATED_UNIT_TEST_SUITE)
 	@echo Merging unit coverage profdata...
-	@xcrun llvm-profdata merge -sparse $(COV_DATA_DIR)/*.profraw -o $(COVERAGE_OUTPUT_DIR)/unit/default.profdata
+	@xcrun llvm-profdata merge -sparse $(UNIT_COVERAGE_RAW_DIR)/*.profraw -o $(COVERAGE_OUTPUT_DIR)/unit/default.profdata
 	$(call GENERATE_COV_REPORTS,$(COVERAGE_OUTPUT_DIR)/unit/default.profdata,unit)
 
 .PHONY: fmt

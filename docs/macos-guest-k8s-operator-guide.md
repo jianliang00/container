@@ -222,6 +222,13 @@ spec:
 Clusters that expose this annotation to ordinary workload authors should enforce
 their own admission policy for accepted sandbox images and callers.
 
+Treat the node package and sandbox image as one release unit. Before a canary,
+verify the package checksum and signature, pin the sandbox by digest, and check
+the package-embedded guest-agent checksum against release metadata and against
+the guest-agent checksum inside the sandbox. Required guest capabilities are
+part of the pairing; PortForward fails closed when the sandbox does not
+advertise `tcpConnectV1`.
+
 ## Compat Validation Notes
 
 Compat-mode Pods use Virtualization.framework NAT and do not provide Pod CNI,
@@ -282,6 +289,40 @@ spec:
 Compat-mode Pods have NAT egress only. They do not have a real Pod IP, ClusterIP
 Service semantics, NetworkPolicy, or inbound Service reachability.
 
+## Full-Mode Dual-Stack Rollout
+
+Dual stack is an explicit full-mode feature. Join must use
+`--enable-dual-stack`, and the selected Flannel ConfigMap must enable both
+families. Kubelet can register a new Node before the control plane allocates its
+PodCIDRs; before creating validation Pods or uncordoning, the Node must have one
+IPv4 and one IPv6 PodCIDR.
+
+Automatic node reboot after a vmnet helper disconnect is a separate explicit
+feature. Add `--vmnet-disconnect-recovery reboot-node` to join when the node pool
+requires it; the default is disabled. Canary and rollback commands must preserve
+the selected recovery mode.
+
+Keep the node cordoned until all of the following pass for the exact package and
+sandbox digest pair:
+
+- Pod status contains one IPv4 and one IPv6 address from the Node PodCIDRs
+- the guest has both addresses, an IPv6 default route through the host-only
+  gateway, and the expected inner MTU
+- same-node and cross-node Mac traffic works in both families
+- Mac and Linux Pods communicate in both directions
+- IPv4 and IPv6 ClusterIP, EndpointSlice updates, and DNS A/AAAA work
+- both controlled external IPv6 endpoints are reachable on TCP 443
+- host reboot recreates the network and Pods, and Service endpoints converge
+- `container-macos-node-status` reports fresh Flannel and kube-proxy status, and
+  fresh recovery status when reboot-node recovery is enabled
+
+A host reboot recreates each macOS VM. The Pod UID and allocated IPv4 can stay
+stable while the container attempt increments and the IPv6 interface identifier
+changes with the new VM MAC. Do not uncordon until Kubernetes Pod status and
+EndpointSlices contain the new IPv6 address and bidirectional traffic succeeds.
+Windows Flannel IPv6 remains unsupported. Mac↔Windows IPv4 must be a separate
+release gate; Linux↔Windows success does not prove that path.
+
 ## Static Pod
 
 Static Pods are placed directly on a macOS node by the local kubelet. They are
@@ -326,15 +367,28 @@ The first production rollout supports a conservative macOS worker-node surface:
 | Port-forward | `kubectl port-forward` through the loopback streaming server |
 | Probes | exec, HTTP, and TCP kubelet probes |
 | Mounts | Supported CRI mount subset backed by boot-time `virtiofs` shares |
-| Service | Full mode supports the kube-proxy-backed Service surface validated for the release. Compat mode does not provide ClusterIP or inbound Service semantics |
-| NetworkPolicy | Full mode may enable a separately validated implementation. Compat mode does not provide NetworkPolicy |
+| Service | Full mode supports the release-validated IPv4/IPv6 ClusterIP and EndpointSlice surface. Compat mode does not provide ClusterIP or inbound Service semantics |
+| NetworkPolicy | Disabled in the first rollout for both modes; enable only after a separately validated controller and enforcement rollout |
 
 Unsupported in the first production rollout:
 
-- multi-node Service routing
 - NodePort and LoadBalancer
-- dual-stack Service routing
+- Windows Pod IPv6 and any mixed-OS path not passed by the release canary
 - session affinity
 - Kubernetes NetworkPolicy
 - Linux mount namespaces, cgroups, seccomp, user namespaces, and mount
   propagation semantics
+
+This restricted surface is not a multi-tenant NetworkPolicy boundary. Run it in
+dedicated namespaces and node pools with cluster admission requiring approved
+macOS RuntimeClasses. Service selectors must use an administratively controlled
+backend label admitted only for release-validated macOS or Linux workloads.
+Admission must reject EndpointSlices that introduce a Windows or unapproved
+backend, and monitoring must alert on drift. If the cluster cannot enforce and
+continuously verify those boundaries, do not use the restricted rollout.
+
+The release streaming gate uses a real guest TCP listener and payload. It must
+cover a closed target port, 64 active PortForward pairs in one SPDY session,
+rejection of the 65th pair, quota release and reconnect, pending-byte limits,
+concurrent exec, cancellation, and file-descriptor recovery. A successful local
+TCP connect without a guest payload is not a passing PortForward result.

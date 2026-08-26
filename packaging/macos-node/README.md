@@ -91,8 +91,12 @@ Choose the network mode for the node before joining it:
 - `--network-mode full` is the default. It requires macOS 26 or newer. Kubelet
   publishes the Node's assigned PodCIDR to the CRI shim; the Flannel daemon
   then creates the dedicated `kubernetes-pod` host-only vmnet network with
-  that CIDR and joins the cluster's IPv4 VXLAN fabric. Full-mode Pods use the
-  `macos` RuntimeClass and get the normal macOS node labels:
+  that CIDR and joins the cluster's IPv4 VXLAN fabric. With
+  `--enable-dual-stack`, Flannel waits for the control plane to allocate one
+  IPv4 and one IPv6 PodCIDR before reconciling the host-only network and VXLAN
+  for both families. CNI guest setup and the independent kube-proxy controller
+  consume the same dual-family contract. Full-mode Pods use the `macos`
+  RuntimeClass and get the normal macOS node labels:
   `node.kubernetes.io/macos=true` and
   `node.kubernetes.io/macos-network=full`. Full-mode nodes also carry the taint
   `node.kubernetes.io/macos=true:NoSchedule`.
@@ -142,6 +146,7 @@ sudo container-macos-kubeadm join 10.0.0.10:6443 \
   --node-name macos-node-1 \
   --network-mode full \
   --enable-dual-stack \
+  --vmnet-disconnect-recovery reboot-node \
   --node-ip 10.0.1.21 \
   --node-ip fd00:10:0:1::21 \
   --flannel-config-map-namespace kube-flannel \
@@ -153,6 +158,18 @@ When `--node-ip` is specified for dual stack, pass the IPv4 address first and
 the IPv6 address second. Omitting all `--node-ip` options preserves kubelet's
 automatic address selection. Omitting `--flannel-underlay-interface` preserves
 Flannel's automatic interface selection.
+
+`--vmnet-disconnect-recovery reboot-node` is required only for node pools that
+enable automatic recovery from a vmnet helper disconnect. It is disabled by
+default; when omitted, kubeadm does not install or start the root recovery
+coordinator and status collection does not expect its snapshot.
+
+Dual stack is disabled unless `--enable-dual-stack` is present. Keep a newly
+enabled node cordoned until same-node and cross-node traffic, Linux interop,
+both ClusterIP families, EndpointSlice updates, DNS, external IPv6, MTU, and a
+host reboot have passed for the exact release pair. Windows VXLAN IPv6 is not
+supported; Mac↔Windows IPv4 remains a separate gate before enabling mixed-OS
+backends.
 
 To expose more than one macOS sandbox image on the same node, repeat
 `--runtime-class <name>=<sandbox-image>` during join. Each additional
@@ -173,6 +190,13 @@ RuntimeClass. Each additional profile also renders a
 `runtimeclass-<name>.yaml` manifest under the package manifest directory. Pods
 select the desired sandbox image with `spec.runtimeClassName`, for example
 `macos-15-2`.
+
+Pin every production sandbox image by digest. Release metadata and rollback
+assets must bind the node package checksum, sandbox digest, package guest-agent
+checksum, sandbox guest-agent checksum, and required capabilities. PortForward
+requires `tcpConnectV1` and fails closed when the guest agent does not advertise
+it. Restore the package and its matching sandbox image together during
+rollback.
 
 Use `--gui-runtime-class <name>=<sandbox-image>` instead of `--runtime-class`
 for an additional handler that presents the sandbox GUI. GUI enablement is an
@@ -279,6 +303,11 @@ route. Dual-stack pools must also require the IPv6 family to have `enabled ==
 `container_macos_kubernetes_collector_up` as a
 collector failure; configuration errors occur before component metrics can be
 emitted.
+
+After a host reboot, expect the VM sandbox and workload container to be
+recreated. Verify the Pod UID, Pod IPs, container attempt, EndpointSlices, and
+Service traffic before uncordoning. The IPv4 allocation can remain stable while
+the IPv6 interface identifier changes with the recreated VM MAC.
 
 Runtime logs are written to stable host paths:
 

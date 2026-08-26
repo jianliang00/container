@@ -1,6 +1,13 @@
 # macOS Guest Kubernetes CRI/CNI Implementation Plan
 
-Implementation plan for connecting the macOS guest runtime in `container` to
+> Except for explicitly added contracts such as Section 13 streaming, this
+> document preserves the original single-node, IPv4-first design baseline. Its
+> scope and `current` wording are historical and do not describe the release
+> support matrix. Use the TODO for implementation status and the full dual-stack
+> execution plan for rollout gates. The NetworkPolicy controller described here
+> remains a target; it is disabled in the first production rollout.
+
+Design record for connecting the macOS guest runtime in `container` to
 Kubernetes through CRI, CNI, and a bounded node-local `NetworkPolicy`
 controller.
 
@@ -594,11 +601,31 @@ The shim runs a loopback-only streaming server with:
 - TTY support where available
 - resize support where available
 - cleanup on disconnect
+- a server-wide bound of 256 opening or open PortForward tunnels
+- a bound of 64 active PortForward pair records per SPDY connection
+- bounded pending input and output queues
+- nonblocking shim writes into the guest-agent tunnel and cancellation-safe
+  file descriptor ownership
 
 Current mapping:
 
 - `Exec` -> `ContainerClient.streamExec`
 - `PortForward` -> `ContainerKit.streamPortForward`
+
+PortForward opens a real TCP connection inside the guest. The sandbox guest
+agent must advertise `tcpConnectV1`; an agent that does not advertise the
+capability fails closed instead of falling back to a host-side proxy. The shim
+bounds pending client input to 1 MiB or 256 chunks per pair or stream, and 4 MiB
+or 1,024 chunks per session. Exceeding an input limit fails only the affected
+pair or stream. The shim guest-to-client output queue is independently
+backpressured at 256 KiB or 256 chunks per forwarded stream. Cancellation
+releases the transferred handle and each owned duplicate idempotently without
+acting on a reused file descriptor number.
+
+The release gate verifies real guest payload, a closed target port, 64 active
+pairs and rejection of the 65th pair in one SPDY session, quota release and
+reconnect, concurrent exec under backpressure, cancellation, and numeric file
+descriptor recovery.
 
 The server binds to loopback because kubelet and the shim run on the same macOS
 host in this plan.

@@ -1,5 +1,14 @@
 # macOS Guest Kubernetes CRI/CNI Integration Reference
 
+> This document preserves the initial single-node, IPv4-first architecture
+> baseline. Its `planned` status cells and removed-scope lists are historical,
+> not the current implementation state. The implementation plan is also a
+> historical design record with later contract additions. Use
+> [`macos-guest-k8s-cri-cni-todo.md`](./macos-guest-k8s-cri-cni-todo.md) for the
+> current implementation tracker and
+> [`macos-kubernetes-full-dual-stack-execution-plan.md`](./macos-kubernetes-full-dual-stack-execution-plan.md)
+> for live dual-stack completion and rollout gates.
+
 Implementation reference for integrating the macOS guest runtime in `container core`
 with Kubernetes `CRI` and `CNI`.
 

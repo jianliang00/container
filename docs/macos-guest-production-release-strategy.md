@@ -49,7 +49,10 @@ Kubernetes baseline:
 - `kubelet-darwin-arm64-k8s-v1.27.2-<patch-version>`
 - `container-cri-shim-macos-<container-version>`
 - `container-cni-macvmnet-<container-version>`
+- `container-vmnet-recovery-macos-<container-version>`
+- `container-flannel-vxlan-macos-<container-version>`
 - `container-kube-proxy-macos-<container-version>`
+- `container-macos-node-status-<container-version>`
 
 Release metadata must record:
 
@@ -97,25 +100,30 @@ alongside the container node components:
 - `container` and core runtime helpers
 - `container-cri-shim-macos`
 - `container-cni-macvmnet`
+- `container-vmnet-recovery-macos`
+- `container-flannel-vxlan-macos`
 - `container-kube-proxy-macos`
+- `container-macos-node-status`
 - `container-macos-kubeadm`
 - optional `container-k8s-networkpolicy-macos` binary, not enabled by default
 - forked `kubelet`
-- kubelet, CRI, CNI, and kube-proxy config templates
-- launchd plists for kubelet, CRI shim, and kube-proxy
+- inert kubelet, CRI, CNI, Flannel, and kube-proxy config templates
+- inert launchd templates for the CRI shim, Flannel, kubelet, kube-proxy, and
+  VMNet recovery; kubeadm also renders the container-system bootstrap job
 
 The installer package name is:
 
 - `container-macos-node-<container-version>-k8s-v1.27.2.pkg`
 
-The package stages files under system paths such as `/usr/local/bin`,
-`/opt/cni/bin`, `/etc/kubernetes`, `/etc/cni/net.d`,
-`/Library/LaunchDaemons`, `/var/lib/kubelet`, `/var/log/pods`, and
-`/var/log/containers`.
+The package stages binaries and inert assets only under `/usr/local/bin`,
+`/usr/local/libexec/container`, `/usr/local/share/container-macos-node`, and
+`/opt/cni/bin`. It does not write active `/etc/kubernetes`, `/etc/cni/net.d`,
+`/Library/LaunchDaemons`, `/var/lib`, or `/var/log` paths. Kubeadm creates those
+active paths from the installed templates during join.
 
 The package does not include cluster credentials or certificates, does not load
-launchd services, and does not enable PF. Operators must install
-load the macOS sandbox image, validate PF policy, and run the packaged
+launchd services, and does not enable PF. Operators must install or load the
+macOS sandbox image, validate PF policy, and run the packaged
 bootstrap helper to discover cluster settings, write node-local credentials and
 configuration, start the core container services through `container system
 start`, and then explicitly start the Kubernetes node services.
@@ -130,10 +138,11 @@ node package it is also staged at
 kubectl apply -f packaging/macos-node/manifests/macos-node-bootstrap-rbac.yaml
 ```
 
-That manifest creates the `kube-system/kube-proxy-macos` ServiceAccount, binds
-it to `system:node-proxier`, and allows kubeadm bootstrap tokens in
+That manifest creates the `kube-system/kube-proxy-macos` and
+`kube-system/flannel-macos` ServiceAccounts, grants their bounded proxy and
+read-only Flannel permissions, and allows kubeadm bootstrap tokens in
 `system:bootstrappers:kubeadm:default-node-token` to read the kubelet config
-ConfigMap and request a bounded kube-proxy ServiceAccount token during join.
+ConfigMap and request their short-lived ServiceAccount tokens during join.
 
 The supported deployment path is to install the package and then run the
 packaged bootstrap helper with kubeadm-compatible join arguments. Select one
@@ -171,13 +180,16 @@ sudo container-macos-kubeadm join 10.0.0.10:6443 \
 `container-macos-kubeadm join` reads the public `kube-public/cluster-info`
 ConfigMap, validates the discovered CA with `--discovery-token-ca-cert-hash`,
 then uses the bootstrap token to read the kubelet config ConfigMap when
-available. In full mode it also requests a kube-proxy ServiceAccount token. It
-writes the CA certificate, kubelet bootstrap kubeconfig, kubelet configuration,
-CRI configuration, launchd plists, and the matching RuntimeClass manifest. Full
-mode additionally writes CNI and kube-proxy configuration, then starts
-`container system`, `container-cri-shim-macos`, `container-kube-proxy-macos`,
-and kubelet in dependency order. Compat mode starts `container system`, the CRI
-shim, and kubelet, and intentionally does not configure CNI or kube-proxy.
+available. In full mode it also requests kube-proxy and Flannel ServiceAccount
+tokens. It writes the CA certificate, kubelet bootstrap kubeconfig, kubelet
+configuration, CRI configuration, launchd plists, and the matching RuntimeClass
+manifest. Full mode additionally writes CNI, Flannel, and kube-proxy
+configuration, then starts `container system`, `container-cri-shim-macos`,
+Flannel, kubelet, and kube-proxy in dependency order. It writes and starts VMNet
+recovery only when join includes `--vmnet-disconnect-recovery reboot-node`;
+recovery is disabled by default. Compat mode starts `container system`, the CRI
+shim, and kubelet, and intentionally does not configure Flannel, recovery, CNI,
+or kube-proxy.
 Token-bearing kubeconfig contents are never expanded in logs. Operators can
 pass `--dry-run` to inspect the full plan without writing files, contacting the
 API server, or starting services, and `--skip-start` to render files without
@@ -283,8 +295,9 @@ sudo container-macos-kubeadm status
 ```
 
 `status` is read-only. It reports the presence of packaged binaries,
-node-specific Kubernetes configuration, the CRI socket, and launchd jobs for
-the CRI shim, kube-proxy, and kubelet.
+node-specific Kubernetes configuration, the CRI socket, component status
+files, and launchd jobs for the bootstrap helper, CRI shim, Flannel, kubelet,
+kube-proxy, and VMNet recovery when it is enabled.
 
 Operators can reset node-local Kubernetes configuration with:
 
@@ -292,14 +305,15 @@ Operators can reset node-local Kubernetes configuration with:
 sudo container-macos-kubeadm reset --force
 ```
 
-`reset` stops kubelet, kube-proxy when present, and the CRI shim, flushes the
-kube-proxy PF anchor when present, and removes kubeadm-generated kubelet, CRI,
-CNI, kube-proxy, CA, and launchd configuration. Compat-mode nodes do not create
-CNI or kube-proxy runtime configuration, so reset only removes the files and
-services that exist on the host. It preserves the installed binaries and
-package payload. Use `--dry-run` to inspect the exact plan without changing the
-host. Use `--purge-state` only when intentionally removing kubelet, CRI/CNI
-state, and node logs:
+`reset` stops VMNet recovery, kube-proxy, kubelet, Flannel, the CRI shim, and
+the container-system bootstrap when present. Full mode withdraws the Flannel
+tunnels, routes, forwarding ownership and kube-proxy PF anchors before removing
+the owned Pod network and kubeadm-generated configuration. Compat-mode nodes do
+not create Flannel, recovery, CNI, or kube-proxy runtime configuration, so reset
+only removes the files and services that exist on the host. It preserves the
+installed binaries and package payload. Use `--dry-run` to inspect the exact
+plan without changing the host. Use `--purge-state` only when intentionally
+removing kubelet, CRI/CNI/Flannel/recovery state, and node logs:
 
 ```sh
 sudo container-macos-kubeadm reset --force --purge-state
@@ -316,6 +330,28 @@ scripts/macos-node-installer/build.sh \
 Unsigned packages are acceptable for local validation only. Production packages
 must be code signed, product signed, notarized if distributed outside controlled
 infrastructure, and accompanied by checksums, SBOM, and provenance metadata.
+
+## Runtime And Sandbox Pairing
+
+A production candidate is an immutable pair, not only a node package. Release
+metadata must bind all of the following:
+
+- the signed node package name, version, checksum, and container commit
+- the immutable sandbox image digest
+- the guest-agent checksum embedded in the package
+- the checksum of the guest agent installed in the sandbox image
+- the guest capabilities required by the release, including `tcpConnectV1`
+- the workload image digest used by the canary
+
+The package and sandbox guest-agent checksums must match before scheduling a
+canary. A mutable image tag, a matching version string without a matching
+checksum, or an unverified capability set is not sufficient. PortForward must
+fail closed when the sandbox does not advertise the required TCP capability.
+
+Rollback restores the previous signed package and its matching immutable
+sandbox image as one unit. Keep both artifacts available until the replacement
+has passed node reboot, Pod recreation, exec, PortForward, dual-stack Service,
+and cleanup gates.
 
 Production macOS node packages are published by GitHub Actions, not by a local
 developer machine. The release workflow is `.github/workflows/macos-node-release.yml`.
@@ -357,16 +393,21 @@ path:
 
 | Process | launchd label | stdout/stderr log |
 | --- | --- | --- |
+| `container-system` bootstrap | `com.apple.container.macos-node-bootstrap` | `/var/log/container-macos-node-bootstrap.log` |
 | `kubelet` | `com.apple.container.kubelet` | `/var/log/kubelet.log` |
 | `container-cri-shim-macos` | `com.apple.container.cri-shim-macos` | `/var/log/container-cri-shim-macos.log` |
+| `container-vmnet-recovery-macos` | `com.apple.container.vmnet-recovery-macos` | `/var/log/container-vmnet-recovery-macos.log` |
+| `container-flannel-vxlan-macos` | `com.apple.container.flannel-vxlan-macos` | `/var/log/container-flannel-vxlan-macos.log` |
 | `container-kube-proxy-macos` | `com.apple.container.kube-proxy-macos` | `/var/log/container-kube-proxy-macos.log` |
 
 Use the kubelet log for node registration, pod lifecycle, probe, CRI, and log
 streaming failures. Use the CRI shim log for runtime, image, sandbox, container,
-exec, attach, and port-forward requests. Use the kube-proxy log for Service and
-EndpointSlice watch state, generated PF rules, and PF apply failures. Compat
-mode does not start kube-proxy, so the kube-proxy launchd job and log are
-expected to be absent on compat-mode nodes.
+exec, attach, and port-forward requests. Use the Flannel log for PodCIDR,
+peer, route, tunnel, and ownership reconciliation. Use the recovery log for
+fence, reboot budget, boot-session validation, and admission state. Use the
+kube-proxy log for Service and EndpointSlice watch state, generated PF rules,
+and PF apply failures. Compat mode does not start Flannel, recovery, or
+kube-proxy, so those launchd jobs and logs are expected to be absent.
 
 The Darwin kubelet fork also uses the standard kubelet CRI log layout:
 
@@ -381,30 +422,42 @@ kubelet instances and tests.
 Common node-local troubleshooting commands:
 
 ```sh
+sudo tail -n 200 /var/log/container-macos-node-bootstrap.log
 sudo tail -n 200 /var/log/kubelet.log
 sudo tail -n 200 /var/log/container-cri-shim-macos.log
+sudo tail -n 200 /var/log/container-flannel-vxlan-macos.log
+sudo tail -n 200 /var/log/container-vmnet-recovery-macos.log
 sudo tail -n 200 /var/log/container-kube-proxy-macos.log
+sudo launchctl print system/com.apple.container.macos-node-bootstrap
 sudo launchctl print system/com.apple.container.kubelet
 sudo launchctl print system/com.apple.container.cri-shim-macos
+sudo launchctl print system/com.apple.container.flannel-vxlan-macos
+sudo launchctl print system/com.apple.container.vmnet-recovery-macos
 sudo launchctl print system/com.apple.container.kube-proxy-macos
 ```
 
 `container-macos-kubeadm reset --force --purge-state` removes these process
 logs, `/var/log/pods`, and `/var/log/containers` together with the kubelet and
-CRI/CNI state directories.
+CRI/CNI, Flannel, kube-proxy, and VMNet recovery state directories.
 
 ## Rollback Policy
 
 Rollback is node-local and must not require control-plane changes:
 
 1. `cordon` and drain the macOS node when possible.
-2. Stop launchd services for kubelet, CRI shim, CNI helper services,
-   kube-proxy, and NetworkPolicy controller.
-3. Restore the previous signed package or previous binary set.
-4. Restore previous kubelet, CRI, CNI, kube-proxy, and NetworkPolicy config.
-5. Validate PF config before reloading it on full-mode nodes.
-6. Start launchd services.
-7. Confirm CRI readiness and Node readiness before uncordoning. On full-mode
-   nodes, also confirm CNI readiness and kube-proxy PF anchor state.
+2. Stop launchd services for VMNet recovery when enabled, kube-proxy, kubelet,
+   Flannel, CRI shim, container-system bootstrap, CNI helpers, and NetworkPolicy
+   controller.
+3. Restore the previous signed package from the recorded rollback unit.
+4. Restore the matching sandbox image digest and verify its guest-agent
+   checksum and capabilities.
+5. Restore previous kubelet, CRI, CNI, Flannel, kube-proxy, VMNet recovery,
+   and NetworkPolicy config.
+6. Validate PF config before reloading it on full-mode nodes.
+7. Start launchd services.
+8. Confirm CRI readiness and Node readiness before uncordoning. On full-mode
+   nodes, also confirm CNI and Flannel readiness, kube-proxy PF anchor state,
+   VMNet recovery health when enabled, and a successful
+   `container-macos-node-status` run.
 
 Rollback artifacts must remain available for every production rollout.

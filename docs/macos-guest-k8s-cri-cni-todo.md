@@ -29,7 +29,8 @@ kube-proxy macOS:
 - [x] Add launchd installer and uninstaller scripts with dry-run support.
 - [x] Check PF enabled state before applying or starting the PF-backed daemon.
 - [ ] Add event-driven Kubernetes watch support in addition to periodic relist.
-- [ ] Extend support beyond single-node IPv4 ClusterIP TCP/UDP.
+- [x] Extend ClusterIP TCP/UDP to dual-stack Services and multi-node endpoints.
+- [ ] Add NodePort, LoadBalancer, and session-affinity support.
 
 CRI server:
 
@@ -63,6 +64,18 @@ Logs and exec streaming:
 - [x] Bridge streaming port-forward to `ContainerKit.streamPortForward`.
 - [x] Implement TTY resize handling where core exposes it.
 - [x] Implement disconnect and stream timeout cleanup.
+- [x] Require the guest `tcpConnectV1` capability and fail closed when a sandbox
+  agent does not advertise it.
+- [x] Bound PortForward to 256 opening or open tunnels server-wide and 64 active
+  pair records per SPDY connection. Bound pending client input to 1 MiB or 256
+  chunks per pair or stream and 4 MiB or 1,024 chunks per session, with 256 KiB
+  or 256 chunks of shim guest-to-client output per stream.
+- [x] Use nonblocking shim writes into the guest-agent tunnel with
+  cancellation-safe, idempotent cleanup of the transferred handle and owned
+  duplicates.
+- [x] Validate real PortForward payload, closed ports, the 64/65 boundary,
+  quota recovery, concurrent exec, cancellation, and file descriptor recovery
+  on a signed canary.
 
 NetworkPolicy controller:
 
@@ -105,7 +118,7 @@ Operator docs:
 - [ ] Document local kubelet launch command.
 - [x] Document RuntimeClass, `kubernetes.io/os=darwin`, node label, taint,
   toleration, and static Pod examples.
-- [ ] Document kube-proxy setup for single-node Service reachability.
+- [x] Document kube-proxy setup for single-node Service reachability.
 - [ ] Document sample CNI config installation.
 - [ ] Document NetworkPolicy controller config and supported policy subset.
 - [ ] Document deterministic unsupported behavior for removed features.
@@ -150,13 +163,14 @@ Node components and dataplane:
 
 - [x] Finish CNI 1.1.0 command acceptance for `VERSION`, `STATUS`, `ADD`,
   `CHECK`, `DEL`, and `GC`, including idempotent cleanup and restart recovery.
-- [ ] Validate `container-kube-proxy-macos` with a real API server and
-  single-node IPv4 ClusterIP TCP/UDP Service traffic.
+- [x] Validate `container-kube-proxy-macos` with a real API server and
+  single-node and multi-node IPv4/IPv6 ClusterIP TCP Service traffic.
 - [x] Decide whether NetworkPolicy is required for the first production rollout.
   If required, finish Kubernetes API watches and ingress/egress e2e validation;
   if not required, document NetworkPolicy as unsupported for the rollout.
-- [ ] Decide the kube-proxy scope beyond the first rollout: watch-based updates,
-  multi-node routing, NodePort, LoadBalancer, session affinity, and dual-stack.
+- [x] Fix the first-rollout kube-proxy scope at periodic relist, dual-stack
+  ClusterIP, and multi-node endpoints. Event watches, NodePort, LoadBalancer,
+  and session affinity remain outside that scope.
 
 Installation and operations:
 
@@ -202,6 +216,9 @@ Production validation:
   reboot tests.
 - [ ] Run at least one multi-day soak test with repeated Pod create/delete,
   stream sessions, Service traffic, and cleanup verification.
+- [x] Run a two-node signed canary covering full dual stack, Mac↔Linux,
+  dual-family Service/DNS, external IPv6, MTU, host reboot, multiple Mac Pods,
+  status collection, and bounded streaming stress.
 
 ## 3. Acceptance Criteria
 
@@ -232,7 +249,7 @@ Production validation:
 - [x] `kubectl logs` works for the static Pod mirror path.
 - [x] `kubectl exec` works for the static Pod mirror path.
 - [x] `kubectl port-forward` works for the static Pod mirror path.
-- [ ] Single-node Service reachability through kube-proxy works.
+- [x] Single-node Service reachability through kube-proxy works.
 - [ ] Ingress `NetworkPolicy` allows selected traffic.
 - [ ] Ingress `NetworkPolicy` denies unselected traffic.
 - [ ] Egress `NetworkPolicy` allows selected Pod or IPv4 CIDR traffic.

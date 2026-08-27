@@ -23,6 +23,29 @@ import Testing
 
 struct GuestDNSProxyTests {
     @Test
+    func persistsLogicalConfigurationForAgentRestart() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = GuestDNSProxyConfigurationStore(url: directory.appendingPathComponent("dns-proxy.json"))
+        let dns = MacOSGuestDNSConfiguration(
+            nameservers: ["10.96.0.10"],
+            domain: "cluster.local",
+            searchDomains: ["default.svc.cluster.local", "svc.cluster.local", "cluster.local"],
+            options: ["ndots:5"]
+        )
+
+        try store.save(dns)
+
+        #expect(try store.load() == dns)
+        let attributes = try FileManager.default.attributesOfItem(atPath: store.url.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+
+        try store.remove()
+        #expect(try store.load() == nil)
+        try store.remove()
+    }
+
+    @Test
     func buildsKubernetesSearchCandidatesUsingNDots() throws {
         let configuration = try GuestDNSProxy.ResolutionConfiguration(
             MacOSGuestDNSConfiguration(

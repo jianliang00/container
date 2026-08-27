@@ -34,6 +34,11 @@ struct MacOSGuestAgent: ParsableCommand {
         configureGuestAgentSignals()
         logAgentInfo("starting guest agent on vsock port \(port)")
         logAgentStartupContext()
+        do {
+            try GuestDNSProxy.shared.restorePersistedConfigurationIfPresent()
+        } catch {
+            logAgentError("failed to restore DNS proxy configuration: \(describeError(error))")
+        }
         let listener = try VsockListener(port: port)
         try listener.serveForever()
     }
@@ -1401,6 +1406,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
     private let stderrHandle: FileHandle?
     private let outputLock = NSLock()
     private var exitSent = false
+    private var cleanedUp = false
 
     private init(
         pid: pid_t,
@@ -1601,6 +1607,15 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
     }
 
     func cleanup() {
+        outputLock.lock()
+        guard !cleanedUp else {
+            outputLock.unlock()
+            return
+        }
+        cleanedUp = true
+        exitSent = true
+        outputLock.unlock()
+
         stdoutHandle?.readabilityHandler = nil
         stderrHandle?.readabilityHandler = nil
         masterHandle?.readabilityHandler = nil
@@ -1643,8 +1658,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
             return
         }
 
-        let data = handle.availableData
-        if data.isEmpty {
+        guard let data = readAvailableOutput(from: handle), !data.isEmpty else {
             handle.readabilityHandler = nil
             return
         }
@@ -1672,12 +1686,30 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         guard let handle else { return }
 
         while true {
-            let data = handle.availableData
-            if data.isEmpty {
+            guard let data = readAvailableOutput(from: handle), !data.isEmpty else {
                 handle.readabilityHandler = nil
                 return
             }
             send(data, channel: channel)
+        }
+    }
+
+    private func readAvailableOutput(from handle: FileHandle) -> Data? {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(handle.fileDescriptor, bytes.baseAddress, bytes.count)
+            }
+            if count > 0 {
+                return Data(buffer.prefix(count))
+            }
+            if count == 0 {
+                return Data()
+            }
+            if errno == EINTR {
+                continue
+            }
+            return nil
         }
     }
 

@@ -197,6 +197,37 @@ struct GuestAgentProcessStartupTests {
     }
 
     @Test
+    func peerDisconnectDuringProcessExitDoesNotCrashAgent() throws {
+        signal(SIGPIPE, SIG_IGN)
+
+        for iteration in 0..<24 {
+            let harness = try AgentConnectionHarness()
+            let ready = try readAgentFrame(from: harness.peerFD)
+            #expect(ready.type == .ready)
+
+            try MacOSSidecarSocketIO.writeJSONFrame(
+                GuestAgentFrame(
+                    type: .exec,
+                    id: "disconnect-during-exit-\(iteration)",
+                    executable: "/bin/sh",
+                    arguments: ["-c", "printf output; printf error >&2; exit 28"],
+                    environment: ["PATH=/usr/bin:/bin"],
+                    workingDirectory: "/",
+                    terminal: false,
+                    uid: UInt32(geteuid()),
+                    gid: UInt32(getegid())
+                ),
+                fd: harness.peerFD
+            )
+
+            let ack = try readAgentFrame(from: harness.peerFD)
+            #expect(ack.type == .ack)
+            harness.closePeer()
+            try harness.waitForCompletion()
+        }
+    }
+
+    @Test
     func signalStopsShellChildProcessGroup() throws {
         signal(SIGPIPE, SIG_IGN)
 

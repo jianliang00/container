@@ -18,6 +18,43 @@ import Darwin
 import Foundation
 import RuntimeMacOSSidecarShared
 
+struct GuestDNSProxyConfigurationStore: Sendable {
+    static let live = GuestDNSProxyConfigurationStore(
+        url: URL(fileURLWithPath: "/var/run/container-macos-guest-agent/dns-proxy.json")
+    )
+
+    let url: URL
+
+    func load() throws -> MacOSGuestDNSConfiguration? {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+        return try JSONDecoder().decode(
+            MacOSGuestDNSConfiguration.self,
+            from: Data(contentsOf: url)
+        )
+    }
+
+    func save(_ configuration: MacOSGuestDNSConfiguration) throws {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        try JSONEncoder().encode(configuration).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    func remove() throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+        try FileManager.default.removeItem(at: url)
+    }
+}
+
 /// Implements Kubernetes resolver search and `ndots` behavior before forwarding to cluster DNS.
 /// macOS SystemConfiguration applies search domains only to single-label names, so multi-label
 /// service names require a local resolver to match the semantics of a Pod's `resolv.conf`.
@@ -99,16 +136,21 @@ final class GuestDNSProxy: @unchecked Sendable {
         let length: socklen_t
     }
 
-    static let shared = GuestDNSProxy()
+    static let shared = GuestDNSProxy(configurationStore: .live)
     static let listenAddress = "127.0.0.1"
     static let listenPort: UInt16 = 53
 
+    private let configurationStore: GuestDNSProxyConfigurationStore
     private let lock = NSLock()
     private let udpQuerySlots = DispatchSemaphore(value: 64)
     private let tcpClientSlots = DispatchSemaphore(value: 32)
     private var configuration: ResolutionConfiguration?
     private var udpFD: Int32 = -1
     private var tcpFD: Int32 = -1
+
+    private init(configurationStore: GuestDNSProxyConfigurationStore) {
+        self.configurationStore = configurationStore
+    }
 
     deinit {
         Self.closeSocket(udpFD)
@@ -117,6 +159,7 @@ final class GuestDNSProxy: @unchecked Sendable {
 
     func configure(_ dns: MacOSGuestDNSConfiguration) throws -> MacOSGuestDNSConfiguration {
         guard Self.requiresProxy(dns) else {
+            try configurationStore.remove()
             lock.lock()
             configuration = nil
             lock.unlock()
@@ -125,12 +168,25 @@ final class GuestDNSProxy: @unchecked Sendable {
 
         let newConfiguration = try ResolutionConfiguration(dns)
         try startIfNeeded(configuration: newConfiguration)
+        try configurationStore.save(dns)
         return MacOSGuestDNSConfiguration(
             nameservers: [Self.listenAddress],
             domain: dns.domain,
             searchDomains: dns.searchDomains,
             options: dns.options
         )
+    }
+
+    func restorePersistedConfigurationIfPresent() throws {
+        guard let dns = try configurationStore.load() else {
+            return
+        }
+        guard Self.requiresProxy(dns) else {
+            try configurationStore.remove()
+            return
+        }
+        try startIfNeeded(configuration: ResolutionConfiguration(dns))
+        Self.log("restored DNS proxy configuration after guest agent restart")
     }
 
     static func requiresProxy(_ dns: MacOSGuestDNSConfiguration) -> Bool {
@@ -226,6 +282,12 @@ final class GuestDNSProxy: @unchecked Sendable {
                     continue
                 }
                 Self.log("TCP accept failed: \(String(cString: strerror(errno)))")
+                continue
+            }
+            do {
+                try setGuestAgentCloseOnExec(clientFD)
+            } catch {
+                Self.closeSocket(clientFD)
                 continue
             }
             var on: Int32 = 1
@@ -369,6 +431,7 @@ final class GuestDNSProxy: @unchecked Sendable {
             throw POSIXError.fromErrno()
         }
         do {
+            try setGuestAgentCloseOnExec(fd)
             var on: Int32 = 1
             guard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
                 throw POSIXError.fromErrno()
@@ -425,6 +488,7 @@ final class GuestDNSProxy: @unchecked Sendable {
                 continue
             }
             do {
+                try setGuestAgentCloseOnExec(fd)
                 try configureTimeouts(fd: fd, seconds: timeoutSeconds)
                 var on: Int32 = 1
                 _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))

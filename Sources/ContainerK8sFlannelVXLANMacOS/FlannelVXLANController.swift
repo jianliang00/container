@@ -1097,6 +1097,10 @@ public actor FlannelVXLANController {
         try removeAllIPv6Routes(interface: ownedInterface)
 
         guard let stoppingTunnel = ipv6Tunnel else {
+            if let ownedInterface, ownedInterface == tunnel?.interfaceName {
+                ipv6TunnelConfiguration = nil
+                return
+            }
             if let ownedInterface, try system.interfaceExists(ownedInterface) {
                 throw FlannelVXLANError.runtime(
                     "persisted IPv6 tunnel interface \(ownedInterface) is active but is not controlled by this process"

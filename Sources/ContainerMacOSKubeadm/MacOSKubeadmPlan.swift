@@ -1137,18 +1137,23 @@ public enum MacOSKubeadmPlanner {
     }
 
     private static func vmnetRecoveryAccessStep(options: MacOSKubeadmJoinOptions) -> MacOSKubeadmStep {
+        let containerPath = options.rooted("/var/lib/container")
         let recoveryPath = options.rooted("/var/lib/container/vmnet-recovery")
         let requestPath = options.rooted("/var/lib/container/vmnet-recovery/requests")
         let script = """
             set -eu
             user=$(/usr/bin/id -nu "$1")
-            state_path=$2
-            request_path=$3
+            container_path=$2
+            state_path=$3
+            request_path=$4
+            container_traverse_acl="$user allow readattr,readextattr,readsecurity,search"
             state_traverse_acl="$user allow readattr,readextattr,readsecurity,search"
             state_inherit_acl="$user allow read,readattr,readextattr,readsecurity,file_inherit,only_inherit"
             state_file_acl="$user allow read,readattr,readextattr,readsecurity"
             request_directory_acl="$user allow readattr,readextattr,readsecurity,search,add_file"
-            /bin/mkdir -p "$state_path" "$request_path"
+            /bin/mkdir -p "$container_path" "$state_path" "$request_path"
+            /bin/chmod -a "$container_traverse_acl" "$container_path" 2>/dev/null || true
+            /bin/chmod +a "$container_traverse_acl" "$container_path"
             /bin/chmod -a "$state_traverse_acl" "$state_path" 2>/dev/null || true
             /bin/chmod -a "$state_inherit_acl" "$state_path" 2>/dev/null || true
             /bin/chmod +a "$state_traverse_acl" "$state_path"
@@ -1171,6 +1176,7 @@ public enum MacOSKubeadmPlanner {
                     script,
                     "container-macos-kubeadm-vmnet-recovery-acl",
                     "\(options.containerServiceUserID)",
+                    containerPath,
                     recoveryPath,
                     requestPath,
                 ],

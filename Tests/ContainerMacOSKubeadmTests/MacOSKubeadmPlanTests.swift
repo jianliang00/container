@@ -282,8 +282,10 @@ struct MacOSKubeadmPlanTests {
                     return false
                 }
                 return arguments.contains("501")
+                    && arguments.contains("/tmp/macos-node/var/lib/container")
                     && arguments.contains("/tmp/macos-node/var/lib/container/vmnet-recovery")
                     && arguments.contains("/tmp/macos-node/var/lib/container/vmnet-recovery/requests")
+                    && arguments[2].contains("container_traverse_acl")
                     && arguments[2].contains("file_inherit")
                     && arguments[2].contains("only_inherit")
                     && arguments[2].contains("state.json.lock")

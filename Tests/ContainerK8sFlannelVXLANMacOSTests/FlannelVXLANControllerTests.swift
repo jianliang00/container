@@ -910,6 +910,45 @@ struct FlannelVXLANControllerTests {
     }
 
     @Test
+    func crashRestartRecoversWhenIPv4ReusesPersistedIPv6InterfaceName() async throws {
+        let fixture = try ControllerFixture(dualStackEnabled: true)
+        try await fixture.writeRuntimeState(
+            podCIDR: "10.250.22.0/24",
+            ipv6PodCIDR: "fd42:10:244:22::/64"
+        )
+        let originalController = try fixture.makeController()
+        _ = try await originalController.runOnce()
+        fixture.system.setInterface("utun43", exists: true)
+
+        let restartedIPv4TunnelBox = MockTunnelBox(interfaceName: "utun43")
+        let restartedIPv6TunnelBox = MockIPv6TunnelBox(interfaceName: "utun44")
+        let restartedController = try fixture.makeController(
+            tunnelBox: restartedIPv4TunnelBox,
+            ipv6TunnelBox: restartedIPv6TunnelBox
+        )
+
+        let result = try await restartedController.runOnce()
+
+        #expect(result.ipv4Ready)
+        #expect(result.ipv6Ready == true)
+        #expect(result.interfaceName == "utun43")
+        #expect(result.ipv6InterfaceName == "utun44")
+        #expect(restartedIPv4TunnelBox.tunnel.isRunning)
+        #expect(!restartedIPv4TunnelBox.tunnel.wasDestroyed)
+        #expect(restartedIPv6TunnelBox.createdConfigurations.count == 1)
+        #expect(
+            fixture.system.removedIPv6Routes.map { "\($0.podCIDR)|\($0.interface)" }
+                == ["fd42:10:244:2::/64|utun43"]
+        )
+        let ownership = try #require(
+            try FlannelOwnershipStateStore(path: fixture.config.ownershipStatePath).load()
+        )
+        #expect(ownership.ipv6InterfaceName == "utun44")
+        #expect(ownership.localIPv6PodCIDR == "fd42:10:244:22::/64")
+        #expect(ownership.ipv6RoutePodCIDRs == ["fd42:10:244:2::/64"])
+    }
+
+    @Test
     func crashRestartRetainsPersistedIPv6OwnershipWhenRouteCleanupFails() async throws {
         let fixture = try ControllerFixture(dualStackEnabled: true)
         try await fixture.writeRuntimeState(
@@ -2214,8 +2253,12 @@ private final class MockFlannelSystemManager: FlannelSystemManaging, @unchecked 
 
 private final class MockTunnelBox: @unchecked Sendable {
     private let lock = NSLock()
-    let tunnel = MockFlannelTunnel()
+    let tunnel: MockFlannelTunnel
     private var configurations: [FlannelTunnelConfiguration] = []
+
+    init(interfaceName: String = "utun42") {
+        tunnel = MockFlannelTunnel(interfaceName: interfaceName)
+    }
 
     var createdConfigurations: [FlannelTunnelConfiguration] {
         lock.withLock { configurations }
@@ -2251,13 +2294,17 @@ private final class MockIPv6TunnelBox: @unchecked Sendable {
 }
 
 private final class MockFlannelTunnel: FlannelTunnelControlling, @unchecked Sendable {
-    let interfaceName = "utun42"
+    let interfaceName: String
     private let lock = NSLock()
     private var running = true
     private var stopFails = false
     private var destroyed = false
     private var stopOnNextPeerUpdate = false
     private var updates: [[FlannelPeer]] = []
+
+    init(interfaceName: String) {
+        self.interfaceName = interfaceName
+    }
 
     var isRunning: Bool {
         lock.withLock { running }

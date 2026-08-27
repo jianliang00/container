@@ -257,12 +257,6 @@ jobs:
               echo "::error::Draft target ${container_commit} does not match ${RELEASE_TAG}"
               exit 1
             fi
-            if [[ "$(jq -er '.sandboxImage.source.containerCommit' "${RELEASE_PAIRING_PATH}")" != "${container_commit}" ]]; then
-              echo "::error::Release pairing source commit does not match draft target ${container_commit}"
-              exit 1
-            fi
-            git cat-file -e "${container_commit}^{commit}"
-
             jq -e \
               --arg package_name "${PACKAGE_NAME}" \
               --arg checksum_name "${PACKAGE_NAME}.sha256" \
@@ -275,10 +269,14 @@ jobs:
               exit 1
             fi
             container_commit="${GITHUB_SHA}"
-            if [[ "$(jq -er '.sandboxImage.source.containerCommit' "${RELEASE_PAIRING_PATH}")" != "${container_commit}" ]]; then
-              echo "::error::Release pairing source commit does not match ${container_commit}"
-              exit 1
-            fi
+          fi
+
+          paired_container_commit="$(jq -er '.sandboxImage.source.containerCommit' "${RELEASE_PAIRING_PATH}")"
+          git cat-file -e "${container_commit}^{commit}"
+          git cat-file -e "${paired_container_commit}^{commit}"
+          if ! git merge-base --is-ancestor "${paired_container_commit}" "${container_commit}"; then
+            echo "::error::Release pairing source commit ${paired_container_commit} is not an ancestor of release commit ${container_commit}"
+            exit 1
           fi
 
           echo "CONTAINER_COMMIT=${container_commit}" >> "$GITHUB_ENV"

@@ -40,6 +40,11 @@ on:
         required: true
         default: false
         type: boolean
+      prepare_unpaired_draft:
+        description: "Create a notarized package-only draft for rebuilding the paired sandbox image"
+        required: true
+        default: false
+        type: boolean
       promote_existing_draft:
         description: "Publish an existing signed and notarized draft after regenerating release metadata"
         required: true
@@ -111,6 +116,7 @@ jobs:
           INPUT_DRAFT: ${{ inputs.draft }}
           INPUT_PRERELEASE: ${{ inputs.prerelease }}
           INPUT_SKIP_NOTARIZATION: ${{ inputs.skip_notarization }}
+          INPUT_PREPARE_UNPAIRED_DRAFT: ${{ inputs.prepare_unpaired_draft }}
           INPUT_PROMOTE_EXISTING_DRAFT: ${{ inputs.promote_existing_draft }}
         run: |
           set -euo pipefail
@@ -122,6 +128,7 @@ jobs:
           draft="false"
           prerelease="false"
           skip_notarization="false"
+          prepare_unpaired_draft="false"
           promote_existing_draft="false"
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -132,6 +139,7 @@ jobs:
             draft="${INPUT_DRAFT}"
             prerelease="${INPUT_PRERELEASE}"
             skip_notarization="${INPUT_SKIP_NOTARIZATION}"
+            prepare_unpaired_draft="${INPUT_PREPARE_UNPAIRED_DRAFT}"
             promote_existing_draft="${INPUT_PROMOTE_EXISTING_DRAFT}"
           fi
 
@@ -153,15 +161,25 @@ jobs:
             echo "::error::node_name must be a lowercase Kubernetes DNS subdomain"
             exit 1
           fi
-          for boolean_value in "${draft}" "${prerelease}" "${skip_notarization}" "${promote_existing_draft}"; do
+          for boolean_value in "${draft}" "${prerelease}" "${skip_notarization}" "${prepare_unpaired_draft}" "${promote_existing_draft}"; do
             if [[ "${boolean_value}" != "true" && "${boolean_value}" != "false" ]]; then
-              echo "::error::draft, prerelease, skip_notarization, and promote_existing_draft must be boolean values"
+              echo "::error::draft, prerelease, skip_notarization, prepare_unpaired_draft, and promote_existing_draft must be boolean values"
               exit 1
             fi
           done
           if [[ "${skip_notarization}" == "true" && "${draft}" != "true" ]]; then
             echo "::error::skip_notarization requires draft=true"
             exit 1
+          fi
+          if [[ "${prepare_unpaired_draft}" == "true" ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+              echo "::error::prepare_unpaired_draft is only supported with workflow_dispatch"
+              exit 1
+            fi
+            if [[ "${draft}" != "true" || "${prerelease}" != "false" || "${skip_notarization}" != "false" || "${promote_existing_draft}" != "false" ]]; then
+              echo "::error::prepare_unpaired_draft requires draft=true, prerelease=false, skip_notarization=false, and promote_existing_draft=false"
+              exit 1
+            fi
           fi
           if [[ "${promote_existing_draft}" == "true" ]]; then
             if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
@@ -230,6 +248,7 @@ jobs:
             echo "RELEASE_DRAFT=${draft}"
             echo "RELEASE_PRERELEASE=${prerelease}"
             echo "SKIP_NOTARIZATION=${skip_notarization}"
+            echo "PREPARE_UNPAIRED_DRAFT=${prepare_unpaired_draft}"
             echo "PROMOTE_EXISTING_DRAFT=${promote_existing_draft}"
           } >> "$GITHUB_ENV"
 
@@ -674,8 +693,11 @@ jobs:
           guest_agent_path="${work_dir}/pkg/Payload/usr/local/libexec/container/macos-guest-agent/bin/container-macos-guest-agent"
           package_guest_agent_sha256="$(shasum -a 256 "${guest_agent_path}" | awk '{print $1}')"
           if [[ "${package_guest_agent_sha256}" != "${SANDBOX_GUEST_AGENT_SHA256}" ]]; then
-            echo "package and sandbox guest-agent SHA-256 differ: package=${package_guest_agent_sha256} sandbox=${SANDBOX_GUEST_AGENT_SHA256}" >&2
-            exit 1
+            if [[ "${PREPARE_UNPAIRED_DRAFT}" != "true" ]]; then
+              echo "package and sandbox guest-agent SHA-256 differ: package=${package_guest_agent_sha256} sandbox=${SANDBOX_GUEST_AGENT_SHA256}" >&2
+              exit 1
+            fi
+            echo "::warning::Package guest-agent ${package_guest_agent_sha256} is not paired with the current sandbox ${SANDBOX_GUEST_AGENT_SHA256}; creating a package-only draft"
           fi
           while IFS= read -r capability; do
             if ! grep -a -F -q "${capability}" "${guest_agent_path}"; then
@@ -784,54 +806,68 @@ jobs:
           fi
           required_capabilities="$(jq -r '.sandboxImage.guestAgent.requiredCapabilities | join(", ")' "${RELEASE_PAIRING_PATH}")"
 
-          jq -n \
-            --slurpfile pairing "${RELEASE_PAIRING_PATH}" \
-            --arg release_tag "${RELEASE_TAG}" \
-            --arg container_commit "${CONTAINER_COMMIT}" \
-            --arg kubernetes_baseline "${KUBERNETES_BASELINE}" \
-            --arg package_name "${PACKAGE_NAME}" \
-            --arg package_version "${PACKAGE_VERSION}" \
-            --arg package_sha256 "${package_sha256}" \
-            --arg kubelet_artifact "${KUBELET_ARTIFACT_URL}" \
-            --arg kubelet_artifact_sha256 "${KUBELET_ARTIFACT_SHA256}" \
-            --arg guest_agent_sha256 "${PACKAGE_GUEST_AGENT_SHA256}" \
-            --arg notarization "${notarization_status}" \
-            '{
-              schemaVersion: 1,
-              releaseTag: $release_tag,
-              containerCommit: $container_commit,
-              kubernetesBaseline: $kubernetes_baseline,
-              package: {
-                name: $package_name,
-                version: $package_version,
-                sha256: $package_sha256,
-                guestAgentSHA256: $guest_agent_sha256,
-                signing: "Developer ID Application and Developer ID Installer",
-                notarization: $notarization,
-                kubeletArtifact: $kubelet_artifact,
-                kubeletArtifactSHA256: $kubelet_artifact_sha256
-              },
-              sandboxImage: $pairing[0].sandboxImage,
-              workloadImage: $pairing[0].workloadImage,
-              verificationPolicy: {
-                imageIdentity: "GitHub OIDC release attestation",
-                digestPinningRequired: true,
-                packageGuestAgentMustMatchSandbox: true,
-                releasePredicateType: "https://in-toto.io/attestation/release/v0.1"
-              }
-            }' > "${RELEASE_MANIFEST_PATH}"
+          if [[ "${PREPARE_UNPAIRED_DRAFT}" == "true" ]]; then
+            cat > release-notes.md <<EOF
+          Package-only staging draft for rebuilding the paired macOS sandbox image. Do not deploy this draft.
 
-          sandbox_tag="$(jq -er '.sandboxImage.tag' "${RELEASE_PAIRING_PATH}")"
-          jq -n \
-            --arg purl "pkg:generic/container-macos-node@${PACKAGE_VERSION}" \
-            --arg package_id "container-macos-node" \
-            '{purl: $purl, packageId: $package_id}' > "${PACKAGE_RELEASE_PREDICATE_PATH}"
-          jq -n \
-            --arg purl "pkg:oci/macos-base-256g@sha256%3A${SANDBOX_IMAGE_DIGEST#sha256:}?repository_url=${SANDBOX_IMAGE_REPOSITORY}&tag=${sandbox_tag}" \
-            --arg package_id "macos-base-256g" \
-            '{purl: $purl, packageId: $package_id}' > "${SANDBOX_RELEASE_PREDICATE_PATH}"
+          - Container commit: ${CONTAINER_COMMIT}
+          - Kubernetes baseline: ${KUBERNETES_BASELINE}
+          - Package: ${PACKAGE_NAME}
+          - Package SHA-256: ${package_sha256}
+          - Package guest-agent SHA-256: ${PACKAGE_GUEST_AGENT_SHA256}
+          - Signing: Developer ID Application and Developer ID Installer
+          - Notarization: ${notarization_status}
+          - Formal release metadata and attestations will be generated only after sandbox pairing succeeds.
+          EOF
+          else
+            jq -n \
+              --slurpfile pairing "${RELEASE_PAIRING_PATH}" \
+              --arg release_tag "${RELEASE_TAG}" \
+              --arg container_commit "${CONTAINER_COMMIT}" \
+              --arg kubernetes_baseline "${KUBERNETES_BASELINE}" \
+              --arg package_name "${PACKAGE_NAME}" \
+              --arg package_version "${PACKAGE_VERSION}" \
+              --arg package_sha256 "${package_sha256}" \
+              --arg kubelet_artifact "${KUBELET_ARTIFACT_URL}" \
+              --arg kubelet_artifact_sha256 "${KUBELET_ARTIFACT_SHA256}" \
+              --arg guest_agent_sha256 "${PACKAGE_GUEST_AGENT_SHA256}" \
+              --arg notarization "${notarization_status}" \
+              '{
+                schemaVersion: 1,
+                releaseTag: $release_tag,
+                containerCommit: $container_commit,
+                kubernetesBaseline: $kubernetes_baseline,
+                package: {
+                  name: $package_name,
+                  version: $package_version,
+                  sha256: $package_sha256,
+                  guestAgentSHA256: $guest_agent_sha256,
+                  signing: "Developer ID Application and Developer ID Installer",
+                  notarization: $notarization,
+                  kubeletArtifact: $kubelet_artifact,
+                  kubeletArtifactSHA256: $kubelet_artifact_sha256
+                },
+                sandboxImage: $pairing[0].sandboxImage,
+                workloadImage: $pairing[0].workloadImage,
+                verificationPolicy: {
+                  imageIdentity: "GitHub OIDC release attestation",
+                  digestPinningRequired: true,
+                  packageGuestAgentMustMatchSandbox: true,
+                  releasePredicateType: "https://in-toto.io/attestation/release/v0.1"
+                }
+              }' > "${RELEASE_MANIFEST_PATH}"
 
-          cat > release-notes.md <<EOF
+            sandbox_tag="$(jq -er '.sandboxImage.tag' "${RELEASE_PAIRING_PATH}")"
+            jq -n \
+              --arg purl "pkg:generic/container-macos-node@${PACKAGE_VERSION}" \
+              --arg package_id "container-macos-node" \
+              '{purl: $purl, packageId: $package_id}' > "${PACKAGE_RELEASE_PREDICATE_PATH}"
+            jq -n \
+              --arg purl "pkg:oci/macos-base-256g@sha256%3A${SANDBOX_IMAGE_DIGEST#sha256:}?repository_url=${SANDBOX_IMAGE_REPOSITORY}&tag=${sandbox_tag}" \
+              --arg package_id "macos-base-256g" \
+              '{purl: $purl, packageId: $package_id}' > "${SANDBOX_RELEASE_PREDICATE_PATH}"
+
+            cat > release-notes.md <<EOF
           macOS Kubernetes worker-node installer.
 
           - Container commit: ${CONTAINER_COMMIT}
@@ -850,8 +886,10 @@ jobs:
           - Image identity: GitHub OIDC release attestation for the exact sandbox digest
           - Attested release metadata: $(basename "${RELEASE_MANIFEST_PATH}")
           EOF
+          fi
 
       - name: Prepare package SBOM root
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         run: |
           set -euo pipefail
           rm -rf "${PACKAGE_SBOM_ROOT}"
@@ -859,6 +897,7 @@ jobs:
           pkgutil --expand-full "${PACKAGE_PATH}" "${PACKAGE_SBOM_ROOT}/pkg"
 
       - name: Generate package SBOM
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           path: ${{ env.PACKAGE_SBOM_ROOT }}/pkg/Payload
@@ -868,6 +907,7 @@ jobs:
           upload-release-assets: false
 
       - name: Attest package release
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         id: package_release_attestation
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
@@ -876,6 +916,7 @@ jobs:
           predicate-path: ${{ env.PACKAGE_RELEASE_PREDICATE_PATH }}
 
       - name: Attest package SBOM
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         id: package_sbom_attestation
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
@@ -883,6 +924,7 @@ jobs:
           sbom-path: ${{ env.PACKAGE_SBOM_PATH }}
 
       - name: Attest sandbox release
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         id: sandbox_release_attestation
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
@@ -892,12 +934,14 @@ jobs:
           predicate-path: ${{ env.SANDBOX_RELEASE_PREDICATE_PATH }}
 
       - name: Attest release manifest
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         id: release_manifest_attestation
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ env.RELEASE_MANIFEST_PATH }}
 
       - name: Collect attestation bundles
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         run: |
           set -euo pipefail
           cp '${{ steps.package_release_attestation.outputs.bundle-path }}' "${PACKAGE_RELEASE_ATTESTATION_PATH}"
@@ -906,6 +950,7 @@ jobs:
           cp '${{ steps.release_manifest_attestation.outputs.bundle-path }}' "${RELEASE_MANIFEST_ATTESTATION_PATH}"
 
       - name: Upload workflow artifacts
+        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: container-macos-node-installer
@@ -947,6 +992,15 @@ jobs:
               --notes-file release-notes.md \
               --draft=false \
               --prerelease=false
+          elif [[ "${PREPARE_UNPAIRED_DRAFT}" == "true" ]]; then
+            gh release create "${RELEASE_TAG}" \
+              "${PACKAGE_PATH}" \
+              "${PACKAGE_PATH}.sha256" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${CONTAINER_COMMIT}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file release-notes.md \
+              --draft
           else
             release_args=(
               gh release create "${RELEASE_TAG}"

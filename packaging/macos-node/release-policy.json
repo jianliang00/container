@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "guestAgent": {
+    "requiredCapabilities": [
+      "tcpConnectV1"
+    ]
+  },
+  "deploymentPairing": {
+    "required": true,
+    "digestAlgorithm": "sha256"
+  }
+}

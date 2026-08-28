@@ -70,16 +70,40 @@ jobs:
       DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-7/kubelet-darwin-arm64-k8s-v1.27.2-7.tar.gz"
       DEFAULT_KUBELET_ARTIFACT_SHA256: "44eaf2f738e06a5c0312794f05dc4adad9a33dec133345274dacd323de59016e"
       DEFAULT_NODE_NAME: macos-node-1
-      RELEASE_PAIRING_PATH: packaging/macos-node/release-pairing.json
+      RELEASE_POLICY_PATH: packaging/macos-node/release-policy.json
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
+      - name: Materialize private release pairing
+        env:
+          RELEASE_PAIRING_BASE64: ${{ secrets.MACOS_NODE_RELEASE_PAIRING_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RELEASE_PAIRING_BASE64}" ]]; then
+            echo "::error::MACOS_NODE_RELEASE_PAIRING_BASE64 is required"
+            exit 1
+          fi
+
+          release_pairing_path="${RUNNER_TEMP}/release-pairing.json"
+          umask 077
+          python3 -c 'import base64, pathlib, sys; data = "".join(sys.stdin.read().split()); pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(data, validate=True))' \
+            "${release_pairing_path}" <<< "${RELEASE_PAIRING_BASE64}"
+          echo "RELEASE_PAIRING_PATH=${release_pairing_path}" >> "$GITHUB_ENV"
+
       - name: Validate release pairing
         run: |
           set -euo pipefail
+          jq -e '
+            .schemaVersion == 1
+              and (.guestAgent.requiredCapabilities | type == "array" and length > 0)
+              and (.guestAgent.requiredCapabilities | all(type == "string" and test("^[A-Za-z0-9._-]+$")))
+              and .deploymentPairing.required == true
+              and .deploymentPairing.digestAlgorithm == "sha256"
+          ' "${RELEASE_POLICY_PATH}" >/dev/null
           jq -e '
             def digest: type == "string" and test("^sha256:[0-9a-f]{64}$");
             def sha256: type == "string" and test("^[0-9a-f]{64}$");
@@ -106,6 +130,32 @@ jobs:
                 and ($workload.reference | image)
                 and ($workload.reference == (($workload.reference | split("@")[0]) + "@" + $workload.indexDigest)))
           ' "${RELEASE_PAIRING_PATH}" >/dev/null
+
+          private_capabilities="$(jq -cS '.sandboxImage.guestAgent.requiredCapabilities' "${RELEASE_PAIRING_PATH}")"
+          public_capabilities="$(jq -cS '.guestAgent.requiredCapabilities' "${RELEASE_POLICY_PATH}")"
+          if [[ "${private_capabilities}" != "${public_capabilities}" ]]; then
+            echo "::error::Private release pairing capabilities do not match the public release policy"
+            exit 1
+          fi
+
+          while IFS= read -r sensitive_value; do
+            if [[ -n "${sensitive_value}" ]]; then
+              echo "::add-mask::${sensitive_value}"
+            fi
+          done < <(jq -r '[
+            .sandboxImage.repository,
+            .sandboxImage.tag,
+            .sandboxImage.reference,
+            .sandboxImage.source.baseImage,
+            .workloadImage.reference
+          ] | .[]' "${RELEASE_PAIRING_PATH}")
+
+          deployment_pairing_sha256="$(shasum -a 256 "${RELEASE_PAIRING_PATH}" | awk '{print $1}')"
+          required_capabilities="$(jq -r '.guestAgent.requiredCapabilities | join(", ")' "${RELEASE_POLICY_PATH}")"
+          {
+            echo "DEPLOYMENT_PAIRING_SHA256=${deployment_pairing_sha256}"
+            echo "REQUIRED_GUEST_CAPABILITIES=${required_capabilities}"
+          } >> "$GITHUB_ENV"
 
       - name: Resolve release inputs
         env:
@@ -210,10 +260,6 @@ jobs:
           package_path="bin/release/${package_name}"
           kubelet_artifact_path="${RUNNER_TEMP}/kubelet-artifact.tar.gz"
 
-          sandbox_image_reference="$(jq -er '.sandboxImage.reference' "${RELEASE_PAIRING_PATH}")"
-          sandbox_image_digest="$(jq -er '.sandboxImage.indexDigest' "${RELEASE_PAIRING_PATH}")"
-          sandbox_image_repository="$(jq -er '.sandboxImage.repository' "${RELEASE_PAIRING_PATH}")"
-          workload_image_reference="$(jq -er '.workloadImage.reference' "${RELEASE_PAIRING_PATH}")"
           sandbox_guest_agent_sha256="$(jq -er '.sandboxImage.guestAgent.sha256' "${RELEASE_PAIRING_PATH}")"
 
           if [[ ! "${kubelet_artifact_sha256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
@@ -231,19 +277,13 @@ jobs:
             echo "KUBELET_ARTIFACT_PATH=${kubelet_artifact_path}"
             echo "KUBELET_ARTIFACT_SHA256=${kubelet_artifact_sha256}"
             echo "MACOS_NODE_NAME=${node_name}"
-            echo "SANDBOX_IMAGE_REFERENCE=${sandbox_image_reference}"
-            echo "SANDBOX_IMAGE_REPOSITORY=${sandbox_image_repository}"
-            echo "SANDBOX_IMAGE_DIGEST=${sandbox_image_digest}"
-            echo "WORKLOAD_IMAGE_REFERENCE=${workload_image_reference}"
             echo "SANDBOX_GUEST_AGENT_SHA256=${sandbox_guest_agent_sha256}"
             echo "RELEASE_MANIFEST_PATH=${RUNNER_TEMP}/container-macos-node-release-manifest.json"
             echo "PACKAGE_SBOM_ROOT=${RUNNER_TEMP}/container-macos-node-sbom-root"
             echo "PACKAGE_SBOM_PATH=${RUNNER_TEMP}/container-macos-node-sbom.spdx.json"
             echo "PACKAGE_RELEASE_PREDICATE_PATH=${RUNNER_TEMP}/container-macos-node-package-release-predicate.json"
-            echo "SANDBOX_RELEASE_PREDICATE_PATH=${RUNNER_TEMP}/container-macos-node-sandbox-release-predicate.json"
             echo "PACKAGE_RELEASE_ATTESTATION_PATH=${RUNNER_TEMP}/container-macos-node-package-release-attestation.json"
             echo "PACKAGE_SBOM_ATTESTATION_PATH=${RUNNER_TEMP}/container-macos-node-package-sbom-attestation.json"
-            echo "SANDBOX_RELEASE_ATTESTATION_PATH=${RUNNER_TEMP}/container-macos-node-sandbox-release-attestation.json"
             echo "RELEASE_MANIFEST_ATTESTATION_PATH=${RUNNER_TEMP}/container-macos-node-release-manifest-attestation.json"
             echo "RELEASE_DRAFT=${draft}"
             echo "RELEASE_PRERELEASE=${prerelease}"
@@ -804,7 +844,7 @@ jobs:
           if [[ "${SKIP_NOTARIZATION}" == "true" ]]; then
             notarization_status="skipped"
           fi
-          required_capabilities="$(jq -r '.sandboxImage.guestAgent.requiredCapabilities | join(", ")' "${RELEASE_PAIRING_PATH}")"
+          required_capabilities="${REQUIRED_GUEST_CAPABILITIES}"
 
           if [[ "${PREPARE_UNPAIRED_DRAFT}" == "true" ]]; then
             cat > release-notes.md <<EOF
@@ -821,7 +861,6 @@ jobs:
           EOF
           else
             jq -n \
-              --slurpfile pairing "${RELEASE_PAIRING_PATH}" \
               --arg release_tag "${RELEASE_TAG}" \
               --arg container_commit "${CONTAINER_COMMIT}" \
               --arg kubernetes_baseline "${KUBERNETES_BASELINE}" \
@@ -831,9 +870,11 @@ jobs:
               --arg kubelet_artifact "${KUBELET_ARTIFACT_URL}" \
               --arg kubelet_artifact_sha256 "${KUBELET_ARTIFACT_SHA256}" \
               --arg guest_agent_sha256 "${PACKAGE_GUEST_AGENT_SHA256}" \
+              --arg deployment_pairing_sha256 "${DEPLOYMENT_PAIRING_SHA256}" \
+              --argjson required_capabilities "$(jq -c '.guestAgent.requiredCapabilities' "${RELEASE_POLICY_PATH}")" \
               --arg notarization "${notarization_status}" \
               '{
-                schemaVersion: 1,
+                schemaVersion: 2,
                 releaseTag: $release_tag,
                 containerCommit: $container_commit,
                 kubernetesBaseline: $kubernetes_baseline,
@@ -847,25 +888,26 @@ jobs:
                   kubeletArtifact: $kubelet_artifact,
                   kubeletArtifactSHA256: $kubelet_artifact_sha256
                 },
-                sandboxImage: $pairing[0].sandboxImage,
-                workloadImage: $pairing[0].workloadImage,
+                guestAgent: {
+                  requiredCapabilities: $required_capabilities
+                },
+                deploymentPairing: {
+                  required: true,
+                  digestAlgorithm: "sha256",
+                  manifestSHA256: $deployment_pairing_sha256
+                },
                 verificationPolicy: {
-                  imageIdentity: "GitHub OIDC release attestation",
                   digestPinningRequired: true,
                   packageGuestAgentMustMatchSandbox: true,
+                  privateDeploymentPairingRequired: true,
                   releasePredicateType: "https://in-toto.io/attestation/release/v0.1"
                 }
               }' > "${RELEASE_MANIFEST_PATH}"
 
-            sandbox_tag="$(jq -er '.sandboxImage.tag' "${RELEASE_PAIRING_PATH}")"
             jq -n \
               --arg purl "pkg:generic/container-macos-node@${PACKAGE_VERSION}" \
               --arg package_id "container-macos-node" \
               '{purl: $purl, packageId: $package_id}' > "${PACKAGE_RELEASE_PREDICATE_PATH}"
-            jq -n \
-              --arg purl "pkg:oci/macos-base-256g@sha256%3A${SANDBOX_IMAGE_DIGEST#sha256:}?repository_url=${SANDBOX_IMAGE_REPOSITORY}&tag=${sandbox_tag}" \
-              --arg package_id "macos-base-256g" \
-              '{purl: $purl, packageId: $package_id}' > "${SANDBOX_RELEASE_PREDICATE_PATH}"
 
             cat > release-notes.md <<EOF
           macOS Kubernetes worker-node installer.
@@ -879,11 +921,9 @@ jobs:
           - Package SHA-256: ${package_sha256}
           - Signing: Developer ID Application and Developer ID Installer
           - Notarization: ${notarization_status}
-          - Sandbox image: ${SANDBOX_IMAGE_REFERENCE}
-          - Workload image used by the canary: ${WORKLOAD_IMAGE_REFERENCE}
           - Package and sandbox guest-agent SHA-256: ${PACKAGE_GUEST_AGENT_SHA256}
           - Required guest capabilities: ${required_capabilities}
-          - Image identity: GitHub OIDC release attestation for the exact sandbox digest
+          - Private deployment pairing manifest SHA-256: ${DEPLOYMENT_PAIRING_SHA256}
           - Attested release metadata: $(basename "${RELEASE_MANIFEST_PATH}")
           EOF
           fi
@@ -923,16 +963,6 @@ jobs:
           subject-path: ${{ env.PACKAGE_PATH }}
           sbom-path: ${{ env.PACKAGE_SBOM_PATH }}
 
-      - name: Attest sandbox release
-        if: env.PREPARE_UNPAIRED_DRAFT != 'true'
-        id: sandbox_release_attestation
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
-        with:
-          subject-name: ${{ env.SANDBOX_IMAGE_REPOSITORY }}
-          subject-digest: ${{ env.SANDBOX_IMAGE_DIGEST }}
-          predicate-type: https://in-toto.io/attestation/release/v0.1
-          predicate-path: ${{ env.SANDBOX_RELEASE_PREDICATE_PATH }}
-
       - name: Attest release manifest
         if: env.PREPARE_UNPAIRED_DRAFT != 'true'
         id: release_manifest_attestation
@@ -946,7 +976,6 @@ jobs:
           set -euo pipefail
           cp '${{ steps.package_release_attestation.outputs.bundle-path }}' "${PACKAGE_RELEASE_ATTESTATION_PATH}"
           cp '${{ steps.package_sbom_attestation.outputs.bundle-path }}' "${PACKAGE_SBOM_ATTESTATION_PATH}"
-          cp '${{ steps.sandbox_release_attestation.outputs.bundle-path }}' "${SANDBOX_RELEASE_ATTESTATION_PATH}"
           cp '${{ steps.release_manifest_attestation.outputs.bundle-path }}' "${RELEASE_MANIFEST_ATTESTATION_PATH}"
 
       - name: Upload workflow artifacts
@@ -961,7 +990,6 @@ jobs:
             ${{ env.PACKAGE_SBOM_PATH }}
             ${{ env.PACKAGE_RELEASE_ATTESTATION_PATH }}
             ${{ env.PACKAGE_SBOM_ATTESTATION_PATH }}
-            ${{ env.SANDBOX_RELEASE_ATTESTATION_PATH }}
             ${{ env.RELEASE_MANIFEST_ATTESTATION_PATH }}
 
       - name: Publish GitHub release
@@ -976,7 +1004,6 @@ jobs:
             "${PACKAGE_SBOM_PATH}"
             "${PACKAGE_RELEASE_ATTESTATION_PATH}"
             "${PACKAGE_SBOM_ATTESTATION_PATH}"
-            "${SANDBOX_RELEASE_ATTESTATION_PATH}"
             "${RELEASE_MANIFEST_ATTESTATION_PATH}"
           )
 
@@ -1048,7 +1075,6 @@ jobs:
             --arg sbom_name "$(basename "${PACKAGE_SBOM_PATH}")" \
             --arg package_attestation_name "$(basename "${PACKAGE_RELEASE_ATTESTATION_PATH}")" \
             --arg package_sbom_attestation_name "$(basename "${PACKAGE_SBOM_ATTESTATION_PATH}")" \
-            --arg sandbox_attestation_name "$(basename "${SANDBOX_RELEASE_ATTESTATION_PATH}")" \
             --arg release_manifest_attestation_name "$(basename "${RELEASE_MANIFEST_ATTESTATION_PATH}")" \
             '.isDraft == false
               and .isPrerelease == $prerelease
@@ -1059,7 +1085,6 @@ jobs:
               and ([.assets[] | select(.name == $sbom_name)] | length) == 1
               and ([.assets[] | select(.name == $package_attestation_name)] | length) == 1
               and ([.assets[] | select(.name == $package_sbom_attestation_name)] | length) == 1
-              and ([.assets[] | select(.name == $sandbox_attestation_name)] | length) == 1
               and ([.assets[] | select(.name == $release_manifest_attestation_name)] | length) == 1' \
             <<< "${release_json}" >/dev/null
 
@@ -1068,3 +1093,7 @@ jobs:
             echo "::error::Remote tag ${RELEASE_TAG} points to ${remote_tag_commit}, expected ${CONTAINER_COMMIT}"
             exit 1
           fi
+
+      - name: Remove private release pairing
+        if: always()
+        run: rm -f "${RELEASE_PAIRING_PATH:-${RUNNER_TEMP}/release-pairing.json}"

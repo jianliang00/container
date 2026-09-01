@@ -16,6 +16,7 @@
 
 #if os(macOS)
 import Darwin
+import ContainerResource
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
@@ -25,6 +26,62 @@ import Testing
 
 @Suite(.serialized)
 struct SidecarControlServerTests {
+    @Test
+    func unknownMethodAndVersionMismatchReturnFramesWithoutClosingConnection() throws {
+        let socketPath = "/tmp/runtime-macos-sidecar-protocol-\(UUID().uuidString).sock"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("RuntimeMacOSSidecarProtocol-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makeConfigurationWithInvalidStorage().write(to: root.appendingPathComponent("config.json"))
+        let service = MacOSSidecarService(rootURL: root, log: Logger(label: "RuntimeMacOSSidecarTests"))
+        let server = SidecarControlServer(
+            socketPath: socketPath,
+            service: service,
+            log: Logger(label: "RuntimeMacOSSidecarTests")
+        )
+        try server.start()
+        defer { server.stop() }
+        let fd = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        defer { closeIfValid(fd) }
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(
+                .init(requestID: "unknown", method: .unknown("vm.future"), protocolVersion: 2)
+            ),
+            fd: fd
+        )
+        let unknown = try responseFrame(fd: fd)
+        #expect(unknown.requestID == "unknown")
+        #expect(unknown.error?.code == "unknownMethod")
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(
+                .init(requestID: "version", method: .vmPause, protocolVersion: 1)
+            ),
+            fd: fd
+        )
+        let version = try responseFrame(fd: fd)
+        #expect(version.requestID == "version")
+        #expect(version.error?.code == "protocolVersionMismatch")
+        #expect(version.error?.metadata?["requiredVersion"] == "2")
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(.init(requestID: "storage", method: .vmBootstrapStart)),
+            fd: fd
+        )
+        let storage = try responseFrame(fd: fd)
+        #expect(storage.requestID == "storage")
+        #expect(storage.error?.code == "invalidStorageConfiguration")
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(.init(requestID: "legacy-stop", method: .vmStop)),
+            fd: fd
+        )
+        let legacyStop = try responseFrame(fd: fd)
+        #expect(legacyStop.requestID == "legacy-stop")
+        #expect(legacyStop.ok)
+    }
+
     @Test
     func ownerDisconnectClosesOwnedFileTransferSessions() throws {
         let server = makeServer()
@@ -214,6 +271,42 @@ struct SidecarControlServerTests {
         #expect(launch.executable == "")
         #expect(launch.arguments == ["arg"])
     }
+}
+
+private func makeConfigurationWithInvalidStorage() throws -> Data {
+    let image = try JSONDecoder().decode(
+        ImageDescription.self,
+        from: Data(
+            #"{"reference":"example/macos:latest","descriptor":{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"sha256:test","size":1}}"#.utf8
+        )
+    )
+    var configuration = ContainerConfiguration(
+        id: "invalid-storage",
+        image: image,
+        process: ProcessConfiguration(
+            executable: "/bin/true",
+            arguments: [],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+    )
+    configuration.macosGuest = .init(
+        snapshotEnabled: false,
+        guiEnabled: false,
+        agentPort: 27_000,
+        blockDevices: [
+            .init(identifier: "root", kind: .nbdUnixSocket, path: "relative.sock")
+        ]
+    )
+    return try JSONEncoder().encode(configuration)
+}
+
+private func responseFrame(fd: Int32) throws -> MacOSSidecarResponse {
+    let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+    #expect(envelope.kind == .response)
+    return try #require(envelope.response)
 }
 
 private func makeServer() -> SidecarControlServer {

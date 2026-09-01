@@ -27,6 +27,86 @@ import Testing
 @Suite(.serialized)
 struct MacOSSidecarClientTests {
     @Test
+    func machineStateMethodsUseVersionTwoAndDecodeStructuredResults() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let capabilitiesRequest = try readRequest(from: clientFD)
+            #expect(capabilitiesRequest.method == .vmCapabilities)
+            #expect(capabilitiesRequest.protocolVersion == 2)
+            let capabilities = MacOSSidecarCapabilities(
+                lifecycleState: .running,
+                machineState: .init(supported: true),
+                methods: [MacOSSidecarMethod.vmPause.rawValue]
+            )
+            try writeResponse(
+                .success(
+                    requestID: capabilitiesRequest.requestID,
+                    data: try JSONEncoder().encode(capabilities),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+
+            let pauseRequest = try readRequest(from: clientFD)
+            #expect(pauseRequest.method == .vmPause)
+            #expect(pauseRequest.protocolVersion == 2)
+            #expect(pauseRequest.machineState?.timeoutSeconds == 12)
+            try writeResponse(
+                .success(
+                    requestID: pauseRequest.requestID,
+                    data: try JSONEncoder().encode(MacOSMachineStateOperationResult(lifecycleState: .paused)),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+
+            let saveRequest = try readRequest(from: clientFD)
+            #expect(saveRequest.method == .vmSaveMachineState)
+            #expect(saveRequest.machineState?.stateID == "state-1")
+            try writeResponse(
+                .success(
+                    requestID: saveRequest.requestID,
+                    data: try JSONEncoder().encode(
+                        MacOSMachineStateOperationResult(lifecycleState: .paused, stateID: "state-1")
+                    ),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+
+            let restoreRequest = try readRequest(from: clientFD)
+            #expect(restoreRequest.method == .vmRestoreMachineState)
+            #expect(restoreRequest.protocolVersion == 2)
+            try writeResponse(
+                .failure(
+                    requestID: restoreRequest.requestID,
+                    code: "machineStateNotFound",
+                    message: "machine state missing does not exist",
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+        }
+
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+        #expect(try client.capabilities().machineState.supported)
+        #expect(try client.pauseVM(timeoutSeconds: 12).lifecycleState == .paused)
+        #expect(try client.saveMachineState(stateID: "state-1", timeoutSeconds: 12).stateID == "state-1")
+        do {
+            _ = try client.restoreMachineState(stateID: "missing", timeoutSeconds: 12)
+            Issue.record("expected missing machine state to be reported")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .notFound)
+            #expect(error.message.contains("machineStateNotFound"))
+        }
+        try server.waitForCompletion()
+    }
+
+    @Test
     func bootstrapAndProcessEventsFlowOverPersistentControlConnection() throws {
         let socketPath = try makeTemporarySocketPath()
         let server = try FakeUnixSidecarTestServer(socketPath: socketPath)

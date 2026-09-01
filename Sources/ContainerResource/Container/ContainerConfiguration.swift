@@ -191,6 +191,46 @@ public struct ContainerConfiguration: Sendable, Codable {
             case rebootNode = "reboot-node"
         }
 
+        public struct BlockDevice: Sendable, Codable, Equatable {
+            public enum Kind: String, Sendable, Codable, Equatable {
+                /// A disk image below the sandbox runtime directory.
+                case runtimeDiskImage
+                /// An NBD server reachable through a local Unix-domain socket.
+                case nbdUnixSocket
+            }
+
+            public enum SynchronizationMode: String, Sendable, Codable, Equatable {
+                case full
+                case none
+            }
+
+            public var identifier: String
+            public var kind: Kind
+            public var path: String
+            public var exportName: String?
+            public var readOnly: Bool
+            public var timeoutSeconds: Double
+            public var synchronizationMode: SynchronizationMode
+
+            public init(
+                identifier: String,
+                kind: Kind,
+                path: String,
+                exportName: String? = nil,
+                readOnly: Bool = false,
+                timeoutSeconds: Double = 5,
+                synchronizationMode: SynchronizationMode = .full
+            ) {
+                self.identifier = identifier
+                self.kind = kind
+                self.path = path
+                self.exportName = exportName
+                self.readOnly = readOnly
+                self.timeoutSeconds = timeoutSeconds
+                self.synchronizationMode = synchronizationMode
+            }
+        }
+
         public var snapshotEnabled: Bool
         public var guiEnabled: Bool
         public var agentPort: UInt32
@@ -199,6 +239,9 @@ public struct ContainerConfiguration: Sendable, Codable {
         public var vmnetRecoveryStatePath: String?
         public var vmnetRecoveryRequestPath: String?
         public var vmnetRecoveryBootSessionID: String?
+        /// Block devices in guest-visible order. An empty list preserves the
+        /// existing Disk.img-backed root device behavior.
+        public var blockDevices: [BlockDevice]
 
         enum CodingKeys: String, CodingKey {
             case snapshotEnabled
@@ -209,6 +252,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             case vmnetRecoveryStatePath
             case vmnetRecoveryRequestPath
             case vmnetRecoveryBootSessionID
+            case blockDevices
         }
 
         public init(
@@ -219,7 +263,8 @@ public struct ContainerConfiguration: Sendable, Codable {
             vmnetDisconnectRecovery: VMNetDisconnectRecovery = .disabled,
             vmnetRecoveryStatePath: String? = nil,
             vmnetRecoveryRequestPath: String? = nil,
-            vmnetRecoveryBootSessionID: String? = nil
+            vmnetRecoveryBootSessionID: String? = nil,
+            blockDevices: [BlockDevice] = []
         ) {
             self.snapshotEnabled = snapshotEnabled
             self.guiEnabled = guiEnabled
@@ -229,6 +274,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             self.vmnetRecoveryStatePath = vmnetRecoveryStatePath
             self.vmnetRecoveryRequestPath = vmnetRecoveryRequestPath
             self.vmnetRecoveryBootSessionID = vmnetRecoveryBootSessionID
+            self.blockDevices = blockDevices
         }
 
         public init(from decoder: Decoder) throws {
@@ -242,6 +288,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             vmnetRecoveryStatePath = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryStatePath)
             vmnetRecoveryRequestPath = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryRequestPath)
             vmnetRecoveryBootSessionID = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryBootSessionID)
+            blockDevices = try container.decodeIfPresent([BlockDevice].self, forKey: .blockDevices) ?? []
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -254,6 +301,9 @@ public struct ContainerConfiguration: Sendable, Codable {
             try container.encodeIfPresent(vmnetRecoveryStatePath, forKey: .vmnetRecoveryStatePath)
             try container.encodeIfPresent(vmnetRecoveryRequestPath, forKey: .vmnetRecoveryRequestPath)
             try container.encodeIfPresent(vmnetRecoveryBootSessionID, forKey: .vmnetRecoveryBootSessionID)
+            if !blockDevices.isEmpty {
+                try container.encode(blockDevices, forKey: .blockDevices)
+            }
         }
     }
 

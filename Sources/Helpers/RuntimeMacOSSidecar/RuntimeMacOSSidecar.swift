@@ -406,12 +406,6 @@ actor MacOSSidecarService {
         }
     }
 
-    private enum State: String {
-        case created
-        case running
-        case stopped
-    }
-
     private let rootURL: URL
     private let log: Logging.Logger
 
@@ -425,7 +419,11 @@ actor MacOSSidecarService {
     private var ownedVMNetNetworks: [ManagedVMNetNetwork] = []
     private var networkSessions: [XPCClientSession] = []
     private var networkActivations: [PreparedMacOSNetworkActivation] = []
-    private var state: State = .created
+    private var nbdObservers: [MacOSNBDConnectionObserver] = []
+    private var currentCompatibility: MacOSMachineStateCompatibilityDescription?
+    private var lifecycle = MacOSVMLifecycleCoordinator()
+
+    private var state: MacOSVMRuntimeState { lifecycle.state }
 
     init(rootURL: URL, log: Logging.Logger) {
         self.rootURL = rootURL
@@ -433,7 +431,8 @@ actor MacOSSidecarService {
     }
 
     func bootstrapStart(presentGUI: Bool = true) async throws {
-        if state == .running, vm != nil {
+        let shouldStart = try lifecycle.begin(.start)
+        if !shouldStart {
             log.info(
                 "bootstrapStart skipped; vm already running",
                 metadata: ["present_gui": "\(presentGUI)"])
@@ -441,7 +440,13 @@ actor MacOSSidecarService {
         }
 
         log.info("bootstrapStart: loading container config")
-        let config = try loadContainerConfiguration()
+        let config: ContainerConfiguration
+        do {
+            config = try loadContainerConfiguration()
+        } catch {
+            lifecycle.complete(.start, succeeded: false)
+            throw error
+        }
         let guiEnabled = config.macosGuest?.guiEnabled ?? false
         log.info(
             "bootstrapStart: building vm configuration",
@@ -452,7 +457,12 @@ actor MacOSSidecarService {
             ])
 
         do {
-            let vmConfiguration = try await makeVirtualMachineConfiguration(containerConfig: config)
+            let vmConfiguration: VZVirtualMachineConfiguration
+            if let prepared = self.vmConfiguration {
+                vmConfiguration = prepared
+            } else {
+                vmConfiguration = try await makeVirtualMachineConfiguration(containerConfig: config)
+            }
             self.vmConfiguration = vmConfiguration
             log.info("bootstrapStart: creating VZVirtualMachine")
             let created = try await createVirtualMachineOnMain(configuration: vmConfiguration)
@@ -481,37 +491,269 @@ actor MacOSSidecarService {
             try await validateSocketDeviceAvailable(on: vm)
             try await waitForGuestAgentDuringBootstrap(port: agentPort)
             try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
-            state = .running
+            lifecycle.complete(.start, succeeded: true)
             log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
         } catch {
             if let vm, vm.state != .stopped {
                 try? await stopVirtualMachine(vm)
             }
-            await closeGUIWindowOnMain()
-            discardPreparedNetworkResources()
-            self.vm = nil
-            self.vmConfiguration = nil
-            self.vmDelegate = nil
-            self.state = .created
+            await discardVirtualMachineResources()
+            lifecycle.complete(.start, succeeded: false)
             throw error
         }
     }
 
     func stopVM() async throws {
         log.info("stopVM requested", metadata: ["state": "\(state.rawValue)", "has_window": "\(vmWindow != nil)"])
-        guard let vm else {
-            discardPreparedNetworkResources()
-            state = .stopped
+        let shouldStop = try lifecycle.begin(.stop)
+        if !shouldStop {
+            if state == .stopped {
+                await discardVirtualMachineResources()
+            }
             return
         }
-        try await stopVirtualMachine(vm)
+        guard let vm else {
+            await discardVirtualMachineResources()
+            lifecycle.complete(.stop, succeeded: true)
+            return
+        }
+        do {
+            try await stopVirtualMachine(vm)
+            await discardVirtualMachineResources()
+            lifecycle.complete(.stop, succeeded: true)
+            log.info("vm stopped", metadata: ["state": "\(state.rawValue)"])
+        } catch {
+            lifecycle.complete(.stop, succeeded: false)
+            throw error
+        }
+    }
+
+    func capabilities() async -> MacOSSidecarCapabilities {
+        let capability: MacOSMachineStateCapability
+        #if arch(arm64)
+        do {
+            let configuration = try await ensurePreparedConfiguration()
+            try configuration.validateSaveRestoreSupport()
+            capability = .init(supported: true)
+        } catch let error as SidecarRPCError {
+            capability = .init(
+                supported: false,
+                unsupportedReason: .init(code: error.code, message: error.message)
+            )
+        } catch {
+            capability = .init(
+                supported: false,
+                unsupportedReason: .init(
+                    code: "unsupportedVMConfiguration",
+                    message: (error as NSError).localizedDescription,
+                    configurationComponent: "virtualMachineConfiguration"
+                )
+            )
+        }
+        #else
+        capability = .init(
+            supported: false,
+            unsupportedReason: .init(
+                code: "unsupportedHostArchitecture",
+                message: "machine-state save and restore requires an Apple silicon Mac"
+            )
+        )
+        #endif
+        return .init(
+            lifecycleState: state,
+            machineState: capability,
+            methods: [
+                MacOSSidecarMethod.vmCapabilities.rawValue,
+                MacOSSidecarMethod.vmPause.rawValue,
+                MacOSSidecarMethod.vmResume.rawValue,
+                MacOSSidecarMethod.vmSaveMachineState.rawValue,
+                MacOSSidecarMethod.vmRestoreMachineState.rawValue,
+                MacOSSidecarMethod.vmCompatibilityDescription.rawValue,
+                MacOSSidecarMethod.vmStop.rawValue,
+            ]
+        )
+    }
+
+    func pauseVM(timeoutSeconds: Double? = nil) async throws -> MacOSMachineStateOperationResult {
+        try validateOperationTimeout(timeoutSeconds)
+        let shouldPause = try lifecycle.begin(.pause)
+        guard shouldPause else { return .init(lifecycleState: state) }
+        guard let vm else {
+            lifecycle.complete(.pause, succeeded: false)
+            throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
+        }
+        do {
+            try await pauseVirtualMachine(vm)
+            lifecycle.complete(.pause, succeeded: true)
+            return .init(lifecycleState: state)
+        } catch {
+            lifecycle.complete(.pause, succeeded: false)
+            throw error
+        }
+    }
+
+    func resumeVM(timeoutSeconds: Double? = nil) async throws -> MacOSMachineStateOperationResult {
+        try validateOperationTimeout(timeoutSeconds)
+        let shouldResume = try lifecycle.begin(.resume)
+        guard shouldResume else {
+            return .init(lifecycleState: state, stateID: lifecycle.activeStateID)
+        }
+        guard let vm else {
+            lifecycle.complete(.resume, succeeded: false)
+            throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
+        }
+        do {
+            try await resumeVirtualMachine(vm)
+            lifecycle.complete(.resume, succeeded: true)
+            return .init(lifecycleState: state, stateID: lifecycle.activeStateID)
+        } catch {
+            lifecycle.complete(.resume, succeeded: false)
+            throw error
+        }
+    }
+
+    func saveMachineState(stateID: String, timeoutSeconds: Double?) async throws -> MacOSMachineStateOperationResult {
+        try validateOperationTimeout(timeoutSeconds)
+        let store = MacOSMachineStateStore(runtimeRootURL: rootURL)
+        try MacOSMachineStateStore.validateStateID(stateID)
+        try lifecycle.ensureNoOperationInProgress()
+        do {
+            let stored = try store.load(stateID: stateID)
+            let current = try await currentCompatibilityDescription()
+            let reasons = MacOSMachineStateCompatibility.compare(saved: stored.compatibility, current: current)
+            guard reasons.isEmpty else {
+                throw compatibilityMismatchError(reasons)
+            }
+            return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
+        } catch let error as SidecarRPCError where error.code == "machineStateNotFound" {
+            // A missing state is the expected first-save path.
+        }
+
+        #if arch(arm64)
+        let configuration = try await ensurePreparedConfiguration()
+        try configuration.validateSaveRestoreSupport()
+        let compatibility = try await currentCompatibilityDescription()
+        let shouldSave = try lifecycle.begin(.save, stateID: stateID)
+        guard shouldSave else {
+            return .init(lifecycleState: state, stateID: stateID, compatibility: compatibility)
+        }
+        guard let vm else {
+            lifecycle.complete(.save, succeeded: false)
+            throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
+        }
+
+        let staging: MacOSMachineStateStore.Staging
+        do {
+            staging = try store.createStaging(stateID: stateID)
+        } catch {
+            lifecycle.complete(.save, succeeded: false)
+            throw error
+        }
+        do {
+            try await saveVirtualMachine(vm, to: staging.stateURL)
+            try store.commit(staging, compatibility: compatibility)
+            lifecycle.complete(.save, succeeded: true)
+            return .init(lifecycleState: state, stateID: stateID, compatibility: compatibility)
+        } catch {
+            store.abort(staging)
+            lifecycle.complete(.save, succeeded: false)
+            throw error
+        }
+        #else
+        throw SidecarRPCError(code: "unsupportedHostArchitecture", message: "machine-state save requires an Apple silicon Mac")
+        #endif
+    }
+
+    func restoreMachineState(stateID: String, timeoutSeconds: Double?) async throws -> MacOSMachineStateOperationResult {
+        try validateOperationTimeout(timeoutSeconds)
+        #if arch(arm64)
+        let store = MacOSMachineStateStore(runtimeRootURL: rootURL)
+        let stored = try store.load(stateID: stateID)
+        let configuration = try await ensurePreparedConfiguration()
+        try configuration.validateSaveRestoreSupport()
+        let current = try await currentCompatibilityDescription()
+        let reasons = MacOSMachineStateCompatibility.compare(saved: stored.compatibility, current: current)
+        guard reasons.isEmpty else {
+            throw compatibilityMismatchError(reasons)
+        }
+
+        let shouldRestore = try lifecycle.begin(.restore, stateID: stateID)
+        guard shouldRestore else {
+            return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
+        }
+        do {
+            if vm == nil {
+                let created = try await createVirtualMachineOnMain(configuration: configuration)
+                vm = created.vm
+                vmDelegate = created.delegate
+            }
+            guard let vm else {
+                throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
+            }
+            try await restoreVirtualMachine(vm, from: stored.stateURL)
+            lifecycle.complete(.restore, succeeded: true)
+            return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
+        } catch {
+            vm = nil
+            vmDelegate = nil
+            lifecycle.complete(.restore, succeeded: false)
+            throw error
+        }
+        #else
+        throw SidecarRPCError(code: "unsupportedHostArchitecture", message: "machine-state restore requires an Apple silicon Mac")
+        #endif
+    }
+
+    func compatibilityDescription(stateID: String? = nil) async throws -> MacOSMachineStateCompatibilityResult {
+        let current = try await currentCompatibilityDescription()
+        guard let stateID else {
+            return .init(current: current, compatible: true)
+        }
+        let saved = try MacOSMachineStateStore(runtimeRootURL: rootURL).load(stateID: stateID).compatibility
+        let reasons = MacOSMachineStateCompatibility.compare(saved: saved, current: current)
+        return .init(current: current, saved: saved, compatible: reasons.isEmpty, reasons: reasons)
+    }
+
+    private func currentCompatibilityDescription() async throws -> MacOSMachineStateCompatibilityDescription {
+        _ = try await ensurePreparedConfiguration()
+        guard let currentCompatibility else {
+            throw SidecarRPCError(code: "compatibilityDescriptionUnavailable", message: "VM compatibility description is unavailable")
+        }
+        return currentCompatibility
+    }
+
+    private func ensurePreparedConfiguration() async throws -> VZVirtualMachineConfiguration {
+        if let vmConfiguration { return vmConfiguration }
+        let configuration = try await makeVirtualMachineConfiguration(containerConfig: loadContainerConfiguration())
+        vmConfiguration = configuration
+        return configuration
+    }
+
+    private func compatibilityMismatchError(_ reasons: [MacOSMachineStateUnsupportedReason]) -> SidecarRPCError {
+        let reasonCodes = reasons.map(\.code).joined(separator: ",")
+        return SidecarRPCError(
+            code: "machineStateIncompatible",
+            message: "machine state is not compatible with this VM and physical host",
+            details: reasonCodes,
+            metadata: ["reasonCodes": reasonCodes]
+        )
+    }
+
+    private func validateOperationTimeout(_ timeoutSeconds: Double?) throws {
+        guard let timeoutSeconds else { return }
+        guard timeoutSeconds.isFinite, (1...600).contains(timeoutSeconds) else {
+            throw SidecarRPCError(code: "invalidTimeout", message: "operation timeout must be between 1 and 600 seconds")
+        }
+    }
+
+    private func discardVirtualMachineResources() async {
         await closeGUIWindowOnMain()
+        vm = nil
+        vmConfiguration = nil
+        vmDelegate = nil
+        currentCompatibility = nil
+        nbdObservers = []
         discardPreparedNetworkResources()
-        self.vm = nil
-        self.vmConfiguration = nil
-        self.vmDelegate = nil
-        state = .stopped
-        log.info("vm stopped", metadata: ["state": "\(state.rawValue)"])
     }
 
     func showGUIWindow() async throws {
@@ -699,18 +941,12 @@ actor MacOSSidecarService {
         return try JSONDecoder().decode(MacOSGuestNetworkConfigurationResult.self, from: data)
     }
 
-    func prepareForQuit() async {
+    func prepareForQuit() async throws {
         log.info("prepareForQuit requested", metadata: ["state": "\(state.rawValue)", "has_window": "\(vmWindow != nil)"])
-        do {
-            try await stopVM()
-        } catch {
-            log.error("failed to stop vm during quit", metadata: ["error": "\(error)"])
-        }
-        discardPreparedNetworkResources()
+        try await stopVM()
     }
 
     private func configPath() -> URL { rootURL.appendingPathComponent("config.json") }
-    private func diskImagePath() -> URL { rootURL.appendingPathComponent("Disk.img") }
     private func auxiliaryStoragePath() -> URL { rootURL.appendingPathComponent("AuxiliaryStorage") }
     private func hardwareModelPath() -> URL { rootURL.appendingPathComponent("HardwareModel.bin") }
     private func machineIdentifierPath() -> URL { rootURL.appendingPathComponent("MachineIdentifier.bin") }
@@ -721,6 +957,7 @@ actor MacOSSidecarService {
     }
 
     private func makeVirtualMachineConfiguration(containerConfig: ContainerConfiguration) async throws -> VZVirtualMachineConfiguration {
+        let storage = try MacOSBlockDeviceBuilder.build(rootURL: rootURL, options: containerConfig.macosGuest, log: log)
         let hardwareData = try Data(contentsOf: hardwareModelPath())
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareData) else {
             throw ContainerizationError(.invalidState, message: "invalid hardware model data")
@@ -743,11 +980,8 @@ actor MacOSSidecarService {
             VZVirtualMachineConfiguration.minimumAllowedMemorySize,
             min(VZVirtualMachineConfiguration.maximumAllowedMemorySize, containerConfig.resources.memoryInBytes)
         )
-        vmConfiguration.storageDevices = [
-            VZVirtioBlockDeviceConfiguration(
-                attachment: try VZDiskImageStorageDeviceAttachment(url: diskImagePath(), readOnly: false)
-            )
-        ]
+        vmConfiguration.storageDevices = storage.devices
+        nbdObservers = storage.observers
         let networkBackend = MacOSNetworkBackendFactory.backend(for: containerConfig)
         log.info("resolved macOS guest network backend", metadata: ["backend": "\(networkBackend.backendID.rawValue)"])
         let existingLease = try MacOSGuestNetworkLeaseStore.load(from: rootURL)
@@ -774,6 +1008,12 @@ actor MacOSSidecarService {
             vmConfiguration.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         }
         try vmConfiguration.validate()
+        currentCompatibility = try MacOSCompatibilityDescriptionBuilder.make(
+            containerConfig: containerConfig,
+            hardwareModelData: hardwareData,
+            machineIdentifierData: machineIdentifier.dataRepresentation,
+            storageDescriptions: storage.descriptions
+        )
         return vmConfiguration
     }
 
@@ -1019,6 +1259,60 @@ actor MacOSSidecarService {
             }
         }
     }
+
+    private func pauseVirtualMachine(_ vm: VZVirtualMachine) async throws {
+        let vmBox = UnsafeSendableBox(vm)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.main.async {
+                vmBox.value.pause { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+    }
+
+    private func resumeVirtualMachine(_ vm: VZVirtualMachine) async throws {
+        let vmBox = UnsafeSendableBox(vm)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.main.async {
+                vmBox.value.resume { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+    }
+
+    #if arch(arm64)
+    private func saveVirtualMachine(_ vm: VZVirtualMachine, to url: URL) async throws {
+        let vmBox = UnsafeSendableBox(vm)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.main.async {
+                vmBox.value.saveMachineStateTo(url: url) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                }
+            }
+        }
+    }
+
+    private func restoreVirtualMachine(_ vm: VZVirtualMachine, from url: URL) async throws {
+        let vmBox = UnsafeSendableBox(vm)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.main.async {
+                vmBox.value.restoreMachineStateFrom(url: url) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                }
+            }
+        }
+    }
+    #endif
 
     private func connectSocketOnMainWithTimeout(
         _ vm: VZVirtualMachine,
@@ -2160,12 +2454,23 @@ final class SidecarControlServer: @unchecked Sendable {
     }
 
     private func failureResponse(requestID: String, error: Error) -> MacOSSidecarResponse {
+        if let rpcError = error as? SidecarRPCError {
+            return .failure(
+                requestID: requestID,
+                code: rpcError.code,
+                message: rpcError.message,
+                details: rpcError.details,
+                metadata: rpcError.metadata,
+                protocolVersion: MacOSSidecarProtocolVersion.current
+            )
+        }
         let normalized = normalizedError(error)
         return .failure(
             requestID: requestID,
             code: normalized.code.description,
             message: normalized.message,
-            details: responseErrorDetails(for: normalized)
+            details: responseErrorDetails(for: normalized),
+            protocolVersion: MacOSSidecarProtocolVersion.current
         )
     }
 
@@ -2187,6 +2492,9 @@ final class SidecarControlServer: @unchecked Sendable {
     private func perform(request: MacOSSidecarRequest, clientFD: Int32) throws -> MacOSSidecarResponse {
         let service = self.service
         let requestID = request.requestID
+        if let versionError = protocolVersionError(for: request) {
+            return failureResponse(requestID: requestID, error: versionError)
+        }
         switch request.method {
         case .vmBootstrapStart:
             log.info(
@@ -2393,6 +2701,82 @@ final class SidecarControlServer: @unchecked Sendable {
             } catch {
                 return failureResponse(requestID: requestID, error: error)
             }
+        case .vmCapabilities:
+            return try sync(requestID: requestID) {
+                let capabilities = await service.capabilities()
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(capabilities),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+        case .vmPause:
+            return try sync(requestID: requestID) {
+                let result = try await service.pauseVM(timeoutSeconds: request.machineState?.timeoutSeconds)
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+        case .vmResume:
+            return try sync(requestID: requestID) {
+                let result = try await service.resumeVM(timeoutSeconds: request.machineState?.timeoutSeconds)
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+        case .vmSaveMachineState:
+            guard let stateID = request.machineState?.stateID else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "missing machineState.stateID",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            return try sync(requestID: requestID) {
+                let result = try await service.saveMachineState(
+                    stateID: stateID,
+                    timeoutSeconds: request.machineState?.timeoutSeconds
+                )
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+        case .vmRestoreMachineState:
+            guard let stateID = request.machineState?.stateID else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "missing machineState.stateID",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            return try sync(requestID: requestID) {
+                let result = try await service.restoreMachineState(
+                    stateID: stateID,
+                    timeoutSeconds: request.machineState?.timeoutSeconds
+                )
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+        case .vmCompatibilityDescription:
+            return try sync(requestID: requestID) {
+                let result = try await service.compatibilityDescription(stateID: request.machineState?.stateID)
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
         case .vmStop:
             log.info("sidecar control vmStop request", metadata: ["request_id": "\(requestID)"])
             return try sync(requestID: requestID) {
@@ -2408,14 +2792,55 @@ final class SidecarControlServer: @unchecked Sendable {
                 self.closeAllProcessSessions()
                 self.closeAllFSSessions()
                 self.closeAllFSReadSessions()
-                await service.prepareForQuit()
+                try await service.prepareForQuit()
                 return .success(requestID: requestID)
             }
             DispatchQueue.main.async {
                 NSApplication.shared.terminate(nil)
             }
             return response
+        case .unknown(let method):
+            return .failure(
+                requestID: requestID,
+                code: "unknownMethod",
+                message: "unknown sidecar control method \(method)",
+                metadata: ["method": method],
+                protocolVersion: MacOSSidecarProtocolVersion.current
+            )
         }
+    }
+
+    private func protocolVersionError(for request: MacOSSidecarRequest) -> SidecarRPCError? {
+        if let version = request.protocolVersion, !MacOSSidecarProtocolVersion.supported.contains(version) {
+            return SidecarRPCError(
+                code: "protocolVersionMismatch",
+                message: "unsupported sidecar protocol version \(version)",
+                metadata: [
+                    "requestedVersion": "\(version)",
+                    "currentVersion": "\(MacOSSidecarProtocolVersion.current)",
+                    "supportedVersions": MacOSSidecarProtocolVersion.supported.map(String.init).joined(separator: ","),
+                ]
+            )
+        }
+
+        switch request.method {
+        case .vmPause, .vmResume, .vmSaveMachineState, .vmRestoreMachineState, .vmCompatibilityDescription:
+            guard request.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
+                return SidecarRPCError(
+                    code: "protocolVersionMismatch",
+                    message: "method \(request.method.rawValue) requires sidecar protocol version \(MacOSSidecarProtocolVersion.machineState)",
+                    metadata: [
+                        "requestedVersion": request.protocolVersion.map(String.init) ?? "legacy-unversioned",
+                        "requiredVersion": "\(MacOSSidecarProtocolVersion.machineState)",
+                    ]
+                )
+            }
+        case .vmBootstrapStart, .vmShowGUI, .vmConnectVsock, .processStart, .processStdin, .processSignal,
+            .processResize, .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+            .fsListDir, .vmCapabilities, .vmStop, .sidecarQuit, .unknown:
+            break
+        }
+        return nil
     }
 
     private func sync(requestID: String, _ body: @Sendable @escaping () async throws -> MacOSSidecarResponse) throws -> MacOSSidecarResponse {

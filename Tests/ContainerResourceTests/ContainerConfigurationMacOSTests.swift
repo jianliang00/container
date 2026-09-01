@@ -113,6 +113,7 @@ struct ContainerConfigurationMacOSTests {
         #expect(decoded.macosGuest?.networkBackend == .virtualizationNAT)
         #expect(decoded.macosGuest?.vmnetDisconnectRecovery == .disabled)
         #expect(decoded.macosGuest?.blockDevices == [])
+        #expect(decoded.macosGuest?.machineState == nil)
     }
 
     @Test
@@ -131,6 +132,30 @@ struct ContainerConfigurationMacOSTests {
                     synchronizationMode: .full
                 )
             ]
+        )
+
+        let decoded = try JSONDecoder().decode(
+            ContainerConfiguration.MacOSGuestOptions.self,
+            from: JSONEncoder().encode(options)
+        )
+        #expect(decoded == options)
+    }
+
+    @Test
+    func macOSGuestMachineStateConfigurationRoundTrips() throws {
+        let options = ContainerConfiguration.MacOSGuestOptions(
+            snapshotEnabled: true,
+            guiEnabled: false,
+            agentPort: 27_000,
+            blockDevices: [
+                .init(identifier: "root", kind: .nbdUnixSocket, path: "/var/run/container/nbd/root.sock")
+            ],
+            machineState: .init(
+                persistenceID: "pod-a",
+                storageDirectory: "/var/lib/container/machine-state/v1/pod-a",
+                controlSocketPath: "/var/run/container/machine-state/v1/pod-a.sock",
+                restoreStateID: "state-a"
+            )
         )
 
         let decoded = try JSONDecoder().decode(

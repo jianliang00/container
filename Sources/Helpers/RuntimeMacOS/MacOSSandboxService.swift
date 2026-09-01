@@ -274,6 +274,7 @@ public actor MacOSSandboxService {
     var sidecarHandle: SidecarHandle?
     var sidecarEventPump: SidecarEventPump?
     var sidecarEventPumpTask: Task<Void, Never>?
+    var machineStateLeaseFD: Int32 = -1
     private var eventLoopGroup: MultiThreadedEventLoopGroup?
     private var socketForwarders: [SocketForwarderResult] = []
 
@@ -3979,6 +3980,7 @@ extension MacOSSandboxService {
         sidecarEventPump = nil
         sidecarEventPumpTask = nil
         sidecarHandle = nil
+        releaseMachineStateLeaseIfPresent()
         await stopSocketForwarders()
         closeAllSessions()
         sandboxState = .stopped(255)

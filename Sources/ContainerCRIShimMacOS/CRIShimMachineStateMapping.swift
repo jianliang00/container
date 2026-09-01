@@ -1,0 +1,416 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2026 Apple Inc. and the container project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import ContainerResource
+import Foundation
+
+#if os(Linux)
+import Glibc
+#else
+import Darwin
+#endif
+
+public enum CRIShimMachineStateAnnotation {
+    public static let prefix = "io.container.runtime.macos.machine-state.v1/"
+    public static let enabled = prefix + "enabled"
+    public static let persistenceID = prefix + "persistence-id"
+    public static let restoreStateID = prefix + "restore-state-id"
+    public static let blockDevices = prefix + "block-devices"
+    public static let criRestoreUnsupportedReasonCode = "criWorkloadAdoptionUnavailable"
+
+    static let companionKeys = [persistenceID, restoreStateID, blockDevices]
+}
+
+struct CRIShimMachineStateMapping: Equatable, Sendable {
+    var machineState: ContainerConfiguration.MacOSGuestOptions.MachineState?
+    var blockDevices: [ContainerConfiguration.MacOSGuestOptions.BlockDevice]
+
+    static let disabled = CRIShimMachineStateMapping(machineState: nil, blockDevices: [])
+}
+
+private struct CRIShimNBDAnnotationDevice: Decodable {
+    let identifier: String
+    let unixSocket: String
+    let exportName: String?
+    let readOnly: Bool
+    let timeoutSeconds: Double
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case identifier
+        case unixSocket
+        case exportName
+        case readOnly
+        case timeoutSeconds
+    }
+
+    init(from decoder: any Decoder) throws {
+        let allKeys = try decoder.container(keyedBy: CRIShimAnyCodingKey.self).allKeys
+        let allowedKeys = Set(CodingKeys.allCases.map(\.rawValue))
+        if let unsupported = allKeys.map(\.stringValue).first(where: { !allowedKeys.contains($0) }) {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "unsupported block device field \(unsupported)")
+            )
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        identifier = try container.decode(String.self, forKey: .identifier)
+        unixSocket = try container.decode(String.self, forKey: .unixSocket)
+        exportName = try container.decodeIfPresent(String.self, forKey: .exportName)
+        readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+        timeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .timeoutSeconds) ?? 5
+    }
+}
+
+private struct CRIShimAnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        self.intValue = nil
+    }
+
+    init?(intValue: Int) {
+        self.stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+func makeCRIShimMachineStateMapping(
+    annotations: [String: String],
+    nodeConfig: MachineStateConfig?
+) throws -> CRIShimMachineStateMapping {
+    let enabledValue = annotations[CRIShimMachineStateAnnotation.enabled]
+    let presentCompanionKeys = CRIShimMachineStateAnnotation.companionKeys.filter { annotations[$0] != nil }
+
+    guard let enabledValue else {
+        guard presentCompanionKeys.isEmpty else {
+            throw CRIShimError.invalidArgument(
+                "\(presentCompanionKeys[0]) requires \(CRIShimMachineStateAnnotation.enabled)=true"
+            )
+        }
+        return .disabled
+    }
+
+    let enabled: Bool
+    switch enabledValue {
+    case "true":
+        enabled = true
+    case "false":
+        enabled = false
+    default:
+        throw CRIShimError.invalidArgument(
+            "\(CRIShimMachineStateAnnotation.enabled) must be exactly true or false"
+        )
+    }
+
+    guard enabled else {
+        guard presentCompanionKeys.isEmpty else {
+            throw CRIShimError.invalidArgument(
+                "\(presentCompanionKeys[0]) is not allowed when machine state is disabled"
+            )
+        }
+        return .disabled
+    }
+
+    guard let nodeConfig, nodeConfig.enabled else {
+        throw CRIShimError.unsupported("machine-state annotations are disabled by the node runtime configuration")
+    }
+    let persistenceID = try requireSafeIdentifier(
+        annotations[CRIShimMachineStateAnnotation.persistenceID],
+        annotation: CRIShimMachineStateAnnotation.persistenceID,
+        maximumLength: 64
+    )
+    if let restoreStateID = annotations[CRIShimMachineStateAnnotation.restoreStateID] {
+        _ = try requireSafeIdentifier(
+            restoreStateID,
+            annotation: CRIShimMachineStateAnnotation.restoreStateID,
+            maximumLength: 128
+        )
+        throw CRIShimError.unsupported(
+            "\(CRIShimMachineStateAnnotation.criRestoreUnsupportedReasonCode): CRI machine-state restore requires guest process and host workload metadata adoption, which this runtime protocol does not support"
+        )
+    }
+    let blockDevices = try decodeBlockDevices(
+        annotations[CRIShimMachineStateAnnotation.blockDevices],
+        allowedRoots: nodeConfig.nbdSocketAllowedRoots
+    )
+
+    let storageRoot = URL(fileURLWithPath: nodeConfig.normalizedStorageRoot).standardizedFileURL
+    let socketRoot = URL(fileURLWithPath: nodeConfig.normalizedControlSocketRoot).standardizedFileURL
+    try preparePrivateDirectory(storageRoot, createIntermediates: true)
+    try preparePrivateDirectory(socketRoot, createIntermediates: true)
+
+    let storageDirectory = storageRoot.appendingPathComponent(persistenceID, isDirectory: true)
+    try requireManagedDescendant(storageDirectory, below: storageRoot)
+    try preparePrivateDirectory(storageDirectory, createIntermediates: false)
+
+    let controlSocket = socketRoot.appendingPathComponent("\(persistenceID).sock", isDirectory: false)
+    try requireManagedDescendant(controlSocket, below: socketRoot)
+    let socketAddress = sockaddr_un()
+    guard controlSocket.path.utf8.count < MemoryLayout.size(ofValue: socketAddress.sun_path) else {
+        throw CRIShimError.invalidArgument("derived machine-state control socket path is too long")
+    }
+
+    return CRIShimMachineStateMapping(
+        machineState: .init(
+            persistenceID: persistenceID,
+            storageDirectory: storageDirectory.path,
+            controlSocketPath: controlSocket.path
+        ),
+        blockDevices: blockDevices
+    )
+}
+
+private func decodeBlockDevices(
+    _ value: String?,
+    allowedRoots: [String]
+) throws -> [ContainerConfiguration.MacOSGuestOptions.BlockDevice] {
+    guard let value else {
+        return []
+    }
+    guard !value.isEmpty, value.utf8.count <= 65_536 else {
+        throw CRIShimError.invalidArgument(
+            "\(CRIShimMachineStateAnnotation.blockDevices) must contain 1 to 65536 UTF-8 bytes"
+        )
+    }
+
+    let decoded: [CRIShimNBDAnnotationDevice]
+    do {
+        decoded = try JSONDecoder().decode([CRIShimNBDAnnotationDevice].self, from: Data(value.utf8))
+    } catch {
+        throw CRIShimError.invalidArgument(
+            "\(CRIShimMachineStateAnnotation.blockDevices) must be a valid v1 JSON device array: \(error.localizedDescription)"
+        )
+    }
+    guard !decoded.isEmpty, decoded.count <= 16 else {
+        throw CRIShimError.invalidArgument(
+            "\(CRIShimMachineStateAnnotation.blockDevices) must contain between 1 and 16 devices"
+        )
+    }
+    guard decoded[0].identifier == "root" else {
+        throw CRIShimError.invalidArgument("the first block device must have identifier root")
+    }
+
+    var identifiers = Set<String>()
+    return try decoded.map { device in
+        let identifier = try requireSafeIdentifier(
+            device.identifier,
+            annotation: "block device identifier",
+            maximumLength: 64
+        )
+        guard identifiers.insert(identifier).inserted else {
+            throw CRIShimError.invalidArgument("block device identifiers must be unique")
+        }
+        guard device.timeoutSeconds.isFinite, (0.1...300).contains(device.timeoutSeconds) else {
+            throw CRIShimError.invalidArgument("NBD timeoutSeconds must be between 0.1 and 300")
+        }
+        if let exportName = device.exportName {
+            guard !exportName.isEmpty, exportName.utf8.count <= 255, !exportName.contains("\0") else {
+                throw CRIShimError.invalidArgument("NBD exportName must contain 1 to 255 bytes without NUL")
+            }
+        }
+        try validateAllowedUnixSocket(device.unixSocket, allowedRoots: allowedRoots)
+        return .init(
+            identifier: identifier,
+            kind: .nbdUnixSocket,
+            path: device.unixSocket,
+            exportName: device.exportName,
+            readOnly: device.readOnly,
+            timeoutSeconds: device.timeoutSeconds,
+            synchronizationMode: .full
+        )
+    }
+}
+
+private func requireSafeIdentifier(
+    _ value: String?,
+    annotation: String,
+    maximumLength: Int
+) throws -> String {
+    guard let value else {
+        throw CRIShimError.invalidArgument("\(annotation) is required")
+    }
+    return try requireSafeIdentifier(value, annotation: annotation, maximumLength: maximumLength)
+}
+
+private func requireSafeIdentifier(
+    _ value: String,
+    annotation: String,
+    maximumLength: Int
+) throws -> String {
+    let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    guard !value.isEmpty,
+        value.utf8.count <= maximumLength,
+        value != ".",
+        value != "..",
+        value.unicodeScalars.allSatisfy(allowed.contains)
+    else {
+        throw CRIShimError.invalidArgument(
+            "\(annotation) must contain 1 to \(maximumLength) letters, digits, dots, underscores, or hyphens"
+        )
+    }
+    return value
+}
+
+private func preparePrivateDirectory(_ url: URL, createIntermediates: Bool) throws {
+    try rejectSymbolicLinksInAbsolutePath(url)
+    var value = stat()
+    if lstat(url.path, &value) != 0 {
+        guard errno == ENOENT else {
+            throw CRIShimError.internalError("failed to inspect managed directory \(url.path): \(posixMessage())")
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: url,
+                withIntermediateDirectories: createIntermediates,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            throw CRIShimError.internalError("failed to create managed directory \(url.path): \(error.localizedDescription)")
+        }
+        guard lstat(url.path, &value) == 0 else {
+            throw CRIShimError.internalError("failed to inspect managed directory \(url.path): \(posixMessage())")
+        }
+        try rejectSymbolicLinksInAbsolutePath(url)
+    }
+    guard (value.st_mode & S_IFMT) == S_IFDIR else {
+        throw CRIShimError.invalidArgument("managed path must be a directory and cannot be a symbolic link: \(url.path)")
+    }
+    guard chmod(url.path, mode_t(S_IRWXU)) == 0 else {
+        throw CRIShimError.internalError("failed to set private permissions on \(url.path): \(posixMessage())")
+    }
+}
+
+private func requireManagedDescendant(_ candidate: URL, below root: URL) throws {
+    let root = root.standardizedFileURL
+    let candidate = candidate.standardizedFileURL
+    let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+    guard candidate.path.hasPrefix(prefix) else {
+        throw CRIShimError.invalidArgument("managed path escapes its configured root")
+    }
+    try rejectSymbolicLinksInAbsolutePath(root)
+    try rejectSymbolicLinksInAbsolutePath(candidate)
+
+    var current = root
+    var rootValue = stat()
+    guard lstat(root.path, &rootValue) == 0, (rootValue.st_mode & S_IFMT) == S_IFDIR else {
+        throw CRIShimError.invalidArgument("managed root must be a directory and cannot be a symbolic link: \(root.path)")
+    }
+    for component in candidate.pathComponents.dropFirst(root.pathComponents.count) {
+        current.appendPathComponent(component)
+        var value = stat()
+        if lstat(current.path, &value) != 0 {
+            if errno == ENOENT { return }
+            throw CRIShimError.internalError("failed to inspect managed path \(current.path): \(posixMessage())")
+        }
+        guard (value.st_mode & S_IFMT) != S_IFLNK else {
+            throw CRIShimError.invalidArgument("symbolic links are not allowed in managed paths: \(current.path)")
+        }
+    }
+}
+
+private func rejectSymbolicLinksInAbsolutePath(_ url: URL) throws {
+    let standardized = url.standardizedFileURL
+    guard standardized.path.hasPrefix("/") else {
+        throw CRIShimError.invalidArgument("managed path must be absolute")
+    }
+    let allowedSystemLinks: Set<String> = ["/etc", "/tmp", "/var"]
+    var current = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in standardized.pathComponents.dropFirst() {
+        current.appendPathComponent(component)
+        var value = stat()
+        if lstat(current.path, &value) != 0 {
+            if errno == ENOENT { return }
+            throw CRIShimError.internalError("failed to inspect managed path \(current.path): \(posixMessage())")
+        }
+        if (value.st_mode & S_IFMT) == S_IFLNK, !allowedSystemLinks.contains(current.path) {
+            throw CRIShimError.invalidArgument("symbolic links are not allowed in managed paths: \(current.path)")
+        }
+    }
+}
+
+private func validateAllowedUnixSocket(_ path: String, allowedRoots: [String]) throws {
+    guard path.hasPrefix("/"), URL(fileURLWithPath: path).standardizedFileURL.path == path else {
+        throw CRIShimError.invalidArgument("NBD Unix socket must be an absolute canonical local path")
+    }
+    guard !allowedRoots.isEmpty else {
+        throw CRIShimError.unsupported("NBD Unix sockets are disabled by the node runtime configuration")
+    }
+
+    let candidate = URL(fileURLWithPath: path).standardizedFileURL
+    var matchedRoot: URL?
+    for configuredRoot in allowedRoots {
+        let root = URL(fileURLWithPath: configuredRoot).standardizedFileURL
+        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        if candidate.path.hasPrefix(prefix) {
+            matchedRoot = root
+            break
+        }
+    }
+    guard let matchedRoot else {
+        throw CRIShimError.invalidArgument("NBD Unix socket is outside the configured allowlist")
+    }
+    try requireManagedDescendant(candidate, below: matchedRoot)
+
+    var value = stat()
+    guard lstat(path, &value) == 0 else {
+        throw CRIShimError.unavailable("NBD Unix socket does not exist: \(path)")
+    }
+    guard (value.st_mode & S_IFMT) == S_IFSOCK else {
+        throw CRIShimError.invalidArgument("NBD path is not a Unix socket: \(path)")
+    }
+    try probeUnixSocket(path)
+}
+
+private func probeUnixSocket(_ path: String) throws {
+    #if os(Linux)
+    let socketType = CInt(SOCK_STREAM.rawValue)
+    #else
+    let socketType = SOCK_STREAM
+    #endif
+    let fd = socket(AF_UNIX, socketType, 0)
+    guard fd >= 0 else {
+        throw CRIShimError.internalError("failed to create NBD probe socket: \(posixMessage())")
+    }
+    defer { _ = close(fd) }
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let bytes = Array(path.utf8)
+    guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
+        throw CRIShimError.invalidArgument("NBD Unix socket path is too long")
+    }
+    withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+        buffer.initializeMemory(as: UInt8.self, repeating: 0)
+        for (index, byte) in bytes.enumerated() {
+            buffer[index] = byte
+        }
+    }
+    let length = socklen_t(MemoryLayout<sa_family_t>.size + bytes.count + 1)
+    let result = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, length)
+        }
+    }
+    guard result == 0 else {
+        throw CRIShimError.unavailable("failed to connect to NBD Unix socket \(path): \(posixMessage())")
+    }
+}
+
+private func posixMessage() -> String {
+    String(cString: strerror(errno))
+}

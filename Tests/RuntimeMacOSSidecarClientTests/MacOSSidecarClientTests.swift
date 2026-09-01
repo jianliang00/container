@@ -16,6 +16,7 @@
 
 #if os(macOS)
 import ContainerizationError
+import ContainerResource
 import Darwin
 import Foundation
 import Logging
@@ -26,6 +27,151 @@ import Testing
 
 @Suite(.serialized)
 struct MacOSSidecarClientTests {
+    @Test
+    func restoreStartupUsesRestoreThenResumeWithoutColdBootstrap() async throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let restore = try readRequest(from: clientFD)
+            #expect(restore.method == .vmRestoreMachineState)
+            #expect(restore.protocolVersion == 2)
+            #expect(restore.machineState?.stateID == "state-a")
+            try writeResponse(
+                .success(
+                    requestID: restore.requestID,
+                    data: try JSONEncoder().encode(
+                        MacOSMachineStateOperationResult(lifecycleState: .paused, stateID: "state-a")
+                    ),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+
+            let resume = try readRequest(from: clientFD)
+            #expect(resume.method == .vmResume)
+            #expect(resume.protocolVersion == 2)
+            try writeResponse(
+                .success(
+                    requestID: resume.requestID,
+                    data: try JSONEncoder().encode(
+                        MacOSMachineStateOperationResult(lifecycleState: .running, stateID: "state-a")
+                    ),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("restore-start-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = MacOSSandboxService(root: root, log: Logger(label: "MacOSSidecarClientTests"))
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+
+        try await service.initializeVirtualMachineViaSidecar(
+            client: client,
+            config: try makeSidecarStartupConfiguration(restoreStateID: "state-a"),
+            presentGUI: false,
+            socketConnectRetries: 3
+        )
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func failedRestoreDoesNotFallBackToColdBootstrap() async throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let restore = try readRequest(from: clientFD)
+            #expect(restore.method == .vmRestoreMachineState)
+            try writeResponse(
+                .failure(
+                    requestID: restore.requestID,
+                    code: "machineStateIncompatible",
+                    message: "saved state is incompatible",
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+            usleep(150_000)
+            var byte = UInt8.zero
+            let count = Darwin.recv(clientFD, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+            #expect(count == -1)
+            #expect(errno == EAGAIN || errno == EWOULDBLOCK)
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("restore-failure-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = MacOSSandboxService(root: root, log: Logger(label: "MacOSSidecarClientTests"))
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+
+        await #expect(throws: ContainerizationError.self) {
+            try await service.initializeVirtualMachineViaSidecar(
+                client: client,
+                config: makeSidecarStartupConfiguration(restoreStateID: "state-a"),
+                presentGUI: false,
+                socketConnectRetries: 3
+            )
+        }
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func persistenceLeaseSerializesRecreatedSandboxes() async throws {
+        let root = URL(fileURLWithPath: "/tmp/ms-lease-\(UUID().uuidString)", isDirectory: true)
+        let storage = root.appendingPathComponent("state", isDirectory: true)
+        let control = root.appendingPathComponent("control", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: control, withIntermediateDirectories: true)
+        let config = try makeSidecarStartupConfiguration(
+            restoreStateID: nil,
+            storageDirectory: storage.path,
+            controlSocketPath: control.appendingPathComponent("pod-a.sock").path
+        )
+        let first = MacOSSandboxService(
+            root: root.appendingPathComponent("sandbox-a"),
+            log: Logger(label: "MacOSSidecarClientTests")
+        )
+        let recreated = MacOSSandboxService(
+            root: root.appendingPathComponent("sandbox-b"),
+            log: Logger(label: "MacOSSidecarClientTests")
+        )
+
+        try await first.validateMachineStateRuntimeConfiguration(config)
+        try await first.acquireMachineStateLeaseIfNeeded(config)
+        await #expect(throws: ContainerizationError.self) {
+            try await recreated.acquireMachineStateLeaseIfNeeded(config)
+        }
+        await first.releaseMachineStateLeaseIfPresent()
+        try await recreated.acquireMachineStateLeaseIfNeeded(config)
+        await recreated.releaseMachineStateLeaseIfPresent()
+    }
+
+    @Test
+    func persistenceIDKeepsSidecarIdentityStableAcrossSandboxIDs() async throws {
+        var firstConfig = try makeSidecarStartupConfiguration(restoreStateID: nil)
+        firstConfig.id = "sandbox-a"
+        var recreatedConfig = firstConfig
+        recreatedConfig.id = "sandbox-b"
+        let service = MacOSSandboxService(
+            root: FileManager.default.temporaryDirectory.appendingPathComponent("stable-sidecar-identity"),
+            log: Logger(label: "MacOSSidecarClientTests")
+        )
+        let firstSocket = await service.sidecarSocketPath(config: firstConfig)
+        let recreatedSocket = await service.sidecarSocketPath(config: recreatedConfig)
+        let firstLabel = await service.sidecarLaunchLabel(config: firstConfig)
+        let recreatedLabel = await service.sidecarLaunchLabel(config: recreatedConfig)
+
+        #expect(firstSocket == recreatedSocket)
+        #expect(firstLabel == recreatedLabel)
+    }
+
     @Test
     func machineStateMethodsUseVersionTwoAndDecodeStructuredResults() throws {
         let socketPath = try makeTemporarySocketPath()
@@ -116,6 +262,11 @@ struct MacOSSidecarClientTests {
         let eventSemaphore = DispatchSemaphore(value: 0)
 
         server.start { clientFD in
+            let subscription = try readRequest(from: clientFD)
+            #expect(subscription.method == .eventsSubscribe)
+            #expect(subscription.protocolVersion == 2)
+            try writeResponse(.success(requestID: subscription.requestID, protocolVersion: 2), to: clientFD)
+
             let bootstrap = try readRequest(from: clientFD)
             #expect(bootstrap.method == .vmBootstrapStart)
             try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
@@ -159,6 +310,45 @@ struct MacOSSidecarClientTests {
         #expect(received.contains(where: { $0.event == .processStdout && $0.data == Data("hello\n".utf8) }))
         #expect(received.contains(where: { $0.event == .processExit && $0.exitCode == 0 }))
 
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func eventSubscriptionFallsBackToLegacySidecarWithoutLosingEvents() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        let events = LockedValue<[MacOSSidecarEvent]>([])
+        let eventSemaphore = DispatchSemaphore(value: 0)
+        server.start { clientFD in
+            let subscription = try readRequest(from: clientFD)
+            #expect(subscription.method == .eventsSubscribe)
+            try writeResponse(
+                .failure(
+                    requestID: subscription.requestID,
+                    code: "unknownMethod",
+                    message: "unknown sidecar control method events.subscribe"
+                ),
+                to: clientFD
+            )
+
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+            try writeEvent(.init(event: .processExit, processID: "legacy-process", exitCode: 0), to: clientFD)
+        }
+
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+        client.setEventHandler { event in
+            events.withLock { $0.append(event) }
+            eventSemaphore.signal()
+        }
+
+        try client.bootstrapStart(socketConnectRetries: 3)
+        #expect(eventSemaphore.wait(timeout: .now() + 2) == .success)
+        #expect(events.withLock { $0 }.contains(where: { $0.processID == "legacy-process" && $0.exitCode == 0 }))
         try server.waitForCompletion()
     }
 
@@ -499,6 +689,46 @@ struct MacOSSidecarClientTests {
         #expect(received.first?.data == Data("hello\n".utf8))
         #expect(received.last?.exitCode == 0)
     }
+}
+
+private func makeSidecarStartupConfiguration(
+    restoreStateID: String?,
+    storageDirectory: String = "/var/lib/container/machine-state/v1/pod-a",
+    controlSocketPath: String = "/var/run/container/machine-state/v1/pod-a.sock"
+) throws -> ContainerConfiguration {
+    let image = try JSONDecoder().decode(
+        ImageDescription.self,
+        from: Data(
+            #"{"reference":"example/macos:latest","descriptor":{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"sha256:test","size":1}}"#.utf8
+        )
+    )
+    var configuration = ContainerConfiguration(
+        id: "sandbox-a",
+        image: image,
+        process: ProcessConfiguration(
+            executable: "/bin/true",
+            arguments: [],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+    )
+    configuration.macosGuest = .init(
+        snapshotEnabled: true,
+        guiEnabled: false,
+        agentPort: 27_000,
+        blockDevices: [
+            .init(identifier: "root", kind: .nbdUnixSocket, path: "/var/run/container/nbd/root.sock")
+        ],
+        machineState: .init(
+            persistenceID: "pod-a",
+            storageDirectory: storageDirectory,
+            controlSocketPath: controlSocketPath,
+            restoreStateID: restoreStateID
+        )
+    )
+    return configuration
 }
 
 private actor EventRecorder {

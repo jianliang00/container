@@ -278,6 +278,80 @@ accepted sandbox images and callers. For basic compat-mode validation, run one
 macOS Pod at a time on a host. Set `automountServiceAccountToken: false` for
 validation Pods that do not need Kubernetes API credentials.
 
+Machine-state persistence is opt-in per Pod sandbox through the versioned
+`io.container.runtime.macos.machine-state.v1/` annotation namespace. The node
+configuration controls all host paths; Pods cannot supply a state directory or
+control socket path. A cold-startable sandbox uses:
+
+```yaml
+metadata:
+  annotations:
+    io.container.runtime.macos.machine-state.v1/enabled: "true"
+    io.container.runtime.macos.machine-state.v1/persistence-id: example-vm
+    io.container.runtime.macos.machine-state.v1/block-devices: >-
+      [{"identifier":"root","unixSocket":"/var/run/container/nbd/example-vm.sock","readOnly":false,"timeoutSeconds":30}]
+```
+
+The first block device is the root device and must have identifier `root`.
+Every configured device is a local Unix-socket NBD attachment with full disk
+synchronization. Socket paths must be absolute, canonical, reachable, and below
+a root listed in `machineState.nbdSocketAllowedRoots`. Unknown JSON fields,
+duplicate identifiers, unavailable sockets, symbolic links, and paths outside
+the allowlist are rejected before the sandbox is created.
+
+The runtime derives the persistent state directory as
+`<storageRoot>/<persistence-id>` and the discoverable sidecar socket as
+`<controlSocketRoot>/<persistence-id>.sock`. Only one active sandbox may hold a
+persistence ID. Machine states and VM identity remain in the state directory
+after CRI sandbox removal; the volatile control socket does not.
+
+`restore-state-id` is recognized by the v1 annotation decoder but CRI restore is
+currently rejected with `criWorkloadAdoptionUnavailable`. Restoring only the VM
+would leave the old guest process tied to a closed sidecar stream, while a new
+CRI `CreateContainer`/`StartContainer` would launch a duplicate process with a
+new container ID. The runtime therefore does not publish a warm-restore success
+signal and does not fall back to a cold start. A future CRI restore protocol must
+atomically adopt guest process identity, host workload metadata, logs, exec
+sessions, and exit events before this annotation can succeed.
+
+For enabled cold-started sandboxes, verbose CRI `PodSandboxStatus` includes a
+`machineState` JSON entry with schema version, runtime protocol version,
+`persistenceID`, and `restore.supported=false` plus the same structured reason
+code. No `restored=true` signal exists in this release.
+
+For example, the following additional annotation is deliberately rejected by
+this release rather than reported as a warm restore:
+
+```yaml
+metadata:
+  annotations:
+    io.container.runtime.macos.machine-state.v1/restore-state-id: checkpoint-1
+```
+
+Direct runtime protocol v2 VM restore remains available outside CRI. It restores
+before a VM cold start, leaves the VM paused, and requires an explicit resume.
+Saved state is bound to the physical Mac, macOS build, VM hardware model,
+machine identifier, VM configuration, and runtime protocol version. It must not
+be moved to another physical Mac. This VM-level result is not a Kubernetes
+workload restore result.
+
+On a joined macOS node with a bootable root disk exported over a local NBD Unix
+socket, run the real kubelet integration entry from the source checkout as the
+container service user or root:
+
+```sh
+sudo env \
+  MACOS_CRI_MACHINE_STATE_NODE=macos-node-1 \
+  MACOS_CRI_MACHINE_STATE_IMAGE=ghcr.io/example/macos-workload@sha256:<digest> \
+  MACOS_CRI_MACHINE_STATE_NBD_SOCKET=/var/run/container/nbd/integration.sock \
+  scripts/macos-cri-machine-state-integration.sh
+```
+
+The check verifies protocol v2 capability, pause, save, and resume calls through
+short-lived control clients without disrupting runtime exec, logs, or process
+progress. It then deletes the Pod, creates a Pod with a new UID and the restore
+annotation, and requires rejection before a CRI container ID is created.
+
 Use `container-macos-kubeadm status` to inspect installed files, generated
 configuration, the CRI socket, and launchd state. Use
 `container-macos-kubeadm reset --force` to stop node services and remove

@@ -40,6 +40,7 @@ struct SidecarControlProtocolTests {
         #expect(request.method == .unknown("vm.futureMethod"))
         #expect(request.method.rawValue == "vm.futureMethod")
         #expect(MacOSSidecarMethod(rawValue: "vm.stop") == .vmStop)
+        #expect(MacOSSidecarMethod(rawValue: "events.subscribe") == .eventsSubscribe)
         #expect(MacOSSidecarMethod(rawValue: "vm.futureMethod") == nil)
         #expect(try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request)).method == request.method)
     }

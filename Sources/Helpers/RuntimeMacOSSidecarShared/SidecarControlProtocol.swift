@@ -21,6 +21,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
     case vmBootstrapStart
     case vmShowGUI
     case vmConnectVsock
+    case eventsSubscribe
     case processStart
     case processStdin
     case processSignal
@@ -48,6 +49,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         case .vmBootstrapStart: "vm.bootstrapStart"
         case .vmShowGUI: "vm.showGUI"
         case .vmConnectVsock: "vm.connectVsock"
+        case .eventsSubscribe: "events.subscribe"
         case .processStart: "process.start"
         case .processStdin: "process.stdin"
         case .processSignal: "process.signal"
@@ -91,6 +93,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         Self.vmBootstrapStart.rawValue: .vmBootstrapStart,
         Self.vmShowGUI.rawValue: .vmShowGUI,
         Self.vmConnectVsock.rawValue: .vmConnectVsock,
+        Self.eventsSubscribe.rawValue: .eventsSubscribe,
         Self.processStart.rawValue: .processStart,
         Self.processStdin.rawValue: .processStdin,
         Self.processSignal.rawValue: .processSignal,

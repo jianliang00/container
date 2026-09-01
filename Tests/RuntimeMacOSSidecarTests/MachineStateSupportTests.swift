@@ -113,6 +113,22 @@ struct MachineStateSupportTests {
         } catch let error as SidecarRPCError {
             #expect(error.code == "unsafeMachineStatePath")
         }
+
+        let realParent = parent.appendingPathComponent("real-parent")
+        let linkedParent = parent.appendingPathComponent("linked-parent")
+        try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: linkedParent, withDestinationURL: realParent)
+        let nestedRoot = linkedParent.appendingPathComponent("state")
+        try FileManager.default.createDirectory(
+            at: realParent.appendingPathComponent("state"),
+            withIntermediateDirectories: false
+        )
+        do {
+            _ = try MacOSMachineStateStore(runtimeRootURL: nestedRoot).reserve(stateID: "state")
+            Issue.record("expected a symbolic-link ancestor to be rejected")
+        } catch let error as SidecarRPCError {
+            #expect(error.code == "unsafeMachineStatePath")
+        }
     }
 
     @Test

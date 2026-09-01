@@ -27,6 +27,81 @@ import Testing
 @Suite(.serialized)
 struct SidecarControlServerTests {
     @Test
+    func machineStateControlClientDoesNotReplaceExplicitEventSubscriber() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let socketPath = "/tmp/runtime-macos-sidecar-events-\(UUID().uuidString).sock"
+        let server = makeServer(socketPath: socketPath)
+        try server.start()
+        defer { server.stop() }
+
+        let runtimeFD = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        defer { closeIfValid(runtimeFD) }
+        let subscription = MacOSSidecarRequest(
+            requestID: "subscribe",
+            method: .eventsSubscribe,
+            protocolVersion: 2
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(subscription), fd: runtimeFD)
+        #expect(try responseFrame(fd: runtimeFD).ok)
+
+        let contenderFD = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        let contender = MacOSSidecarRequest(
+            requestID: "contender",
+            method: .eventsSubscribe,
+            protocolVersion: 2
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(contender), fd: contenderFD)
+        #expect(try responseFrame(fd: contenderFD).error?.code == "eventClientAlreadySubscribed")
+        closeIfValid(contenderFD)
+
+        let controlFD = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        let capabilities = MacOSSidecarRequest(
+            requestID: "capabilities",
+            method: .vmCapabilities,
+            protocolVersion: 2
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(capabilities), fd: controlFD)
+        #expect(try responseFrame(fd: controlFD).ok)
+        closeIfValid(controlFD)
+
+        server._testEmitEvent(
+            .init(event: .processStdout, processID: "process-1", data: Data("preserved\n".utf8))
+        )
+        let eventEnvelope = try readableEnvelope(fd: runtimeFD)
+        #expect(eventEnvelope.kind == .event)
+        #expect(eventEnvelope.event?.event == .processStdout)
+        #expect(eventEnvelope.event?.processID == "process-1")
+        #expect(eventEnvelope.event?.data == Data("preserved\n".utf8))
+    }
+
+    @Test
+    func legacyRuntimeRequestClaimsOnlyAnUnownedEventSubscription() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let socketPath = "/tmp/runtime-macos-sidecar-legacy-events-\(UUID().uuidString).sock"
+        let server = makeServer(socketPath: socketPath)
+        try server.start()
+        defer { server.stop() }
+
+        let legacyFD = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        defer { closeIfValid(legacyFD) }
+        let legacyRequest = MacOSSidecarRequest(requestID: "legacy", method: .vmShowGUI)
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(legacyRequest), fd: legacyFD)
+        _ = try responseFrame(fd: legacyFD)
+
+        let controlFD = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        defer { closeIfValid(controlFD) }
+        let pause = MacOSSidecarRequest(requestID: "pause", method: .vmPause, protocolVersion: 2)
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(pause), fd: controlFD)
+        _ = try responseFrame(fd: controlFD)
+
+        server._testEmitEvent(.init(event: .processExit, processID: "legacy-process", exitCode: 0))
+        let eventEnvelope = try readableEnvelope(fd: legacyFD)
+        #expect(eventEnvelope.kind == .event)
+        #expect(eventEnvelope.event?.event == .processExit)
+        #expect(eventEnvelope.event?.processID == "legacy-process")
+    }
+
+    @Test
     func unknownMethodAndVersionMismatchReturnFramesWithoutClosingConnection() throws {
         let socketPath = "/tmp/runtime-macos-sidecar-protocol-\(UUID().uuidString).sock"
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("RuntimeMacOSSidecarProtocol-\(UUID().uuidString)")
@@ -80,6 +155,23 @@ struct SidecarControlServerTests {
         let legacyStop = try responseFrame(fd: fd)
         #expect(legacyStop.requestID == "legacy-stop")
         #expect(legacyStop.ok)
+    }
+
+    @Test
+    func controlSocketRejectsSymbolicLinkAncestor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "RuntimeMacOSSidecarSocketPath-\(UUID().uuidString)"
+        )
+        let realParent = root.appendingPathComponent("real", isDirectory: true)
+        let linkedParent = root.appendingPathComponent("linked", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: linkedParent, withDestinationURL: realParent)
+
+        let server = makeServer(socketPath: linkedParent.appendingPathComponent("control.sock").path)
+        #expect(throws: SidecarRPCError.self) {
+            try server.start()
+        }
     }
 
     @Test
@@ -309,14 +401,24 @@ private func responseFrame(fd: Int32) throws -> MacOSSidecarResponse {
     return try #require(envelope.response)
 }
 
-private func makeServer() -> SidecarControlServer {
+private func makeServer(socketPath: String = "/tmp/runtime-macos-sidecar-tests-\(UUID().uuidString).sock") -> SidecarControlServer {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("RuntimeMacOSSidecarTests-\(UUID().uuidString)")
     let service = MacOSSidecarService(rootURL: root, log: Logger(label: "RuntimeMacOSSidecarTests"))
     return SidecarControlServer(
-        socketPath: "/tmp/runtime-macos-sidecar-tests-\(UUID().uuidString).sock",
+        socketPath: socketPath,
         service: service,
         log: Logger(label: "RuntimeMacOSSidecarTests")
     )
+}
+
+private func readableEnvelope(fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> MacOSSidecarEnvelope {
+    var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+    guard Darwin.poll(&descriptor, 1, timeoutMilliseconds) == 1,
+        descriptor.revents & Int16(POLLIN) != 0
+    else {
+        throw POSIXError(.ETIMEDOUT)
+    }
+    return try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
 }
 
 private func makeSocketPair() throws -> (server: Int32, peer: Int32) {

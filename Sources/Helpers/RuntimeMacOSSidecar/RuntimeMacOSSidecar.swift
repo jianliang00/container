@@ -570,6 +570,7 @@ actor MacOSSidecarService {
                 MacOSSidecarMethod.vmRestoreMachineState.rawValue,
                 MacOSSidecarMethod.vmCompatibilityDescription.rawValue,
                 MacOSSidecarMethod.vmStop.rawValue,
+                MacOSSidecarMethod.eventsSubscribe.rawValue,
             ]
         )
     }
@@ -614,7 +615,7 @@ actor MacOSSidecarService {
 
     func saveMachineState(stateID: String, timeoutSeconds: Double?) async throws -> MacOSMachineStateOperationResult {
         try validateOperationTimeout(timeoutSeconds)
-        let store = MacOSMachineStateStore(runtimeRootURL: rootURL)
+        let store = try machineStateStore()
         try MacOSMachineStateStore.validateStateID(stateID)
         try lifecycle.ensureNoOperationInProgress()
         do {
@@ -667,7 +668,7 @@ actor MacOSSidecarService {
     func restoreMachineState(stateID: String, timeoutSeconds: Double?) async throws -> MacOSMachineStateOperationResult {
         try validateOperationTimeout(timeoutSeconds)
         #if arch(arm64)
-        let store = MacOSMachineStateStore(runtimeRootURL: rootURL)
+        let store = try machineStateStore()
         let stored = try store.load(stateID: stateID)
         let configuration = try await ensurePreparedConfiguration()
         try configuration.validateSaveRestoreSupport()
@@ -712,7 +713,7 @@ actor MacOSSidecarService {
         guard let stateID else {
             return .init(current: current, compatible: true)
         }
-        let saved = try MacOSMachineStateStore(runtimeRootURL: rootURL).load(stateID: stateID).compatibility
+        let saved = try machineStateStore().load(stateID: stateID).compatibility
         let reasons = MacOSMachineStateCompatibility.compare(saved: saved, current: current)
         return .init(current: current, saved: saved, compatible: reasons.isEmpty, reasons: reasons)
     }
@@ -747,6 +748,28 @@ actor MacOSSidecarService {
         guard timeoutSeconds.isFinite, (1...600).contains(timeoutSeconds) else {
             throw SidecarRPCError(code: "invalidTimeout", message: "operation timeout must be between 1 and 600 seconds")
         }
+    }
+
+    private func machineStateStore() throws -> MacOSMachineStateStore {
+        let config = try loadContainerConfiguration()
+        guard let machineState = config.macosGuest?.machineState else {
+            return MacOSMachineStateStore(runtimeRootURL: rootURL)
+        }
+        guard machineState.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
+            throw SidecarRPCError(
+                code: "protocolVersionMismatch",
+                message: "configured machine-state protocol version is unsupported"
+            )
+        }
+        let storageURL = URL(fileURLWithPath: machineState.storageDirectory).standardizedFileURL
+        guard storageURL.path == machineState.storageDirectory, storageURL.path.hasPrefix("/") else {
+            throw SidecarRPCError(
+                code: "unsafeMachineStatePath",
+                message: "configured machine-state storage directory is not an absolute canonical path"
+            )
+        }
+        try MacOSMachineStateStore.rejectSymbolicLinks(below: storageURL, through: storageURL)
+        return MacOSMachineStateStore(runtimeRootURL: storageURL)
     }
 
     private func discardVirtualMachineResources() async {
@@ -950,9 +973,75 @@ actor MacOSSidecarService {
     }
 
     private func configPath() -> URL { rootURL.appendingPathComponent("config.json") }
-    private func auxiliaryStoragePath() -> URL { rootURL.appendingPathComponent("AuxiliaryStorage") }
+    private func auxiliaryStoragePath(containerConfig: ContainerConfiguration) throws -> URL {
+        guard let identityDirectory = try persistentIdentityDirectory(containerConfig: containerConfig) else {
+            return rootURL.appendingPathComponent("AuxiliaryStorage")
+        }
+        let target = identityDirectory.appendingPathComponent("AuxiliaryStorage")
+        if !FileManager.default.fileExists(atPath: target.path) {
+            let source = rootURL.appendingPathComponent("AuxiliaryStorage")
+            var sourceValue = stat()
+            guard lstat(source.path, &sourceValue) == 0, (sourceValue.st_mode & S_IFMT) == S_IFREG else {
+                throw SidecarRPCError(
+                    code: "unsafeMachineStatePath",
+                    message: "sandbox auxiliary storage must be a regular file"
+                )
+            }
+            let temporary = identityDirectory.appendingPathComponent(".AuxiliaryStorage.\(UUID().uuidString).tmp")
+            do {
+                try FileManager.default.copyItem(at: source, to: temporary)
+                guard chmod(temporary.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                try FileManager.default.moveItem(at: temporary, to: target)
+            } catch {
+                try? FileManager.default.removeItem(at: temporary)
+                throw error
+            }
+        }
+        try requirePrivateRegularIdentityFile(target)
+        return target
+    }
     private func hardwareModelPath() -> URL { rootURL.appendingPathComponent("HardwareModel.bin") }
-    private func machineIdentifierPath() -> URL { rootURL.appendingPathComponent("MachineIdentifier.bin") }
+    private func machineIdentifierPath(containerConfig: ContainerConfiguration) throws -> URL {
+        guard let identityDirectory = try persistentIdentityDirectory(containerConfig: containerConfig) else {
+            return rootURL.appendingPathComponent("MachineIdentifier.bin")
+        }
+        return identityDirectory.appendingPathComponent("MachineIdentifier.bin")
+    }
+
+    private func persistentIdentityDirectory(containerConfig: ContainerConfiguration) throws -> URL? {
+        guard let machineState = containerConfig.macosGuest?.machineState else { return nil }
+        let storage = URL(fileURLWithPath: machineState.storageDirectory).standardizedFileURL
+        guard storage.path == machineState.storageDirectory, storage.path.hasPrefix("/") else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "invalid persistent identity root")
+        }
+        try MacOSMachineStateStore.rejectSymbolicLinks(below: storage, through: storage)
+        let identity = storage.appendingPathComponent("Identity", isDirectory: true)
+        if FileManager.default.fileExists(atPath: identity.path) {
+            try MacOSMachineStateStore.rejectSymbolicLinks(below: storage, through: identity)
+            var value = stat()
+            guard lstat(identity.path, &value) == 0, (value.st_mode & S_IFMT) == S_IFDIR else {
+                throw SidecarRPCError(code: "unsafeMachineStatePath", message: "persistent identity path is not a directory")
+            }
+        } else {
+            try FileManager.default.createDirectory(at: identity, withIntermediateDirectories: false)
+        }
+        guard chmod(identity.path, mode_t(S_IRWXU)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return identity
+    }
+
+    private func requirePrivateRegularIdentityFile(_ url: URL) throws {
+        var value = stat()
+        guard lstat(url.path, &value) == 0, (value.st_mode & S_IFMT) == S_IFREG else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "persistent identity file is not regular")
+        }
+        guard chmod(url.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
 
     private func loadContainerConfiguration() throws -> ContainerConfiguration {
         let data = try Data(contentsOf: configPath())
@@ -965,12 +1054,12 @@ actor MacOSSidecarService {
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareData) else {
             throw ContainerizationError(.invalidState, message: "invalid hardware model data")
         }
-        let machineIdentifier = try loadOrCreateMachineIdentifier(at: machineIdentifierPath())
+        let machineIdentifier = try loadOrCreateMachineIdentifier(at: machineIdentifierPath(containerConfig: containerConfig))
 
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = hardwareModel
         platform.machineIdentifier = machineIdentifier
-        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: auxiliaryStoragePath())
+        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: try auxiliaryStoragePath(containerConfig: containerConfig))
 
         let vmConfiguration = VZVirtualMachineConfiguration()
         vmConfiguration.bootLoader = VZMacOSBootLoader()
@@ -1215,13 +1304,15 @@ actor MacOSSidecarService {
 
     private func loadOrCreateMachineIdentifier(at path: URL) throws -> VZMacMachineIdentifier {
         if FileManager.default.fileExists(atPath: path.path) {
+            try requirePrivateRegularIdentityFile(path)
             let data = try Data(contentsOf: path)
             if let value = VZMacMachineIdentifier(dataRepresentation: data) {
                 return value
             }
         }
         let value = VZMacMachineIdentifier()
-        try value.dataRepresentation.write(to: path)
+        try value.dataRepresentation.write(to: path, options: .atomic)
+        try requirePrivateRegularIdentityFile(path)
         return value
     }
 
@@ -1558,8 +1649,33 @@ final class SidecarControlServer: @unchecked Sendable {
 
     private func cleanupStaleSocket() throws {
         let parent = URL(fileURLWithPath: socketPath).deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-        _ = unlink(socketPath)
+        try FileManager.default.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try MacOSMachineStateStore.rejectSymbolicLinks(below: parent, through: parent)
+        var parentValue = stat()
+        guard stat(parent.path, &parentValue) == 0, (parentValue.st_mode & S_IFMT) == S_IFDIR else {
+            throw SidecarRPCError(
+                code: "unsafeControlSocketPath",
+                message: "control socket parent must be a directory and cannot be a symbolic link"
+            )
+        }
+        var value = stat()
+        if lstat(socketPath, &value) == 0 {
+            guard (value.st_mode & S_IFMT) == S_IFSOCK else {
+                throw SidecarRPCError(
+                    code: "unsafeControlSocketPath",
+                    message: "refusing to replace a non-socket control path"
+                )
+            }
+            guard unlink(socketPath) == 0 else {
+                throw makePOSIXError(errno)
+            }
+        } else if errno != ENOENT {
+            throw makePOSIXError(errno)
+        }
     }
 
     private func acceptLoop() {
@@ -1604,8 +1720,8 @@ final class SidecarControlServer: @unchecked Sendable {
                     throw ContainerizationError(.invalidArgument, message: "control envelope must be a request")
                 }
                 parsedRequest = request
-                if request.method != .vmConnectVsock {
-                    setEventClient(fd: clientFD)
+                if request.method.claimsLegacyEventSubscription {
+                    setEventClientIfAbsent(fd: clientFD)
                 }
 
                 log.info("control request received", metadata: ["method": "\(request.method.rawValue)", "request_id": "\(request.requestID)"])
@@ -1659,9 +1775,19 @@ final class SidecarControlServer: @unchecked Sendable {
         }
     }
 
-    private func setEventClient(fd: Int32) {
+    private func subscribeEventClient(fd: Int32) -> Bool {
         eventClientLock.lock()
+        defer { eventClientLock.unlock() }
+        guard eventClientFD < 0 || eventClientFD == fd else { return false }
         eventClientFD = fd
+        return true
+    }
+
+    private func setEventClientIfAbsent(fd: Int32) {
+        eventClientLock.lock()
+        if eventClientFD < 0 {
+            eventClientFD = fd
+        }
         eventClientLock.unlock()
     }
 
@@ -1916,6 +2042,10 @@ final class SidecarControlServer: @unchecked Sendable {
 
     func _testGuestExecutableLaunch(executable: String, arguments: [String]) -> (executable: String, arguments: [String]) {
         guestExecutableLaunch(executable: executable, arguments: arguments)
+    }
+
+    func _testEmitEvent(_ event: MacOSSidecarEvent) {
+        emitEvent(event)
     }
 
     private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: ProcessStreamSession) throws {
@@ -2536,6 +2666,19 @@ final class SidecarControlServer: @unchecked Sendable {
                 try MacOSSidecarSocketIO.sendNoFileDescriptorMarker(socketFD: clientFD)
                 return failureResponse(requestID: requestID, error: error)
             }
+        case .eventsSubscribe:
+            guard subscribeEventClient(fd: clientFD) else {
+                return .failure(
+                    requestID: requestID,
+                    code: "eventClientAlreadySubscribed",
+                    message: "another client already owns the sidecar event subscription",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            return .success(
+                requestID: requestID,
+                protocolVersion: MacOSSidecarProtocolVersion.current
+            )
         case .processStart:
             guard let exec = request.exec else {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing exec payload")
@@ -2831,7 +2974,8 @@ final class SidecarControlServer: @unchecked Sendable {
         }
 
         switch request.method {
-        case .vmPause, .vmResume, .vmSaveMachineState, .vmRestoreMachineState, .vmCompatibilityDescription:
+        case .eventsSubscribe, .vmPause, .vmResume, .vmSaveMachineState, .vmRestoreMachineState,
+            .vmCompatibilityDescription:
             guard request.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
                 return SidecarRPCError(
                     code: "protocolVersionMismatch",
@@ -2889,6 +3033,19 @@ final class SidecarControlServer: @unchecked Sendable {
             throw error
         case nil:
             throw ContainerizationError(.internalError, message: "sidecar syncValue finished without result")
+        }
+    }
+}
+
+extension MacOSSidecarMethod {
+    fileprivate var claimsLegacyEventSubscription: Bool {
+        switch self {
+        case .vmBootstrapStart, .vmShowGUI, .processStart, .processStdin, .processSignal, .processResize,
+            .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+            true
+        case .eventsSubscribe, .vmConnectVsock, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
+            .vmRestoreMachineState, .vmCompatibilityDescription, .vmStop, .sidecarQuit, .unknown:
+            false
         }
     }
 }

@@ -129,6 +129,8 @@ struct MacOSVMLifecycleCoordinator: Sendable {
 }
 
 struct MacOSMachineStateStore: Sendable {
+    private static let allowedSystemSymbolicLinks: Set<String> = ["/etc", "/tmp", "/var"]
+
     struct Reservation: Sendable {
         let directoryURL: URL
         let stateURL: URL
@@ -242,6 +244,7 @@ struct MacOSMachineStateStore: Sendable {
         guard rootURL.isFileURL, rootURL.path.hasPrefix("/") else {
             throw SidecarRPCError(code: "unsafeMachineStatePath", message: "runtime root must be an absolute file path")
         }
+        try Self.rejectSymbolicLinks(below: rootURL, through: rootURL)
         try requireDirectory(rootURL)
     }
 
@@ -283,11 +286,13 @@ struct MacOSMachineStateStore: Sendable {
         guard candidate.path == root.path || candidate.path.hasPrefix(prefix) else {
             throw SidecarRPCError(code: "unsafeMachineStatePath", message: "managed path escapes the runtime root")
         }
+        try rejectSymbolicLinksInAbsolutePath(root)
+        try rejectSymbolicLinksInAbsolutePath(candidate)
         var rootValue = stat()
         guard lstat(root.path, &rootValue) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ENOENT)
         }
-        if (rootValue.st_mode & S_IFMT) == S_IFLNK {
+        if (rootValue.st_mode & S_IFMT) == S_IFLNK, !Self.allowedSystemSymbolicLinks.contains(root.path) {
             throw SidecarRPCError(code: "unsafeMachineStatePath", message: "runtime root cannot be a symbolic link")
         }
         var current = root
@@ -298,8 +303,26 @@ struct MacOSMachineStateStore: Sendable {
                 if errno == ENOENT { return }
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
-            if (value.st_mode & S_IFMT) == S_IFLNK {
+            if (value.st_mode & S_IFMT) == S_IFLNK, !Self.allowedSystemSymbolicLinks.contains(current.path) {
                 throw SidecarRPCError(code: "unsafeMachineStatePath", message: "symbolic links are not allowed in managed paths")
+            }
+        }
+    }
+
+    private static func rejectSymbolicLinksInAbsolutePath(_ url: URL) throws {
+        var current = URL(fileURLWithPath: "/", isDirectory: true)
+        for component in url.standardizedFileURL.pathComponents.dropFirst() {
+            current.appendPathComponent(component)
+            var value = stat()
+            if lstat(current.path, &value) != 0 {
+                if errno == ENOENT { return }
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if (value.st_mode & S_IFMT) == S_IFLNK, !allowedSystemSymbolicLinks.contains(current.path) {
+                throw SidecarRPCError(
+                    code: "unsafeMachineStatePath",
+                    message: "symbolic links are not allowed in managed paths"
+                )
             }
         }
     }

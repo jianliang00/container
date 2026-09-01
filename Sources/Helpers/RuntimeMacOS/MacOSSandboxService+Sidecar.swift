@@ -22,9 +22,13 @@ import RuntimeMacOSSidecarShared
 
 extension MacOSSandboxService {
     private static let sidecarBootstrapStartTimeoutSeconds: TimeInterval = 120.0
+    private static let sidecarRestoreTimeoutSeconds: TimeInterval = 600.0
 
     func sidecarSocketPath(config: ContainerConfiguration) -> URL {
-        URL(fileURLWithPath: "/tmp/ctrm-sidecar-\(config.id).sock")
+        if let path = config.macosGuest?.machineState?.controlSocketPath {
+            return URL(fileURLWithPath: path)
+        }
+        return URL(fileURLWithPath: "/tmp/ctrm-sidecar-\(config.id).sock")
     }
 
     func sidecarPlistPath() -> URL {
@@ -40,7 +44,10 @@ extension MacOSSandboxService {
     }
 
     func sidecarLaunchLabel(config: ContainerConfiguration) -> String {
-        "com.apple.container.runtime.container-runtime-macos-sidecar.\(config.id)"
+        if let persistenceID = config.macosGuest?.machineState?.persistenceID {
+            return "com.apple.container.runtime.container-runtime-macos-sidecar.state.\(persistenceID)"
+        }
+        return "com.apple.container.runtime.container-runtime-macos-sidecar.\(config.id)"
     }
 
     nonisolated func sidecarLaunchdDomain(uid: uid_t) -> String {
@@ -91,6 +98,14 @@ extension MacOSSandboxService {
     }
 
     func startVirtualMachineViaSidecar(config: ContainerConfiguration, presentGUI: Bool = true) async throws {
+        try validateMachineStateRuntimeConfiguration(config)
+        var retainedLease = false
+        defer {
+            if !retainedLease {
+                releaseMachineStateLeaseIfPresent()
+            }
+        }
+        try acquireMachineStateLeaseIfNeeded(config)
         let launchLabel = sidecarLaunchLabel(config: config)
         let plistURL = sidecarPlistPath()
         let socketURL = sidecarSocketPath(config: config)
@@ -108,9 +123,15 @@ extension MacOSSandboxService {
             stderrURL: stderrURL
         )
 
-        // Best-effort cleanup of stale unit/socket before bootstrap.
-        try? bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
-        _ = unlink(socketURL.path)
+        // A stable launch label lets a recreated sandbox clean up an orphaned
+        // sidecar only after it has acquired the persistence lease. Refuse to
+        // unlink its socket if launchd cannot terminate it.
+        if config.macosGuest?.machineState == nil {
+            try? bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
+        } else {
+            try bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
+        }
+        try removeStaleSidecarSocket(socketURL)
 
         try bootstrapLaunchAgent(plistURL: plistURL)
 
@@ -138,19 +159,26 @@ extension MacOSSandboxService {
         sidecarEventPump = eventPump
         sidecarEventPumpTask = eventPumpTask
         do {
+            let restoreStateID = config.macosGuest?.machineState?.restoreStateID
             log.info(
-                "macOS sidecar bootstrap start",
+                restoreStateID == nil ? "macOS sidecar bootstrap start" : "macOS sidecar machine-state restore start",
                 metadata: [
                     "id": "\(config.id)",
                     "label": "\(launchLabel)",
                     "present_gui": "\(presentGUI)",
+                    "restore_state_id": "\(restoreStateID ?? "-")",
                 ])
-            writeContainerLog(Data(("sidecar bootstrap start [label=\(launchLabel)] [socket=\(socketURL.path)] [presentGUI=\(presentGUI)]\n").utf8))
-            try client.bootstrapStart(presentGUI: presentGUI, socketConnectRetries: 120)
+            try initializeVirtualMachineViaSidecar(
+                client: client,
+                config: config,
+                presentGUI: presentGUI,
+                socketConnectRetries: 120
+            )
             sidecarHandle = SidecarHandle(
                 launchLabel: launchLabel,
                 client: client
             )
+            retainedLease = true
             writeContainerLog(Data(("sidecar vm bootstrap succeeded [label=\(launchLabel)]\n").utf8))
         } catch {
             writeContainerLog(Data(("sidecar vm bootstrap failed [label=\(launchLabel)] error=\(String(describing: error))\n").utf8))
@@ -163,6 +191,7 @@ extension MacOSSandboxService {
             try? client.quit()
             try? bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
             sidecarHandle = nil
+            releaseMachineStateLeaseIfPresent()
             throw error
         }
     }
@@ -177,7 +206,10 @@ extension MacOSSandboxService {
     }
 
     func stopAndQuitSidecarIfPresent() async {
-        guard let handle = sidecarHandle else { return }
+        guard let handle = sidecarHandle else {
+            releaseMachineStateLeaseIfPresent()
+            return
+        }
         writeContainerLog(Data(("sidecar shutdown begin [label=\(handle.launchLabel)]\n").utf8))
         do {
             try handle.client.stopVM()
@@ -202,6 +234,200 @@ extension MacOSSandboxService {
         sidecarEventPump = nil
         sidecarEventPumpTask = nil
         sidecarHandle = nil
+        releaseMachineStateLeaseIfPresent()
+    }
+
+    func initializeVirtualMachineViaSidecar(
+        client: MacOSSidecarClient,
+        config: ContainerConfiguration,
+        presentGUI: Bool,
+        socketConnectRetries: Int
+    ) throws {
+        guard let restoreStateID = config.macosGuest?.machineState?.restoreStateID else {
+            writeContainerLog(
+                Data(
+                    ("sidecar bootstrap start [socket=\(sidecarSocketPath(config: config).path)] [presentGUI=\(presentGUI)]\n").utf8
+                )
+            )
+            try client.bootstrapStart(
+                presentGUI: presentGUI,
+                socketConnectRetries: socketConnectRetries
+            )
+            return
+        }
+
+        writeContainerLog(Data(("sidecar restore start [state=\(restoreStateID)]\n").utf8))
+        let restored = try client.restoreMachineState(
+            stateID: restoreStateID,
+            timeoutSeconds: Self.sidecarRestoreTimeoutSeconds,
+            socketConnectRetries: socketConnectRetries
+        )
+        guard restored.lifecycleState == .paused else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "machine-state restore did not leave the VM paused"
+            )
+        }
+        let resumed = try client.resumeVM(timeoutSeconds: Self.sidecarRestoreTimeoutSeconds)
+        guard resumed.lifecycleState == .running else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "machine-state resume did not leave the VM running"
+            )
+        }
+        if config.macosGuest?.guiEnabled == true, presentGUI {
+            try client.showGUI()
+        }
+        writeContainerLog(Data(("sidecar restore and resume succeeded [state=\(restoreStateID)]\n").utf8))
+    }
+
+    func validateMachineStateRuntimeConfiguration(_ config: ContainerConfiguration) throws {
+        guard let machineState = config.macosGuest?.machineState else { return }
+        guard machineState.protocolVersion == 2 else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "unsupported machine-state runtime protocol version \(machineState.protocolVersion)"
+            )
+        }
+        try validateMachineStateIdentifier(machineState.persistenceID, maximumLength: 64, name: "persistence id")
+        if let restoreStateID = machineState.restoreStateID {
+            try validateMachineStateIdentifier(restoreStateID, maximumLength: 128, name: "restore state id")
+            guard config.macosGuest?.blockDevices.first?.kind == .nbdUnixSocket else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "machine-state restore requires an explicit NBD root block device"
+                )
+            }
+        }
+        try validateManagedMachineStateDirectory(machineState.storageDirectory)
+        let expectedSocket = URL(fileURLWithPath: machineState.controlSocketPath).standardizedFileURL
+        let socketAddress = sockaddr_un()
+        guard expectedSocket.path == machineState.controlSocketPath,
+            expectedSocket.path.hasPrefix("/"),
+            expectedSocket.path.utf8.count < MemoryLayout.size(ofValue: socketAddress.sun_path)
+        else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "machine-state control socket must be an absolute canonical local path"
+            )
+        }
+        var parentValue = stat()
+        let parent = expectedSocket.deletingLastPathComponent()
+        try validateMachineStatePathHasNoSymbolicLinks(parent)
+        guard lstat(parent.path, &parentValue) == 0, (parentValue.st_mode & S_IFMT) == S_IFDIR else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "machine-state control socket parent must be a directory and cannot be a symbolic link"
+            )
+        }
+    }
+
+    func acquireMachineStateLeaseIfNeeded(_ config: ContainerConfiguration) throws {
+        guard let storageDirectory = config.macosGuest?.machineState?.storageDirectory else { return }
+        if machineStateLeaseFD >= 0 { return }
+        let leasePath = URL(fileURLWithPath: storageDirectory).appendingPathComponent("runtime.lock").path
+        let fd = open(leasePath, O_RDWR | O_CREAT | O_NOFOLLOW, mode_t(S_IRUSR | S_IWUSR))
+        guard fd >= 0 else {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to open machine-state persistence lease: \(String(cString: strerror(errno)))"
+            )
+        }
+        var value = stat()
+        guard fstat(fd, &value) == 0, (value.st_mode & S_IFMT) == S_IFREG else {
+            Darwin.close(fd)
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "machine-state persistence lease must be a regular file"
+            )
+        }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            Darwin.close(fd)
+            throw ContainerizationError(.invalidState, message: "machine-state persistence id is already active")
+        }
+        _ = fchmod(fd, mode_t(S_IRUSR | S_IWUSR))
+        machineStateLeaseFD = fd
+    }
+
+    func releaseMachineStateLeaseIfPresent() {
+        guard machineStateLeaseFD >= 0 else { return }
+        _ = flock(machineStateLeaseFD, LOCK_UN)
+        Darwin.close(machineStateLeaseFD)
+        machineStateLeaseFD = -1
+    }
+
+    private func validateManagedMachineStateDirectory(_ path: String) throws {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard path.hasPrefix("/"), url.path == path else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "machine-state storage directory must be an absolute canonical path"
+            )
+        }
+        try validateMachineStatePathHasNoSymbolicLinks(url)
+        var value = stat()
+        guard lstat(path, &value) == 0, (value.st_mode & S_IFMT) == S_IFDIR else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "machine-state storage path must be a directory and cannot be a symbolic link"
+            )
+        }
+    }
+
+    private func validateMachineStatePathHasNoSymbolicLinks(_ url: URL) throws {
+        let allowedSystemLinks: Set<String> = ["/etc", "/tmp", "/var"]
+        var current = URL(fileURLWithPath: "/", isDirectory: true)
+        for component in url.standardizedFileURL.pathComponents.dropFirst() {
+            current.appendPathComponent(component)
+            var value = stat()
+            guard lstat(current.path, &value) == 0 else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "machine-state managed path does not exist: \(current.path)"
+                )
+            }
+            if (value.st_mode & S_IFMT) == S_IFLNK, !allowedSystemLinks.contains(current.path) {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "symbolic links are not allowed in machine-state managed paths"
+                )
+            }
+        }
+    }
+
+    private func validateMachineStateIdentifier(_ value: String, maximumLength: Int, name: String) throws {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        guard !value.isEmpty,
+            value.utf8.count <= maximumLength,
+            value != ".",
+            value != "..",
+            value.unicodeScalars.allSatisfy(allowed.contains)
+        else {
+            throw ContainerizationError(.invalidArgument, message: "invalid machine-state \(name)")
+        }
+    }
+
+    private func removeStaleSidecarSocket(_ socketURL: URL) throws {
+        var value = stat()
+        guard lstat(socketURL.path, &value) == 0 else {
+            if errno == ENOENT { return }
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to inspect sidecar socket: \(String(cString: strerror(errno)))"
+            )
+        }
+        guard (value.st_mode & S_IFMT) == S_IFSOCK else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "refusing to remove non-socket sidecar control path"
+            )
+        }
+        guard unlink(socketURL.path) == 0 else {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to remove stale sidecar socket: \(String(cString: strerror(errno)))"
+            )
+        }
     }
 
     func sidecarDial(port: UInt32) throws -> FileHandle {

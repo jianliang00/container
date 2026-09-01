@@ -287,6 +287,31 @@ struct MacOSKubeadmRenderingTests {
         #expect(podNetwork["vmnetDisconnectRecovery"] as? String == "stop-sandbox")
     }
 
+    @Test func CRIConfigurationRendersMachineStateContractInEveryNetworkMode() throws {
+        for networkMode in [MacOSKubeadmNetworkMode.full, .compat] {
+            let rendered = MacOSKubeadmRenderer.criShimConfiguration(
+                sandboxImage: "localhost/macos-sandbox:test",
+                nodeName: "macos-ci-1",
+                networkMode: networkMode
+            )
+            let object = try #require(
+                JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
+            )
+            let machineState = try #require(object["machineState"] as? [String: Any])
+
+            #expect(machineState["enabled"] as? Bool == true)
+            #expect(
+                machineState["storageRoot"] as? String
+                    == "/var/lib/container/cri-shim-macos/machine-state/v1"
+            )
+            #expect(
+                machineState["controlSocketRoot"] as? String
+                    == "/var/run/container/machine-state/v1"
+            )
+            #expect(machineState["nbdSocketAllowedRoots"] as? [String] == ["/var/run/container/nbd"])
+        }
+    }
+
     @Test func CRIConfigurationRendersBoundedRebootRecovery() throws {
         let rendered = MacOSKubeadmRenderer.criShimConfiguration(
             sandboxImage: "localhost/macos-sandbox:test",
@@ -315,7 +340,7 @@ struct MacOSKubeadmRenderingTests {
         #expect(recovery["healthyProbeFailureThreshold"] as? Int == 3)
     }
 
-    @Test func packagedVMNetRecoveryConfigurationMatchesRenderer() throws {
+    @Test func packagedCRIConfigurationMatchesRenderer() throws {
         let rendered = MacOSKubeadmRenderer.criShimConfiguration(
             sandboxImage: "localhost/macos-sandbox:latest",
             nodeName: "__NODE_NAME__"
@@ -325,6 +350,7 @@ struct MacOSKubeadmRenderingTests {
         )
         let renderedPodNetwork = try #require(renderedObject["podNetwork"] as? [String: Any])
         let renderedRecovery = try #require(renderedPodNetwork["vmnetRecovery"] as? NSDictionary)
+        let renderedMachineState = try #require(renderedObject["machineState"] as? NSDictionary)
 
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -338,8 +364,10 @@ struct MacOSKubeadmRenderingTests {
         )
         let packagedPodNetwork = try #require(packagedObject["podNetwork"] as? [String: Any])
         let packagedRecovery = try #require(packagedPodNetwork["vmnetRecovery"] as? NSDictionary)
+        let packagedMachineState = try #require(packagedObject["machineState"] as? NSDictionary)
 
         #expect(packagedRecovery == renderedRecovery)
+        #expect(packagedMachineState == renderedMachineState)
     }
 
     @Test func kubeletPlistRendersDualNodeIPsAsOneArgument() throws {

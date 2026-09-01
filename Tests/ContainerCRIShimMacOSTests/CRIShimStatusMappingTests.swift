@@ -46,6 +46,30 @@ struct CRIShimStatusMappingTests {
         #expect(metadata.applying(sandboxSnapshot: snapshot).state == .ready)
     }
 
+    @Test
+    func verboseStatusDistinguishesEnabledVMStateFromUnsupportedCRIWorkloadRestore() throws {
+        var metadata = readyMetadata()
+        metadata.annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "stable-workload",
+        ]
+
+        let info = makeCRIPodSandboxStatusInfo(metadata, sandboxSnapshot: nil)
+        let encoded = try #require(info["machineState"])
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]
+        )
+        let restore = try #require(object["restore"] as? [String: Any])
+        let unsupportedReason = try #require(restore["unsupportedReason"] as? [String: Any])
+
+        #expect(object["schemaVersion"] as? Int == 1)
+        #expect(object["protocolVersion"] as? Int == 2)
+        #expect(object["persistenceID"] as? String == "stable-workload")
+        #expect(restore["supported"] as? Bool == false)
+        #expect(restore["status"] as? String == "notRequested")
+        #expect(unsupportedReason["code"] as? String == "criWorkloadAdoptionUnavailable")
+    }
+
     private func readyMetadata() -> CRIShimSandboxMetadata {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         return CRIShimSandboxMetadata(

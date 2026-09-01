@@ -231,6 +231,31 @@ public struct ContainerConfiguration: Sendable, Codable {
             }
         }
 
+        /// Runtime-managed machine-state storage and control-plane settings.
+        /// Callers must derive these paths from a trusted runtime policy rather
+        /// than accepting arbitrary workload-provided paths.
+        public struct MachineState: Sendable, Codable, Equatable {
+            public var protocolVersion: Int
+            public var persistenceID: String
+            public var storageDirectory: String
+            public var controlSocketPath: String
+            public var restoreStateID: String?
+
+            public init(
+                protocolVersion: Int = 2,
+                persistenceID: String,
+                storageDirectory: String,
+                controlSocketPath: String,
+                restoreStateID: String? = nil
+            ) {
+                self.protocolVersion = protocolVersion
+                self.persistenceID = persistenceID
+                self.storageDirectory = storageDirectory
+                self.controlSocketPath = controlSocketPath
+                self.restoreStateID = restoreStateID
+            }
+        }
+
         public var snapshotEnabled: Bool
         public var guiEnabled: Bool
         public var agentPort: UInt32
@@ -242,6 +267,9 @@ public struct ContainerConfiguration: Sendable, Codable {
         /// Block devices in guest-visible order. An empty list preserves the
         /// existing Disk.img-backed root device behavior.
         public var blockDevices: [BlockDevice]
+        /// Present only when machine-state lifecycle support is enabled for
+        /// this sandbox. Its storage survives the sandbox runtime directory.
+        public var machineState: MachineState?
 
         enum CodingKeys: String, CodingKey {
             case snapshotEnabled
@@ -253,6 +281,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             case vmnetRecoveryRequestPath
             case vmnetRecoveryBootSessionID
             case blockDevices
+            case machineState
         }
 
         public init(
@@ -264,7 +293,8 @@ public struct ContainerConfiguration: Sendable, Codable {
             vmnetRecoveryStatePath: String? = nil,
             vmnetRecoveryRequestPath: String? = nil,
             vmnetRecoveryBootSessionID: String? = nil,
-            blockDevices: [BlockDevice] = []
+            blockDevices: [BlockDevice] = [],
+            machineState: MachineState? = nil
         ) {
             self.snapshotEnabled = snapshotEnabled
             self.guiEnabled = guiEnabled
@@ -275,6 +305,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             self.vmnetRecoveryRequestPath = vmnetRecoveryRequestPath
             self.vmnetRecoveryBootSessionID = vmnetRecoveryBootSessionID
             self.blockDevices = blockDevices
+            self.machineState = machineState
         }
 
         public init(from decoder: Decoder) throws {
@@ -289,6 +320,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             vmnetRecoveryRequestPath = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryRequestPath)
             vmnetRecoveryBootSessionID = try container.decodeIfPresent(String.self, forKey: .vmnetRecoveryBootSessionID)
             blockDevices = try container.decodeIfPresent([BlockDevice].self, forKey: .blockDevices) ?? []
+            machineState = try container.decodeIfPresent(MachineState.self, forKey: .machineState)
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -304,6 +336,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             if !blockDevices.isEmpty {
                 try container.encode(blockDevices, forKey: .blockDevices)
             }
+            try container.encodeIfPresent(machineState, forKey: .machineState)
         }
     }
 

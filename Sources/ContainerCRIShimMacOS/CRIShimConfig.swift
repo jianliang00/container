@@ -22,6 +22,12 @@ public enum CRIShimConfigDefaults {
     public static let systemConfigURL = URL(fileURLWithPath: "/etc/container/\(fileName)")
     public static let legacySystemConfigURL = URL(fileURLWithPath: "/etc/\(fileName)")
     public static let stateDirectoryURL = URL(fileURLWithPath: "/var/lib/container/cri-shim-macos")
+    public static let machineStateStorageRootURL = URL(
+        fileURLWithPath: "/var/lib/container/cri-shim-macos/machine-state/v1"
+    )
+    public static let machineStateControlSocketRootURL = URL(
+        fileURLWithPath: "/var/run/container/machine-state/v1"
+    )
     public static let vmnetRecoveryStateURL = URL(fileURLWithPath: "/var/lib/container/vmnet-recovery/state.json")
     public static let vmnetRecoveryRequestURL = URL(
         fileURLWithPath: "/var/lib/container/vmnet-recovery/requests/fence.json"
@@ -74,6 +80,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
     public var networkPolicy: NetworkPolicyConfig?
     public var kubeProxy: KubeProxyConfig?
     public var podNetwork: PodNetworkConfig?
+    public var machineState: MachineStateConfig?
 
     public init(
         runtimeEndpoint: String? = nil,
@@ -84,7 +91,8 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         runtimeHandlers: [String: RuntimeProfile] = [:],
         networkPolicy: NetworkPolicyConfig? = nil,
         kubeProxy: KubeProxyConfig? = nil,
-        podNetwork: PodNetworkConfig? = nil
+        podNetwork: PodNetworkConfig? = nil,
+        machineState: MachineStateConfig? = nil
     ) {
         self.runtimeEndpoint = runtimeEndpoint
         self.stateDirectory = stateDirectory
@@ -95,6 +103,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         self.networkPolicy = networkPolicy
         self.kubeProxy = kubeProxy
         self.podNetwork = podNetwork
+        self.machineState = machineState
     }
 
     enum CodingKeys: String, CodingKey {
@@ -107,6 +116,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         case networkPolicy
         case kubeProxy
         case podNetwork
+        case machineState
     }
 
     public init(from decoder: any Decoder) throws {
@@ -120,6 +130,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         networkPolicy = try container.decodeIfPresent(NetworkPolicyConfig.self, forKey: .networkPolicy)
         kubeProxy = try container.decodeIfPresent(KubeProxyConfig.self, forKey: .kubeProxy)
         podNetwork = try container.decodeIfPresent(PodNetworkConfig.self, forKey: .podNetwork)
+        machineState = try container.decodeIfPresent(MachineStateConfig.self, forKey: .machineState)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -133,6 +144,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
         try container.encodeIfPresent(networkPolicy, forKey: .networkPolicy)
         try container.encodeIfPresent(kubeProxy, forKey: .kubeProxy)
         try container.encodeIfPresent(podNetwork, forKey: .podNetwork)
+        try container.encodeIfPresent(machineState, forKey: .machineState)
     }
 
     public static func load(from url: URL, decoder: JSONDecoder = JSONDecoder()) throws -> CRIShimConfig {
@@ -167,6 +179,54 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
             return CRIShimConfigDefaults.stateDirectoryURL.path
         }
         return stateDirectory
+    }
+}
+
+public struct MachineStateConfig: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var storageRoot: String?
+    public var controlSocketRoot: String?
+    public var nbdSocketAllowedRoots: [String]
+
+    public init(
+        enabled: Bool = false,
+        storageRoot: String? = nil,
+        controlSocketRoot: String? = nil,
+        nbdSocketAllowedRoots: [String] = []
+    ) {
+        self.enabled = enabled
+        self.storageRoot = storageRoot
+        self.controlSocketRoot = controlSocketRoot
+        self.nbdSocketAllowedRoots = nbdSocketAllowedRoots
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case storageRoot
+        case controlSocketRoot
+        case nbdSocketAllowedRoots
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        storageRoot = try container.decodeIfPresent(String.self, forKey: .storageRoot)
+        controlSocketRoot = try container.decodeIfPresent(String.self, forKey: .controlSocketRoot)
+        nbdSocketAllowedRoots = try container.decodeIfPresent([String].self, forKey: .nbdSocketAllowedRoots) ?? []
+    }
+
+    public var normalizedStorageRoot: String {
+        guard let storageRoot, !storageRoot.trimmed.isEmpty else {
+            return CRIShimConfigDefaults.machineStateStorageRootURL.path
+        }
+        return storageRoot.trimmed
+    }
+
+    public var normalizedControlSocketRoot: String {
+        guard let controlSocketRoot, !controlSocketRoot.trimmed.isEmpty else {
+            return CRIShimConfigDefaults.machineStateControlSocketRootURL.path
+        }
+        return controlSocketRoot.trimmed
     }
 }
 

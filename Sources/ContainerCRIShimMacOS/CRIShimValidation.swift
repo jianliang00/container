@@ -186,6 +186,30 @@ extension CRIShimConfig {
             }
         }
 
+        if let machineState {
+            validateManagedRoot(
+                machineState.normalizedStorageRoot,
+                name: "machineState.storageRoot",
+                issues: &issues
+            )
+            validateManagedRoot(
+                machineState.normalizedControlSocketRoot,
+                name: "machineState.controlSocketRoot",
+                issues: &issues
+            )
+            if machineState.normalizedStorageRoot == machineState.normalizedControlSocketRoot {
+                issues.append("machineState.storageRoot and machineState.controlSocketRoot must be different")
+            }
+            var allowedRoots = Set<String>()
+            for (index, root) in machineState.nbdSocketAllowedRoots.enumerated() {
+                let name = "machineState.nbdSocketAllowedRoots[\(index)]"
+                validateManagedRoot(root, name: name, issues: &issues)
+                if !allowedRoots.insert(root).inserted {
+                    issues.append("\(name) duplicates an earlier allowlist root")
+                }
+            }
+        }
+
         validateKubernetesIntegrationNetworkBackend(issues: &issues)
 
         return issues
@@ -279,6 +303,26 @@ private func validateOptionalPath(_ value: String?, name: String, allowUnixSchem
     let path = allowUnixScheme ? trimmed.removingUnixScheme : trimmed
     if !path.hasPrefix("/") {
         issues.append("\(name) must be an absolute path")
+    }
+}
+
+private func validateManagedRoot(_ value: String, name: String, issues: inout [String]) {
+    let trimmed = value.trimmed
+    guard !trimmed.isEmpty else {
+        issues.append("\(name) cannot be empty")
+        return
+    }
+    guard trimmed.hasPrefix("/") else {
+        issues.append("\(name) must be an absolute path")
+        return
+    }
+    guard trimmed != "/" else {
+        issues.append("\(name) cannot be the filesystem root")
+        return
+    }
+    let standardized = URL(fileURLWithPath: trimmed).standardizedFileURL.path
+    if standardized != trimmed || trimmed.split(separator: "/", omittingEmptySubsequences: false).contains("..") {
+        issues.append("\(name) must not contain path traversal or non-canonical components")
     }
 }
 

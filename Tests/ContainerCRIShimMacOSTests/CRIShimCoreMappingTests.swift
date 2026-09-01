@@ -149,12 +149,52 @@ struct CRIShimCoreMappingTests {
         #expect(configuration.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
         #expect(configuration.macosGuest?.networkBackend == .vmnetShared)
         #expect(configuration.macosGuest?.vmnetDisconnectRecovery == .stopSandbox)
+        #expect(configuration.macosGuest?.snapshotEnabled == false)
+        #expect(configuration.macosGuest?.machineState == nil)
         #expect(configuration.networks.map(\.network) == ["default"])
         #expect(configuration.networks.first?.options.mtu == 1_450)
         let decodedMetadata = try #require(decodeCRIShimCoreSandboxMetadataLabel(configuration.labels))
         #expect(decodedMetadata.id == "sandbox-1")
         #expect(decodedMetadata.runtimeHandler == "macos")
         #expect(removeCRIShimCoreLabels(configuration.labels) == ["app": "demo"])
+    }
+
+    @Test
+    func mapsMachineStateAnnotationsIntoSandboxConfiguration() throws {
+        let root = URL(fileURLWithPath: "/tmp/cri-map-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let storageRoot = root.appendingPathComponent("machine-state", isDirectory: true)
+        let socketRoot = root.appendingPathComponent("control", isDirectory: true)
+        var request = Runtime_V1_RunPodSandboxRequest()
+        request.config.annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "pod-uid-a",
+        ]
+
+        let configuration = try makeCRIShimSandboxConfiguration(
+            id: "sandbox-1",
+            request: request,
+            handler: resolvedRuntimeHandler,
+            sandboxImage: CRIShimImageRecord(
+                reference: "example.com/macos/sandbox:latest",
+                digest: "sha256:sandbox",
+                size: 1
+            ),
+            machineStateConfig: MachineStateConfig(
+                enabled: true,
+                storageRoot: storageRoot.path,
+                controlSocketRoot: socketRoot.path
+            )
+        )
+
+        let options = try #require(configuration.macosGuest)
+        #expect(options.snapshotEnabled)
+        #expect(options.machineState?.protocolVersion == 2)
+        #expect(options.machineState?.persistenceID == "pod-uid-a")
+        #expect(options.machineState?.storageDirectory == storageRoot.appendingPathComponent("pod-uid-a").path)
+        #expect(options.machineState?.controlSocketPath == socketRoot.appendingPathComponent("pod-uid-a.sock").path)
+        #expect(options.blockDevices.isEmpty)
     }
 
     @Test

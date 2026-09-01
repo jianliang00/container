@@ -127,12 +127,17 @@ final class MacOSSidecarClient: @unchecked Sendable {
         return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmSaveMachineState)
     }
 
-    func restoreMachineState(stateID: String, timeoutSeconds: TimeInterval = 300) throws -> MacOSMachineStateOperationResult {
+    func restoreMachineState(
+        stateID: String,
+        timeoutSeconds: TimeInterval = 300,
+        socketConnectRetries: Int = 1
+    ) throws -> MacOSMachineStateOperationResult {
         let response = try request(
             method: .vmRestoreMachineState,
             protocolVersion: MacOSSidecarProtocolVersion.machineState,
             machineState: .init(stateID: stateID, timeoutSeconds: timeoutSeconds),
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: timeoutSeconds,
+            socketConnectRetries: socketConnectRetries
         )
         return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmRestoreMachineState)
     }
@@ -379,6 +384,17 @@ final class MacOSSidecarClient: @unchecked Sendable {
         stateLock.unlock()
 
         let fd = try connectControlSocket(retries: retries)
+        do {
+            stateLock.lock()
+            let wantsEvents = eventHandler != nil
+            stateLock.unlock()
+            if wantsEvents {
+                try subscribeToEventsSynchronously(fd: fd)
+            }
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
         let thread = Thread { [weak self] in
             self?.readerLoop(fd: fd)
         }
@@ -398,6 +414,46 @@ final class MacOSSidecarClient: @unchecked Sendable {
 
         thread.start()
         return fd
+    }
+
+    private func subscribeToEventsSynchronously(fd: Int32) throws {
+        let request = MacOSSidecarRequest(
+            method: .eventsSubscribe,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(request), fd: fd)
+        while true {
+            let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+            switch envelope.kind {
+            case .response:
+                guard let response = envelope.response, response.requestID == request.requestID else {
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "sidecar event subscription returned an invalid response"
+                    )
+                }
+                // Older sidecars claimed the event connection before returning
+                // unknownMethod. Accept that response during a rolling upgrade.
+                if !response.ok, response.error?.code == "unknownMethod" {
+                    return
+                }
+                try validate(response: response, expectedRequestID: request.requestID)
+                return
+            case .event:
+                guard let event = envelope.event else {
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "sidecar event subscription returned an empty event"
+                    )
+                }
+                stateLock.lock()
+                let handler = eventHandler
+                stateLock.unlock()
+                handler?(event)
+            case .request:
+                continue
+            }
+        }
     }
 
     private func readerLoop(fd: Int32) {

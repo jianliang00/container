@@ -239,7 +239,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled,
                 vmnetRecoveryStatePath: vmnetRecoveryController.statePath,
                 vmnetRecoveryRequestPath: vmnetRecoveryController.requestPath,
-                vmnetRecoveryBootSessionID: vmnetRecoveryController.bootSessionID
+                vmnetRecoveryBootSessionID: vmnetRecoveryController.bootSessionID,
+                machineStateConfig: config.machineState
             )
 
             do {

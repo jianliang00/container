@@ -187,6 +187,14 @@ public enum MacOSKubeadmRenderer {
                         "enabled": true,
                         "configPath": "/etc/kubernetes/kube-proxy.conf"
                     },
+                    "machineState": {
+                        "enabled": true,
+                        "storageRoot": "/var/lib/container/cri-shim-macos/machine-state/v1",
+                        "controlSocketRoot": "/var/run/container/machine-state/v1",
+                        "nbdSocketAllowedRoots": [
+                            "/var/run/container/nbd"
+                        ]
+                    },
                     "podNetwork": {
                         "enabled": true,
                         "dualStackEnabled": \(dualStackEnabled),
@@ -239,6 +247,14 @@ public enum MacOSKubeadmRenderer {
                     },
                     "kubeProxy": {
                         "enabled": false
+                    },
+                    "machineState": {
+                        "enabled": true,
+                        "storageRoot": "/var/lib/container/cri-shim-macos/machine-state/v1",
+                        "controlSocketRoot": "/var/run/container/machine-state/v1",
+                        "nbdSocketAllowedRoots": [
+                            "/var/run/container/nbd"
+                        ]
                     }
                 }
 

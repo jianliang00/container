@@ -51,6 +51,44 @@ struct CRIShimConfigTests {
         #expect(config.podNetwork?.networkName == "kubernetes-pods")
         #expect(config.podNetwork?.runtimeStatePath == "/var/lib/container/pod-network/runtime.json")
         #expect(config.podNetwork?.readyStatePath == "/var/lib/container/pod-network/ready.json")
+        #expect(config.machineState == nil)
+    }
+
+    @Test
+    func machineStateConfigDefaultsRemainDisabledAndExplicitRootsRoundTrip() throws {
+        let defaults = try JSONDecoder().decode(MachineStateConfig.self, from: Data("{}".utf8))
+        #expect(!defaults.enabled)
+        #expect(defaults.normalizedStorageRoot == CRIShimConfigDefaults.machineStateStorageRootURL.path)
+        #expect(defaults.normalizedControlSocketRoot == CRIShimConfigDefaults.machineStateControlSocketRootURL.path)
+        #expect(defaults.nbdSocketAllowedRoots.isEmpty)
+
+        let configured = MachineStateConfig(
+            enabled: true,
+            storageRoot: "/var/lib/container/machine-state/v1",
+            controlSocketRoot: "/var/run/container/machine-state/v1",
+            nbdSocketAllowedRoots: ["/var/run/container/nbd"]
+        )
+        let decoded = try JSONDecoder().decode(
+            MachineStateConfig.self,
+            from: JSONEncoder().encode(configured)
+        )
+        #expect(decoded == configured)
+    }
+
+    @Test
+    func machineStateConfigRejectsUnsafeAndDuplicateRoots() throws {
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.machineState = MachineStateConfig(
+            enabled: true,
+            storageRoot: "../state",
+            controlSocketRoot: "/",
+            nbdSocketAllowedRoots: ["/var/run/nbd", "/var/run/nbd"]
+        )
+
+        let issues = config.validationIssues
+        #expect(issues.contains("machineState.storageRoot must be an absolute path"))
+        #expect(issues.contains("machineState.controlSocketRoot cannot be the filesystem root"))
+        #expect(issues.contains("machineState.nbdSocketAllowedRoots[1] duplicates an earlier allowlist root"))
     }
 
     @Test

@@ -238,10 +238,35 @@ func makeCRIPodSandboxStatusInfo(
     sandboxSnapshot: SandboxSnapshot?
 ) -> [String: String] {
     var info = makeCRIStatusInfo(metadata)
+    if metadata.annotations[CRIShimMachineStateAnnotation.enabled] == "true",
+        let persistenceID = metadata.annotations[CRIShimMachineStateAnnotation.persistenceID]
+    {
+        info["machineState"] = makeCRIStatusJSONString(
+            CRIShimMachineStateStatusInfo(persistenceID: persistenceID)
+        )
+    }
     if let sandboxSnapshot {
         info["sandboxSnapshot"] = makeCRIStatusJSONString(sandboxSnapshot)
     }
     return info
+}
+
+private struct CRIShimMachineStateStatusInfo: Encodable {
+    struct Restore: Encodable {
+        struct UnsupportedReason: Encodable {
+            let code = CRIShimMachineStateAnnotation.criRestoreUnsupportedReasonCode
+            let message = "CRI machine-state restore requires guest process and host workload metadata adoption"
+        }
+
+        let supported = false
+        let status = "notRequested"
+        let unsupportedReason = UnsupportedReason()
+    }
+
+    let schemaVersion = 1
+    let protocolVersion = 2
+    let persistenceID: String
+    let restore = Restore()
 }
 
 private func makeCRIPodSandboxMetadata(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandboxMetadata {

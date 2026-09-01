@@ -58,7 +58,8 @@ func makeCRIShimSandboxConfiguration(
     vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled,
     vmnetRecoveryStatePath: String? = nil,
     vmnetRecoveryRequestPath: String? = nil,
-    vmnetRecoveryBootSessionID: String? = nil
+    vmnetRecoveryBootSessionID: String? = nil,
+    machineStateConfig: MachineStateConfig? = nil
 ) throws -> ContainerConfiguration {
     let sandboxID = id.trimmed
     guard !sandboxID.isEmpty else {
@@ -111,15 +112,21 @@ func makeCRIShimSandboxConfiguration(
     if let metadata {
         configuration.labels[CRIShimCoreLabel.sandboxMetadata] = try makeCRIShimCoreMetadataLabel(metadata)
     }
+    let machineState = try makeCRIShimMachineStateMapping(
+        annotations: request.config.annotations,
+        nodeConfig: machineStateConfig
+    )
     configuration.macosGuest = ContainerConfiguration.MacOSGuestOptions(
-        snapshotEnabled: false,
+        snapshotEnabled: machineState.machineState != nil,
         guiEnabled: handler.guiEnabled,
         agentPort: 27_000,
         networkBackend: try makeCRIShimMacOSNetworkBackend(handler.networkBackend),
         vmnetDisconnectRecovery: vmnetDisconnectRecovery,
         vmnetRecoveryStatePath: vmnetRecoveryStatePath,
         vmnetRecoveryRequestPath: vmnetRecoveryRequestPath,
-        vmnetRecoveryBootSessionID: vmnetRecoveryBootSessionID
+        vmnetRecoveryBootSessionID: vmnetRecoveryBootSessionID,
+        blockDevices: machineState.blockDevices,
+        machineState: machineState.machineState
     )
     return configuration
 }

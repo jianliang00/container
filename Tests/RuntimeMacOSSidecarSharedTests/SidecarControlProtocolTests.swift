@@ -22,6 +22,62 @@ import Testing
 
 struct SidecarControlProtocolTests {
     @Test
+    func eventSubscriptionMethodRoundTrips() throws {
+        let request = MacOSSidecarRequest(requestID: "events", method: .eventsSubscribe)
+        let decoded = try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request))
+
+        #expect(decoded.method == .eventsSubscribe)
+        #expect(decoded.method.rawValue == "events.subscribe")
+        #expect(MacOSSidecarMethod(rawValue: "events.subscribe") == .eventsSubscribe)
+        #expect(MacOSSidecarMethod(rawValue: "process.inspect") == .processInspect)
+        #expect(MacOSSidecarMethod(rawValue: "process.delete") == .processDelete)
+        #expect(MacOSSidecarMethod(rawValue: "vm.deleteMachineState") == .vmDeleteMachineState)
+    }
+
+    @Test
+    func durableEventAcknowledgementV3RoundTrips() throws {
+        let acknowledgement = MacOSSidecarEventAcknowledgement(
+            subscriptionID: "subscriber-1",
+            processID: "process-1",
+            sequence: 42
+        )
+        let request = MacOSSidecarRequest(
+            requestID: "ack",
+            method: .eventsAcknowledge,
+            protocolVersion: MacOSSidecarProtocolVersion.durableEventAcknowledgement,
+            eventAcknowledgement: acknowledgement
+        )
+        let decoded = try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request))
+
+        #expect(decoded.method == .eventsAcknowledge)
+        #expect(decoded.protocolVersion == 3)
+        #expect(decoded.eventAcknowledgement == acknowledgement)
+        #expect(MacOSSidecarMethod(rawValue: "events.acknowledge") == .eventsAcknowledge)
+        #expect(MacOSSidecarProtocolVersion.supported == [1, 2, 3, 4, 5])
+    }
+
+    @Test
+    func durableProcessDeleteIdentityV5RoundTrips() throws {
+        let identity = MacOSSidecarDurableProcessDeleteIdentity(
+            executionID: "sandbox:container:builder",
+            trustedLaunchFingerprint: "sha256:\(String(repeating: "c", count: 64))",
+            incarnation: "sha256:\(String(repeating: "d", count: 64))",
+            storageGeneration: 12
+        )
+        let request = MacOSSidecarRequest(
+            requestID: "delete",
+            method: .processDelete,
+            protocolVersion: MacOSSidecarProtocolVersion.durableProcessIdentity,
+            processID: identity.executionID,
+            durableProcessDeleteIdentity: identity
+        )
+
+        let decoded = try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request))
+        #expect(decoded.protocolVersion == 5)
+        #expect(decoded.durableProcessDeleteIdentity == identity)
+    }
+
+    @Test
     func legacyRequestWithoutVersionRemainsDecodable() throws {
         let data = Data(#"{"requestID":"legacy","method":"vm.stop"}"#.utf8)
         let request = try JSONDecoder().decode(MacOSSidecarRequest.self, from: data)
@@ -57,6 +113,36 @@ struct SidecarControlProtocolTests {
         let decoded = try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request))
         #expect(decoded.protocolVersion == 2)
         #expect(decoded.machineState == .init(stateID: "checkpoint-1", timeoutSeconds: 120))
+
+        let result = MacOSMachineStateDeleteResult(stateID: "checkpoint-1", deleted: true)
+        #expect(try JSONDecoder().decode(MacOSMachineStateDeleteResult.self, from: JSONEncoder().encode(result)) == result)
+    }
+
+    @Test
+    func durableGenerationFencePayloadRoundTrips() throws {
+        let fingerprint = "sha256:\(String(repeating: "a", count: 64))"
+        let request = MacOSSidecarRequest(
+            requestID: "adopt-1",
+            method: .processStart,
+            protocolVersion: MacOSSidecarProtocolVersion.current,
+            processID: "runtime-process",
+            exec: .init(
+                executable: "/bin/sleep",
+                arguments: ["60"],
+                durableExecutionID: "sandbox:container:builder",
+                durableLaunchFingerprint: fingerprint,
+                storageGeneration: 8,
+                previousStorageGeneration: 7,
+                replayCursor: 19
+            )
+        )
+
+        let decoded = try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request))
+        #expect(decoded.exec?.durableExecutionID == "sandbox:container:builder")
+        #expect(decoded.exec?.durableLaunchFingerprint == fingerprint)
+        #expect(decoded.exec?.storageGeneration == 8)
+        #expect(decoded.exec?.previousStorageGeneration == 7)
+        #expect(decoded.exec?.replayCursor == 19)
     }
 
     @Test
@@ -109,7 +195,13 @@ struct SidecarControlProtocolTests {
         )
         let eventPayload = Data("stdout\n".utf8)
         let event = MacOSSidecarEnvelope.event(
-            .init(event: .processStdout, processID: "proc-2", data: eventPayload)
+            .init(
+                event: .processStdout,
+                processID: "proc-2",
+                data: eventPayload,
+                sequence: 17,
+                subscriptionID: "subscriber-2"
+            )
         )
 
         let (reader, writer) = try socketPair()
@@ -133,6 +225,8 @@ struct SidecarControlProtocolTests {
         #expect(decodedEvent.event?.event == .processStdout)
         #expect(decodedEvent.event?.processID == "proc-2")
         #expect(decodedEvent.event?.data == eventPayload)
+        #expect(decodedEvent.event?.sequence == 17)
+        #expect(decodedEvent.event?.subscriptionID == "subscriber-2")
     }
 
     @Test
@@ -188,7 +282,9 @@ struct SidecarControlProtocolTests {
             workingDirectory: "/tmp",
             terminal: false,
             user: "nobody",
-            supplementalGroups: [20, 80]
+            supplementalGroups: [20, 80],
+            durableExecutionID: "sandbox:container:builder",
+            replayCursor: 42
         )
         let request = MacOSSidecarRequest(
             method: .processStart,
@@ -215,6 +311,8 @@ struct SidecarControlProtocolTests {
         #expect(decodedExec.uid == nil)
         #expect(decodedExec.gid == nil)
         #expect(decodedExec.supplementalGroups == [20, 80])
+        #expect(decodedExec.durableExecutionID == "sandbox:container:builder")
+        #expect(decodedExec.replayCursor == 42)
     }
 
     @Test
@@ -281,6 +379,101 @@ struct SidecarControlProtocolTests {
         } catch {
             #expect(error.localizedDescription.contains("invalid frame size"))
         }
+    }
+
+    @Test
+    func frameReadDeadlineCoversPartialPayloadWithoutLateReader() throws {
+        let (reader, writer) = try socketPair()
+        defer {
+            closeIfValid(reader)
+            closeIfValid(writer)
+        }
+
+        var length = UInt32(8).bigEndian
+        let header = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
+        try writeAll(header + Data("ab".utf8), fd: writer)
+
+        do {
+            _ = try MacOSSidecarSocketIO.readFrame(fd: reader, timeoutMilliseconds: 50)
+            Issue.record("partial payload unexpectedly completed")
+        } catch {
+            let nsError = error as NSError
+            #expect(nsError.domain == NSPOSIXErrorDomain)
+            #expect(nsError.code == Int(ETIMEDOUT))
+        }
+
+        let remaining = Data("cdefghTAIL".utf8)
+        try writeAll(remaining, fd: writer)
+        usleep(100_000)
+        #expect(try MacOSSidecarSocketIO.readExact(fd: reader, count: remaining.count) == remaining)
+    }
+
+    @Test
+    func duplicatedReaderCannotConsumeAReusedOwnerDescriptor() throws {
+        let old = try socketPair()
+        let replacement = try socketPair()
+        let readerFD = Darwin.dup(old.0)
+        #expect(readerFD >= 0)
+        guard readerFD >= 0 else { return }
+        let reusedFD = old.0
+        defer {
+            closeIfValid(readerFD)
+            closeIfValid(reusedFD)
+            closeIfValid(old.1)
+            closeIfValid(replacement.0)
+            closeIfValid(replacement.1)
+        }
+
+        let headerRead = DispatchSemaphore(value: 0)
+        let releaseReader = DispatchSemaphore(value: 0)
+        let readerDone = DispatchSemaphore(value: 0)
+        let oldReaderSucceeded = ProtocolLockedValue(false)
+        Thread.detachNewThread {
+            defer { readerDone.signal() }
+            do {
+                _ = try MacOSSidecarSocketIO.readFrame(
+                    fd: readerFD,
+                    timeoutMilliseconds: 2_000,
+                    afterHeaderRead: {
+                        headerRead.signal()
+                        _ = releaseReader.wait(timeout: .now() + 2)
+                    }
+                )
+                oldReaderSucceeded.withLock { $0 = true }
+            } catch {}
+        }
+
+        var oldLength = UInt32(3).bigEndian
+        try withUnsafeBytes(of: &oldLength) { bytes in
+            try writeAll(Data(bytes), fd: old.1)
+        }
+        #expect(headerRead.wait(timeout: .now() + 2) == .success)
+
+        _ = Darwin.shutdown(reusedFD, SHUT_RDWR)
+        closeIfValid(reusedFD)
+        #expect(Darwin.dup2(replacement.0, reusedFD) == reusedFD)
+        let replacementPayload = Data("replacement-frame".utf8)
+        try MacOSSidecarSocketIO.writeFrame(replacementPayload, fd: replacement.1)
+
+        releaseReader.signal()
+        #expect(readerDone.wait(timeout: .now() + 2) == .success)
+        #expect(!oldReaderSucceeded.withLock { $0 })
+        #expect(try MacOSSidecarSocketIO.readFrame(fd: reusedFD, timeoutMilliseconds: 1_000) == replacementPayload)
+    }
+}
+
+private final class ProtocolLockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
     }
 }
 

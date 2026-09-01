@@ -34,6 +34,22 @@ struct MacOSSidecarClientTests {
         defer { server.stop() }
 
         server.start { clientFD in
+            let capabilities = try readRequest(from: clientFD)
+            #expect(capabilities.method == .vmCapabilities)
+            try writeResponse(
+                .success(
+                    requestID: capabilities.requestID,
+                    data: try JSONEncoder().encode(
+                        MacOSSidecarCapabilities(
+                            lifecycleState: .created,
+                            machineState: .init(supported: true),
+                            methods: []
+                        )
+                    ),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
             let restore = try readRequest(from: clientFD)
             #expect(restore.method == .vmRestoreMachineState)
             #expect(restore.protocolVersion == 2)
@@ -86,6 +102,22 @@ struct MacOSSidecarClientTests {
         defer { server.stop() }
 
         server.start { clientFD in
+            let capabilities = try readRequest(from: clientFD)
+            #expect(capabilities.method == .vmCapabilities)
+            try writeResponse(
+                .success(
+                    requestID: capabilities.requestID,
+                    data: try JSONEncoder().encode(
+                        MacOSSidecarCapabilities(
+                            lifecycleState: .created,
+                            machineState: .init(supported: true),
+                            methods: []
+                        )
+                    ),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
             let restore = try readRequest(from: clientFD)
             #expect(restore.method == .vmRestoreMachineState)
             try writeResponse(
@@ -122,6 +154,66 @@ struct MacOSSidecarClientTests {
     }
 
     @Test
+    func explicitRestoreInternalErrorIsNotRetriedAsTransportLoss() async throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+        let methods = LockedValue<[MacOSSidecarMethod]>([])
+
+        server.start { clientFD in
+            let capabilities = try readRequest(from: clientFD)
+            methods.withLock { $0.append(capabilities.method) }
+            try writeCapabilities(state: .created, requestID: capabilities.requestID, to: clientFD)
+
+            let restore = try readRequest(from: clientFD)
+            methods.withLock { $0.append(restore.method) }
+            try writeResponse(
+                .failure(
+                    requestID: restore.requestID,
+                    code: "internalError",
+                    message: "Virtualization restore failed",
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
+            usleep(100_000)
+            var byte = UInt8.zero
+            let count = Darwin.recv(clientFD, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+            #expect(count == -1)
+            #expect(errno == EAGAIN || errno == EWOULDBLOCK)
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("restore-internal-error-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = MacOSSandboxService(root: root, log: Logger(label: "MacOSSidecarClientTests"))
+        let client = MacOSSidecarClient(
+            socketPath: socketPath,
+            log: Logger(label: "MacOSSidecarClientTests"),
+            requestTimeoutSeconds: 0.05
+        )
+        defer { client.closeControlConnection() }
+
+        do {
+            try await service.initializeVirtualMachineViaSidecar(
+                client: client,
+                config: makeSidecarStartupConfiguration(restoreStateID: "state-a"),
+                presentGUI: false,
+                socketConnectRetries: 1,
+                operationTimeoutSeconds: 0.05,
+                reconciliationTimeoutSeconds: 0.1,
+                reconciliationPollMicroseconds: 10_000
+            )
+            Issue.record("explicit sidecar restore failure was treated as an unknown transport outcome")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .internalError)
+            #expect(error.message.contains("Virtualization restore failed"))
+        }
+
+        try server.waitForCompletion()
+        #expect(methods.withLock { $0 } == [.vmCapabilities, .vmRestoreMachineState])
+    }
+
+    @Test
     func persistenceLeaseSerializesRecreatedSandboxes() async throws {
         let root = URL(fileURLWithPath: "/tmp/ms-lease-\(UUID().uuidString)", isDirectory: true)
         let storage = root.appendingPathComponent("state", isDirectory: true)
@@ -151,6 +243,91 @@ struct MacOSSidecarClientTests {
         await first.releaseMachineStateLeaseIfPresent()
         try await recreated.acquireMachineStateLeaseIfNeeded(config)
         await recreated.releaseMachineStateLeaseIfPresent()
+    }
+
+    @Test
+    func pendingRequestEOFReconnectsEventsAndPreservesPersistentRuntime() async throws {
+        let root = URL(fileURLWithPath: "/tmp/ms-control-recovery-\(UUID().uuidString)", isDirectory: true)
+        let sandboxRoot = root.appendingPathComponent("sandbox", isDirectory: true)
+        let storage = root.appendingPathComponent("state", isDirectory: true)
+        let control = root.appendingPathComponent("control", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: sandboxRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: control, withIntermediateDirectories: true)
+        let socketPath = control.appendingPathComponent("sidecar.sock").path
+        let eventAcknowledged = LockedValue(false)
+        let releaseRecoveredConnection = DispatchSemaphore(value: 0)
+        let server = try FakeConcurrentUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start(connectionCount: 2) { index, clientFD in
+            try acknowledgeEventSubscription(from: clientFD)
+            if index == 0 {
+                let signal = try readRequest(from: clientFD)
+                #expect(signal.method == .processSignal)
+                _ = Darwin.shutdown(clientFD, SHUT_RDWR)
+                return
+            }
+
+            let capabilities = try readRequest(from: clientFD)
+            #expect(capabilities.method == .vmCapabilities)
+            try writeCapabilities(state: .running, requestID: capabilities.requestID, to: clientFD)
+            try writeEvent(
+                .init(
+                    event: .processStdout,
+                    processID: "durable-session",
+                    data: Data("after-reconnect\n".utf8),
+                    sequence: 1,
+                    subscriptionID: "test-subscription"
+                ),
+                to: clientFD
+            )
+            let acknowledgement = try readRequest(from: clientFD)
+            #expect(acknowledgement.method == .eventsAcknowledge)
+            #expect(acknowledgement.eventAcknowledgement?.processID == "durable-session")
+            #expect(acknowledgement.eventAcknowledgement?.sequence == 1)
+            try writeResponse(.success(requestID: acknowledgement.requestID), to: clientFD)
+            eventAcknowledged.withLock { $0 = true }
+            _ = releaseRecoveredConnection.wait(timeout: .now() + 2)
+        }
+        let config = try makeSidecarStartupConfiguration(
+            restoreStateID: nil,
+            storageDirectory: storage.path,
+            controlSocketPath: socketPath
+        )
+        let service = MacOSSandboxService(
+            root: sandboxRoot,
+            log: Logger(label: "MacOSSidecarClientTests")
+        )
+
+        try await service.testingPrepareSandbox(config, state: "running")
+        try await service.acquireMachineStateLeaseIfNeeded(config)
+        await service.testingAddSession(
+            id: "durable-session",
+            config: config.initProcess,
+            started: true
+        )
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        await #expect(throws: ContainerizationError.self) {
+            try await service.testingSignalWorkload("durable-session", signal: SIGUSR1)
+        }
+        for _ in 0..<200 where !eventAcknowledged.withLock({ $0 }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(eventAcknowledged.withLock { $0 })
+
+        #expect(await service.testingHasSidecarHandle())
+        #expect(await service.testingMachineStateLeaseIsHeld())
+        let session = try await service.testingInspectWorkload("durable-session")
+        #expect(session.status == .running)
+        #expect(session.exitCode == nil)
+        let stdout = try String(contentsOfFile: try #require(session.stdoutLogPath), encoding: .utf8)
+        #expect(stdout == "after-reconnect\n")
+        await service.testingRemoveSidecarClient()
+        await service.releaseMachineStateLeaseIfPresent()
+        releaseRecoveredConnection.signal()
+        try server.waitForCompletion()
     }
 
     @Test
@@ -235,6 +412,21 @@ struct MacOSSidecarClientTests {
                 ),
                 to: clientFD
             )
+
+            let deleteRequest = try readRequest(from: clientFD)
+            #expect(deleteRequest.method == .vmDeleteMachineState)
+            #expect(deleteRequest.protocolVersion == 2)
+            #expect(deleteRequest.machineState?.stateID == "state-1")
+            try writeResponse(
+                .success(
+                    requestID: deleteRequest.requestID,
+                    data: try JSONEncoder().encode(
+                        MacOSMachineStateDeleteResult(stateID: "state-1", deleted: true)
+                    ),
+                    protocolVersion: 2
+                ),
+                to: clientFD
+            )
         }
 
         let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
@@ -249,7 +441,105 @@ struct MacOSSidecarClientTests {
             #expect(error.code == .notFound)
             #expect(error.message.contains("machineStateNotFound"))
         }
+        #expect(try client.deleteMachineState(stateID: "state-1") == .init(stateID: "state-1", deleted: true))
         try server.waitForCompletion()
+    }
+
+    @Test
+    func restoreAndResumeResponseLossReconcilesOnNewConnections() async throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeConcurrentUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+        let methods = LockedValue<[MacOSSidecarMethod]>([])
+
+        server.start(connectionCount: 3) { index, clientFD in
+            func nextRequest() throws -> MacOSSidecarRequest {
+                let request = try readRequest(from: clientFD)
+                methods.withLock { $0.append(request.method) }
+                return request
+            }
+
+            switch index {
+            case 0:
+                let capabilities = try nextRequest()
+                #expect(capabilities.method == .vmCapabilities)
+                try writeCapabilities(state: .created, requestID: capabilities.requestID, to: clientFD)
+
+                let restore = try nextRequest()
+                #expect(restore.method == .vmRestoreMachineState)
+                #expect(restore.machineState?.stateID == "state-reconcile")
+                usleep(150_000)
+            case 1:
+                let restoring = try nextRequest()
+                #expect(restoring.method == .vmCapabilities)
+                try writeCapabilities(state: .restoring, requestID: restoring.requestID, to: clientFD)
+
+                let paused = try nextRequest()
+                #expect(paused.method == .vmCapabilities)
+                try writeCapabilities(state: .paused, requestID: paused.requestID, to: clientFD)
+
+                let restoreReadback = try nextRequest()
+                #expect(restoreReadback.method == .vmRestoreMachineState)
+                try writeResponse(
+                    .success(
+                        requestID: restoreReadback.requestID,
+                        data: try JSONEncoder().encode(
+                            MacOSMachineStateOperationResult(lifecycleState: .paused, stateID: "state-reconcile")
+                        ),
+                        protocolVersion: 2
+                    ),
+                    to: clientFD
+                )
+
+                let resume = try nextRequest()
+                #expect(resume.method == .vmResume)
+                usleep(150_000)
+            default:
+                let resuming = try nextRequest()
+                #expect(resuming.method == .vmCapabilities)
+                try writeCapabilities(state: .resuming, requestID: resuming.requestID, to: clientFD)
+
+                let running = try nextRequest()
+                #expect(running.method == .vmCapabilities)
+                try writeCapabilities(state: .running, requestID: running.requestID, to: clientFD)
+
+                let resumeReadback = try nextRequest()
+                #expect(resumeReadback.method == .vmResume)
+                try writeResponse(
+                    .success(
+                        requestID: resumeReadback.requestID,
+                        data: try JSONEncoder().encode(
+                            MacOSMachineStateOperationResult(lifecycleState: .running, stateID: "state-reconcile")
+                        ),
+                        protocolVersion: 2
+                    ),
+                    to: clientFD
+                )
+            }
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("restore-reconcile-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = MacOSSandboxService(root: root, log: Logger(label: "MacOSSidecarClientTests"))
+        let client = MacOSSidecarClient(
+            socketPath: socketPath,
+            log: Logger(label: "MacOSSidecarClientTests"),
+            requestTimeoutSeconds: 0.05
+        )
+        defer { client.closeControlConnection() }
+
+        try await service.initializeVirtualMachineViaSidecar(
+            client: client,
+            config: makeSidecarStartupConfiguration(restoreStateID: "state-reconcile"),
+            presentGUI: false,
+            socketConnectRetries: 3,
+            operationTimeoutSeconds: 0.05,
+            reconciliationTimeoutSeconds: 2,
+            reconciliationPollMicroseconds: 10_000
+        )
+        try server.waitForCompletion(timeout: 3)
+        #expect(!methods.withLock { $0 }.contains(.vmBootstrapStart))
+        #expect(!methods.withLock { $0 }.contains(.vmStop))
     }
 
     @Test
@@ -262,11 +552,7 @@ struct MacOSSidecarClientTests {
         let eventSemaphore = DispatchSemaphore(value: 0)
 
         server.start { clientFD in
-            let subscription = try readRequest(from: clientFD)
-            #expect(subscription.method == .eventsSubscribe)
-            #expect(subscription.protocolVersion == 2)
-            try writeResponse(.success(requestID: subscription.requestID, protocolVersion: 2), to: clientFD)
-
+            try acknowledgeEventSubscription(from: clientFD)
             let bootstrap = try readRequest(from: clientFD)
             #expect(bootstrap.method == .vmBootstrapStart)
             try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
@@ -291,6 +577,11 @@ struct MacOSSidecarClientTests {
             eventSemaphore.signal()
         }
 
+        let descriptors = try client._testControlConnectionDescriptors()
+        #expect(descriptors.owner >= 0)
+        #expect(descriptors.reader >= 0)
+        #expect(descriptors.owner != descriptors.reader)
+
         try client.bootstrapStart(socketConnectRetries: 3)
         try client.processStart(
             port: 27000,
@@ -314,6 +605,60 @@ struct MacOSSidecarClientTests {
     }
 
     @Test
+    func reconnectResubscribesBeforeSendingControlRequests() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let firstServer = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { firstServer.stop() }
+
+        firstServer.start { clientFD in
+            try acknowledgeEventSubscription(from: clientFD)
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+            _ = Darwin.shutdown(clientFD, SHUT_RDWR)
+        }
+
+        let eventSemaphore = DispatchSemaphore(value: 0)
+        let disconnectSemaphore = DispatchSemaphore(value: 0)
+        let receivedEvent = LockedValue<MacOSSidecarEvent?>(nil)
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+        client.setEventHandler { event in
+            receivedEvent.withLock { $0 = event }
+            eventSemaphore.signal()
+        }
+        client.setDisconnectHandler { _ in
+            disconnectSemaphore.signal()
+        }
+
+        try client.bootstrapStart(socketConnectRetries: 3)
+        #expect(disconnectSemaphore.wait(timeout: .now() + 2) == .success)
+        try firstServer.waitForCompletion()
+        firstServer.stop()
+
+        let secondServer = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { secondServer.stop() }
+        secondServer.start { clientFD in
+            try acknowledgeEventSubscription(from: clientFD)
+            let start = try readRequest(from: clientFD)
+            #expect(start.method == .processStart)
+            #expect(start.processID == "proc-reconnected")
+            try writeResponse(.success(requestID: start.requestID), to: clientFD)
+            try writeEvent(.init(event: .processExit, processID: "proc-reconnected", exitCode: 0), to: clientFD)
+        }
+
+        try client.processStart(
+            port: 27000,
+            processID: "proc-reconnected",
+            request: .init(executable: "/bin/true")
+        )
+        #expect(eventSemaphore.wait(timeout: .now() + 2) == .success)
+        #expect(receivedEvent.withLock { $0?.processID == "proc-reconnected" })
+        #expect(receivedEvent.withLock { $0?.exitCode == 0 })
+        try secondServer.waitForCompletion()
+    }
+
+    @Test
     func eventSubscriptionFallsBackToLegacySidecarWithoutLosingEvents() throws {
         let socketPath = try makeTemporarySocketPath()
         let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
@@ -324,9 +669,22 @@ struct MacOSSidecarClientTests {
         server.start { clientFD in
             let subscription = try readRequest(from: clientFD)
             #expect(subscription.method == .eventsSubscribe)
+            #expect(subscription.protocolVersion == MacOSSidecarProtocolVersion.durableEventAcknowledgement)
             try writeResponse(
                 .failure(
                     requestID: subscription.requestID,
+                    code: "unknownMethod",
+                    message: "unknown sidecar control method events.subscribe"
+                ),
+                to: clientFD
+            )
+
+            let versionTwoSubscription = try readRequest(from: clientFD)
+            #expect(versionTwoSubscription.method == .eventsSubscribe)
+            #expect(versionTwoSubscription.protocolVersion == MacOSSidecarProtocolVersion.machineState)
+            try writeResponse(
+                .failure(
+                    requestID: versionTwoSubscription.requestID,
                     code: "unknownMethod",
                     message: "unknown sidecar control method events.subscribe"
                 ),
@@ -443,6 +801,221 @@ struct MacOSSidecarClientTests {
     }
 
     @Test
+    func durableProcessDeleteCarriesStableExecutionIDAndPort() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+
+        server.start { clientFD in
+            let bootstrap = try readRequest(from: clientFD)
+            #expect(bootstrap.method == .vmBootstrapStart)
+            try writeResponse(.success(requestID: bootstrap.requestID), to: clientFD)
+
+            let delete = try readRequest(from: clientFD)
+            #expect(delete.method == .processDelete)
+            #expect(delete.protocolVersion == MacOSSidecarProtocolVersion.durableProcessIdentity)
+            #expect(delete.port == 27_001)
+            #expect(delete.processID == "sandbox:container:builder")
+            #expect(delete.durableProcessDeleteIdentity?.executionID == "sandbox:container:builder")
+            #expect(
+                delete.durableProcessDeleteIdentity?.trustedLaunchFingerprint
+                    == "sha256:\(String(repeating: "a", count: 64))"
+            )
+            #expect(
+                delete.durableProcessDeleteIdentity?.incarnation
+                    == "sha256:\(String(repeating: "b", count: 64))"
+            )
+            #expect(delete.durableProcessDeleteIdentity?.storageGeneration == 9)
+            try writeResponse(.success(requestID: delete.requestID), to: clientFD)
+        }
+
+        let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
+        defer { client.closeControlConnection() }
+        try client.bootstrapStart(socketConnectRetries: 3)
+        try client.processDelete(
+            port: 27_001,
+            identity: .init(
+                executionID: "sandbox:container:builder",
+                trustedLaunchFingerprint: "sha256:\(String(repeating: "a", count: 64))",
+                incarnation: "sha256:\(String(repeating: "b", count: 64))",
+                storageGeneration: 9
+            )
+        )
+
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func durableProcessDeleteRetriesAfterResponseLoss() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeConcurrentUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+        let received = LockedValue<[MacOSSidecarDurableProcessDeleteIdentity]>([])
+
+        server.start(connectionCount: 2) { index, clientFD in
+            let request = try readRequest(from: clientFD)
+            #expect(request.method == .processDelete)
+            received.withLock {
+                if let identity = request.durableProcessDeleteIdentity {
+                    $0.append(identity)
+                }
+            }
+            if index == 0 {
+                // Simulate a sidecar restart after the guest committed delete
+                // but before the control response was written.
+                return
+            }
+            try writeResponse(.success(requestID: request.requestID), to: clientFD)
+        }
+
+        let identity = MacOSSidecarDurableProcessDeleteIdentity(
+            executionID: "sandbox:container:lost-delete-ack",
+            trustedLaunchFingerprint: "sha256:\(String(repeating: "b", count: 64))",
+            incarnation: "sha256:\(String(repeating: "c", count: 64))",
+            storageGeneration: 11
+        )
+        let client = MacOSSidecarClient(
+            socketPath: socketPath,
+            log: Logger(label: "MacOSSidecarClientTests"),
+            requestTimeoutSeconds: 1
+        )
+        defer { client.closeControlConnection() }
+        try client.processDelete(port: 27_001, identity: identity)
+
+        try server.waitForCompletion()
+        #expect(received.withLock { $0 } == [identity, identity])
+    }
+
+    @Test
+    func durableProcessStartTimeoutReconnectsAndInspectsBeforeRetryingStart() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeConcurrentUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+        let receivedMethods = LockedValue<[MacOSSidecarMethod]>([])
+        let releaseInspectionConnection = DispatchSemaphore(value: 0)
+
+        server.start(connectionCount: 2) { index, clientFD in
+            let request = try readRequest(from: clientFD)
+            receivedMethods.withLock { $0.append(request.method) }
+            if index == 0 {
+                #expect(request.method == .processStart)
+                #expect(request.processID == "durable-process")
+                usleep(300_000)
+                return
+            }
+
+            #expect(request.method == .processInspect)
+            #expect(request.processID == "durable-process")
+            #expect(request.port == 27_001)
+            #expect(request.exec?.durableExecutionID == "sandbox:container:builder")
+            let status = MacOSGuestProcessStatusPayload(
+                executionID: "sandbox:container:builder",
+                disposition: .inspected,
+                state: .running,
+                launchFingerprint: "guest-launch-fingerprint",
+                processIdentifier: 909,
+                exitCode: nil,
+                cursor: 8,
+                oldestAvailableSequence: 1,
+                replayTruncated: false
+            )
+            try writeResponse(
+                .success(requestID: request.requestID, data: try JSONEncoder().encode(status)),
+                to: clientFD
+            )
+            _ = releaseInspectionConnection.wait(timeout: .now() + 2)
+        }
+
+        let disconnectCount = LockedValue(0)
+        let client = MacOSSidecarClient(
+            socketPath: socketPath,
+            log: Logger(label: "MacOSSidecarClientTests"),
+            requestTimeoutSeconds: 0.1
+        )
+        defer { client.closeControlConnection() }
+        client.setDisconnectHandler { _ in
+            disconnectCount.withLock { $0 += 1 }
+        }
+
+        try client.processStart(
+            port: 27_001,
+            processID: "durable-process",
+            request: .init(
+                executable: "/bin/sleep",
+                arguments: ["60"],
+                durableExecutionID: "sandbox:container:builder",
+                replayCursor: 7
+            )
+        )
+
+        #expect(receivedMethods.withLock { $0 } == [.processStart, .processInspect])
+        #expect(disconnectCount.withLock { $0 } == 0)
+        releaseInspectionConnection.signal()
+        client.closeControlConnection()
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func durableProcessStartTimeoutRejectsExitedInspection() throws {
+        let socketPath = try makeTemporarySocketPath()
+        let server = try FakeConcurrentUnixSidecarTestServer(socketPath: socketPath)
+        defer { server.stop() }
+        let receivedMethods = LockedValue<[MacOSSidecarMethod]>([])
+
+        server.start(connectionCount: 2) { index, clientFD in
+            let request = try readRequest(from: clientFD)
+            receivedMethods.withLock { $0.append(request.method) }
+            if index == 0 {
+                #expect(request.method == .processStart)
+                usleep(300_000)
+                return
+            }
+
+            #expect(request.method == .processInspect)
+            let status = MacOSGuestProcessStatusPayload(
+                executionID: "sandbox:container:exited",
+                disposition: .inspected,
+                state: .exited,
+                launchFingerprint: "guest-launch-fingerprint",
+                processIdentifier: 910,
+                exitCode: 0,
+                cursor: 9,
+                oldestAvailableSequence: 1,
+                replayTruncated: false
+            )
+            try writeResponse(
+                .success(requestID: request.requestID, data: try JSONEncoder().encode(status)),
+                to: clientFD
+            )
+        }
+
+        let client = MacOSSidecarClient(
+            socketPath: socketPath,
+            log: Logger(label: "MacOSSidecarClientTests"),
+            requestTimeoutSeconds: 0.1
+        )
+        defer { client.closeControlConnection() }
+
+        do {
+            try client.processStart(
+                port: 27_001,
+                processID: "durable-exited-process",
+                request: .init(
+                    executable: "/bin/true",
+                    durableExecutionID: "sandbox:container:exited",
+                    replayCursor: 8
+                )
+            )
+            Issue.record("exited durable process inspection was accepted as a successful start")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .invalidState)
+        }
+
+        try server.waitForCompletion()
+        #expect(receivedMethods.withLock { $0 } == [.processStart, .processInspect])
+    }
+
+    @Test
     func filesystemRequestsUseDedicatedPayloads() throws {
         let socketPath = try makeTemporarySocketPath()
         let server = try FakeUnixSidecarTestServer(socketPath: socketPath)
@@ -555,6 +1128,12 @@ struct MacOSSidecarClientTests {
 
         let client = MacOSSidecarClient(socketPath: socketPath, log: Logger(label: "MacOSSidecarClientTests"))
         defer { client.closeControlConnection() }
+        let disconnectCount = LockedValue(0)
+        let disconnect = DispatchSemaphore(value: 0)
+        client.setDisconnectHandler { _ in
+            disconnectCount.withLock { $0 += 1 }
+            disconnect.signal()
+        }
         try client.bootstrapStart(socketConnectRetries: 3)
 
         do {
@@ -575,6 +1154,8 @@ struct MacOSSidecarClientTests {
         }
 
         try server.waitForCompletion()
+        #expect(disconnect.wait(timeout: .now() + 2) == .success)
+        #expect(disconnectCount.withLock { $0 } == 1)
     }
 
     @Test
@@ -599,6 +1180,10 @@ struct MacOSSidecarClientTests {
             requestTimeoutSeconds: 0.1
         )
         defer { client.closeControlConnection() }
+        let disconnectCount = LockedValue(0)
+        client.setDisconnectHandler { _ in
+            disconnectCount.withLock { $0 += 1 }
+        }
         try client.bootstrapStart(socketConnectRetries: 3)
 
         do {
@@ -619,6 +1204,7 @@ struct MacOSSidecarClientTests {
         }
 
         try server.waitForCompletion()
+        #expect(disconnectCount.withLock { $0 } == 0)
     }
 
     @Test
@@ -823,6 +1409,101 @@ private final class FakeUnixSidecarTestServer: @unchecked Sendable {
     }
 }
 
+private final class FakeConcurrentUnixSidecarTestServer: @unchecked Sendable {
+    private let socketPath: String
+    private let stateLock = NSLock()
+    private var listenFD: Int32
+    private let activeClients = LockedValue<[UUID: Int32]>([:])
+    private let errorBox = LockedValue<Error?>(nil)
+    private let done = DispatchSemaphore(value: 0)
+    private let started = LockedValue(false)
+
+    init(socketPath: String) throws {
+        self.socketPath = socketPath
+        self.listenFD = try makeUnixListener(path: socketPath)
+    }
+
+    func start(
+        connectionCount: Int,
+        handler: @Sendable @escaping (Int, Int32) throws -> Void
+    ) {
+        let wasStarted = started.withLock { value -> Bool in
+            let old = value
+            value = true
+            return old
+        }
+        precondition(!wasStarted, "server can only be started once")
+
+        Thread.detachNewThread { [self] in
+            let handlers = DispatchGroup()
+            defer {
+                handlers.wait()
+                done.signal()
+            }
+
+            for index in 0..<connectionCount {
+                let clientFD = Darwin.accept(listenFD, nil, nil)
+                guard clientFD >= 0 else {
+                    errorBox.withLock { value in
+                        value = value ?? POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                    return
+                }
+                let token = UUID()
+                activeClients.withLock { $0[token] = clientFD }
+                handlers.enter()
+                Thread.detachNewThread { [self] in
+                    defer {
+                        let ownedFD = activeClients.withLock { $0.removeValue(forKey: token) }
+                        if let ownedFD {
+                            closeIfValid(ownedFD)
+                        }
+                        handlers.leave()
+                    }
+                    do {
+                        try handler(index, clientFD)
+                    } catch {
+                        errorBox.withLock { value in
+                            value = value ?? error
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func waitForCompletion(timeout: TimeInterval = 2) throws {
+        guard done.wait(timeout: .now() + timeout) == .success else {
+            throw POSIXError(.ETIMEDOUT)
+        }
+        if let error = errorBox.withLock({ $0 }) {
+            throw error
+        }
+    }
+
+    func stop() {
+        stateLock.lock()
+        let listener = listenFD
+        listenFD = -1
+        stateLock.unlock()
+
+        let clients = activeClients.withLock { values -> [Int32] in
+            let result = Array(values.values)
+            values.removeAll()
+            return result
+        }
+        for fd in clients {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            closeIfValid(fd)
+        }
+        if listener >= 0 {
+            _ = Darwin.shutdown(listener, SHUT_RDWR)
+            closeIfValid(listener)
+        }
+        _ = unlink(socketPath)
+    }
+}
+
 private final class LockedValue<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: T
@@ -844,8 +1525,41 @@ private func readRequest(from fd: Int32) throws -> MacOSSidecarRequest {
     return try #require(envelope.request)
 }
 
+private func acknowledgeEventSubscription(from fd: Int32) throws {
+    let request = try readRequest(from: fd)
+    #expect(request.method == .eventsSubscribe)
+    #expect(request.protocolVersion == MacOSSidecarProtocolVersion.durableEventAcknowledgement)
+    try writeResponse(
+        .success(
+            requestID: request.requestID,
+            data: try JSONEncoder().encode(
+                MacOSSidecarEventSubscription(subscriptionID: "test-subscription")
+            ),
+            protocolVersion: MacOSSidecarProtocolVersion.durableEventAcknowledgement
+        ),
+        to: fd
+    )
+}
+
 private func writeResponse(_ response: MacOSSidecarResponse, to fd: Int32) throws {
     try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.response(response), fd: fd)
+}
+
+private func writeCapabilities(state: MacOSVMRuntimeState, requestID: String, to fd: Int32) throws {
+    try writeResponse(
+        .success(
+            requestID: requestID,
+            data: try JSONEncoder().encode(
+                MacOSSidecarCapabilities(
+                    lifecycleState: state,
+                    machineState: .init(supported: true),
+                    methods: []
+                )
+            ),
+            protocolVersion: MacOSSidecarProtocolVersion.machineState
+        ),
+        to: fd
+    )
 }
 
 private func writeEvent(_ event: MacOSSidecarEvent, to fd: Int32) throws {

@@ -264,7 +264,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
 
             var handler = try config.resolveRuntimeHandler(request.runtimeHandler)
             handler.sandboxImage = try sandboxImageReference(request: request, handler: handler)
-            let sandboxID = UUID().uuidString.lowercased()
+            let proposedSandboxID = UUID().uuidString.lowercased()
             let sandboxImage = try await resolveSandboxImage(reference: handler.sandboxImage)
             try validateCRIShimImage(
                 sandboxImage,
@@ -272,37 +272,76 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 requestedReference: handler.sandboxImage
             )
             let networkMTUOverride = try await resolvePodNetworkMTUOverride(handler: handler)
-            var metadata = try makeCRIShimSandboxMetadata(
-                id: sandboxID,
-                request: request,
-                handler: handler
+            let machineState = try makeCRIShimMachineStateMapping(
+                annotations: request.config.annotations,
+                nodeConfig: config.machineState
             )
-            let sandboxConfiguration = try makeCRIShimSandboxConfiguration(
-                id: sandboxID,
-                request: request,
-                handler: handler,
-                sandboxImage: sandboxImage,
-                metadata: metadata,
-                networkMTUOverride: networkMTUOverride,
-                vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled,
-                vmnetRecoveryStatePath: vmnetRecoveryController.statePath,
-                vmnetRecoveryRequestPath: vmnetRecoveryController.requestPath,
-                vmnetRecoveryBootSessionID: vmnetRecoveryController.bootSessionID,
-                machineStateConfig: config.machineState
-            )
+            let leaseAcquisition: CRIShimMachineStateLeaseAcquisition?
+            if let resolved = machineState.machineState {
+                guard let policy = config.machineState else {
+                    throw CRIShimError.internalError("machine-state policy disappeared during admission")
+                }
+                leaseAcquisition = try CRIShimMachineStateLeaseStore.acquire(
+                    policy: policy,
+                    machineState: resolved,
+                    podUID: request.config.metadata.uid,
+                    proposedSandboxID: proposedSandboxID
+                )
+            } else {
+                leaseAcquisition = nil
+            }
+            let sandboxID = leaseAcquisition?.lease.sandboxID ?? proposedSandboxID
+            if let leaseAcquisition, !leaseAcquisition.created {
+                guard let existing = try metadataStore.sandbox(id: sandboxID),
+                    existing.podUID == leaseAcquisition.lease.podUID,
+                    existing.state != .pending,
+                    existing.state != .released
+                else {
+                    throw CRIShimError.unavailable(
+                        "machine-state persistence id \(leaseAcquisition.lease.persistenceID) has a lease without a completed sandbox; refusing automatic takeover"
+                    )
+                }
+                var response = Runtime_V1_RunPodSandboxResponse()
+                response.podSandboxID = sandboxID
+                return response
+            }
+            var sandboxCreated = false
+            var metadataPersisted = false
+            var networkAttachAttempted = false
 
             do {
+                var metadata = try makeCRIShimSandboxMetadata(
+                    id: sandboxID,
+                    request: request,
+                    handler: handler
+                )
+                let sandboxConfiguration = try makeCRIShimSandboxConfiguration(
+                    id: sandboxID,
+                    request: request,
+                    handler: handler,
+                    sandboxImage: sandboxImage,
+                    metadata: metadata,
+                    networkMTUOverride: networkMTUOverride,
+                    vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled,
+                    vmnetRecoveryStatePath: vmnetRecoveryController.statePath,
+                    vmnetRecoveryRequestPath: vmnetRecoveryController.requestPath,
+                    vmnetRecoveryBootSessionID: vmnetRecoveryController.bootSessionID,
+                    machineStateConfig: config.machineState
+                )
                 try vmnetRecoveryController.requireAdmission(
                     gate: .beforeSandboxCreate,
                     attemptID: admissionAttemptID
                 )
                 try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
+                sandboxCreated = true
                 try metadataStore.upsertSandbox(metadata)
+                metadataPersisted = true
                 if handler.usesPodNetworking {
                     try vmnetRecoveryController.requireAdmission(
                         gate: .beforeNetworkAttach,
                         attemptID: admissionAttemptID
                     )
+                    networkAttachAttempted = true
                     let network = try await cniManager.add(
                         sandboxID: sandboxID,
                         networkName: handler.network,
@@ -315,11 +354,21 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 metadata.updatedAt = Date()
                 try metadataStore.upsertSandbox(metadata)
             } catch {
-                if handler.usesPodNetworking {
+                if networkAttachAttempted {
                     try? await cniManager.delete(sandboxID: sandboxID, networkName: handler.network, config: config)
                 }
-                try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
-                try? metadataStore.deleteSandbox(id: sandboxID)
+                if sandboxCreated {
+                    try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
+                }
+                if metadataPersisted {
+                    try? metadataStore.deleteSandbox(id: sandboxID)
+                }
+                if let leaseAcquisition, leaseAcquisition.created, let policy = config.machineState {
+                    try? CRIShimMachineStateLeaseStore.release(
+                        policy: policy,
+                        expected: leaseAcquisition.lease
+                    )
+                }
                 throw error
             }
 
@@ -387,6 +436,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 for container in containers {
                     await logManager.stop(containerID: container.id, removeState: true)
                     try metadataStore.deleteContainer(id: container.id)
+                }
+                if let lease = try machineStateLease(for: metadata),
+                    let policy = config.machineState
+                {
+                    try CRIShimMachineStateLeaseStore.release(policy: policy, expected: lease)
                 }
                 try metadataStore.deleteSandbox(id: metadata.id)
                 return Runtime_V1_RemovePodSandboxResponse()
@@ -635,7 +689,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 let workloadConfiguration = try makeCRIShimWorkloadConfiguration(
                     id: containerID,
                     request: request,
-                    workloadImageDigest: workloadImageDigest
+                    workloadImageDigest: workloadImageDigest,
+                    sandbox: sandbox
                 )
 
                 try await runtimeManager.createWorkload(
@@ -684,6 +739,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                         )
                     }
                     if sandbox.state == .ready {
+                        if let lease = try machineStateLease(for: sandbox),
+                            let policy = config.machineState
+                        {
+                            try CRIShimMachineStateLeaseStore.requireActive(policy: policy, expected: lease)
+                        }
                         let runtimeHandler = sandbox.runtimeHandler.trimmed.isEmpty ? nil : sandbox.runtimeHandler
                         let handler = try config.resolveRuntimeHandler(runtimeHandler)
                         try await runtimeManager.startSandbox(id: sandbox.id, presentGUI: handler.guiEnabled)
@@ -1320,6 +1380,29 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
         }
         return metadata
+    }
+
+    private func machineStateLease(
+        for metadata: CRIShimSandboxMetadata
+    ) throws -> CRIShimMachineStateLease? {
+        guard metadata.annotations[CRIShimMachineStateAnnotation.enabled] == "true" else {
+            return nil
+        }
+        guard config.machineState != nil else {
+            throw CRIShimError.internalError("persisted machine-state lease policy is unavailable")
+        }
+        let values = try decodeEnabledMachineStateAnnotationValues(metadata.annotations)
+        guard let podUID = metadata.podUID?.trimmed, !podUID.isEmpty else {
+            throw CRIShimError.internalError("persisted machine-state lease identity is incomplete")
+        }
+        return CRIShimMachineStateLease(
+            persistenceID: values.persistenceID,
+            podUID: podUID,
+            sandboxID: metadata.id,
+            restoreStateID: values.restoreStateID,
+            restoreStateGeneration: values.restoreStateGeneration,
+            storageGeneration: values.storageGeneration
+        )
     }
 
     private func stopSandboxResources(metadata: inout CRIShimSandboxMetadata) async throws {

@@ -21,6 +21,7 @@ import ContainerResource
 import ContainerVersion
 import ContainerXPC
 import ContainerizationError
+import CryptoKit
 import Darwin
 import Foundation
 import Logging
@@ -150,9 +151,36 @@ private final class GUIWindowDelegate: NSObject, NSWindowDelegate {
     }
 }
 
+private func sidecarReadDeadline(timeoutSeconds: TimeInterval) -> UInt64 {
+    let timeoutNanoseconds = UInt64(max(timeoutSeconds, 0) * 1_000_000_000)
+    let now = DispatchTime.now().uptimeNanoseconds
+    let (deadline, overflow) = now.addingReportingOverflow(timeoutNanoseconds)
+    return overflow ? UInt64.max : deadline
+}
+
+private func sidecarRemainingReadMilliseconds(until deadline: UInt64) throws -> Int32 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    guard now < deadline else {
+        throw POSIXError(.ETIMEDOUT)
+    }
+    let remainingNanoseconds = deadline - now
+    let roundedMilliseconds = 1 + ((remainingNanoseconds - 1) / 1_000_000)
+    return Int32(min(roundedMilliseconds, UInt64(Int32.max)))
+}
+
+private func isSidecarReadTimeout(_ error: Error) -> Bool {
+    let nsError = error as NSError
+    return nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ETIMEDOUT)
+}
+
 struct SidecarGuestAgentFrame: Codable {
     enum FrameType: String, Codable {
         case exec
+        case processInspect
+        case processAttach
+        case processEventAck
+        case processStop
+        case processDelete
         case stdin
         case signal
         case resize
@@ -176,12 +204,21 @@ struct SidecarGuestAgentFrame: Codable {
 
     let type: FrameType
     let id: String?
+    let capabilities: [String]?
     let executable: String?
     let arguments: [String]?
     let environment: [String]?
     let rootDirectory: String?
     let workingDirectory: String?
     let terminal: Bool?
+    let durable: Bool?
+    let cursor: UInt64?
+    let sequence: UInt64?
+    let expectedLaunchFingerprint: String?
+    let trustedLaunchFingerprint: String?
+    let incarnation: String?
+    let storageGeneration: UInt64?
+    let previousStorageGeneration: UInt64?
     let user: String?
     let signal: Int32?
     let width: UInt16?
@@ -189,6 +226,7 @@ struct SidecarGuestAgentFrame: Codable {
     let data: Data?
     let exitCode: Int32?
     let message: String?
+    let errorCode: Int32?
     let op: MacOSSidecarFSOperation?
     let path: String?
     let mode: UInt32?
@@ -207,12 +245,21 @@ struct SidecarGuestAgentFrame: Codable {
     init(
         type: FrameType,
         id: String? = nil,
+        capabilities: [String]? = nil,
         executable: String? = nil,
         arguments: [String]? = nil,
         environment: [String]? = nil,
         rootDirectory: String? = nil,
         workingDirectory: String? = nil,
         terminal: Bool? = nil,
+        durable: Bool? = nil,
+        cursor: UInt64? = nil,
+        sequence: UInt64? = nil,
+        expectedLaunchFingerprint: String? = nil,
+        trustedLaunchFingerprint: String? = nil,
+        incarnation: String? = nil,
+        storageGeneration: UInt64? = nil,
+        previousStorageGeneration: UInt64? = nil,
         user: String? = nil,
         signal: Int32? = nil,
         width: UInt16? = nil,
@@ -220,6 +267,7 @@ struct SidecarGuestAgentFrame: Codable {
         data: Data? = nil,
         exitCode: Int32? = nil,
         message: String? = nil,
+        errorCode: Int32? = nil,
         op: MacOSSidecarFSOperation? = nil,
         path: String? = nil,
         mode: UInt32? = nil,
@@ -237,12 +285,21 @@ struct SidecarGuestAgentFrame: Codable {
     ) {
         self.type = type
         self.id = id
+        self.capabilities = capabilities
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
         self.rootDirectory = rootDirectory
         self.workingDirectory = workingDirectory
         self.terminal = terminal
+        self.durable = durable
+        self.cursor = cursor
+        self.sequence = sequence
+        self.expectedLaunchFingerprint = expectedLaunchFingerprint
+        self.trustedLaunchFingerprint = trustedLaunchFingerprint
+        self.incarnation = incarnation
+        self.storageGeneration = storageGeneration
+        self.previousStorageGeneration = previousStorageGeneration
         self.user = user
         self.signal = signal
         self.width = width
@@ -250,6 +307,7 @@ struct SidecarGuestAgentFrame: Codable {
         self.data = data
         self.exitCode = exitCode
         self.message = message
+        self.errorCode = errorCode
         self.op = op
         self.path = path
         self.mode = mode
@@ -277,7 +335,14 @@ struct SidecarGuestAgentFrame: Codable {
         user: String?,
         uid: UInt32?,
         gid: UInt32?,
-        supplementalGroups: [UInt32]?
+        supplementalGroups: [UInt32]?,
+        durable: Bool = false,
+        cursor: UInt64? = nil,
+        expectedLaunchFingerprint: String? = nil,
+        trustedLaunchFingerprint: String? = nil,
+        incarnation: String? = nil,
+        storageGeneration: UInt64? = nil,
+        previousStorageGeneration: UInt64? = nil
     ) -> Self {
         .init(
             type: .exec,
@@ -288,6 +353,13 @@ struct SidecarGuestAgentFrame: Codable {
             rootDirectory: rootDirectory,
             workingDirectory: workingDirectory,
             terminal: terminal,
+            durable: durable,
+            cursor: cursor,
+            expectedLaunchFingerprint: expectedLaunchFingerprint,
+            trustedLaunchFingerprint: trustedLaunchFingerprint,
+            incarnation: incarnation,
+            storageGeneration: storageGeneration,
+            previousStorageGeneration: previousStorageGeneration,
             user: user,
             signal: nil,
             width: nil,
@@ -303,6 +375,48 @@ struct SidecarGuestAgentFrame: Codable {
 
     static func close(id: String) -> Self {
         .init(type: .close, id: id)
+    }
+
+    static func processAttach(
+        id: String,
+        cursor: UInt64,
+        expectedLaunchFingerprint: String? = nil,
+        trustedLaunchFingerprint: String? = nil,
+        incarnation: String? = nil,
+        storageGeneration: UInt64? = nil,
+        previousStorageGeneration: UInt64? = nil
+    ) -> Self {
+        .init(
+            type: .processAttach,
+            id: id,
+            cursor: cursor,
+            expectedLaunchFingerprint: expectedLaunchFingerprint,
+            trustedLaunchFingerprint: trustedLaunchFingerprint,
+            incarnation: incarnation,
+            storageGeneration: storageGeneration,
+            previousStorageGeneration: previousStorageGeneration
+        )
+    }
+
+    static func processDelete(
+        id: String,
+        expectedLaunchFingerprint: String?,
+        trustedLaunchFingerprint: String,
+        incarnation: String,
+        storageGeneration: UInt64?
+    ) -> Self {
+        .init(
+            type: .processDelete,
+            id: id,
+            expectedLaunchFingerprint: expectedLaunchFingerprint,
+            trustedLaunchFingerprint: trustedLaunchFingerprint,
+            incarnation: incarnation,
+            storageGeneration: storageGeneration
+        )
+    }
+
+    static func processEventAck(id: String, sequence: UInt64) -> Self {
+        .init(type: .processEventAck, id: id, sequence: sequence)
     }
 
     static func stdin(id: String, data: Data) -> Self {
@@ -568,11 +682,28 @@ actor MacOSSidecarService {
                 MacOSSidecarMethod.vmResume.rawValue,
                 MacOSSidecarMethod.vmSaveMachineState.rawValue,
                 MacOSSidecarMethod.vmRestoreMachineState.rawValue,
+                MacOSSidecarMethod.vmDeleteMachineState.rawValue,
                 MacOSSidecarMethod.vmCompatibilityDescription.rawValue,
                 MacOSSidecarMethod.vmStop.rawValue,
                 MacOSSidecarMethod.eventsSubscribe.rawValue,
+                MacOSSidecarMethod.eventsAcknowledge.rawValue,
             ]
         )
+    }
+
+    func acquireProcessStartAdmission() throws -> UUID {
+        try lifecycle.acquireProcessStartAdmission()
+    }
+
+    func releaseProcessStartAdmission(_ token: UUID) {
+        lifecycle.releaseProcessStartAdmission(token)
+    }
+
+    func _testSetLifecycleRunning() throws {
+        let shouldStart = try lifecycle.begin(.start)
+        if shouldStart {
+            lifecycle.complete(.start, succeeded: true)
+        }
     }
 
     func pauseVM(timeoutSeconds: Double? = nil) async throws -> MacOSMachineStateOperationResult {
@@ -620,11 +751,16 @@ actor MacOSSidecarService {
         try lifecycle.ensureNoOperationInProgress()
         do {
             let stored = try store.load(stateID: stateID)
+            try MacOSMachineIdentityBundleStore.verify(in: stored.directoryURL)
             let current = try await currentCompatibilityDescription()
             let reasons = MacOSMachineStateCompatibility.compare(saved: stored.compatibility, current: current)
             guard reasons.isEmpty else {
                 throw compatibilityMismatchError(reasons)
             }
+            try MacOSMachineStateStorageGeneration.validateIdempotentSave(
+                saved: stored.compatibility,
+                current: current
+            )
             return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
         } catch let error as SidecarRPCError where error.code == "machineStateNotFound" {
             // A missing state is the expected first-save path.
@@ -651,7 +787,9 @@ actor MacOSSidecarService {
             throw error
         }
         do {
+            try MacOSMachineIdentityBundleStore.capture(from: rootURL, into: reservation.directoryURL)
             try await saveVirtualMachine(vm, to: reservation.stateURL)
+            try MacOSMachineIdentityBundleStore.verify(in: reservation.directoryURL)
             try store.commit(reservation, compatibility: compatibility)
             lifecycle.complete(.save, succeeded: true)
             return .init(lifecycleState: state, stateID: stateID, compatibility: compatibility)
@@ -668,8 +806,23 @@ actor MacOSSidecarService {
     func restoreMachineState(stateID: String, timeoutSeconds: Double?) async throws -> MacOSMachineStateOperationResult {
         try validateOperationTimeout(timeoutSeconds)
         #if arch(arm64)
-        let store = try machineStateStore()
+        let config = try loadContainerConfiguration()
+        if let requested = config.macosGuest?.machineState {
+            guard requested.restoreStateID == stateID,
+                requested.restoreStateGeneration != nil
+            else {
+                throw SidecarRPCError(
+                    code: "machineStateRequestMismatch",
+                    message: "restore request does not match the configured machine state"
+                )
+            }
+        }
+        let store = try machineStateStore(containerConfig: config)
         let stored = try store.load(stateID: stateID)
+        try MacOSMachineStateStorageGeneration.validateRestore(
+            saved: stored.compatibility,
+            selectedSavedGeneration: config.macosGuest?.machineState?.restoreStateGeneration
+        )
         let configuration = try await ensurePreparedConfiguration()
         try configuration.validateSaveRestoreSupport()
         let current = try await currentCompatibilityDescription()
@@ -708,6 +861,13 @@ actor MacOSSidecarService {
         #endif
     }
 
+    func deleteMachineState(stateID: String) throws -> MacOSMachineStateDeleteResult {
+        try MacOSMachineStateStore.validateStateID(stateID)
+        try lifecycle.ensureStateCanBeDeleted(stateID)
+        let deleted = try machineStateStore().delete(stateID: stateID)
+        return .init(stateID: stateID, deleted: deleted)
+    }
+
     func compatibilityDescription(stateID: String? = nil) async throws -> MacOSMachineStateCompatibilityResult {
         let current = try await currentCompatibilityDescription()
         guard let stateID else {
@@ -728,9 +888,40 @@ actor MacOSSidecarService {
 
     private func ensurePreparedConfiguration() async throws -> VZVirtualMachineConfiguration {
         if let vmConfiguration { return vmConfiguration }
-        let configuration = try await makeVirtualMachineConfiguration(containerConfig: loadContainerConfiguration())
+        let containerConfig = try loadContainerConfiguration()
+        if let machineState = containerConfig.macosGuest?.machineState,
+            let stateID = machineState.restoreStateID
+        {
+            let stored = try machineStateStore(containerConfig: containerConfig).load(stateID: stateID)
+            try MacOSMachineIdentityBundleStore.materialize(from: stored.directoryURL, into: rootURL)
+        }
+        let configuration = try await makeVirtualMachineConfiguration(containerConfig: containerConfig)
         vmConfiguration = configuration
         return configuration
+    }
+
+    private func machineStateStore(
+        containerConfig: ContainerConfiguration? = nil
+    ) throws -> MacOSMachineStateStore {
+        let config = try containerConfig ?? loadContainerConfiguration()
+        guard let machineState = config.macosGuest?.machineState else {
+            return MacOSMachineStateStore(runtimeRootURL: rootURL)
+        }
+        guard machineState.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
+            throw SidecarRPCError(
+                code: "protocolVersionMismatch",
+                message: "configured machine-state protocol version is unsupported"
+            )
+        }
+        let storeRoot = URL(fileURLWithPath: machineState.storageDirectory, isDirectory: true).standardizedFileURL
+        guard storeRoot.path == machineState.storageDirectory, storeRoot.path.hasPrefix("/") else {
+            throw SidecarRPCError(
+                code: "unsafeMachineStatePath",
+                message: "configured machine-state storage directory is not an absolute canonical path"
+            )
+        }
+        try MacOSMachineStateStore.preparePersistentRoot(at: storeRoot)
+        return MacOSMachineStateStore(runtimeRootURL: storeRoot)
     }
 
     private func compatibilityMismatchError(_ reasons: [MacOSMachineStateUnsupportedReason]) -> SidecarRPCError {
@@ -748,28 +939,6 @@ actor MacOSSidecarService {
         guard timeoutSeconds.isFinite, (1...600).contains(timeoutSeconds) else {
             throw SidecarRPCError(code: "invalidTimeout", message: "operation timeout must be between 1 and 600 seconds")
         }
-    }
-
-    private func machineStateStore() throws -> MacOSMachineStateStore {
-        let config = try loadContainerConfiguration()
-        guard let machineState = config.macosGuest?.machineState else {
-            return MacOSMachineStateStore(runtimeRootURL: rootURL)
-        }
-        guard machineState.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
-            throw SidecarRPCError(
-                code: "protocolVersionMismatch",
-                message: "configured machine-state protocol version is unsupported"
-            )
-        }
-        let storageURL = URL(fileURLWithPath: machineState.storageDirectory).standardizedFileURL
-        guard storageURL.path == machineState.storageDirectory, storageURL.path.hasPrefix("/") else {
-            throw SidecarRPCError(
-                code: "unsafeMachineStatePath",
-                message: "configured machine-state storage directory is not an absolute canonical path"
-            )
-        }
-        try MacOSMachineStateStore.rejectSymbolicLinks(below: storageURL, through: storageURL)
-        return MacOSMachineStateStore(runtimeRootURL: storageURL)
     }
 
     private func discardVirtualMachineResources() async {
@@ -815,30 +984,29 @@ actor MacOSSidecarService {
     }
 
     private func waitForGuestAgentReadyWithTimeout(fd: Int32, timeoutSeconds: TimeInterval) throws {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = BlockingResultBox<Void>()
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try self.waitForGuestAgentReady(fd: fd)
-                box.result = .success(())
-            } catch {
-                box.result = .failure(error)
+        let deadline = sidecarReadDeadline(timeoutSeconds: timeoutSeconds)
+        do {
+            while true {
+                let frame = try MacOSSidecarSocketIO.readJSONFrame(
+                    SidecarGuestAgentFrame.self,
+                    fd: fd,
+                    timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+                )
+                switch frame.type {
+                case .ready:
+                    return
+                case .error:
+                    throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
+                case .exit:
+                    throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
+                case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
+                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult,
+                    .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+                    continue
+                }
             }
-            semaphore.signal()
-        }
-
-        let deadline = DispatchTime.now() + timeoutSeconds
-        if semaphore.wait(timeout: deadline) == .timedOut {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
+        } catch  where isSidecarReadTimeout(error) {
             throw ContainerizationError(.timeout, message: "timed out waiting for guest-agent ready frame")
-        }
-        switch box.result {
-        case .success?:
-            return
-        case .failure(let error)?:
-            throw error
-        case nil:
-            throw ContainerizationError(.internalError, message: "ready wait finished without result")
         }
     }
 
@@ -951,8 +1119,9 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest network configuration stream exited unexpectedly (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .ack, .stdout, .stderr, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
-                .fsListDir:
+            case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
+                .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd,
+                .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
         }
@@ -1493,8 +1662,9 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
-            case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
-                .fsReadEnd, .fsListDir:
+            case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete,
+                .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd,
+                .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
         }
@@ -1506,17 +1676,418 @@ final class SidecarControlServer: @unchecked Sendable {
         var result: Result<T, Error>?
     }
 
+    private struct BoundSocketIdentity: Sendable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    private struct ProcessStartHandshake {
+        let bufferedFrames: [SidecarGuestAgentFrame]
+        let status: MacOSGuestProcessStatusPayload?
+    }
+
+    private struct ProcessLaunchIdentity: Codable {
+        let executable: String
+        let arguments: [String]
+        let environment: [String]?
+        let rootDirectory: String?
+        let workingDirectory: String?
+        let terminal: Bool
+        let user: String?
+        let uid: UInt32?
+        let gid: UInt32?
+        let supplementalGroups: [UInt32]?
+        let durableExecutionID: String?
+        let durableLaunchFingerprint: String?
+        let durableIncarnation: String?
+        let storageGeneration: UInt64?
+        let previousStorageGeneration: UInt64?
+
+        init(_ exec: MacOSSidecarExecRequestPayload) {
+            self.executable = exec.executable
+            self.arguments = exec.arguments
+            self.environment = exec.environment
+            self.rootDirectory = exec.rootDirectory
+            self.workingDirectory = exec.workingDirectory
+            self.terminal = exec.terminal
+            self.user = exec.user
+            self.uid = exec.uid
+            self.gid = exec.gid
+            self.supplementalGroups = exec.supplementalGroups
+            self.durableExecutionID = exec.durableExecutionID
+            self.durableLaunchFingerprint = exec.durableLaunchFingerprint
+            self.durableIncarnation = exec.durableIncarnation
+            self.storageGeneration = exec.storageGeneration
+            self.previousStorageGeneration = exec.previousStorageGeneration
+        }
+    }
+
+    private struct ProcessStreamConnection: Equatable, Sendable {
+        let fd: Int32
+        let readerFD: Int32
+        let generation: UInt64
+    }
+
+    private struct ProcessReconnectIdentityError: LocalizedError {
+        let reason: String
+
+        var errorDescription: String? { reason }
+    }
+
     private final class ProcessStreamSession: @unchecked Sendable {
         let processID: String
-        let fd: Int32
-        let writeLock = NSLock()
-        let stateLock = NSLock()
-        var closed = false
+        let guestProcessID: String
+        let durable: Bool
+        let requestFingerprint: String
+        let port: UInt32
+        let launchFingerprint: String?
+        let storageGeneration: UInt64?
+        let processIdentifier: Int32?
+        let trustedLaunchFingerprint: String?
+        let incarnation: String?
 
-        init(processID: String, fd: Int32) {
+        private let stateLock = NSLock()
+        private let writeQueue: DispatchQueue
+        private let writeTimeoutMilliseconds: Int32
+        private var connection: ProcessStreamConnection?
+        private var nextConnectionGeneration: UInt64 = 2
+        private var cancelled = false
+        private var terminal = false
+        private var reconnecting = false
+        private var reconnectBlocked = false
+        private var deletePending = false
+        private var readerStartedGenerations: Set<UInt64> = []
+        private var lastDeliveredSequence: UInt64
+        private var highestQueuedSequence: UInt64
+
+        init(
+            processID: String,
+            guestProcessID: String,
+            durable: Bool,
+            requestFingerprint: String,
+            port: UInt32,
+            launchFingerprint: String?,
+            storageGeneration: UInt64?,
+            processIdentifier: Int32?,
+            trustedLaunchFingerprint: String?,
+            incarnation: String?,
+            replayCursor: UInt64,
+            fd: Int32,
+            writeTimeoutMilliseconds: Int32 = 1_000
+        ) throws {
             self.processID = processID
-            self.fd = fd
+            self.guestProcessID = guestProcessID
+            self.durable = durable
+            self.requestFingerprint = requestFingerprint
+            self.port = port
+            self.launchFingerprint = launchFingerprint
+            self.storageGeneration = storageGeneration
+            self.processIdentifier = processIdentifier
+            self.trustedLaunchFingerprint = trustedLaunchFingerprint
+            self.incarnation = incarnation
+            self.lastDeliveredSequence = replayCursor
+            self.highestQueuedSequence = replayCursor
+            let readerFD = Darwin.dup(fd)
+            guard readerFD >= 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            _ = Darwin.fcntl(readerFD, F_SETFD, FD_CLOEXEC)
+            self.connection = .init(fd: fd, readerFD: readerFD, generation: 1)
+            self.writeTimeoutMilliseconds = max(writeTimeoutMilliseconds, 1)
+            self.writeQueue = DispatchQueue(label: "container.runtime.macos.sidecar.process-stream.\(processID)")
         }
+
+        func reserve(sequence: UInt64?) -> Bool {
+            guard durable else { return true }
+            guard let sequence else { return false }
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard !cancelled, sequence > lastDeliveredSequence, sequence > highestQueuedSequence else {
+                return false
+            }
+            highestQueuedSequence = sequence
+            return true
+        }
+
+        func markDelivered(sequence: UInt64?) {
+            guard durable, let sequence else { return }
+            stateLock.lock()
+            if sequence > lastDeliveredSequence {
+                lastDeliveredSequence = sequence
+            }
+            if highestQueuedSequence < lastDeliveredSequence {
+                highestQueuedSequence = lastDeliveredSequence
+            }
+            stateLock.unlock()
+        }
+
+        func deliveredCursor() -> UInt64 {
+            stateLock.lock()
+            let result = lastDeliveredSequence
+            stateLock.unlock()
+            return result
+        }
+
+        func acknowledgeDeliveredEvent(sequence: UInt64?) throws {
+            guard durable, let sequence else { return }
+            markDelivered(sequence: sequence)
+
+            try writeQueue.sync {
+                stateLock.lock()
+                let current = connection
+                let closeAfterWrite = terminal
+                let unavailable = cancelled || deletePending
+                stateLock.unlock()
+                guard !unavailable, let current else { return }
+
+                defer {
+                    if closeAfterWrite {
+                        stateLock.lock()
+                        let shouldClose = connection == current
+                        let closeUnclaimedReader = shouldClose && !readerStartedGenerations.contains(current.generation)
+                        if shouldClose {
+                            connection = nil
+                        }
+                        stateLock.unlock()
+                        if shouldClose {
+                            _ = Darwin.shutdown(current.fd, SHUT_RDWR)
+                            Darwin.close(current.fd)
+                            if closeUnclaimedReader {
+                                Darwin.close(current.readerFD)
+                            }
+                        }
+                    }
+                }
+                try MacOSSidecarSocketIO.writeJSONFrame(
+                    SidecarGuestAgentFrame.processEventAck(id: guestProcessID, sequence: sequence),
+                    fd: current.fd,
+                    timeoutMilliseconds: 1_000
+                )
+            }
+        }
+
+        func currentConnection() -> ProcessStreamConnection? {
+            stateLock.lock()
+            let result = connection
+            stateLock.unlock()
+            return result
+        }
+
+        func claimReader(_ expected: ProcessStreamConnection) -> Bool {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard connection == expected, !readerStartedGenerations.contains(expected.generation) else {
+                return false
+            }
+            readerStartedGenerations.insert(expected.generation)
+            return true
+        }
+
+        func connectionDescriptors() -> (owner: Int32, reader: Int32)? {
+            stateLock.lock()
+            let result = connection.map { ($0.fd, $0.readerFD) }
+            stateLock.unlock()
+            return result
+        }
+
+        func send(
+            _ frame: SidecarGuestAgentFrame,
+            timeoutMilliseconds: Int32? = nil
+        ) throws {
+            try writeQueue.sync {
+                stateLock.lock()
+                let current = connection
+                let unavailable = cancelled || terminal || deletePending
+                stateLock.unlock()
+                guard !unavailable, let current else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "process \(processID) stream is not attached"
+                    )
+                }
+                try MacOSSidecarSocketIO.writeJSONFrame(
+                    frame,
+                    fd: current.fd,
+                    timeoutMilliseconds: timeoutMilliseconds ?? writeTimeoutMilliseconds
+                )
+            }
+        }
+
+        @discardableResult
+        func detach(_ expected: ProcessStreamConnection) -> Bool {
+            stateLock.lock()
+            guard connection == expected else {
+                stateLock.unlock()
+                return false
+            }
+            connection = nil
+            let closeUnclaimedReader = !readerStartedGenerations.contains(expected.generation)
+            stateLock.unlock()
+
+            _ = Darwin.shutdown(expected.fd, SHUT_RDWR)
+            _ = writeQueue.sync {
+                Darwin.close(expected.fd)
+            }
+            if closeUnclaimedReader {
+                Darwin.close(expected.readerFD)
+            }
+            return true
+        }
+
+        func beginReconnect() -> Bool {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard durable, !cancelled, !terminal, !reconnectBlocked, !deletePending, connection == nil, !reconnecting else {
+                return false
+            }
+            reconnecting = true
+            return true
+        }
+
+        func shouldContinueReconnect() -> Bool {
+            stateLock.lock()
+            let result = durable && !cancelled && !terminal && !reconnectBlocked && !deletePending && connection == nil && reconnecting
+            stateLock.unlock()
+            return result
+        }
+
+        func isReconnectPending() -> Bool {
+            stateLock.lock()
+            let result = reconnecting
+            stateLock.unlock()
+            return result
+        }
+
+        func installReconnected(fd: Int32, status: MacOSGuestProcessStatusPayload) throws -> ProcessStreamConnection? {
+            try writeQueue.sync {
+                guard status.executionID == guestProcessID else {
+                    throw ProcessReconnectIdentityError(reason: "durable process attach returned a different execution identifier")
+                }
+                guard status.launchFingerprint == launchFingerprint else {
+                    throw ProcessReconnectIdentityError(reason: "durable process launch fingerprint changed during reconnect")
+                }
+                guard status.trustedLaunchFingerprint == trustedLaunchFingerprint else {
+                    throw ProcessReconnectIdentityError(reason: "durable process trusted launch fingerprint changed during reconnect")
+                }
+                guard status.incarnation == incarnation else {
+                    throw ProcessReconnectIdentityError(reason: "durable process incarnation changed during reconnect")
+                }
+                guard status.storageGeneration == storageGeneration else {
+                    throw ProcessReconnectIdentityError(reason: "durable process storage generation changed during reconnect")
+                }
+                guard status.processIdentifier == processIdentifier else {
+                    throw ProcessReconnectIdentityError(reason: "durable process identifier changed during reconnect")
+                }
+
+                let readerFD = Darwin.dup(fd)
+                guard readerFD >= 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                _ = Darwin.fcntl(readerFD, F_SETFD, FD_CLOEXEC)
+
+                stateLock.lock()
+                defer { stateLock.unlock() }
+                guard !cancelled, !terminal, !reconnectBlocked, !deletePending, reconnecting, connection == nil else {
+                    reconnecting = false
+                    Darwin.close(readerFD)
+                    return nil
+                }
+                let installed = ProcessStreamConnection(fd: fd, readerFD: readerFD, generation: nextConnectionGeneration)
+                nextConnectionGeneration &+= 1
+                connection = installed
+                reconnecting = false
+                return installed
+            }
+        }
+
+        func finishReconnect(blocked: Bool) {
+            stateLock.lock()
+            reconnecting = false
+            if blocked {
+                reconnectBlocked = true
+            }
+            stateLock.unlock()
+        }
+
+        func markTerminal() {
+            stateLock.lock()
+            terminal = true
+            reconnecting = false
+            stateLock.unlock()
+        }
+
+        func startRetryError() -> ContainerizationError? {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            if cancelled {
+                return ContainerizationError(.invalidState, message: "process \(processID) session is cancelled")
+            }
+            if deletePending {
+                return ContainerizationError(.invalidState, message: "process \(processID) durable deletion is pending")
+            }
+            if terminal {
+                return ContainerizationError(.invalidState, message: "process \(processID) is terminal")
+            }
+            if reconnectBlocked {
+                return ContainerizationError(.invalidState, message: "process \(processID) reconnect is permanently blocked")
+            }
+            return nil
+        }
+
+        func matchesDeleteIdentity(_ identity: MacOSSidecarDurableProcessDeleteIdentity) -> Bool {
+            durable && guestProcessID == identity.executionID
+                && trustedLaunchFingerprint == identity.trustedLaunchFingerprint
+                && incarnation == identity.incarnation
+                && storageGeneration == identity.storageGeneration
+        }
+
+        func prepareForDelete(_ identity: MacOSSidecarDurableProcessDeleteIdentity) throws {
+            guard matchesDeleteIdentity(identity) else {
+                throw ContainerizationError(.invalidState, message: "durable delete identity does not match the process session")
+            }
+
+            stateLock.lock()
+            guard !cancelled else {
+                stateLock.unlock()
+                throw ContainerizationError(.invalidState, message: "process \(processID) session is cancelled")
+            }
+            deletePending = true
+            reconnecting = false
+            let current = connection
+            connection = nil
+            let closeUnclaimedReader = current.map { !readerStartedGenerations.contains($0.generation) } ?? false
+            stateLock.unlock()
+
+            guard let current else { return }
+            _ = Darwin.shutdown(current.fd, SHUT_RDWR)
+            _ = writeQueue.sync {
+                Darwin.close(current.fd)
+            }
+            if closeUnclaimedReader {
+                Darwin.close(current.readerFD)
+            }
+        }
+
+        func cancelAndClose() {
+            stateLock.lock()
+            cancelled = true
+            reconnecting = false
+            let current = connection
+            connection = nil
+            let closeUnclaimedReader = current.map { !readerStartedGenerations.contains($0.generation) } ?? false
+            stateLock.unlock()
+
+            if let current {
+                _ = Darwin.shutdown(current.fd, SHUT_RDWR)
+                _ = writeQueue.sync {
+                    Darwin.close(current.fd)
+                }
+                if closeUnclaimedReader {
+                    Darwin.close(current.readerFD)
+                }
+            }
+        }
+
     }
 
     private final class FSTransferSession: @unchecked Sendable {
@@ -1559,26 +2130,53 @@ final class SidecarControlServer: @unchecked Sendable {
     private let service: MacOSSidecarService
     private let log: Logging.Logger
     private let lock = NSLock()
+    private let eventDelivery: SidecarEventDeliveryBuffer
     private let eventClientLock = NSLock()
-    private let eventWriteLock = NSLock()
     private let processLock = NSLock()
+    private let processStartLock = NSLock()
+    private let processReconnectQueue = DispatchQueue(
+        label: "container.runtime.macos.sidecar.process-reconnect",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+    private let processConnectionFactory: (@Sendable (UInt32) throws -> Int32)?
+    private let processReconnectDelayMicroseconds: useconds_t
     private let fsLock = NSLock()
     private let fsReadLock = NSLock()
     private var listenFD: Int32 = -1
     private var stopping = false
+    private var boundSocketIdentity: BoundSocketIdentity?
     private var eventClientFD: Int32 = -1
+    private var eventClientSubscriptionID: String?
     private var processSessions: [String: ProcessStreamSession] = [:]
     private var fsSessions: [String: FSTransferSession] = [:]
     private var fsReadSessions: [String: FSReadSession] = [:]
 
-    init(socketPath: String, service: MacOSSidecarService, log: Logging.Logger) {
+    init(
+        socketPath: String,
+        service: MacOSSidecarService,
+        log: Logging.Logger,
+        processConnectionFactory: (@Sendable (UInt32) throws -> Int32)? = nil,
+        processReconnectDelayMicroseconds: useconds_t = 100_000,
+        maximumBufferedEventCount: Int = 256,
+        maximumBufferedEventBytes: Int = 16 * 1024 * 1024,
+        controlWriteTimeoutMilliseconds: Int32 = 1_000
+    ) {
         self.socketPath = socketPath
         self.service = service
         self.log = log
+        self.processConnectionFactory = processConnectionFactory
+        self.processReconnectDelayMicroseconds = processReconnectDelayMicroseconds
+        self.eventDelivery = SidecarEventDeliveryBuffer(
+            log: log,
+            maximumEventCount: maximumBufferedEventCount,
+            maximumRetainedBytes: maximumBufferedEventBytes,
+            writeTimeoutMilliseconds: controlWriteTimeoutMilliseconds
+        )
     }
 
     func start() throws {
-        try cleanupStaleSocket()
+        try cleanupStaleSocket(requiredOwnerID: geteuid())
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw makePOSIXError(errno) }
 
@@ -1607,17 +2205,32 @@ final class SidecarControlServer: @unchecked Sendable {
             Darwin.close(fd)
             throw error
         }
-        guard Darwin.listen(fd, 16) == 0 else {
-            let error = makePOSIXError(errno)
+
+        var identity: BoundSocketIdentity?
+        do {
+            let boundIdentity = try inspectBoundSocketIdentity()
+            identity = boundIdentity
+            guard chmod(socketPath, mode_t(0o600)) == 0 else {
+                throw makePOSIXError(errno)
+            }
+            try validateBoundSocket(identity: boundIdentity)
+            guard Darwin.listen(fd, 16) == 0 else {
+                throw makePOSIXError(errno)
+            }
+        } catch {
             Darwin.close(fd)
+            if let identity {
+                try? removeBoundSocketIfMatches(identity)
+            }
             throw error
         }
-        _ = chmod(socketPath, mode_t(S_IRUSR | S_IWUSR))
 
         lock.lock()
         listenFD = fd
+        boundSocketIdentity = identity
         stopping = false
         lock.unlock()
+        eventDelivery.start()
 
         Thread.detachNewThread { [weak self] in
             self?.acceptLoop()
@@ -1634,6 +2247,8 @@ final class SidecarControlServer: @unchecked Sendable {
         stopping = true
         let fd = listenFD
         listenFD = -1
+        let socketIdentity = boundSocketIdentity
+        boundSocketIdentity = nil
         lock.unlock()
 
         if fd >= 0 {
@@ -1641,40 +2256,211 @@ final class SidecarControlServer: @unchecked Sendable {
             Darwin.close(fd)
         }
         clearEventClient()
+        eventDelivery.stop()
         closeAllProcessSessions()
         closeAllFSSessions()
         closeAllFSReadSessions()
-        _ = unlink(socketPath)
+        if let socketIdentity {
+            do {
+                try removeBoundSocketIfMatches(socketIdentity)
+            } catch {
+                log.error("failed to remove control socket", metadata: ["path": "\(socketPath)", "error": "\(error)"])
+            }
+        }
     }
 
-    private func cleanupStaleSocket() throws {
-        let parent = URL(fileURLWithPath: socketPath).deletingLastPathComponent()
-        try FileManager.default.createDirectory(
-            at: parent,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try MacOSMachineStateStore.rejectSymbolicLinks(below: parent, through: parent)
-        var parentValue = stat()
-        guard stat(parent.path, &parentValue) == 0, (parentValue.st_mode & S_IFMT) == S_IFDIR else {
-            throw SidecarRPCError(
-                code: "unsafeControlSocketPath",
-                message: "control socket parent must be a directory and cannot be a symbolic link"
-            )
-        }
+    private func cleanupStaleSocket(requiredOwnerID: uid_t) throws {
+        let validatedSocketPath = try validatedSocketPathForCleanup()
+        try ensureSecureSocketParent(for: validatedSocketPath)
+
         var value = stat()
-        if lstat(socketPath, &value) == 0 {
-            guard (value.st_mode & S_IFMT) == S_IFSOCK else {
-                throw SidecarRPCError(
-                    code: "unsafeControlSocketPath",
-                    message: "refusing to replace a non-socket control path"
-                )
+        guard lstat(validatedSocketPath, &value) == 0 else {
+            if errno == ENOENT {
+                return
             }
-            guard unlink(socketPath) == 0 else {
-                throw makePOSIXError(errno)
-            }
-        } else if errno != ENOENT {
             throw makePOSIXError(errno)
+        }
+        guard (value.st_mode & S_IFMT) == S_IFSOCK else {
+            throw makePOSIXLikeError(message: "refusing to replace non-socket control path \(socketPath)")
+        }
+        guard value.st_uid == requiredOwnerID else {
+            throw makePOSIXLikeError(message: "refusing to replace control socket not owned by the current user")
+        }
+        guard try shouldRemoveStaleSocket(at: validatedSocketPath) else {
+            return
+        }
+        guard unlink(validatedSocketPath) == 0 else {
+            throw makePOSIXError(errno)
+        }
+    }
+
+    private func shouldRemoveStaleSocket(at path: String) throws -> Bool {
+        do {
+            let activeFD = try MacOSSidecarSocketIO.connectUnixSocket(path: path)
+            Darwin.close(activeFD)
+            throw makePOSIXLikeError(message: "refusing to replace an active control socket")
+        } catch let error as NSError {
+            guard error.domain == NSPOSIXErrorDomain else {
+                throw error
+            }
+            switch error.code {
+            case Int(ECONNREFUSED):
+                return true
+            case Int(ENOENT):
+                return false
+            default:
+                throw error
+            }
+        }
+    }
+
+    private func inspectBoundSocketIdentity() throws -> BoundSocketIdentity {
+        var value = stat()
+        guard lstat(socketPath, &value) == 0 else {
+            throw makePOSIXError(errno)
+        }
+        guard (value.st_mode & S_IFMT) == S_IFSOCK, value.st_uid == geteuid() else {
+            throw makePOSIXLikeError(message: "new control socket has an unexpected type or owner")
+        }
+        return BoundSocketIdentity(device: value.st_dev, inode: value.st_ino)
+    }
+
+    private func validateBoundSocket(identity: BoundSocketIdentity) throws {
+        var value = stat()
+        guard lstat(socketPath, &value) == 0 else {
+            throw makePOSIXError(errno)
+        }
+        let isSameSocket =
+            (value.st_mode & S_IFMT) == S_IFSOCK
+            && value.st_uid == geteuid()
+            && value.st_dev == identity.device
+            && value.st_ino == identity.inode
+        guard isSameSocket, value.st_mode & mode_t(0o777) == mode_t(0o600) else {
+            throw makePOSIXLikeError(message: "new control socket has unsafe owner, type, or permissions")
+        }
+    }
+
+    private func removeBoundSocketIfMatches(_ identity: BoundSocketIdentity) throws {
+        let validatedSocketPath = try validatedSocketPathForCleanup()
+        var value = stat()
+        guard lstat(validatedSocketPath, &value) == 0 else {
+            if errno == ENOENT {
+                return
+            }
+            throw makePOSIXError(errno)
+        }
+        let isSameSocket =
+            (value.st_mode & S_IFMT) == S_IFSOCK
+            && value.st_dev == identity.device
+            && value.st_ino == identity.inode
+        guard isSameSocket else {
+            log.warning("control socket path changed before cleanup; preserving replacement", metadata: ["path": "\(socketPath)"])
+            return
+        }
+        guard unlink(validatedSocketPath) == 0 else {
+            throw makePOSIXError(errno)
+        }
+    }
+
+    private func validatedSocketPathForCleanup() throws -> String {
+        guard socketPath.hasPrefix("/"), !socketPath.utf8.contains(0), !socketPath.hasSuffix("/") else {
+            throw makePOSIXLikeError(message: "control socket path must be an absolute file path")
+        }
+        let components = NSString(string: socketPath).pathComponents
+        guard !components.contains("."), !components.contains("..") else {
+            throw makePOSIXLikeError(message: "control socket path must not contain relative components")
+        }
+
+        guard let standardized = macOSLexicallyNormalizedAbsolutePath(socketPath) else {
+            throw makePOSIXLikeError(message: "control socket path must be normalized")
+        }
+        guard standardized == socketPath else {
+            throw makePOSIXLikeError(message: "control socket path must be normalized")
+        }
+        guard standardized == "/tmp" || standardized.hasPrefix("/tmp/") else {
+            return standardized
+        }
+
+        var temporaryDirectoryValue = stat()
+        guard lstat("/tmp", &temporaryDirectoryValue) == 0 else {
+            throw makePOSIXError(errno)
+        }
+        let temporaryDirectoryType = temporaryDirectoryValue.st_mode & S_IFMT
+        if temporaryDirectoryType == S_IFDIR {
+            return standardized
+        }
+        guard temporaryDirectoryType == S_IFLNK, temporaryDirectoryValue.st_uid == 0 else {
+            throw makePOSIXLikeError(message: "system temporary directory alias is not trusted")
+        }
+
+        var resolvedPath = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard realpath("/tmp", &resolvedPath) != nil else {
+            throw makePOSIXError(errno)
+        }
+        let resolvedTemporaryDirectory = String(
+            decoding: resolvedPath.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+            as: UTF8.self
+        )
+        guard resolvedTemporaryDirectory == "/private/tmp" else {
+            throw makePOSIXLikeError(message: "system temporary directory alias has an unexpected target")
+        }
+        return resolvedTemporaryDirectory + standardized.dropFirst("/tmp".count)
+    }
+
+    private func ensureSecureSocketParent(for validatedSocketPath: String) throws {
+        let parentPath = URL(fileURLWithPath: validatedSocketPath).deletingLastPathComponent().path
+        let components = NSString(string: parentPath).pathComponents
+        guard components.first == "/" else {
+            throw makePOSIXLikeError(message: "control socket parent must be absolute")
+        }
+
+        try validateSocketDirectory(path: "/", wasCreated: false)
+        var currentPath = "/"
+        for component in components.dropFirst() {
+            currentPath = URL(fileURLWithPath: currentPath, isDirectory: true).appendingPathComponent(component).path
+            var value = stat()
+            var wasCreated = false
+            if lstat(currentPath, &value) != 0 {
+                guard errno == ENOENT else {
+                    throw makePOSIXError(errno)
+                }
+                if mkdir(currentPath, mode_t(0o700)) == 0 {
+                    wasCreated = true
+                } else if errno != EEXIST {
+                    throw makePOSIXError(errno)
+                }
+            }
+            try validateSocketDirectory(path: currentPath, wasCreated: wasCreated)
+        }
+    }
+
+    private func validateSocketDirectory(path: String, wasCreated: Bool) throws {
+        var value = stat()
+        guard lstat(path, &value) == 0 else {
+            throw makePOSIXError(errno)
+        }
+        guard (value.st_mode & S_IFMT) == S_IFDIR else {
+            throw makePOSIXLikeError(message: "control socket path must not traverse symbolic links or non-directories")
+        }
+
+        let permissions = value.st_mode & mode_t(0o7777)
+        if wasCreated {
+            guard value.st_uid == geteuid(), permissions == mode_t(0o700) else {
+                throw makePOSIXLikeError(message: "new control socket parent has unsafe owner or permissions")
+            }
+            return
+        }
+        if path == "/private/tmp" || path == "/tmp" {
+            guard value.st_uid == 0, permissions == mode_t(0o1777) else {
+                throw makePOSIXLikeError(message: "system temporary directory has unsafe owner or permissions")
+            }
+            return
+        }
+
+        let permittedOwner = value.st_uid == 0 || value.st_uid == geteuid()
+        let writableByOthers = permissions & mode_t(S_IWGRP | S_IWOTH) != 0
+        guard permittedOwner, !writableByOthers else {
+            throw makePOSIXLikeError(message: "control socket parent has unsafe owner or permissions")
         }
     }
 
@@ -1706,10 +2492,9 @@ final class SidecarControlServer: @unchecked Sendable {
 
     private func handleClient(fd clientFD: Int32) {
         defer {
-            clearEventClientIfMatches(clientFD)
             closeOwnedFSSessions(clientFD: clientFD)
             closeOwnedFSReadSessions(clientFD: clientFD)
-            Darwin.close(clientFD)
+            closeControlClient(clientFD)
         }
 
         while true {
@@ -1726,7 +2511,15 @@ final class SidecarControlServer: @unchecked Sendable {
 
                 log.info("control request received", metadata: ["method": "\(request.method.rawValue)", "request_id": "\(request.requestID)"])
                 let response = try perform(request: request, clientFD: clientFD)
-                try writeEnvelope(.response(response), to: clientFD)
+                if request.method == .eventsSubscribe, response.ok {
+                    try writeEventSubscriptionResponse(
+                        response,
+                        to: clientFD,
+                        subscriptionID: eventSubscriptionID(for: clientFD)
+                    )
+                } else {
+                    try writeEnvelope(.response(response), to: clientFD)
+                }
                 log.info("control request completed", metadata: ["method": "\(request.method.rawValue)", "request_id": "\(request.requestID)", "ok": "\(response.ok)"])
             } catch {
                 if parsedRequest == nil, isExpectedEOF(error) {
@@ -1746,63 +2539,88 @@ final class SidecarControlServer: @unchecked Sendable {
     }
 
     private func writeEnvelope(_ envelope: MacOSSidecarEnvelope, to fd: Int32) throws {
-        eventWriteLock.lock()
-        defer { eventWriteLock.unlock() }
-        try MacOSSidecarSocketIO.writeJSONFrame(envelope, fd: fd)
+        try eventDelivery.write(envelope, to: fd)
     }
 
-    private func emitEvent(_ event: MacOSSidecarEvent) {
-        let clientFD: Int32
-        eventClientLock.lock()
-        clientFD = eventClientFD
-        eventClientLock.unlock()
-
-        guard clientFD >= 0 else {
-            log.warning("dropping sidecar event without control client", metadata: ["event": "\(event.event.rawValue)", "process_id": "\(event.processID)"])
-            return
-        }
-
-        do {
-            try writeEnvelope(.event(event), to: clientFD)
-        } catch {
-            log.error(
-                "failed to send sidecar event",
-                metadata: [
-                    "event": "\(event.event.rawValue)",
-                    "process_id": "\(event.processID)",
-                    "error": "\(error)",
-                ])
-        }
+    private func writeEventSubscriptionResponse(
+        _ response: MacOSSidecarResponse,
+        to fd: Int32,
+        subscriptionID: String?
+    ) throws {
+        try eventDelivery.writeSubscriptionResponse(response, to: fd, subscriptionID: subscriptionID)
     }
 
-    private func subscribeEventClient(fd: Int32) -> Bool {
+    @discardableResult
+    private func emitEvent(
+        _ event: MacOSSidecarEvent,
+        acknowledged: (@Sendable () -> Void)? = nil
+    ) -> Bool {
+        eventDelivery.enqueue(event, acknowledged: acknowledged)
+    }
+
+    private func subscribeEventClient(fd: Int32, acknowledgementRequired: Bool) -> (claimed: Bool, subscriptionID: String?) {
         eventClientLock.lock()
         defer { eventClientLock.unlock() }
-        guard eventClientFD < 0 || eventClientFD == fd else { return false }
+        guard eventClientFD < 0 || eventClientFD == fd else { return (false, nil) }
         eventClientFD = fd
-        return true
+        if acknowledgementRequired {
+            if eventClientSubscriptionID == nil {
+                eventClientSubscriptionID = UUID().uuidString
+            }
+        } else {
+            eventClientSubscriptionID = nil
+        }
+        return (true, eventClientSubscriptionID)
+    }
+
+    private func eventSubscriptionID(for fd: Int32) -> String? {
+        eventClientLock.lock()
+        let result = eventClientFD == fd ? eventClientSubscriptionID : nil
+        eventClientLock.unlock()
+        return result
     }
 
     private func setEventClientIfAbsent(fd: Int32) {
+        let claimed: Bool
         eventClientLock.lock()
         if eventClientFD < 0 {
             eventClientFD = fd
+            eventClientSubscriptionID = nil
+            claimed = true
+        } else {
+            claimed = eventClientFD == fd
         }
         eventClientLock.unlock()
+
+        if claimed {
+            eventDelivery.setClient(fd)
+        }
+    }
+
+    private func setEventClient(fd: Int32) {
+        eventClientLock.lock()
+        eventClientFD = fd
+        eventClientSubscriptionID = nil
+        eventClientLock.unlock()
+        eventDelivery.setClient(fd)
     }
 
     private func clearEventClient() {
         eventClientLock.lock()
         eventClientFD = -1
+        eventClientSubscriptionID = nil
         eventClientLock.unlock()
+        eventDelivery.clearClient()
     }
 
-    private func clearEventClientIfMatches(_ fd: Int32) {
+    private func closeControlClient(_ fd: Int32) {
         eventClientLock.lock()
         if eventClientFD == fd {
             eventClientFD = -1
+            eventClientSubscriptionID = nil
         }
         eventClientLock.unlock()
+        eventDelivery.closeClient(fd)
     }
 
     private func isExpectedEOF(_ error: Error) -> Bool {
@@ -1813,10 +2631,105 @@ final class SidecarControlServer: @unchecked Sendable {
     private func registerProcessSession(_ session: ProcessStreamSession) throws {
         processLock.lock()
         defer { processLock.unlock() }
+        try registerProcessSessionLocked(session)
+    }
+
+    private func registerProcessSessionLocked(_ session: ProcessStreamSession) throws {
         guard processSessions[session.processID] == nil else {
             throw ContainerizationError(.exists, message: "process \(session.processID) already exists in sidecar")
         }
+        guard !processSessions.values.contains(where: { $0.guestProcessID == session.guestProcessID }) else {
+            throw ContainerizationError(
+                .exists,
+                message: "durable execution \(session.guestProcessID) already has a sidecar process stream"
+            )
+        }
         processSessions[session.processID] = session
+    }
+
+    private func registerProcessSessionAndStartReadLoop(
+        _ session: ProcessStreamSession,
+        connection: ProcessStreamConnection,
+        initialFrames: [SidecarGuestAgentFrame]
+    ) throws {
+        processLock.lock()
+        do {
+            try registerProcessSessionLocked(session)
+            guard startProcessReadLoop(session, connection: connection, initialFrames: initialFrames) else {
+                processSessions.removeValue(forKey: session.processID)
+                throw ContainerizationError(.invalidState, message: "new process stream was detached before reader startup")
+            }
+            processLock.unlock()
+        } catch {
+            processLock.unlock()
+            throw error
+        }
+    }
+
+    private func existingProcessSession(for processID: String) -> ProcessStreamSession? {
+        processLock.lock()
+        let session = processSessions[processID]
+        processLock.unlock()
+        return session
+    }
+
+    private func processRequestFingerprint(_ exec: MacOSSidecarExecRequestPayload) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return SHA256.hash(data: try encoder.encode(ProcessLaunchIdentity(exec)))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private func validateDurableProcessRequest(_ exec: MacOSSidecarExecRequestPayload) throws {
+        let hasDurableMetadata =
+            exec.durableLaunchFingerprint != nil
+            || exec.durableIncarnation != nil
+            || exec.storageGeneration != nil
+            || exec.previousStorageGeneration != nil
+        guard exec.durableExecutionID != nil || !hasDurableMetadata else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "durable launch metadata requires a durable execution identifier"
+            )
+        }
+        if let durableLaunchFingerprint = exec.durableLaunchFingerprint,
+            durableLaunchFingerprint.isEmpty
+        {
+            throw ContainerizationError(.invalidArgument, message: "durable launch fingerprint must not be empty")
+        }
+        if let durableIncarnation = exec.durableIncarnation, durableIncarnation.isEmpty {
+            throw ContainerizationError(.invalidArgument, message: "durable process incarnation must not be empty")
+        }
+        if exec.durableIncarnation != nil, exec.durableLaunchFingerprint == nil {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "durable process incarnation requires a trusted launch fingerprint"
+            )
+        }
+        if let storageGeneration = exec.storageGeneration, storageGeneration == 0 {
+            throw ContainerizationError(.invalidArgument, message: "durable storage generation must be positive")
+        }
+        if exec.storageGeneration != nil, exec.durableLaunchFingerprint == nil {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "generation-fenced durable execution requires a launch fingerprint"
+            )
+        }
+        if let previousStorageGeneration = exec.previousStorageGeneration {
+            guard previousStorageGeneration > 0, let storageGeneration = exec.storageGeneration else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "durable generation adoption requires positive previous and current generations"
+                )
+            }
+            guard storageGeneration > previousStorageGeneration else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "durable storage generation must be newer than its previous generation"
+                )
+            }
+        }
     }
 
     private func processSession(for processID: String) throws -> ProcessStreamSession {
@@ -1829,9 +2742,17 @@ final class SidecarControlServer: @unchecked Sendable {
         return session
     }
 
-    private func removeProcessSession(_ processID: String) -> ProcessStreamSession? {
+    private func removeProcessSession(
+        _ processID: String,
+        matching expected: ProcessStreamSession? = nil
+    ) -> ProcessStreamSession? {
         processLock.lock()
-        let removed = processSessions.removeValue(forKey: processID)
+        let removed: ProcessStreamSession?
+        if let expected, processSessions[processID] !== expected {
+            removed = nil
+        } else {
+            removed = processSessions.removeValue(forKey: processID)
+        }
         processLock.unlock()
         return removed
     }
@@ -1844,18 +2765,24 @@ final class SidecarControlServer: @unchecked Sendable {
         processLock.unlock()
 
         for session in sessions {
-            closeProcessStreamSession(session)
+            session.cancelAndClose()
         }
     }
 
-    private func closeProcessStreamSession(_ session: ProcessStreamSession) {
-        session.stateLock.lock()
-        let shouldClose = !session.closed
-        session.closed = true
-        session.stateLock.unlock()
-        guard shouldClose else { return }
-        _ = Darwin.shutdown(session.fd, SHUT_RDWR)
-        Darwin.close(session.fd)
+    private func cancelProcessSession(_ session: ProcessStreamSession) {
+        session.cancelAndClose()
+        processLock.lock()
+        if processSessions[session.processID] === session {
+            processSessions.removeValue(forKey: session.processID)
+        }
+        processLock.unlock()
+    }
+
+    private func processSession(forExecutionID executionID: String) -> ProcessStreamSession? {
+        processLock.lock()
+        let result = processSessions.values.first { $0.guestProcessID == executionID }
+        processLock.unlock()
+        return result
     }
 
     private func registerFSSession(_ session: FSTransferSession) throws {
@@ -2037,21 +2964,174 @@ final class SidecarControlServer: @unchecked Sendable {
         expectedProcessID: String,
         timeoutSeconds: TimeInterval = 1
     ) throws -> [SidecarGuestAgentFrame] {
-        try waitForProcessStartAck(fd: fd, expectedProcessID: expectedProcessID, timeoutSeconds: timeoutSeconds)
+        try waitForProcessStartAck(
+            fd: fd,
+            expectedProcessID: expectedProcessID,
+            timeoutSeconds: timeoutSeconds
+        ).bufferedFrames
     }
 
     func _testGuestExecutableLaunch(executable: String, arguments: [String]) -> (executable: String, arguments: [String]) {
         guestExecutableLaunch(executable: executable, arguments: arguments)
     }
 
-    func _testEmitEvent(_ event: MacOSSidecarEvent) {
-        emitEvent(event)
+    func _testCleanupStaleSocket(requiredOwnerID: uid_t) throws {
+        try cleanupStaleSocket(requiredOwnerID: requiredOwnerID)
+    }
+
+    func _testEmitEvent(
+        _ event: MacOSSidecarEvent,
+        acknowledged: (@Sendable () -> Void)? = nil
+    ) {
+        emitEvent(event, acknowledged: acknowledged)
+    }
+
+    func _testHasEventClient() -> Bool {
+        eventDelivery.hasClient()
+    }
+
+    func _testSetVMLifecycleRunning() throws {
+        try syncValue {
+            try await self.service._testSetLifecycleRunning()
+        }
+    }
+
+    func _testPendingEventCount() -> Int {
+        eventDelivery.pendingCount()
+    }
+
+    func _testSetEventClient(fd: Int32) {
+        setEventClient(fd: fd)
+    }
+
+    func _testClearEventClient() {
+        clearEventClient()
+    }
+
+    func _testRegisterProcessSession(
+        processID: String,
+        guestProcessID: String,
+        durable: Bool,
+        exec: MacOSSidecarExecRequestPayload,
+        replayCursor: UInt64,
+        fd: Int32,
+        port: UInt32 = 27_000,
+        launchFingerprint: String = "test-launch-fingerprint",
+        storageGeneration: UInt64? = nil,
+        processIdentifier: Int32 = 42,
+        trustedLaunchFingerprint: String? = nil,
+        incarnation: String? = nil,
+        writeTimeoutMilliseconds: Int32 = 1_000
+    ) throws {
+        let session = try ProcessStreamSession(
+            processID: processID,
+            guestProcessID: guestProcessID,
+            durable: durable,
+            requestFingerprint: try processRequestFingerprint(exec),
+            port: port,
+            launchFingerprint: durable ? launchFingerprint : nil,
+            storageGeneration: durable ? storageGeneration : nil,
+            processIdentifier: durable ? processIdentifier : nil,
+            trustedLaunchFingerprint: durable ? trustedLaunchFingerprint ?? exec.durableLaunchFingerprint : nil,
+            incarnation: durable ? incarnation ?? exec.durableIncarnation : nil,
+            replayCursor: replayCursor,
+            fd: fd,
+            writeTimeoutMilliseconds: writeTimeoutMilliseconds
+        )
+        do {
+            try registerProcessSession(session)
+        } catch {
+            session.cancelAndClose()
+            throw error
+        }
+    }
+
+    func _testStartProcessReadLoop(processID: String) throws {
+        let session = try processSession(for: processID)
+        guard let connection = session.currentConnection() else {
+            throw ContainerizationError(.invalidState, message: "test process stream is detached")
+        }
+        _ = startProcessReadLoop(session, connection: connection)
+    }
+
+    func _testStartProcessStream(
+        port: UInt32 = 27_000,
+        processID: String,
+        exec: MacOSSidecarExecRequestPayload
+    ) throws {
+        try startProcessStream(port: port, processID: processID, exec: exec)
+    }
+
+    func _testInspectDurableProcess(
+        port: UInt32 = 27_000,
+        processID: String,
+        exec: MacOSSidecarExecRequestPayload
+    ) throws -> MacOSGuestProcessStatusPayload {
+        try inspectDurableProcess(port: port, processID: processID, exec: exec)
+    }
+
+    func _testCloseAllProcessSessions() {
+        closeAllProcessSessions()
+    }
+
+    func _testProcessDeliveredCursor(processID: String) -> UInt64? {
+        try? processSession(for: processID).deliveredCursor()
+    }
+
+    func _testProcessConnectionDescriptors(processID: String) -> (owner: Int32, reader: Int32)? {
+        try? processSession(for: processID).connectionDescriptors()
+    }
+
+    func _testHasProcessSession(processID: String) -> Bool {
+        (try? processSession(for: processID)) != nil
+    }
+
+    func _testIsProcessReconnectPending(processID: String) -> Bool {
+        (try? processSession(for: processID).isReconnectPending()) == true
+    }
+
+    func _testMarkProcessTerminal(processID: String) throws {
+        try processSession(for: processID).markTerminal()
+    }
+
+    func _testBlockProcessReconnect(processID: String) throws {
+        try processSession(for: processID).finishReconnect(blocked: true)
+    }
+
+    func _testCancelProcessSessionWithoutRemoval(processID: String) throws {
+        try processSession(for: processID).cancelAndClose()
+    }
+
+    func _testSendProcessStdin(processID: String, data: Data) throws {
+        let session = try processSession(for: processID)
+        try session.send(.stdin(id: session.guestProcessID, data: data))
+    }
+
+    func _testDeleteDurableProcess(
+        port: UInt32 = 27_000,
+        identity: MacOSSidecarDurableProcessDeleteIdentity
+    ) throws {
+        try deleteDurableProcess(port: port, identity: identity)
+    }
+
+    func _testGuestProcessErrorCode(errorCode: Int32?, message: String) -> ContainerizationError.Code {
+        guestProcessCommandError(
+            .init(type: .error, message: message, errorCode: errorCode),
+            operation: "test"
+        ).code
+    }
+
+    func _testIsPermanentProcessReconnectFailure(errorCode: Int32?, message: String) -> Bool {
+        isPermanentProcessReconnectFailure(
+            guestProcessCommandError(
+                .init(type: .error, message: message, errorCode: errorCode),
+                operation: "test"
+            )
+        )
     }
 
     private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: ProcessStreamSession) throws {
-        session.writeLock.lock()
-        defer { session.writeLock.unlock() }
-        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: session.fd)
+        try session.send(frame)
     }
 
     private func sendFrame(_ frame: SidecarGuestAgentFrame, to session: FSTransferSession) throws {
@@ -2062,7 +3142,14 @@ final class SidecarControlServer: @unchecked Sendable {
 
     private func sendProcessControlFrame(processID: String, build: (ProcessStreamSession) -> SidecarGuestAgentFrame) throws {
         let session = try processSession(for: processID)
-        try sendFrame(build(session), to: session)
+        do {
+            try sendFrame(build(session), to: session)
+        } catch {
+            if let connection = session.currentConnection(), session.detach(connection), session.durable {
+                scheduleProcessReconnect(session)
+            }
+            throw error
+        }
     }
 
     private func startFSTransfer(port: UInt32, clientFD: Int32, payload: MacOSSidecarFSBeginRequestPayload) throws {
@@ -2084,7 +3171,7 @@ final class SidecarControlServer: @unchecked Sendable {
         }
 
         do {
-            try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            _ = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
             try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.fsBegin(payload), fd: fd)
             try waitForFSAck(fd: fd, expectedID: payload.txID)
 
@@ -2174,7 +3261,7 @@ final class SidecarControlServer: @unchecked Sendable {
         }
 
         do {
-            try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            _ = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
             try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.fsReadBegin(payload), fd: fd)
             let responseData = try waitForFSAckWithData(fd: fd, expectedID: payload.txID)
             guard let responseData else {
@@ -2245,7 +3332,7 @@ final class SidecarControlServer: @unchecked Sendable {
         }
 
         do {
-            try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            _ = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
             try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.fsListDir(txID: txID, path: path), fd: fd)
             let responseData = try waitForFSAckWithData(fd: fd, expectedID: txID)
             guard let responseData else {
@@ -2258,19 +3345,170 @@ final class SidecarControlServer: @unchecked Sendable {
         }
     }
 
+    private func inspectExistingDurableProcess(
+        fd: Int32,
+        executionID: String
+    ) throws -> MacOSGuestProcessStatusPayload? {
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame(type: .processInspect, id: executionID),
+            fd: fd
+        )
+        do {
+            guard
+                let status = try waitForGuestProcessCommandAck(
+                    fd: fd,
+                    expectedExecutionID: executionID,
+                    operation: "inspect",
+                    timeoutSeconds: 3
+                )
+            else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "durable process inspect ack is missing identity status"
+                )
+            }
+            try validateDurableProcessStatus(status, expectedExecutionID: executionID)
+            return status
+        } catch let error as ContainerizationError where error.code == .notFound {
+            return nil
+        }
+    }
+
+    private func guestAttachmentSelection(
+        exec: MacOSSidecarExecRequestPayload,
+        existingStatus: MacOSGuestProcessStatusPayload?
+    ) throws -> (expectedLaunchFingerprint: String?, previousStorageGeneration: UInt64?) {
+        guard let currentGeneration = exec.storageGeneration else {
+            return (nil, nil)
+        }
+        guard let existingStatus else {
+            // A restored VM may not contain a process for a container that was
+            // introduced after the save point. It is created directly in the
+            // current writable generation rather than adopted.
+            return (nil, nil)
+        }
+        if let trustedLaunchFingerprint = exec.durableLaunchFingerprint,
+            existingStatus.trustedLaunchFingerprint != trustedLaunchFingerprint
+        {
+            throw ContainerizationError(
+                .invalidState,
+                message: "existing durable process trusted launch fingerprint does not match"
+            )
+        }
+        if let incarnation = exec.durableIncarnation,
+            exec.previousStorageGeneration == nil,
+            existingStatus.incarnation != incarnation
+        {
+            throw ContainerizationError(
+                .invalidState,
+                message: "existing durable process incarnation does not match"
+            )
+        }
+        guard let boundGeneration = existingStatus.storageGeneration else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "existing durable process does not expose a storage generation"
+            )
+        }
+        if boundGeneration == currentGeneration {
+            return (existingStatus.launchFingerprint, nil)
+        }
+        if let previousGeneration = exec.previousStorageGeneration,
+            boundGeneration == previousGeneration,
+            currentGeneration > previousGeneration
+        {
+            return (existingStatus.launchFingerprint, previousGeneration)
+        }
+        throw ContainerizationError(
+            .invalidState,
+            message:
+                "durable process is bound to storage generation \(boundGeneration), not current generation \(currentGeneration) or its selected predecessor"
+        )
+    }
+
     private func startProcessStream(port: UInt32, processID: String, exec: MacOSSidecarExecRequestPayload) throws {
-        let fd = try syncValue {
-            try await self.service.connectVsock(port: port)
+        processStartLock.lock()
+        defer { processStartLock.unlock() }
+
+        try validateDurableProcessRequest(exec)
+        let requestFingerprint = try processRequestFingerprint(exec)
+        if let existing = existingProcessSession(for: processID) {
+            guard existing.requestFingerprint == requestFingerprint else {
+                throw ContainerizationError(
+                    .exists,
+                    message: "process \(processID) already exists with a different launch request"
+                )
+            }
+            if let retryError = existing.startRetryError() {
+                throw retryError
+            }
+            if existing.durable, existing.currentConnection() == nil {
+                scheduleProcessReconnect(existing)
+            }
+            return
+        }
+        if let executionID = exec.durableExecutionID,
+            let existing = processSession(forExecutionID: executionID)
+        {
+            guard existing.requestFingerprint == requestFingerprint else {
+                throw ContainerizationError(
+                    .exists,
+                    message: "durable execution \(executionID) already exists with a different launch request"
+                )
+            }
+            throw ContainerizationError(
+                .exists,
+                message: "durable execution \(executionID) is already bound to process \(existing.processID)"
+            )
         }
 
+        let fd = try connectProcessStream(port: port)
+        var unregisteredSession: ProcessStreamSession?
+
         do {
-            try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            let durable = exec.durableExecutionID != nil
+            let generationFenced = exec.storageGeneration != nil
+            let identityFenced = exec.durableIncarnation != nil
+            let capabilities = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            if durable, !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV1) {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "guest agent does not support durable workload processes"
+                )
+            }
+            if durable, !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV3) {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "guest agent does not support consumer-acknowledged durable process events"
+                )
+            }
+            if generationFenced, !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV2) {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "guest agent does not support generation-fenced durable workload processes"
+                )
+            }
+            if identityFenced, !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV4) {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: "guest agent does not support incarnation-fenced durable workload processes"
+                )
+            }
             let env = exec.environment ?? ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"]
             let cwd = exec.workingDirectory ?? "/"
             let launch = guestExecutableLaunch(executable: exec.executable, arguments: exec.arguments)
+            let guestProcessID = exec.durableExecutionID ?? processID
+            let replayCursor = exec.replayCursor ?? 0
+            let existingStatus: MacOSGuestProcessStatusPayload?
+            if generationFenced {
+                existingStatus = try inspectExistingDurableProcess(fd: fd, executionID: guestProcessID)
+            } else {
+                existingStatus = nil
+            }
+            let attachment = try guestAttachmentSelection(exec: exec, existingStatus: existingStatus)
             try MacOSSidecarSocketIO.writeJSONFrame(
                 SidecarGuestAgentFrame.exec(
-                    id: processID,
+                    id: guestProcessID,
                     executable: launch.executable,
                     arguments: launch.arguments,
                     environment: env,
@@ -2280,19 +3518,562 @@ final class SidecarControlServer: @unchecked Sendable {
                     user: exec.user,
                     uid: exec.uid,
                     gid: exec.gid,
-                    supplementalGroups: exec.supplementalGroups
+                    supplementalGroups: exec.supplementalGroups,
+                    durable: durable,
+                    cursor: durable ? replayCursor : nil,
+                    expectedLaunchFingerprint: attachment.expectedLaunchFingerprint,
+                    trustedLaunchFingerprint: exec.durableLaunchFingerprint,
+                    incarnation: exec.durableIncarnation,
+                    storageGeneration: exec.storageGeneration,
+                    previousStorageGeneration: attachment.previousStorageGeneration
                 ),
                 fd: fd
             )
-            let initialFrames = try waitForProcessStartAck(fd: fd, expectedProcessID: processID, timeoutSeconds: 3)
-            let session = ProcessStreamSession(processID: processID, fd: fd)
-            try registerProcessSession(session)
-            startProcessReadLoop(session, initialFrames: initialFrames)
+            let handshake = try waitForProcessStartAck(
+                fd: fd,
+                expectedProcessID: guestProcessID,
+                timeoutSeconds: 3
+            )
+            let durableStatus: MacOSGuestProcessStatusPayload?
+            if durable {
+                guard let status = handshake.status else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "durable process start ack is missing identity status"
+                    )
+                }
+                try validateDurableProcessStatus(status, expectedExecutionID: guestProcessID)
+                guard status.disposition == .created || status.state == .running else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "durable process retry returned terminal state \(status.state.rawValue)"
+                    )
+                }
+                if generationFenced, status.storageGeneration != exec.storageGeneration {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "durable process start ack returned a different storage generation"
+                    )
+                }
+                if identityFenced,
+                    status.trustedLaunchFingerprint != exec.durableLaunchFingerprint
+                        || status.incarnation != exec.durableIncarnation
+                {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "durable process start ack returned a different trusted identity"
+                    )
+                }
+                durableStatus = status
+            } else {
+                durableStatus = nil
+            }
+            let session = try ProcessStreamSession(
+                processID: processID,
+                guestProcessID: guestProcessID,
+                durable: durable,
+                requestFingerprint: requestFingerprint,
+                port: port,
+                launchFingerprint: durableStatus?.launchFingerprint,
+                storageGeneration: durableStatus?.storageGeneration,
+                processIdentifier: durableStatus?.processIdentifier,
+                trustedLaunchFingerprint: exec.durableLaunchFingerprint,
+                incarnation: exec.durableIncarnation,
+                replayCursor: replayCursor,
+                fd: fd
+            )
+            unregisteredSession = session
+            if handshake.status?.replayTruncated == true {
+                emitEvent(
+                    .init(
+                        event: .processError,
+                        processID: processID,
+                        message: "durable process output replay was truncated before cursor \(replayCursor)"
+                    )
+                )
+            }
+            guard let connection = session.currentConnection() else {
+                throw ContainerizationError(.invalidState, message: "new process stream was detached before registration")
+            }
+            try registerProcessSessionAndStartReadLoop(
+                session,
+                connection: connection,
+                initialFrames: handshake.bufferedFrames
+            )
+            unregisteredSession = nil
         } catch {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
-            Darwin.close(fd)
+            if let unregisteredSession {
+                unregisteredSession.cancelAndClose()
+            } else {
+                _ = Darwin.shutdown(fd, SHUT_RDWR)
+                Darwin.close(fd)
+            }
             throw error
         }
+    }
+
+    private func connectProcessStream(port: UInt32) throws -> Int32 {
+        if let processConnectionFactory {
+            return try processConnectionFactory(port)
+        }
+        return try syncValue {
+            try await self.service.connectVsock(port: port)
+        }
+    }
+
+    private func inspectDurableProcess(
+        port: UInt32,
+        processID: String,
+        exec: MacOSSidecarExecRequestPayload
+    ) throws -> MacOSGuestProcessStatusPayload {
+        let session = try processSession(for: processID)
+        guard session.durable else {
+            throw ContainerizationError(.invalidArgument, message: "process \(processID) is not durable")
+        }
+        guard session.port == port else {
+            throw ContainerizationError(.invalidArgument, message: "process \(processID) uses a different guest-agent port")
+        }
+        guard session.requestFingerprint == (try processRequestFingerprint(exec)) else {
+            throw ContainerizationError(.exists, message: "process \(processID) has a different launch request")
+        }
+        if let retryError = session.startRetryError() {
+            throw retryError
+        }
+
+        let status = try queryDurableProcess(port: port, executionID: session.guestProcessID)
+        if let retryError = session.startRetryError() {
+            throw retryError
+        }
+        do {
+            try validateDurableProcessStatus(status, session: session)
+        } catch let error as ProcessReconnectIdentityError {
+            throw ContainerizationError(.invalidState, message: error.reason)
+        }
+        return status
+    }
+
+    private func queryDurableProcess(port: UInt32, executionID: String) throws -> MacOSGuestProcessStatusPayload {
+        let fd = try connectProcessStream(port: port)
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+
+        let capabilities = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+        guard capabilities.contains(MacOSGuestProcessProtocol.durableProcessV1) else {
+            throw ContainerizationError(.unsupported, message: "guest agent does not support durable workload processes")
+        }
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame(type: .processInspect, id: executionID),
+            fd: fd
+        )
+        guard
+            let status = try waitForGuestProcessCommandAck(
+                fd: fd,
+                expectedExecutionID: executionID,
+                operation: "inspect",
+                timeoutSeconds: 3
+            )
+        else {
+            throw ContainerizationError(.invalidState, message: "durable process inspect ack is missing identity status")
+        }
+        try validateDurableProcessStatus(status, expectedExecutionID: executionID)
+        return status
+    }
+
+    private func validateDurableProcessStatus(
+        _ status: MacOSGuestProcessStatusPayload,
+        expectedExecutionID: String
+    ) throws {
+        guard status.executionID == expectedExecutionID else {
+            throw ContainerizationError(.invalidState, message: "durable process status returned a different execution identifier")
+        }
+        guard !status.launchFingerprint.isEmpty else {
+            throw ContainerizationError(.invalidState, message: "durable process status is missing a launch fingerprint")
+        }
+        if let storageGeneration = status.storageGeneration, storageGeneration == 0 {
+            throw ContainerizationError(.invalidState, message: "durable process status has an invalid storage generation")
+        }
+        guard status.processIdentifier > 0 else {
+            throw ContainerizationError(.invalidState, message: "durable process status has an invalid process identifier")
+        }
+    }
+
+    private func validateDurableProcessStatus(
+        _ status: MacOSGuestProcessStatusPayload,
+        session: ProcessStreamSession
+    ) throws {
+        try validateDurableProcessStatus(status, expectedExecutionID: session.guestProcessID)
+        guard status.launchFingerprint == session.launchFingerprint else {
+            throw ProcessReconnectIdentityError(reason: "durable process launch fingerprint changed")
+        }
+        guard status.trustedLaunchFingerprint == session.trustedLaunchFingerprint else {
+            throw ProcessReconnectIdentityError(reason: "durable process trusted launch fingerprint changed")
+        }
+        guard status.incarnation == session.incarnation else {
+            throw ProcessReconnectIdentityError(reason: "durable process incarnation changed")
+        }
+        guard status.storageGeneration == session.storageGeneration else {
+            throw ProcessReconnectIdentityError(reason: "durable process storage generation changed")
+        }
+        guard status.processIdentifier == session.processIdentifier else {
+            throw ProcessReconnectIdentityError(reason: "durable process identifier changed")
+        }
+    }
+
+    private func deleteDurableProcess(
+        port: UInt32,
+        identity: MacOSSidecarDurableProcessDeleteIdentity
+    ) throws {
+        try validateDurableProcessDeleteIdentity(identity)
+        let existing = processSession(forExecutionID: identity.executionID)
+        let matchingExisting = existing.flatMap { $0.matchesDeleteIdentity(identity) ? $0 : nil }
+        if let matchingExisting {
+            guard matchingExisting.port == port else {
+                throw ContainerizationError(.invalidArgument, message: "durable delete uses a different guest-agent port")
+            }
+            try matchingExisting.prepareForDelete(identity)
+        }
+
+        let fd = try connectProcessStream(port: port)
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+
+        let capabilities = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+        guard capabilities.contains(MacOSGuestProcessProtocol.durableProcessV1) else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "guest agent does not support durable workload processes"
+            )
+        }
+        if identity.storageGeneration != nil,
+            !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV2)
+        {
+            throw ContainerizationError(
+                .unsupported,
+                message: "guest agent does not support generation-fenced durable workload processes"
+            )
+        }
+        guard capabilities.contains(MacOSGuestProcessProtocol.durableProcessV4) else {
+            throw ContainerizationError(
+                .unsupported,
+                message: "guest agent does not support incarnation-fenced durable workload processes"
+            )
+        }
+
+        let status: MacOSGuestProcessStatusPayload?
+        do {
+            try MacOSSidecarSocketIO.writeJSONFrame(
+                SidecarGuestAgentFrame(type: .processInspect, id: identity.executionID),
+                fd: fd,
+                timeoutMilliseconds: 1_000
+            )
+            guard
+                let inspected = try waitForGuestProcessCommandAck(
+                    fd: fd,
+                    expectedExecutionID: identity.executionID,
+                    operation: "inspect for delete",
+                    timeoutSeconds: 3
+                )
+            else {
+                throw ContainerizationError(.invalidState, message: "durable delete inspect ack is missing identity status")
+            }
+            try validateDurableProcessStatus(inspected, expectedExecutionID: identity.executionID)
+            if inspected.incarnation == identity.incarnation {
+                guard inspected.trustedLaunchFingerprint == identity.trustedLaunchFingerprint else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "durable delete trusted launch fingerprint does not match the guest process"
+                    )
+                }
+                guard inspected.storageGeneration == identity.storageGeneration else {
+                    throw ContainerizationError(.invalidState, message: "durable delete storage generation does not match the guest process")
+                }
+                if let matchingExisting {
+                    do {
+                        try validateDurableProcessStatus(inspected, session: matchingExisting)
+                    } catch let error as ProcessReconnectIdentityError {
+                        throw ContainerizationError(.invalidState, message: error.reason)
+                    }
+                }
+                status = inspected
+            } else {
+                status = nil
+            }
+        } catch let error as ContainerizationError where error.code == .notFound {
+            status = nil
+        }
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame.processDelete(
+                id: identity.executionID,
+                expectedLaunchFingerprint: status?.launchFingerprint,
+                trustedLaunchFingerprint: identity.trustedLaunchFingerprint,
+                incarnation: identity.incarnation,
+                storageGeneration: identity.storageGeneration
+            ),
+            fd: fd,
+            timeoutMilliseconds: 1_000
+        )
+        _ = try waitForGuestProcessCommandAck(
+            fd: fd,
+            expectedExecutionID: identity.executionID,
+            operation: "delete",
+            timeoutSeconds: 3
+        )
+        if let matchingExisting {
+            cancelProcessSession(matchingExisting)
+        }
+    }
+
+    private func validateDurableProcessDeleteIdentity(
+        _ identity: MacOSSidecarDurableProcessDeleteIdentity
+    ) throws {
+        guard !identity.executionID.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "durable delete execution identifier must not be empty")
+        }
+        let prefix = "sha256:"
+        let digest = identity.trustedLaunchFingerprint.dropFirst(prefix.count)
+        guard identity.trustedLaunchFingerprint.hasPrefix(prefix), digest.count == 64,
+            digest.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) })
+        else {
+            throw ContainerizationError(.invalidArgument, message: "durable delete launch fingerprint must be canonical SHA-256")
+        }
+        let incarnationDigest = identity.incarnation.dropFirst(prefix.count)
+        guard identity.incarnation.hasPrefix(prefix), incarnationDigest.count == 64,
+            incarnationDigest.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) })
+        else {
+            throw ContainerizationError(.invalidArgument, message: "durable delete incarnation must be canonical SHA-256")
+        }
+        if let storageGeneration = identity.storageGeneration, storageGeneration == 0 {
+            throw ContainerizationError(.invalidArgument, message: "durable delete storage generation must be positive")
+        }
+    }
+
+    private func scheduleProcessReconnect(_ session: ProcessStreamSession) {
+        guard session.beginReconnect() else { return }
+        processReconnectQueue.async { [weak self, session] in
+            self?.reconnectProcessSession(session)
+        }
+    }
+
+    private func reconnectProcessSession(_ session: ProcessStreamSession) {
+        var retryDelay = processReconnectDelayMicroseconds
+        while session.shouldContinueReconnect() {
+            if retryDelay > 0 {
+                usleep(retryDelay)
+            }
+            guard session.shouldContinueReconnect() else { return }
+
+            var fd: Int32 = -1
+            do {
+                fd = try connectProcessStream(port: session.port)
+                let capabilities = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+                guard capabilities.contains(MacOSGuestProcessProtocol.durableProcessV1) else {
+                    throw ContainerizationError(
+                        .unsupported,
+                        message: "guest agent does not support durable workload processes"
+                    )
+                }
+                guard capabilities.contains(MacOSGuestProcessProtocol.durableProcessV3) else {
+                    throw ContainerizationError(
+                        .unsupported,
+                        message: "guest agent does not support consumer-acknowledged durable process events"
+                    )
+                }
+                if session.storageGeneration != nil,
+                    !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV2)
+                {
+                    throw ContainerizationError(
+                        .unsupported,
+                        message: "guest agent does not support generation-fenced durable workload processes"
+                    )
+                }
+                if session.incarnation != nil,
+                    !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV4)
+                {
+                    throw ContainerizationError(
+                        .unsupported,
+                        message: "guest agent does not support incarnation-fenced durable workload processes"
+                    )
+                }
+
+                let cursor = session.deliveredCursor()
+                try MacOSSidecarSocketIO.writeJSONFrame(
+                    SidecarGuestAgentFrame.processAttach(
+                        id: session.guestProcessID,
+                        cursor: cursor,
+                        expectedLaunchFingerprint: session.launchFingerprint,
+                        trustedLaunchFingerprint: session.trustedLaunchFingerprint,
+                        incarnation: session.incarnation,
+                        storageGeneration: session.storageGeneration
+                    ),
+                    fd: fd
+                )
+                guard
+                    let status = try waitForGuestProcessCommandAck(
+                        fd: fd,
+                        expectedExecutionID: session.guestProcessID,
+                        operation: "attach",
+                        timeoutSeconds: 3
+                    )
+                else {
+                    throw ContainerizationError(.invalidState, message: "durable process attach ack is missing identity status")
+                }
+                try validateDurableProcessStatus(status, session: session)
+                guard let connection = try session.installReconnected(fd: fd, status: status) else {
+                    _ = Darwin.shutdown(fd, SHUT_RDWR)
+                    Darwin.close(fd)
+                    return
+                }
+                if status.replayTruncated {
+                    emitEvent(
+                        .init(
+                            event: .processError,
+                            processID: session.processID,
+                            message: "durable process output replay was truncated before cursor \(cursor)"
+                        )
+                    )
+                }
+                log.info(
+                    "durable process stream reattached",
+                    metadata: [
+                        "process_id": "\(session.processID)",
+                        "execution_id": "\(session.guestProcessID)",
+                        "cursor": "\(cursor)",
+                        "pid": "\(status.processIdentifier)",
+                    ]
+                )
+                _ = startProcessReadLoop(session, connection: connection)
+                return
+            } catch {
+                if fd >= 0 {
+                    _ = Darwin.shutdown(fd, SHUT_RDWR)
+                    Darwin.close(fd)
+                }
+                if isPermanentProcessReconnectFailure(error) {
+                    session.finishReconnect(blocked: true)
+                    emitEvent(
+                        .init(
+                            event: .processError,
+                            processID: session.processID,
+                            message: "durable process reconnect was rejected: \(error.localizedDescription)"
+                        )
+                    )
+                    return
+                }
+                log.warning(
+                    "durable process reconnect attempt failed",
+                    metadata: [
+                        "process_id": "\(session.processID)",
+                        "execution_id": "\(session.guestProcessID)",
+                        "error": "\(error)",
+                    ]
+                )
+                retryDelay = min(max(retryDelay, 50_000) * 2, 1_000_000)
+            }
+        }
+        session.finishReconnect(blocked: false)
+    }
+
+    private func isPermanentProcessReconnectFailure(_ error: Error) -> Bool {
+        if error is ProcessReconnectIdentityError {
+            return true
+        }
+        guard let containerError = error as? ContainerizationError else {
+            return false
+        }
+        switch containerError.code {
+        case .notFound, .exists, .invalidArgument, .invalidState, .unsupported:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func waitForGuestProcessCommandAck(
+        fd: Int32,
+        expectedExecutionID: String,
+        operation: String,
+        timeoutSeconds: TimeInterval
+    ) throws -> MacOSGuestProcessStatusPayload? {
+        let deadline = sidecarReadDeadline(timeoutSeconds: timeoutSeconds)
+        do {
+            while true {
+                let frame = try MacOSSidecarSocketIO.readJSONFrame(
+                    SidecarGuestAgentFrame.self,
+                    fd: fd,
+                    timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+                )
+                switch frame.type {
+                case .ack:
+                    guard frame.id == expectedExecutionID else {
+                        throw ContainerizationError(
+                            .internalError,
+                            message:
+                                "durable process \(operation) ack ID mismatch (expected=\(expectedExecutionID) actual=\(frame.id ?? "nil"))"
+                        )
+                    }
+                    return try frame.data.map {
+                        try JSONDecoder().decode(MacOSGuestProcessStatusPayload.self, from: $0)
+                    }
+                case .error:
+                    throw guestProcessCommandError(frame, operation: operation)
+                case .stdout, .stderr, .exit, .ready:
+                    continue
+                case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
+                    .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
+                    .fsReadChunk, .fsReadEnd, .fsListDir:
+                    continue
+                }
+            }
+        } catch  where isSidecarReadTimeout(error) {
+            throw ContainerizationError(
+                .timeout,
+                message: "timed out waiting for durable process \(operation) ack for \(expectedExecutionID)"
+            )
+        }
+    }
+
+    private func guestProcessCommandError(
+        _ frame: SidecarGuestAgentFrame,
+        operation: String
+    ) -> ContainerizationError {
+        let message = frame.message ?? "unknown guest-agent error"
+        let code: ContainerizationError.Code
+        if let errorCode = frame.errorCode {
+            switch errorCode {
+            case ENOENT:
+                code = .notFound
+            case EEXIST:
+                code = .exists
+            case EINVAL:
+                code = .invalidArgument
+            case ESTALE, EPERM:
+                code = .invalidState
+            case EBUSY:
+                code = .interrupted
+            default:
+                code = .internalError
+            }
+        } else {
+            // Compatibility fallback for guest agents predating structured
+            // errno frames. Structured errorCode always takes precedence.
+            let lowered = message.lowercased()
+            if lowered.contains("not found") || lowered.contains("code=2") {
+                code = .notFound
+            } else if lowered.contains("conflict") || lowered.contains("already exists") {
+                code = .exists
+            } else {
+                code = .internalError
+            }
+        }
+        return ContainerizationError(
+            code,
+            message: "guest-agent durable process \(operation) failed: \(message)"
+        )
     }
 
     private func guestExecutableLaunch(executable: String, arguments: [String]) -> (executable: String, arguments: [String]) {
@@ -2302,22 +4083,52 @@ final class SidecarControlServer: @unchecked Sendable {
         return ("/usr/bin/env", [executable] + arguments)
     }
 
-    private func startProcessReadLoop(_ session: ProcessStreamSession, initialFrames: [SidecarGuestAgentFrame] = []) {
+    @discardableResult
+    private func startProcessReadLoop(
+        _ session: ProcessStreamSession,
+        connection: ProcessStreamConnection,
+        initialFrames: [SidecarGuestAgentFrame] = []
+    ) -> Bool {
+        guard session.claimReader(connection) else { return false }
         Thread.detachNewThread { [weak self] in
-            self?.processReadLoop(session, initialFrames: initialFrames)
+            guard let self else {
+                Darwin.close(connection.readerFD)
+                return
+            }
+            self.processReadLoop(session, connection: connection, initialFrames: initialFrames)
         }
+        return true
     }
 
-    private func processReadLoop(_ session: ProcessStreamSession, initialFrames: [SidecarGuestAgentFrame] = []) {
+    private func processReadLoop(
+        _ session: ProcessStreamSession,
+        connection: ProcessStreamConnection,
+        initialFrames: [SidecarGuestAgentFrame] = []
+    ) {
         let processID = session.processID
         var exitEmitted = false
         var pendingExitCode: Int32?
+        var pendingExitSequence: UInt64?
         var bufferedFrames = ArraySlice(initialFrames)
+        defer { Darwin.close(connection.readerFD) }
         defer {
-            closeProcessStreamSession(session)
-            _ = removeProcessSession(processID)
-            if !exitEmitted {
-                emitEvent(.init(event: .processExit, processID: processID, exitCode: pendingExitCode ?? 1))
+            let detached = session.durable && exitEmitted ? false : session.detach(connection)
+            if session.durable {
+                if detached, !exitEmitted {
+                    scheduleProcessReconnect(session)
+                }
+            } else {
+                _ = removeProcessSession(processID, matching: session)
+                if !exitEmitted {
+                    emitEvent(
+                        .init(
+                            event: .processExit,
+                            processID: processID,
+                            exitCode: pendingExitCode ?? 1,
+                            sequence: pendingExitSequence
+                        )
+                    )
+                }
             }
         }
 
@@ -2328,44 +4139,146 @@ final class SidecarControlServer: @unchecked Sendable {
                     frame = bufferedFrame
                     bufferedFrames.removeFirst()
                 } else if pendingExitCode == nil {
-                    frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: session.fd)
+                    frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: connection.readerFD)
                 } else {
-                    guard let drained = try readProcessFrameIfAvailable(fd: session.fd, timeoutMilliseconds: 100) else {
-                        emitEvent(.init(event: .processExit, processID: processID, exitCode: pendingExitCode))
+                    guard let drained = try readProcessFrameIfAvailable(fd: connection.readerFD, timeoutMilliseconds: 100) else {
+                        session.markTerminal()
+                        emitProcessEvent(
+                            .init(
+                                event: .processExit,
+                                processID: processID,
+                                exitCode: pendingExitCode,
+                                sequence: pendingExitSequence
+                            ),
+                            session: session,
+                            sequence: pendingExitSequence
+                        )
                         exitEmitted = true
                         return
                     }
                     frame = drained
                 }
+                if session.durable {
+                    guard frame.id == session.guestProcessID else {
+                        if frame.type == .stdout || frame.type == .stderr || frame.type == .exit {
+                            emitEvent(
+                                .init(
+                                    event: .processError,
+                                    processID: processID,
+                                    message: "durable process event identifier mismatch"
+                                )
+                            )
+                        }
+                        continue
+                    }
+                    if frame.type == .stdout || frame.type == .stderr || frame.type == .exit {
+                        guard session.reserve(sequence: frame.sequence) else { continue }
+                    }
+                }
                 switch frame.type {
                 case .stdout:
                     if let data = frame.data, !data.isEmpty {
-                        emitEvent(.init(event: .processStdout, processID: processID, data: data))
+                        emitProcessEvent(
+                            .init(
+                                event: .processStdout,
+                                processID: processID,
+                                data: data,
+                                sequence: frame.sequence
+                            ),
+                            session: session,
+                            sequence: frame.sequence
+                        )
+                    } else {
+                        acknowledgeProcessEvent(session: session, sequence: frame.sequence)
                     }
                 case .stderr:
                     if let data = frame.data, !data.isEmpty {
-                        emitEvent(.init(event: .processStderr, processID: processID, data: data))
+                        emitProcessEvent(
+                            .init(
+                                event: .processStderr,
+                                processID: processID,
+                                data: data,
+                                sequence: frame.sequence
+                            ),
+                            session: session,
+                            sequence: frame.sequence
+                        )
+                    } else {
+                        acknowledgeProcessEvent(session: session, sequence: frame.sequence)
                     }
                 case .error:
                     emitEvent(.init(event: .processError, processID: processID, message: frame.message ?? "unknown guest-agent error"))
                 case .exit:
                     pendingExitCode = frame.exitCode ?? 1
+                    pendingExitSequence = frame.sequence
                 case .ready:
                     continue
-                case .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
-                    .fsListDir:
+                case .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
+                    .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
+                    .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
             }
         } catch {
             if let pendingExitCode, isExpectedEOF(error) {
-                emitEvent(.init(event: .processExit, processID: processID, exitCode: pendingExitCode))
+                session.markTerminal()
+                emitProcessEvent(
+                    .init(
+                        event: .processExit,
+                        processID: processID,
+                        exitCode: pendingExitCode,
+                        sequence: pendingExitSequence
+                    ),
+                    session: session,
+                    sequence: pendingExitSequence
+                )
                 exitEmitted = true
                 return
             }
-            if !isExpectedEOF(error) {
+            if session.durable {
+                log.warning(
+                    "durable process stream detached",
+                    metadata: [
+                        "process_id": "\(processID)",
+                        "execution_id": "\(session.guestProcessID)",
+                        "cursor": "\(session.deliveredCursor())",
+                        "error": "\(error)",
+                    ]
+                )
+            } else if !isExpectedEOF(error) {
                 emitEvent(.init(event: .processError, processID: processID, message: "sidecar process stream read failed: \(error.localizedDescription)"))
             }
+        }
+    }
+
+    @discardableResult
+    private func emitProcessEvent(
+        _ event: MacOSSidecarEvent,
+        session: ProcessStreamSession,
+        sequence: UInt64?
+    ) -> Bool {
+        emitEvent(event) { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.acknowledgeProcessEvent(session: session, sequence: sequence)
+        }
+    }
+
+    private func acknowledgeProcessEvent(
+        session: ProcessStreamSession,
+        sequence: UInt64?
+    ) {
+        do {
+            try session.acknowledgeDeliveredEvent(sequence: sequence)
+        } catch {
+            log.warning(
+                "failed to forward durable process event acknowledgement",
+                metadata: [
+                    "process_id": "\(session.processID)",
+                    "execution_id": "\(session.guestProcessID)",
+                    "sequence": "\(sequence.map(String.init) ?? "-")",
+                    "error": "\(error)",
+                ]
+            )
         }
     }
 
@@ -2373,42 +4286,34 @@ final class SidecarControlServer: @unchecked Sendable {
         fd: Int32,
         expectedProcessID: String,
         timeoutSeconds: TimeInterval
-    ) throws -> [SidecarGuestAgentFrame] {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = ResultBox<[SidecarGuestAgentFrame]>()
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                box.result = .success(try self.readProcessStartAck(fd: fd, expectedProcessID: expectedProcessID))
-            } catch {
-                box.result = .failure(error)
-            }
-            semaphore.signal()
-        }
-
-        if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
+    ) throws -> ProcessStartHandshake {
+        let deadline = sidecarReadDeadline(timeoutSeconds: timeoutSeconds)
+        do {
+            return try readProcessStartAck(
+                fd: fd,
+                expectedProcessID: expectedProcessID,
+                deadlineUptimeNanoseconds: deadline
+            )
+        } catch  where isSidecarReadTimeout(error) {
             throw ContainerizationError(
                 .timeout,
                 message: "timed out waiting for guest-agent process start ack for \(expectedProcessID)"
             )
         }
-        switch box.result {
-        case .success(let frames)?:
-            return frames
-        case .failure(let error)?:
-            throw error
-        case nil:
-            throw ContainerizationError(
-                .internalError,
-                message: "guest-agent process start ack wait finished without result for \(expectedProcessID)"
-            )
-        }
     }
 
-    private func readProcessStartAck(fd: Int32, expectedProcessID: String) throws -> [SidecarGuestAgentFrame] {
+    private func readProcessStartAck(
+        fd: Int32,
+        expectedProcessID: String,
+        deadlineUptimeNanoseconds: UInt64
+    ) throws -> ProcessStartHandshake {
         var bufferedFrames: [SidecarGuestAgentFrame] = []
         while true {
-            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(
+                SidecarGuestAgentFrame.self,
+                fd: fd,
+                timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadlineUptimeNanoseconds)
+            )
             switch frame.type {
             case .ack:
                 guard frame.id == expectedProcessID else {
@@ -2417,12 +4322,12 @@ final class SidecarControlServer: @unchecked Sendable {
                         message: "guest-agent process start ack ID mismatch (expected=\(expectedProcessID) actual=\(frame.id ?? "nil"))"
                     )
                 }
-                return bufferedFrames
+                let status = try frame.data.map {
+                    try JSONDecoder().decode(MacOSGuestProcessStatusPayload.self, from: $0)
+                }
+                return .init(bufferedFrames: bufferedFrames, status: status)
             case .error:
-                throw ContainerizationError(
-                    .invalidArgument,
-                    message: "guest-agent failed to start process \(expectedProcessID): \(frame.message ?? "unknown error")"
-                )
+                throw guestProcessCommandError(frame, operation: "start")
             case .exit:
                 throw ContainerizationError(
                     .internalError,
@@ -2432,17 +4337,20 @@ final class SidecarControlServer: @unchecked Sendable {
                 bufferedFrames.append(frame)
             case .ready:
                 continue
-            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+            case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
+                .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
+                .fsReadEnd, .fsListDir:
                 continue
             }
         }
     }
 
     private func readProcessFrameIfAvailable(fd: Int32, timeoutMilliseconds: Int32) throws -> SidecarGuestAgentFrame? {
+        let deadline = sidecarReadDeadline(timeoutSeconds: Double(timeoutMilliseconds) / 1_000)
         var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
         while true {
             let result = withUnsafeMutablePointer(to: &descriptor) { pointer in
-                Darwin.poll(pointer, 1, timeoutMilliseconds)
+                Darwin.poll(pointer, 1, (try? sidecarRemainingReadMilliseconds(until: deadline)) ?? 0)
             }
 
             if result == 0 {
@@ -2450,7 +4358,11 @@ final class SidecarControlServer: @unchecked Sendable {
             }
             if result > 0 {
                 if descriptor.revents & Int16(POLLIN) != 0 {
-                    return try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+                    return try MacOSSidecarSocketIO.readJSONFrame(
+                        SidecarGuestAgentFrame.self,
+                        fd: fd,
+                        timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+                    )
                 }
                 if descriptor.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
                     return nil
@@ -2489,7 +4401,9 @@ final class SidecarControlServer: @unchecked Sendable {
                 )
             case .ready, .stdout, .stderr, .networkResult:
                 continue
-            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+            case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
+                .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                .fsListDir:
                 continue
             }
         }
@@ -2521,7 +4435,9 @@ final class SidecarControlServer: @unchecked Sendable {
                 )
             case .ready, .stdout, .stderr, .networkResult:
                 continue
-            case .exec, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+            case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
+                .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                .fsListDir:
                 continue
             }
         }
@@ -2549,44 +4465,30 @@ final class SidecarControlServer: @unchecked Sendable {
         logFS(message, txID: session.txID, op: session.op, path: session.path, extra: extra)
     }
 
-    private func waitForGuestAgentReadyWithTimeout(fd: Int32, timeoutSeconds: TimeInterval) throws {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = ResultBox<Void>()
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                while true {
-                    let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
-                    switch frame.type {
-                    case .ready:
-                        box.result = .success(())
-                        semaphore.signal()
-                        return
-                    case .error:
-                        throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
-                    case .exit:
-                        throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
-                    case .stdout, .stderr, .ack, .exec, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
-                        .fsReadEnd, .fsListDir:
-                        continue
-                    }
+    private func waitForGuestAgentReadyWithTimeout(fd: Int32, timeoutSeconds: TimeInterval) throws -> Set<String> {
+        let deadline = sidecarReadDeadline(timeoutSeconds: timeoutSeconds)
+        do {
+            while true {
+                let frame = try MacOSSidecarSocketIO.readJSONFrame(
+                    SidecarGuestAgentFrame.self,
+                    fd: fd,
+                    timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+                )
+                switch frame.type {
+                case .ready:
+                    return Set(frame.capabilities ?? [])
+                case .error:
+                    throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
+                case .exit:
+                    throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
+                case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
+                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult,
+                    .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+                    continue
                 }
-            } catch {
-                box.result = .failure(error)
-                semaphore.signal()
             }
-        }
-
-        if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
+        } catch  where isSidecarReadTimeout(error) {
             throw ContainerizationError(.timeout, message: "timed out waiting for guest-agent ready frame")
-        }
-        switch box.result {
-        case .success?:
-            return
-        case .failure(let error)?:
-            throw error
-        case nil:
-            throw ContainerizationError(.internalError, message: "guest-agent ready wait finished without result")
         }
     }
 
@@ -2667,7 +4569,9 @@ final class SidecarControlServer: @unchecked Sendable {
                 return failureResponse(requestID: requestID, error: error)
             }
         case .eventsSubscribe:
-            guard subscribeEventClient(fd: clientFD) else {
+            let acknowledgementRequired = request.protocolVersion == MacOSSidecarProtocolVersion.durableEventAcknowledgement
+            let subscription = subscribeEventClient(fd: clientFD, acknowledgementRequired: acknowledgementRequired)
+            guard subscription.claimed else {
                 return .failure(
                     requestID: requestID,
                     code: "eventClientAlreadySubscribed",
@@ -2675,10 +4579,42 @@ final class SidecarControlServer: @unchecked Sendable {
                     protocolVersion: MacOSSidecarProtocolVersion.current
                 )
             }
+            let data = try subscription.subscriptionID.map {
+                try JSONEncoder().encode(MacOSSidecarEventSubscription(subscriptionID: $0))
+            }
             return .success(
                 requestID: requestID,
+                data: data,
                 protocolVersion: MacOSSidecarProtocolVersion.current
             )
+        case .eventsAcknowledge:
+            guard let acknowledgement = request.eventAcknowledgement else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "missing eventAcknowledgement payload",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            guard !acknowledgement.subscriptionID.isEmpty, !acknowledgement.processID.isEmpty,
+                acknowledgement.sequence > 0
+            else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "event acknowledgement requires non-empty identities and a positive sequence",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            do {
+                try eventDelivery.acknowledge(acknowledgement, from: clientFD)
+                return .success(
+                    requestID: requestID,
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
         case .processStart:
             guard let exec = request.exec else {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing exec payload")
@@ -2688,8 +4624,33 @@ final class SidecarControlServer: @unchecked Sendable {
             }
             let port = request.port ?? 27000
             do {
+                let admission = try syncValue {
+                    try await self.service.acquireProcessStartAdmission()
+                }
+                defer {
+                    _ = try? syncValue {
+                        await self.service.releaseProcessStartAdmission(admission)
+                    }
+                }
                 try startProcessStream(port: port, processID: processID, exec: exec)
                 return .success(requestID: requestID)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .processInspect:
+            guard let exec = request.exec else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing exec payload")
+            }
+            guard let processID = request.processID, !processID.isEmpty else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
+            }
+            do {
+                let status = try inspectDurableProcess(
+                    port: request.port ?? 27_000,
+                    processID: processID,
+                    exec: exec
+                )
+                return .success(requestID: requestID, data: try JSONEncoder().encode(status))
             } catch {
                 return failureResponse(requestID: requestID, error: error)
             }
@@ -2701,8 +4662,8 @@ final class SidecarControlServer: @unchecked Sendable {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing data")
             }
             do {
-                try sendProcessControlFrame(processID: processID) { _ in
-                    SidecarGuestAgentFrame.stdin(id: processID, data: data)
+                try sendProcessControlFrame(processID: processID) { session in
+                    SidecarGuestAgentFrame.stdin(id: session.guestProcessID, data: data)
                 }
                 return .success(requestID: requestID)
             } catch {
@@ -2713,7 +4674,22 @@ final class SidecarControlServer: @unchecked Sendable {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
             }
             do {
-                try sendProcessControlFrame(processID: processID) { _ in SidecarGuestAgentFrame.close(id: processID) }
+                try sendProcessControlFrame(processID: processID) { session in
+                    SidecarGuestAgentFrame.close(id: session.guestProcessID)
+                }
+                return .success(requestID: requestID)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .processDelete:
+            guard let identity = request.durableProcessDeleteIdentity else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing durable process delete identity")
+            }
+            if let processID = request.processID, processID != identity.executionID {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "durable process delete identities disagree")
+            }
+            do {
+                try deleteDurableProcess(port: request.port ?? 27000, identity: identity)
                 return .success(requestID: requestID)
             } catch {
                 return failureResponse(requestID: requestID, error: error)
@@ -2726,10 +4702,10 @@ final class SidecarControlServer: @unchecked Sendable {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing signal")
             }
             do {
-                try sendProcessControlFrame(processID: processID) { _ in
+                try sendProcessControlFrame(processID: processID) { session in
                     .init(
                         type: .signal,
-                        id: processID,
+                        id: session.guestProcessID,
                         executable: nil,
                         arguments: nil,
                         environment: nil,
@@ -2755,10 +4731,10 @@ final class SidecarControlServer: @unchecked Sendable {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing width/height")
             }
             do {
-                try sendProcessControlFrame(processID: processID) { _ in
+                try sendProcessControlFrame(processID: processID) { session in
                     .init(
                         type: .resize,
-                        id: processID,
+                        id: session.guestProcessID,
                         executable: nil,
                         arguments: nil,
                         environment: nil,
@@ -2918,6 +4894,23 @@ final class SidecarControlServer: @unchecked Sendable {
                     protocolVersion: MacOSSidecarProtocolVersion.current
                 )
             }
+        case .vmDeleteMachineState:
+            guard let stateID = request.machineState?.stateID else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "missing machineState.stateID",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            return try sync(requestID: requestID) {
+                let result = try await service.deleteMachineState(stateID: stateID)
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
         case .vmCompatibilityDescription:
             return try sync(requestID: requestID) {
                 let result = try await service.compatibilityDescription(stateID: request.machineState?.stateID)
@@ -2974,7 +4967,46 @@ final class SidecarControlServer: @unchecked Sendable {
         }
 
         switch request.method {
-        case .eventsSubscribe, .vmPause, .vmResume, .vmSaveMachineState, .vmRestoreMachineState,
+        case .processDelete:
+            guard request.protocolVersion == MacOSSidecarProtocolVersion.durableProcessIdentity else {
+                return SidecarRPCError(
+                    code: "protocolVersionMismatch",
+                    message:
+                        "method \(request.method.rawValue) requires sidecar protocol version \(MacOSSidecarProtocolVersion.durableProcessIdentity)",
+                    metadata: [
+                        "requestedVersion": request.protocolVersion.map(String.init) ?? "legacy-unversioned",
+                        "requiredVersion": "\(MacOSSidecarProtocolVersion.durableProcessIdentity)",
+                    ]
+                )
+            }
+        case .eventsAcknowledge:
+            guard request.protocolVersion == MacOSSidecarProtocolVersion.durableEventAcknowledgement else {
+                return SidecarRPCError(
+                    code: "protocolVersionMismatch",
+                    message:
+                        "method \(request.method.rawValue) requires sidecar protocol version \(MacOSSidecarProtocolVersion.durableEventAcknowledgement)",
+                    metadata: [
+                        "requestedVersion": request.protocolVersion.map(String.init) ?? "legacy-unversioned",
+                        "requiredVersion": "\(MacOSSidecarProtocolVersion.durableEventAcknowledgement)",
+                    ]
+                )
+            }
+        case .eventsSubscribe:
+            guard
+                request.protocolVersion == MacOSSidecarProtocolVersion.machineState
+                    || request.protocolVersion == MacOSSidecarProtocolVersion.durableEventAcknowledgement
+            else {
+                return SidecarRPCError(
+                    code: "protocolVersionMismatch",
+                    message: "method \(request.method.rawValue) requires sidecar protocol version 2 or 3",
+                    metadata: [
+                        "requestedVersion": request.protocolVersion.map(String.init) ?? "legacy-unversioned",
+                        "requiredVersion":
+                            "\(MacOSSidecarProtocolVersion.machineState),\(MacOSSidecarProtocolVersion.durableEventAcknowledgement)",
+                    ]
+                )
+            }
+        case .vmPause, .vmResume, .vmSaveMachineState, .vmRestoreMachineState, .vmDeleteMachineState,
             .vmCompatibilityDescription:
             guard request.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
                 return SidecarRPCError(
@@ -2986,7 +5018,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     ]
                 )
             }
-        case .vmBootstrapStart, .vmShowGUI, .vmConnectVsock, .processStart, .processStdin, .processSignal,
+        case .vmBootstrapStart, .vmShowGUI, .vmConnectVsock, .processStart, .processInspect, .processStdin, .processSignal,
             .processResize, .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
             .fsListDir, .vmCapabilities, .vmStop, .sidecarQuit, .unknown:
             break
@@ -3043,8 +5075,8 @@ extension MacOSSidecarMethod {
         case .vmBootstrapStart, .vmShowGUI, .processStart, .processStdin, .processSignal, .processResize,
             .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
             true
-        case .eventsSubscribe, .vmConnectVsock, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
-            .vmRestoreMachineState, .vmCompatibilityDescription, .vmStop, .sidecarQuit, .unknown:
+        case .eventsSubscribe, .eventsAcknowledge, .vmConnectVsock, .processInspect, .processDelete, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
+            .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmStop, .sidecarQuit, .unknown:
             false
         }
     }

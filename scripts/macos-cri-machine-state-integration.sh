@@ -21,9 +21,13 @@ Usage: scripts/macos-cri-machine-state-integration.sh
 
 Runs the Kubernetes CRI machine-state safety boundary on a real macOS node:
 starts a counter workload on an NBD root disk, calls protocol v2 capability,
-pause/save/resume through the stable sidecar socket, deletes the Pod, and
-verifies that a new Pod UID requesting restore is rejected before sandbox or
-container start with criWorkloadAdoptionUnavailable.
+exercises pause/resume through the stable sidecar socket, saves while paused,
+deletes the Pod, and restores the same durable workload into a new Pod UID with
+the next writable storage generation. The check requires the restored Pod and
+container to become ready and verifies that the guest PID and counter continue.
+The counter process keeps its random boot token and counter only in process
+memory and emits continuity samples to stdout. It never writes either value to
+the VM filesystem. Restore must preserve the token, PID, and advancing counter.
 
 Required environment:
   MACOS_CRI_MACHINE_STATE_NODE          Kubernetes node name
@@ -36,6 +40,18 @@ Optional environment:
   MACOS_CRI_MACHINE_STATE_RUNTIME_CLASS RuntimeClass (default: macos)
   MACOS_CRI_MACHINE_STATE_CONTROL_ROOT  sidecar socket root (default: /var/run/container/machine-state/v1)
   MACOS_CRI_MACHINE_STATE_TIMEOUT       wait timeout (default: 180s)
+  MACOS_CRI_MACHINE_STATE_PREPARE_RESTORE_HELPER
+                                        absolute executable invoked after the old Pod is removed;
+                                        receives NBD socket, state ID, saved generation, new generation
+  MACOS_CRI_MACHINE_STATE_ALLOW_IN_PLACE_RESTORE
+                                        set to true only for a runtime-only check that reuses the
+                                        quiesced disk instead of validating snapshot/clone (default: false)
+
+The NBD socket path is part of the saved VM configuration and must remain
+stable. Before the restore Pod is created, its backing service must expose a
+writable disk generation cloned from the disk point paired with the saved
+machine state. This script performs no storage snapshot, clone, or export
+switching itself.
 EOF
 }
 
@@ -63,11 +79,28 @@ NAMESPACE="${MACOS_CRI_MACHINE_STATE_NAMESPACE:-default}"
 RUNTIME_CLASS="${MACOS_CRI_MACHINE_STATE_RUNTIME_CLASS:-macos}"
 CONTROL_ROOT="${MACOS_CRI_MACHINE_STATE_CONTROL_ROOT:-/var/run/container/machine-state/v1}"
 WAIT_TIMEOUT="${MACOS_CRI_MACHINE_STATE_TIMEOUT:-180s}"
+PREPARE_RESTORE_HELPER="${MACOS_CRI_MACHINE_STATE_PREPARE_RESTORE_HELPER:-}"
+ALLOW_IN_PLACE_RESTORE="${MACOS_CRI_MACHINE_STATE_ALLOW_IN_PLACE_RESTORE:-false}"
+if [[ "${ALLOW_IN_PLACE_RESTORE}" != "true" && "${ALLOW_IN_PLACE_RESTORE}" != "false" ]]; then
+    echo "MACOS_CRI_MACHINE_STATE_ALLOW_IN_PLACE_RESTORE must be true or false" >&2
+    exit 2
+fi
+if [[ -n "${PREPARE_RESTORE_HELPER}" ]]; then
+    if [[ "${PREPARE_RESTORE_HELPER}" != /* || ! -x "${PREPARE_RESTORE_HELPER}" ]]; then
+        echo "MACOS_CRI_MACHINE_STATE_PREPARE_RESTORE_HELPER must be an absolute executable path" >&2
+        exit 2
+    fi
+elif [[ "${ALLOW_IN_PLACE_RESTORE}" != "true" ]]; then
+    echo "set MACOS_CRI_MACHINE_STATE_PREPARE_RESTORE_HELPER for storage validation, or explicitly allow an in-place runtime-only restore" >&2
+    exit 2
+fi
 SUFFIX="$(date +%s)-$$"
 POD_NAME="machine-state-${SUFFIX}"
 RESTORE_POD_NAME="machine-state-restore-${SUFFIX}"
 PERSISTENCE_ID="cri-integration-${SUFFIX}"
 STATE_ID="checkpoint-${SUFFIX}"
+SAVED_STORAGE_GENERATION=1
+RESTORE_STORAGE_GENERATION=$((SAVED_STORAGE_GENERATION + 1))
 CONTROL_SOCKET="${CONTROL_ROOT}/${PERSISTENCE_ID}.sock"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/container-cri-machine-state.XXXXXX")"
 INITIAL_MANIFEST="${TEMP_ROOT}/initial.json"
@@ -83,14 +116,18 @@ trap cleanup EXIT
 make_manifest() {
     local output=$1
     local name=$2
-    local restore_state=${3:-}
+    local storage_generation=$3
+    local restore_state=${4:-}
+    local restore_generation=${5:-}
     POD_NAME_VALUE="${name}" \
         NODE_VALUE="${NODE}" \
         IMAGE_VALUE="${IMAGE}" \
         RUNTIME_CLASS_VALUE="${RUNTIME_CLASS}" \
         PERSISTENCE_ID_VALUE="${PERSISTENCE_ID}" \
         NBD_SOCKET_VALUE="${NBD_SOCKET}" \
+        STORAGE_GENERATION_VALUE="${storage_generation}" \
         RESTORE_STATE_VALUE="${restore_state}" \
+        RESTORE_GENERATION_VALUE="${restore_generation}" \
         python3 - "${output}" <<'PY'
 import json
 import os
@@ -99,10 +136,12 @@ import sys
 annotations = {
     "io.container.runtime.macos.machine-state.v1/enabled": "true",
     "io.container.runtime.macos.machine-state.v1/persistence-id": os.environ["PERSISTENCE_ID_VALUE"],
+    "io.container.runtime.macos.machine-state.v1/storage-generation": os.environ["STORAGE_GENERATION_VALUE"],
     "io.container.runtime.macos.machine-state.v1/block-devices": json.dumps(
         [{
             "identifier": "root",
             "unixSocket": os.environ["NBD_SOCKET_VALUE"],
+            "exportName": "root",
             "readOnly": False,
             "timeoutSeconds": 30,
         }],
@@ -111,6 +150,9 @@ annotations = {
 }
 if os.environ["RESTORE_STATE_VALUE"]:
     annotations["io.container.runtime.macos.machine-state.v1/restore-state-id"] = os.environ["RESTORE_STATE_VALUE"]
+    annotations["io.container.runtime.macos.machine-state.v1/restore-state-generation"] = os.environ[
+        "RESTORE_GENERATION_VALUE"
+    ]
 
 manifest = {
     "apiVersion": "v1",
@@ -126,7 +168,10 @@ manifest = {
             "image": os.environ["IMAGE_VALUE"],
             "command": ["/bin/sh", "-lc"],
             "args": [
-                "n=0; while :; do n=$((n+1)); echo $n | tee /tmp/container-machine-state-counter; sleep 1; done"
+                "boot_token=$(/usr/bin/uuidgen) || exit 1; "
+                "n=0; while :; do n=$((n+1)); "
+                "printf 'machine-state-sample:%s:%s:%s\\n' \"$boot_token\" \"$$\" \"$n\"; "
+                "sleep 1; done"
             ],
         }],
     },
@@ -191,75 +236,169 @@ wait_for_control_socket() {
     done
 }
 
-make_manifest "${INITIAL_MANIFEST}" "${POD_NAME}"
+read_process_sample() {
+    local pod_name=$1
+    local deadline=$((SECONDS + 180))
+    local line
+    local logs
+    local sample
+    while :; do
+        logs="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" logs "${pod_name}" \
+            --container counter --tail=128 2>/dev/null || true)"
+        sample=""
+        while IFS= read -r line; do
+            if [[ "${line}" =~ ^machine-state-sample:([[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}):([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
+                sample="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}:${BASH_REMATCH[3]}"
+            fi
+        done <<<"${logs}"
+        if [[ -n "${sample}" ]]; then
+            printf '%s\n' "${sample}"
+            return
+        fi
+        if ((SECONDS >= deadline)); then
+            echo "timed out waiting for an in-memory process sample in logs for ${pod_name}" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+}
+
+wait_for_advanced_process_sample() {
+    local pod_name=$1
+    local baseline=$2
+    local deadline=$((SECONDS + 180))
+    local sample
+    while :; do
+        sample="$(read_process_sample "${pod_name}")"
+        if [[ "$(sample_boot_token "${sample}")" != "$(sample_boot_token "${baseline}")" \
+            || "$(sample_pid "${sample}")" != "$(sample_pid "${baseline}")" ]]; then
+            echo "guest process identity changed: baseline=${baseline} observed=${sample}" >&2
+            exit 1
+        fi
+        if (( $(sample_counter "${sample}") > $(sample_counter "${baseline}") )); then
+            printf '%s\n' "${sample}"
+            return
+        fi
+        if ((SECONDS >= deadline)); then
+            echo "timed out waiting for guest process progress: baseline=${baseline} observed=${sample}" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+}
+
+sample_boot_token() {
+    printf '%s\n' "${1%%:*}"
+}
+
+sample_pid() {
+    local remainder=${1#*:}
+    printf '%s\n' "${remainder%%:*}"
+}
+
+sample_counter() {
+    printf '%s\n' "${1##*:}"
+}
+
+require_running_pod() {
+    local pod_name=$1
+    local phase
+    phase="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get pod "${pod_name}" \
+        -o jsonpath='{.status.phase}')"
+    if [[ "${phase}" != "Running" ]]; then
+        echo "Pod ${pod_name} is Ready but has unexpected phase ${phase}" >&2
+        exit 1
+    fi
+}
+
+container_id() {
+    local pod_name=$1
+    local id
+    id="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get pod "${pod_name}" \
+        -o jsonpath='{.status.containerStatuses[0].containerID}')"
+    if [[ -z "${id}" ]]; then
+        echo "Pod ${pod_name} has no CRI container ID" >&2
+        exit 1
+    fi
+    printf '%s\n' "${id}"
+}
+
+make_manifest "${INITIAL_MANIFEST}" "${POD_NAME}" "${SAVED_STORAGE_GENERATION}"
 "${KUBECTL_BIN}" --namespace "${NAMESPACE}" apply -f "${INITIAL_MANIFEST}" >/dev/null
 "${KUBECTL_BIN}" --namespace "${NAMESPACE}" wait pod/"${POD_NAME}" --for=condition=Ready --timeout="${WAIT_TIMEOUT}"
+require_running_pod "${POD_NAME}"
 INITIAL_UID="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get pod "${POD_NAME}" -o jsonpath='{.metadata.uid}')"
+INITIAL_CONTAINER_ID="$(container_id "${POD_NAME}")"
 wait_for_control_socket
 
 sidecar_rpc vm.capabilities >/dev/null
-COUNTER_BEFORE="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" exec "${POD_NAME}" -- cat /tmp/container-machine-state-counter)"
+SAMPLE_BEFORE="$(read_process_sample "${POD_NAME}")"
+sidecar_rpc vm.pause >/dev/null
+sidecar_rpc vm.resume >/dev/null
+SAMPLE_AFTER_RESUME="$(wait_for_advanced_process_sample "${POD_NAME}" "${SAMPLE_BEFORE}")"
+
+CHECKPOINT_SAMPLE="${SAMPLE_AFTER_RESUME}"
 sidecar_rpc vm.pause >/dev/null
 sidecar_rpc vm.saveMachineState "${STATE_ID}" >/dev/null
-sidecar_rpc vm.resume >/dev/null
-sleep 2
-COUNTER_AFTER="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" exec "${POD_NAME}" -- cat /tmp/container-machine-state-counter)"
-if ! [[ "${COUNTER_BEFORE}" =~ ^[0-9]+$ && "${COUNTER_AFTER}" =~ ^[0-9]+$ ]] \
-    || ((COUNTER_AFTER <= COUNTER_BEFORE)); then
-    echo "counter did not continue after short machine-state control connections: before=${COUNTER_BEFORE} after=${COUNTER_AFTER}" >&2
-    exit 1
-fi
-LOG_TAIL="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" logs "${POD_NAME}" --tail=1)"
-if ! [[ "${LOG_TAIL}" =~ ^[0-9]+$ ]]; then
-    echo "workload logs were not observable after machine-state control requests" >&2
-    exit 1
-fi
+
+echo "machine state ${STATE_ID} is committed with storage generation ${SAVED_STORAGE_GENERATION}; the VM remains paused" >&2
+echo "the stable NBD socket must now select a writable clone for storage generation ${RESTORE_STORAGE_GENERATION}" >&2
 
 "${KUBECTL_BIN}" --namespace "${NAMESPACE}" delete pod "${POD_NAME}" --wait --timeout="${WAIT_TIMEOUT}" >/dev/null
-make_manifest "${RESTORE_MANIFEST}" "${RESTORE_POD_NAME}" "${STATE_ID}"
+if [[ -n "${PREPARE_RESTORE_HELPER}" ]]; then
+    "${PREPARE_RESTORE_HELPER}" \
+        "${NBD_SOCKET}" \
+        "${STATE_ID}" \
+        "${SAVED_STORAGE_GENERATION}" \
+        "${RESTORE_STORAGE_GENERATION}"
+else
+    echo "warning: reusing the quiesced NBD backing; external snapshot, clone, and stale-writer fencing are not validated" >&2
+fi
+make_manifest \
+    "${RESTORE_MANIFEST}" \
+    "${RESTORE_POD_NAME}" \
+    "${RESTORE_STORAGE_GENERATION}" \
+    "${STATE_ID}" \
+    "${SAVED_STORAGE_GENERATION}"
 "${KUBECTL_BIN}" --namespace "${NAMESPACE}" apply -f "${RESTORE_MANIFEST}" >/dev/null
+if ! "${KUBECTL_BIN}" --namespace "${NAMESPACE}" wait pod/"${RESTORE_POD_NAME}" \
+    --for=condition=Ready --timeout="${WAIT_TIMEOUT}"; then
+    "${KUBECTL_BIN}" --namespace "${NAMESPACE}" describe pod "${RESTORE_POD_NAME}" >&2 || true
+    exit 1
+fi
 RESTORE_UID="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get pod "${RESTORE_POD_NAME}" -o jsonpath='{.metadata.uid}')"
 if [[ "${RESTORE_UID}" == "${INITIAL_UID}" ]]; then
     echo "recreated Pod unexpectedly reused UID ${RESTORE_UID}" >&2
     exit 1
 fi
+require_running_pod "${RESTORE_POD_NAME}"
+RESTORE_CONTAINER_ID="$(container_id "${RESTORE_POD_NAME}")"
+if [[ "${RESTORE_CONTAINER_ID}" == "${INITIAL_CONTAINER_ID}" ]]; then
+    echo "recreated Pod unexpectedly reused CRI container ID ${RESTORE_CONTAINER_ID}" >&2
+    exit 1
+fi
+if ! "${KUBECTL_BIN}" --namespace "${NAMESPACE}" exec "${RESTORE_POD_NAME}" \
+    --container counter -- /usr/bin/true; then
+    echo "first exec readiness probe failed for restored Pod ${RESTORE_POD_NAME}" >&2
+    exit 1
+fi
+RESTORED_SAMPLE="$(read_process_sample "${RESTORE_POD_NAME}")"
+RESTORED_SAMPLE_LATER="$(wait_for_advanced_process_sample "${RESTORE_POD_NAME}" "${RESTORED_SAMPLE}")"
 
-deadline=$((SECONDS + 180))
-while :; do
-    POD_JSON="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get pod "${RESTORE_POD_NAME}" -o json)"
-    if grep -F "criWorkloadAdoptionUnavailable" <<<"${POD_JSON}" >/dev/null; then
-        break
-    fi
-    EVENT_JSON="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get events \
-        --field-selector "involvedObject.uid=${RESTORE_UID}" -o json 2>/dev/null || true)"
-    if grep -F "criWorkloadAdoptionUnavailable" <<<"${EVENT_JSON}" >/dev/null; then
-        break
-    fi
-    POD_PHASE="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", {}).get("phase", ""))' <<<"${POD_JSON}")"
-    if [[ "${POD_PHASE}" == "Running" ]]; then
-        echo "restore request incorrectly reached Running without workload adoption" >&2
-        exit 1
-    fi
-    if ((SECONDS >= deadline)); then
-        echo "timed out waiting for structured CRI restore rejection" >&2
-        "${KUBECTL_BIN}" --namespace "${NAMESPACE}" describe pod "${RESTORE_POD_NAME}" >&2 || true
-        exit 1
-    fi
-    sleep 2
-done
-
-FINAL_JSON="$("${KUBECTL_BIN}" --namespace "${NAMESPACE}" get pod "${RESTORE_POD_NAME}" -o json)"
-CREATED_CONTAINER_COUNT="$(python3 -c '
-import json
-import sys
-
-pod = json.load(sys.stdin)
-statuses = pod.get("status", {}).get("containerStatuses", [])
-print(sum(bool(status.get("containerID")) for status in statuses))
-' <<<"${FINAL_JSON}")"
-if [[ "${CREATED_CONTAINER_COUNT}" != "0" ]]; then
-    echo "restore rejection occurred after a CRI container was created" >&2
+CHECKPOINT_PID="$(sample_pid "${CHECKPOINT_SAMPLE}")"
+RESTORED_PID="$(sample_pid "${RESTORED_SAMPLE}")"
+CHECKPOINT_BOOT_TOKEN="$(sample_boot_token "${CHECKPOINT_SAMPLE}")"
+RESTORED_BOOT_TOKEN="$(sample_boot_token "${RESTORED_SAMPLE}")"
+if [[ "${RESTORED_BOOT_TOKEN}" != "${CHECKPOINT_BOOT_TOKEN}" \
+    || "$(sample_boot_token "${RESTORED_SAMPLE_LATER}")" != "${CHECKPOINT_BOOT_TOKEN}" \
+    || "${RESTORED_PID}" != "${CHECKPOINT_PID}" \
+    || "$(sample_pid "${RESTORED_SAMPLE_LATER}")" != "${CHECKPOINT_PID}" ]]; then
+    echo "guest boot token or PID was not adopted across restore: checkpoint=${CHECKPOINT_SAMPLE} restored=${RESTORED_SAMPLE} later=${RESTORED_SAMPLE_LATER}" >&2
+    exit 1
+fi
+if (( $(sample_counter "${RESTORED_SAMPLE}") < $(sample_counter "${CHECKPOINT_SAMPLE}") )); then
+    echo "guest counter did not continue across restore: checkpoint=${CHECKPOINT_SAMPLE} restored=${RESTORED_SAMPLE} later=${RESTORED_SAMPLE_LATER}" >&2
     exit 1
 fi
 
-echo "machine-state save/resume advanced counter ${COUNTER_BEFORE}->${COUNTER_AFTER}; recreated Pod UID=${RESTORE_UID} was safely rejected with criWorkloadAdoptionUnavailable"
+echo "machine-state restore passed: pod UID ${INITIAL_UID}->${RESTORE_UID}, container ${INITIAL_CONTAINER_ID}->${RESTORE_CONTAINER_ID}, guest sample ${CHECKPOINT_SAMPLE}->${RESTORED_SAMPLE_LATER}"

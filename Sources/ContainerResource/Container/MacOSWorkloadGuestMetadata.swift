@@ -17,21 +17,27 @@
 import Foundation
 
 public struct MacOSWorkloadGuestMetadata: Sendable, Codable {
-    public static let schemaVersion = 1
+    public static let schemaVersion = 2
 
     public var schemaVersion: Int
     public var workloadImageDigest: String
     public var createdAt: String
     public var processConfiguration: ProcessConfiguration
+    public var executionID: String?
+    public var launchFingerprint: String?
 
     public init(
         workloadImageDigest: String,
         createdAt: String,
-        processConfiguration: ProcessConfiguration
+        processConfiguration: ProcessConfiguration,
+        executionID: String? = nil,
+        launchFingerprint: String? = nil
     ) {
         self.schemaVersion = Self.schemaVersion
         self.workloadImageDigest = workloadImageDigest
         self.createdAt = createdAt
         self.processConfiguration = processConfiguration
+        self.executionID = executionID
+        self.launchFingerprint = launchFingerprint
     }
 }

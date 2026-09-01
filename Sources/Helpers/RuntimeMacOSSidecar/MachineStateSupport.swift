@@ -23,6 +23,27 @@ import Logging
 import RuntimeMacOSSidecarShared
 @preconcurrency import Virtualization
 
+/// Normalizes path components without consulting the filesystem. Foundation's
+/// `standardizingPath` resolves Darwin's `/private/var` alias back to `/var`
+/// once the path exists, which would silently reintroduce a symbolic-link
+/// component into managed machine-state paths.
+func macOSLexicallyNormalizedAbsolutePath(_ path: String) -> String? {
+    guard path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
+    var components: [Substring] = []
+    for component in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
+        switch component {
+        case "", ".":
+            continue
+        case "..":
+            guard !components.isEmpty else { return nil }
+            components.removeLast()
+        default:
+            components.append(component)
+        }
+    }
+    return "/" + components.joined(separator: "/")
+}
+
 struct SidecarRPCError: Error, Sendable {
     let code: String
     let message: String
@@ -50,10 +71,18 @@ struct MacOSVMLifecycleCoordinator: Sendable {
     private(set) var state: MacOSVMRuntimeState = .created
     private(set) var activeStateID: String?
     private var inFlight: (operation: Operation, previous: MacOSVMRuntimeState, stateID: String?)?
+    private var processStartAdmissions: Set<UUID> = []
 
     /// Returns false when the requested operation is already satisfied.
     mutating func begin(_ operation: Operation, stateID: String? = nil) throws -> Bool {
         try ensureNoOperationInProgress()
+        guard processStartAdmissions.isEmpty else {
+            throw SidecarRPCError(
+                code: "operationInProgress",
+                message: "cannot \(operation.rawValue) VM while a process start is in progress",
+                metadata: ["lifecycleState": state.rawValue, "operation": "process.start"]
+            )
+        }
 
         let next: MacOSVMRuntimeState
         switch (operation, state) {
@@ -99,6 +128,48 @@ struct MacOSVMLifecycleCoordinator: Sendable {
         }
     }
 
+    mutating func acquireProcessStartAdmission() throws -> UUID {
+        try ensureNoOperationInProgress()
+        guard state == .running else {
+            throw SidecarRPCError(
+                code: "invalidLifecycleState",
+                message: "cannot start a process while lifecycle state is \(state.rawValue)",
+                metadata: ["lifecycleState": state.rawValue, "operation": "process.start"]
+            )
+        }
+        let token = UUID()
+        processStartAdmissions.insert(token)
+        return token
+    }
+
+    mutating func releaseProcessStartAdmission(_ token: UUID) {
+        processStartAdmissions.remove(token)
+    }
+
+    func ensureStateCanBeDeleted(_ stateID: String) throws {
+        if state == .paused || state == .resuming, activeStateID == stateID {
+            throw SidecarRPCError(
+                code: "machineStateInUse",
+                message: "cannot delete machine state \(stateID) before its restored VM has resumed",
+                metadata: ["lifecycleState": state.rawValue, "stateID": stateID]
+            )
+        }
+        if let inFlight,
+            inFlight.stateID == stateID,
+            inFlight.operation == .save || inFlight.operation == .restore
+        {
+            throw SidecarRPCError(
+                code: "operationInProgress",
+                message: "cannot delete machine state \(stateID) while VM operation \(inFlight.operation.rawValue) is in progress",
+                metadata: [
+                    "lifecycleState": state.rawValue,
+                    "operation": inFlight.operation.rawValue,
+                    "stateID": stateID,
+                ]
+            )
+        }
+    }
+
     mutating func complete(_ operation: Operation, succeeded: Bool) {
         guard let inFlight, inFlight.operation == operation else {
             state = .failed
@@ -137,6 +208,7 @@ struct MacOSMachineStateStore: Sendable {
     }
 
     struct StoredState: Sendable {
+        let directoryURL: URL
         let stateURL: URL
         let compatibility: MacOSMachineStateCompatibilityDescription
     }
@@ -145,7 +217,7 @@ struct MacOSMachineStateStore: Sendable {
     private let statesURL: URL
 
     init(runtimeRootURL: URL) {
-        rootURL = runtimeRootURL.standardizedFileURL
+        rootURL = Self.lexicalDirectoryURL(runtimeRootURL)
         statesURL = rootURL.appendingPathComponent("MachineStates", isDirectory: true)
     }
 
@@ -198,6 +270,30 @@ struct MacOSMachineStateStore: Sendable {
         try? FileManager.default.removeItem(at: reservation.directoryURL)
     }
 
+    func delete(stateID: String) throws -> Bool {
+        try Self.validateStateID(stateID)
+        try validateRuntimeRoot()
+        do {
+            try requireDirectory(statesURL)
+        } catch let error as POSIXError where error.code == .ENOENT {
+            return false
+        }
+
+        let directoryURL = statesURL.appendingPathComponent(stateID, isDirectory: true)
+        do {
+            try requireDirectory(directoryURL)
+        } catch let error as POSIXError where error.code == .ENOENT {
+            return false
+        }
+        try Self.rejectSymbolicLinks(below: statesURL, through: directoryURL)
+        do {
+            try FileManager.default.removeItem(at: directoryURL)
+            return true
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            return false
+        }
+    }
+
     func load(stateID: String) throws -> StoredState {
         try Self.validateStateID(stateID)
         try validateRuntimeRoot()
@@ -224,7 +320,36 @@ struct MacOSMachineStateStore: Sendable {
             MacOSMachineStateCompatibilityDescription.self,
             from: Data(contentsOf: manifestURL, options: .uncached)
         )
-        return StoredState(stateURL: stateURL, compatibility: compatibility)
+        return StoredState(directoryURL: directoryURL, stateURL: stateURL, compatibility: compatibility)
+    }
+
+    /// Creates the per-binding persistent root without creating any missing
+    /// ancestor. The CRI integration owns and protects the parent directory;
+    /// the sidecar only owns its binding-specific child.
+    static func preparePersistentRoot(at rootURL: URL, effectiveUserID: uid_t = geteuid()) throws {
+        let root = lexicalDirectoryURL(rootURL)
+        guard root.isFileURL, root.path.hasPrefix("/"), root.path != "/" else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state root must be absolute")
+        }
+        let parent = root.deletingLastPathComponent()
+        try requirePersistentDirectory(parent, effectiveUserID: effectiveUserID, requirePrivateMode: true)
+        try rejectAllSymbolicLinkComponents(through: parent)
+
+        var information = stat()
+        if lstat(root.path, &information) != 0 {
+            guard errno == ENOENT else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if mkdir(root.path, mode_t(0o700)) != 0 {
+                if errno != EEXIST {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                // A concurrent sidecar may have created the same binding root;
+                // validate it below instead of treating EEXIST as success.
+            }
+        }
+        try requirePersistentDirectory(root, effectiveUserID: effectiveUserID, requirePrivateMode: true)
+        try rejectAllSymbolicLinkComponents(through: root)
     }
 
     static func validateStateID(_ value: String) throws {
@@ -280,8 +405,8 @@ struct MacOSMachineStateStore: Sendable {
     }
 
     static func rejectSymbolicLinks(below rootURL: URL, through url: URL) throws {
-        let root = rootURL.standardizedFileURL
-        let candidate = url.standardizedFileURL
+        let root = lexicalDirectoryURL(rootURL)
+        let candidate = lexicalDirectoryURL(url)
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         guard candidate.path == root.path || candidate.path.hasPrefix(prefix) else {
             throw SidecarRPCError(code: "unsafeMachineStatePath", message: "managed path escapes the runtime root")
@@ -311,20 +436,62 @@ struct MacOSMachineStateStore: Sendable {
 
     private static func rejectSymbolicLinksInAbsolutePath(_ url: URL) throws {
         var current = URL(fileURLWithPath: "/", isDirectory: true)
-        for component in url.standardizedFileURL.pathComponents.dropFirst() {
+        for component in url.pathComponents.dropFirst() {
             current.appendPathComponent(component)
             var value = stat()
             if lstat(current.path, &value) != 0 {
                 if errno == ENOENT { return }
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
-            if (value.st_mode & S_IFMT) == S_IFLNK, !allowedSystemSymbolicLinks.contains(current.path) {
+            if value.st_mode & S_IFMT == S_IFLNK,
+                !allowedSystemSymbolicLinks.contains(current.path)
+            {
                 throw SidecarRPCError(
                     code: "unsafeMachineStatePath",
                     message: "symbolic links are not allowed in managed paths"
                 )
             }
         }
+    }
+
+    private static func requirePersistentDirectory(
+        _ url: URL,
+        effectiveUserID: uid_t,
+        requirePrivateMode: Bool
+    ) throws {
+        var information = stat()
+        guard lstat(url.path, &information) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ENOENT)
+        }
+        guard information.st_mode & S_IFMT == S_IFDIR else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state path is not a directory")
+        }
+        guard information.st_uid == effectiveUserID else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state directory has an unexpected owner")
+        }
+        let unsafeMode: mode_t = requirePrivateMode ? 0o077 : 0o022
+        guard information.st_mode & unsafeMode == 0 else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state directory has unsafe permissions")
+        }
+    }
+
+    private static func rejectAllSymbolicLinkComponents(through url: URL) throws {
+        var current = "/"
+        for component in NSString(string: url.path).pathComponents where component != "/" {
+            current = URL(fileURLWithPath: current, isDirectory: true).appendingPathComponent(component).path
+            var information = stat()
+            guard lstat(current, &information) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ENOENT)
+            }
+            guard information.st_mode & S_IFMT != S_IFLNK else {
+                throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state paths cannot use symbolic links")
+            }
+        }
+    }
+
+    private static func lexicalDirectoryURL(_ url: URL) -> URL {
+        let path = macOSLexicallyNormalizedAbsolutePath(url.path) ?? url.path
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
 }
 
@@ -355,10 +522,51 @@ enum MacOSMachineStateCompatibility {
         if saved.machineIdentifierFingerprint != current.machineIdentifierFingerprint {
             reasons.append(.init(code: "machineIdentifierMismatch", message: "VM machine identifier differs", configurationComponent: "platform.machineIdentifier"))
         }
+        // A restore attaches a new writable clone, so its storage generation
+        // differs from the generation captured in the saved manifest. The
+        // selected saved generation is validated separately before restore.
         if saved.configuration.fingerprint != current.configuration.fingerprint {
             reasons.append(.init(code: "configurationMismatch", message: "VM configuration differs", configurationComponent: "virtualMachineConfiguration"))
         }
         return reasons
+    }
+}
+
+enum MacOSMachineStateStorageGeneration {
+    static func validateIdempotentSave(
+        saved: MacOSMachineStateCompatibilityDescription,
+        current: MacOSMachineStateCompatibilityDescription
+    ) throws {
+        if saved.storageGeneration == nil, current.storageGeneration == nil {
+            return
+        }
+        guard let savedGeneration = saved.storageGeneration,
+            savedGeneration > 0,
+            savedGeneration == current.storageGeneration
+        else {
+            throw SidecarRPCError(
+                code: "machineStateStorageGenerationMismatch",
+                message: "existing machine state was saved against a different writable disk generation"
+            )
+        }
+    }
+
+    static func validateRestore(
+        saved: MacOSMachineStateCompatibilityDescription,
+        selectedSavedGeneration: UInt64?
+    ) throws {
+        if saved.storageGeneration == nil, selectedSavedGeneration == nil {
+            return
+        }
+        guard let selectedSavedGeneration,
+            selectedSavedGeneration > 0,
+            saved.storageGeneration == selectedSavedGeneration
+        else {
+            throw SidecarRPCError(
+                code: "machineStateStorageGenerationMismatch",
+                message: "machine state does not match the selected saved disk generation"
+            )
+        }
     }
 }
 
@@ -450,6 +658,7 @@ enum MacOSCompatibilityDescriptionBuilder {
             hostIdentifier: try MacOSHostIdentity.hardwareUUID(),
             hardwareModelFingerprint: sha256Fingerprint(hardwareModelData),
             machineIdentifierFingerprint: sha256Fingerprint(machineIdentifierData),
+            storageGeneration: options?.machineState?.storageGeneration,
             configuration: .init(
                 cpuCount: cpuCount,
                 memorySize: memorySize,
@@ -526,8 +735,7 @@ enum MacOSBlockDeviceBuilder {
                 guard device.timeoutSeconds.isFinite, (0.1...300).contains(device.timeoutSeconds) else {
                     throw SidecarRPCError(code: "invalidStorageConfiguration", message: "NBD timeout must be between 0.1 and 300 seconds")
                 }
-                try validateUnixSocket(path: device.path)
-                try probeUnixSocket(path: device.path)
+                try waitForUnixSocket(path: device.path, timeoutSeconds: device.timeoutSeconds)
             }
         }
     }
@@ -625,6 +833,32 @@ enum MacOSBlockDeviceBuilder {
         }
         guard (value.st_mode & S_IFMT) == S_IFSOCK else {
             throw SidecarRPCError(code: "invalidStorageConfiguration", message: "NBD path is not a Unix socket", details: path)
+        }
+    }
+
+    /// A scheduled Pod can reach the runtime before the node-local storage
+    /// controller has finished publishing its Unix socket. Bound the startup
+    /// wait by the attachment timeout so this race remains recoverable without
+    /// allowing an unavailable root disk to block VM creation indefinitely.
+    static func waitForUnixSocket(path: String, timeoutSeconds: Double) throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeoutSeconds * 1_000_000_000)
+        var lastUnavailableError: SidecarRPCError?
+        while true {
+            do {
+                try validateUnixSocket(path: path)
+                try probeUnixSocket(path: path)
+                return
+            } catch let error as SidecarRPCError where error.code == "storageUnavailable" {
+                lastUnavailableError = error
+            }
+
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else {
+                throw lastUnavailableError
+                    ?? SidecarRPCError(code: "storageUnavailable", message: "NBD Unix socket did not become ready")
+            }
+            let remainingSeconds = Double(deadline - now) / 1_000_000_000
+            Thread.sleep(forTimeInterval: min(0.05, remainingSeconds))
         }
     }
 

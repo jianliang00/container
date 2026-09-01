@@ -61,6 +61,7 @@ struct CRIShimConfigTests {
         #expect(defaults.normalizedStorageRoot == CRIShimConfigDefaults.machineStateStorageRootURL.path)
         #expect(defaults.normalizedControlSocketRoot == CRIShimConfigDefaults.machineStateControlSocketRootURL.path)
         #expect(defaults.runtimeOwnerUID == nil)
+        #expect(defaults.normalizedLeaseRoot == CRIShimConfigDefaults.machineStateLeaseRootURL.path)
         #expect(defaults.nbdSocketAllowedRoots.isEmpty)
 
         let configured = MachineStateConfig(
@@ -68,7 +69,8 @@ struct CRIShimConfigTests {
             storageRoot: "/var/lib/container/machine-state/v1",
             controlSocketRoot: "/var/run/container/machine-state/v1",
             runtimeOwnerUID: 501,
-            nbdSocketAllowedRoots: ["/var/run/container/nbd"]
+            nbdSocketAllowedRoots: ["/var/run/container/nbd"],
+            leaseRoot: "/var/lib/container/machine-state-leases/v1"
         )
         let decoded = try JSONDecoder().decode(
             MachineStateConfig.self,
@@ -92,7 +94,7 @@ struct CRIShimConfigTests {
         #expect(issues.contains("machineState.storageRoot must be an absolute path"))
         #expect(issues.contains("machineState.controlSocketRoot cannot be the filesystem root"))
         #expect(issues.contains("machineState.runtimeOwnerUID must be a valid uid"))
-        #expect(issues.contains("machineState.nbdSocketAllowedRoots[1] duplicates an earlier allowlist root"))
+        #expect(issues.contains("machineState.nbdSocketAllowedRoots[1] duplicates another managed machine-state root"))
     }
 
     @Test

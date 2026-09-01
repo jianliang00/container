@@ -55,6 +55,22 @@ struct MacOSKubeadmPlanTests {
                 return path == "/tmp/macos-node/var/lib/container/kube-proxy-macos"
             })
 
+        for path in [
+            "/tmp/macos-node/var/lib/container/cri-shim-macos/machine-state/v1",
+            "/tmp/macos-node/var/run/container/machine-state/v1",
+            "/tmp/macos-node/var/run/container/nbd",
+            "/tmp/macos-node/var/lib/container/cri-shim-macos/machine-state-leases/v1",
+        ] {
+            #expect(
+                plan.steps.contains { step in
+                    guard case .createDirectory(let createdPath, 0o700) = step.action else {
+                        return false
+                    }
+                    return createdPath == path
+                }
+            )
+        }
+
         #expect(
             plan.steps.contains { step in
                 guard case .writeFile(let path, let contents, 0o600, false) = step.action else {
@@ -150,6 +166,9 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains(#""statusPath": "/var/lib/container/vmnet-recovery/status.json""#)
                     && contents.contains(#""runtimeStatePath": "/var/lib/container/cri-shim-macos/pod-network.json""#)
                     && contents.contains(#""readyStatePath": "/var/lib/container/flannel-vxlan/ready.json""#)
+                    && contents.contains(#""storageRoot": "/var/lib/container/cri-shim-macos/machine-state/v1""#)
+                    && contents.contains(#""controlSocketRoot": "/var/run/container/machine-state/v1""#)
+                    && contents.contains(#""leaseRoot": "/var/lib/container/cri-shim-macos/machine-state-leases/v1""#)
             })
 
         #expect(
@@ -227,6 +246,11 @@ struct MacOSKubeadmPlanTests {
         enabled.containerServiceUserID = 501
 
         let enabledPlan = try MacOSKubeadmPlanner.joinPlan(options: enabled)
+        #expect(
+            !enabledPlan.steps.contains { step in
+                step.message == "assign private machine-state directories to the container service user"
+            }
+        )
         let recoveryPlist = try #require(
             enabledPlan.steps.compactMap { step -> String? in
                 guard case .writeFile(let path, let contents, 0o644, false) = step.action,
@@ -1623,6 +1647,14 @@ struct MacOSKubeadmPlanTests {
                 }
                 return path == "/tmp/macos-node/var/lib/container/kube-proxy-macos"
             })
+        #expect(
+            plan.steps.contains { step in
+                guard case .removePath(let path, true, true, false) = step.action else {
+                    return false
+                }
+                return path == "/tmp/macos-node/private/var/run/container/cri-shim-macos"
+            }
+        )
     }
 
     @Test func resetRemovesAllGeneratedRuntimeClassManifests() throws {

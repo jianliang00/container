@@ -49,6 +49,8 @@ public struct WorkloadConfiguration: Sendable, Codable {
     public var guestMetadataPath: String?
     /// Injection progress for image-backed workloads.
     public var injectionState: WorkloadInjectionState
+    /// Stable logical execution identity retained independently of transient runtime IDs.
+    public var executionIdentity: WorkloadExecutionIdentity?
 
     /// Whether the workload is backed by an OCI workload image.
     public var isImageBacked: Bool {
@@ -66,6 +68,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         case guestPayloadPath
         case guestMetadataPath
         case injectionState
+        case executionIdentity
     }
 
     public init(
@@ -77,7 +80,8 @@ public struct WorkloadConfiguration: Sendable, Codable {
         workloadImageDigest: String? = nil,
         guestPayloadPath: String? = nil,
         guestMetadataPath: String? = nil,
-        injectionState: WorkloadInjectionState = .notRequired
+        injectionState: WorkloadInjectionState = .notRequired,
+        executionIdentity: WorkloadExecutionIdentity? = nil
     ) {
         self.persistedSchemaVersion = Self.schemaVersion
         self.id = id
@@ -89,6 +93,7 @@ public struct WorkloadConfiguration: Sendable, Codable {
         self.guestPayloadPath = guestPayloadPath
         self.guestMetadataPath = guestMetadataPath
         self.injectionState = injectionState
+        self.executionIdentity = executionIdentity
     }
 
     public init(from decoder: Decoder) throws {
@@ -111,6 +116,10 @@ public struct WorkloadConfiguration: Sendable, Codable {
         self.guestPayloadPath = try container.decodeIfPresent(String.self, forKey: .guestPayloadPath)
         self.guestMetadataPath = try container.decodeIfPresent(String.self, forKey: .guestMetadataPath)
         self.injectionState = try container.decode(WorkloadInjectionState.self, forKey: .injectionState)
+        self.executionIdentity = try container.decodeIfPresent(
+            WorkloadExecutionIdentity.self,
+            forKey: .executionIdentity
+        )
     }
 }
 

@@ -54,6 +54,28 @@ struct MachineStateSupportTests {
     }
 
     @Test
+    func processStartAdmissionIsMutuallyExclusiveWithPause() throws {
+        var lifecycle = MacOSVMLifecycleCoordinator()
+        #expect(try lifecycle.begin(.start))
+        lifecycle.complete(.start, succeeded: true)
+
+        let admission = try lifecycle.acquireProcessStartAdmission()
+        do {
+            _ = try lifecycle.begin(.pause)
+            Issue.record("pause began while process start admission was held")
+        } catch let error as SidecarRPCError {
+            #expect(error.code == "operationInProgress")
+        }
+        lifecycle.releaseProcessStartAdmission(admission)
+
+        #expect(try lifecycle.begin(.pause))
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.acquireProcessStartAdmission()
+        }
+        lifecycle.complete(.pause, succeeded: true)
+    }
+
+    @Test
     func restoreIsIdempotentOnlyForSameActiveState() throws {
         var lifecycle = MacOSVMLifecycleCoordinator()
         #expect(try lifecycle.begin(.restore, stateID: "state-a"))
@@ -66,6 +88,26 @@ struct MachineStateSupportTests {
     }
 
     @Test
+    func deletionIsRejectedOnlyWhileTheSameStateIsBeingSavedOrRestored() throws {
+        var lifecycle = MacOSVMLifecycleCoordinator()
+        #expect(try lifecycle.begin(.restore, stateID: "state-a"))
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.ensureStateCanBeDeleted("state-a")
+        }
+        try lifecycle.ensureStateCanBeDeleted("state-b")
+        lifecycle.complete(.restore, succeeded: true)
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.ensureStateCanBeDeleted("state-a")
+        }
+        #expect(try lifecycle.begin(.resume))
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.ensureStateCanBeDeleted("state-a")
+        }
+        lifecycle.complete(.resume, succeeded: true)
+        try lifecycle.ensureStateCanBeDeleted("state-a")
+    }
+
+    @Test
     func compatibilityRejectsDifferentHostBuildAndConfiguration() {
         let saved = makeCompatibility(hostBuild: "24A1", hostIdentifier: "host-a", configurationFingerprint: "config-a")
         let current = makeCompatibility(hostBuild: "24B2", hostIdentifier: "host-b", configurationFingerprint: "config-b")
@@ -74,6 +116,43 @@ struct MachineStateSupportTests {
         #expect(reasons.map(\.code).contains("differentPhysicalHost"))
         #expect(reasons.map(\.code).contains("hostBuildMismatch"))
         #expect(reasons.map(\.code).contains("configurationMismatch"))
+    }
+
+    @Test
+    func savedManifestClosesOverExternalDiskGeneration() throws {
+        try MacOSMachineStateStorageGeneration.validateIdempotentSave(
+            saved: makeCompatibility(),
+            current: makeCompatibility()
+        )
+        try MacOSMachineStateStorageGeneration.validateRestore(
+            saved: makeCompatibility(),
+            selectedSavedGeneration: nil
+        )
+
+        let saved = makeCompatibility(storageGeneration: 7)
+        let sameWritableDisk = makeCompatibility(storageGeneration: 7)
+        let successorWritableDisk = makeCompatibility(storageGeneration: 8)
+
+        try MacOSMachineStateStorageGeneration.validateIdempotentSave(
+            saved: saved,
+            current: sameWritableDisk
+        )
+        #expect(throws: SidecarRPCError.self) {
+            try MacOSMachineStateStorageGeneration.validateIdempotentSave(
+                saved: saved,
+                current: successorWritableDisk
+            )
+        }
+        try MacOSMachineStateStorageGeneration.validateRestore(
+            saved: saved,
+            selectedSavedGeneration: 7
+        )
+        #expect(throws: SidecarRPCError.self) {
+            try MacOSMachineStateStorageGeneration.validateRestore(
+                saved: saved,
+                selectedSavedGeneration: 8
+            )
+        }
     }
 
     @Test
@@ -89,9 +168,32 @@ struct MachineStateSupportTests {
         try store.commit(reservation, compatibility: compatibility)
         let stored = try store.load(stateID: "state-1")
         #expect(stored.compatibility == compatibility)
+        #expect(stored.directoryURL == reservation.directoryURL)
         #expect(stored.stateURL == reservation.stateURL)
         #expect(try permissions(stored.stateURL) == 0o600)
         #expect(try permissions(stored.stateURL.deletingLastPathComponent()) == 0o700)
+    }
+
+    @Test
+    func persistentRootCreatesOnlyBindingChildAndRejectsUnsafeParent() throws {
+        let parent = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try FileManager.default.createDirectory(
+            at: parent,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(parent.path, mode_t(0o700)) == 0)
+        let bindingRoot = parent.appendingPathComponent("workload-42")
+
+        try MacOSMachineStateStore.preparePersistentRoot(at: bindingRoot)
+        #expect(try permissions(bindingRoot) == 0o700)
+        try MacOSMachineStateStore.preparePersistentRoot(at: bindingRoot)
+
+        #expect(chmod(parent.path, mode_t(0o777)) == 0)
+        #expect(throws: SidecarRPCError.self) {
+            try MacOSMachineStateStore.preparePersistentRoot(at: parent.appendingPathComponent("workload-43"))
+        }
     }
 
     @Test
@@ -143,6 +245,28 @@ struct MachineStateSupportTests {
         store.abort(reservation)
 
         #expect(!FileManager.default.fileExists(atPath: reservation.directoryURL.path))
+    }
+
+    @Test
+    func managedStoreDeleteIsIdempotentAndRemovesCommittedState() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let store = MacOSMachineStateStore(runtimeRootURL: root)
+        let reservation = try store.reserve(stateID: "delete-me")
+        try Data("machine-state".utf8).write(to: reservation.stateURL)
+        try store.commit(reservation, compatibility: makeCompatibility())
+
+        #expect(try store.delete(stateID: "delete-me"))
+        #expect(try store.delete(stateID: "delete-me") == false)
+        #expect(throws: SidecarRPCError.self) {
+            _ = try store.load(stateID: "delete-me")
+        }
+
+        let incomplete = try store.reserve(stateID: "delete-incomplete")
+        try Data("partial".utf8).write(to: incomplete.stateURL)
+        #expect(try store.delete(stateID: "delete-incomplete"))
+        #expect(try store.delete(stateID: "delete-incomplete") == false)
     }
 
     @Test
@@ -216,12 +340,73 @@ struct MachineStateSupportTests {
         #expect(observer.snapshot().connectionCount == 2)
         #expect(observer.snapshot().terminalError == nil)
     }
+
+    @Test
+    func nbdSocketStartupWaitsForNodeLocalPublisher() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let socketURL = URL(fileURLWithPath: "/tmp/container-ms-wait-\(UUID().uuidString.prefix(8)).sock")
+        let listenerStarted = DispatchSemaphore(value: 0)
+        let listenerFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            Thread.sleep(forTimeInterval: 0.05)
+            guard let listener = try? UnixSocketListener(path: socketURL.path, expectedConnections: 1) else {
+                listenerFinished.signal()
+                return
+            }
+            listenerStarted.signal()
+            _ = listener.wait()
+            listener.close()
+            listenerFinished.signal()
+        }
+
+        let options = ContainerConfiguration.MacOSGuestOptions(
+            snapshotEnabled: false,
+            guiEnabled: false,
+            agentPort: 27_000,
+            blockDevices: [
+                .init(
+                    identifier: "root",
+                    kind: .nbdUnixSocket,
+                    path: socketURL.path,
+                    timeoutSeconds: 1
+                )
+            ]
+        )
+        _ = try MacOSBlockDeviceBuilder.build(
+            rootURL: root,
+            options: options,
+            log: Logger(label: "MachineStateSupportTests")
+        )
+
+        #expect(listenerStarted.wait(timeout: .now()) == .success)
+        #expect(listenerFinished.wait(timeout: .now() + 2) == .success)
+    }
+
+    @Test
+    func nbdSocketStartupFailsAfterBoundedWait() throws {
+        let socketPath = "/tmp/container-ms-missing-\(UUID().uuidString.prefix(8)).sock"
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+
+        do {
+            try MacOSBlockDeviceBuilder.waitForUnixSocket(path: socketPath, timeoutSeconds: 0.1)
+            Issue.record("missing NBD socket unexpectedly became ready")
+        } catch let error as SidecarRPCError {
+            #expect(error.code == "storageUnavailable")
+        }
+
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
+        #expect(elapsed >= 0.09)
+        #expect(elapsed < 1)
+    }
 }
 
 private func makeCompatibility(
     hostBuild: String = "24A1",
     hostIdentifier: String = "host-a",
-    configurationFingerprint: String = "config-a"
+    configurationFingerprint: String = "config-a",
+    storageGeneration: UInt64? = nil
 ) -> MacOSMachineStateCompatibilityDescription {
     .init(
         createdAt: Date(timeIntervalSince1970: 1_700_000_000),
@@ -230,6 +415,7 @@ private func makeCompatibility(
         hostIdentifier: hostIdentifier,
         hardwareModelFingerprint: "hardware",
         machineIdentifierFingerprint: "machine",
+        storageGeneration: storageGeneration,
         configuration: .init(
             cpuCount: 4,
             memorySize: 8 * 1024 * 1024 * 1024,
@@ -245,7 +431,10 @@ private func makeCompatibility(
 }
 
 private func temporaryDirectory() -> URL {
-    FileManager.default.temporaryDirectory.appendingPathComponent("machine-state-tests-\(UUID().uuidString)")
+    let temporaryPath = FileManager.default.temporaryDirectory.standardizedFileURL.path
+    let canonicalPath = temporaryPath.hasPrefix("/var/") ? "/private\(temporaryPath)" : temporaryPath
+    return URL(fileURLWithPath: canonicalPath, isDirectory: true)
+        .appendingPathComponent("machine-state-tests-\(UUID().uuidString)")
 }
 
 private func permissions(_ url: URL) throws -> UInt16 {

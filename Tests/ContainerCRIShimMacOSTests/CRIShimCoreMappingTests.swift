@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Darwin
 import Foundation
 import Testing
 
@@ -170,6 +171,7 @@ struct CRIShimCoreMappingTests {
         request.config.annotations = [
             CRIShimMachineStateAnnotation.enabled: "true",
             CRIShimMachineStateAnnotation.persistenceID: "pod-uid-a",
+            CRIShimMachineStateAnnotation.storageGeneration: "1",
         ]
 
         let configuration = try makeCRIShimSandboxConfiguration(
@@ -184,7 +186,8 @@ struct CRIShimCoreMappingTests {
             machineStateConfig: MachineStateConfig(
                 enabled: true,
                 storageRoot: storageRoot.path,
-                controlSocketRoot: socketRoot.path
+                controlSocketRoot: socketRoot.path,
+                runtimeOwnerUID: UInt32(geteuid())
             )
         )
 
@@ -194,7 +197,135 @@ struct CRIShimCoreMappingTests {
         #expect(options.machineState?.persistenceID == "pod-uid-a")
         #expect(options.machineState?.storageDirectory == storageRoot.appendingPathComponent("pod-uid-a").path)
         #expect(options.machineState?.controlSocketPath == socketRoot.appendingPathComponent("pod-uid-a.sock").path)
+        #expect(options.machineState?.storageGeneration == 1)
         #expect(options.blockDevices.isEmpty)
+        #expect(configuration.networks.first?.options.hostname == "pod-uid-a")
+    }
+
+    @Test
+    func mapsRestoreGenerationIntoDurableWorkloadExecutionIdentity() throws {
+        var sandbox = sandboxMetadata
+        sandbox.annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "workload-42",
+            CRIShimMachineStateAnnotation.restoreStateID: "snapshot-7",
+            CRIShimMachineStateAnnotation.restoreStateGeneration: "7",
+            CRIShimMachineStateAnnotation.storageGeneration: "8",
+        ]
+        var request = Runtime_V1_CreateContainerRequest()
+        request.config.metadata.name = "builder"
+        request.config.metadata.attempt = 2
+        request.config.image.image = "example.com/macos/workload:latest"
+        request.config.command = ["/bin/sh"]
+        request.config.args = ["-c", "echo ready"]
+
+        let workload = try makeCRIShimWorkloadConfiguration(
+            id: "container-1",
+            request: request,
+            workloadImageDigest: "sha256:workload",
+            sandbox: sandbox
+        )
+
+        let identity = try #require(workload.executionIdentity)
+        #expect(identity.executionID.hasPrefix("workload-42:container:"))
+        #expect(identity.restoreBinding?.executionID == identity.executionID)
+        #expect(identity.restoreBinding?.generation == 7)
+        #expect(identity.launchFingerprint.hasPrefix("sha256:"))
+    }
+
+    @Test
+    func workloadExecutionIdentitySurvivesAttemptResetAcrossPodRestore() throws {
+        var initialSandbox = sandboxMetadata
+        initialSandbox.annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "workload-42",
+            CRIShimMachineStateAnnotation.storageGeneration: "7",
+        ]
+        var restoredSandbox = initialSandbox
+        restoredSandbox.annotations[CRIShimMachineStateAnnotation.restoreStateID] = "snapshot-7"
+        restoredSandbox.annotations[CRIShimMachineStateAnnotation.restoreStateGeneration] = "7"
+        restoredSandbox.annotations[CRIShimMachineStateAnnotation.storageGeneration] = "8"
+
+        var request = Runtime_V1_CreateContainerRequest()
+        request.config.metadata.name = "builder"
+        request.config.metadata.attempt = 3
+        request.config.image.image = "example.com/macos/workload:latest"
+        request.config.command = ["/bin/sh", "-lc", "sleep 3600"]
+        let captured = try makeCRIShimWorkloadConfiguration(
+            id: "container-before-snapshot",
+            request: request,
+            workloadImageDigest: "sha256:workload",
+            sandbox: initialSandbox
+        )
+        let capturedRetry = try makeCRIShimWorkloadConfiguration(
+            id: "container-before-snapshot-retry",
+            request: request,
+            workloadImageDigest: "sha256:workload",
+            sandbox: initialSandbox
+        )
+
+        request.config.metadata.attempt = 0
+        let restored = try makeCRIShimWorkloadConfiguration(
+            id: "container-after-restore",
+            request: request,
+            workloadImageDigest: "sha256:workload",
+            sandbox: restoredSandbox
+        )
+
+        let capturedIdentity = try #require(captured.executionIdentity)
+        let restoredIdentity = try #require(restored.executionIdentity)
+        #expect(capturedIdentity.executionID == restoredIdentity.executionID)
+        #expect(capturedIdentity.launchFingerprint == restoredIdentity.launchFingerprint)
+        #expect(capturedIdentity.incarnation == capturedRetry.executionIdentity?.incarnation)
+        #expect(capturedIdentity.incarnation != nil)
+        #expect(capturedIdentity.incarnation != restoredIdentity.incarnation)
+        #expect(capturedIdentity.restoreBinding == nil)
+        #expect(restoredIdentity.restoreBinding?.executionID == capturedIdentity.executionID)
+        #expect(restoredIdentity.restoreBinding?.generation == 7)
+    }
+
+    @Test
+    func workloadAdoptionFingerprintIncludesMountSource() throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceA = root.appendingPathComponent("source-a", isDirectory: true)
+        let sourceB = root.appendingPathComponent("source-b", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sourceB, withIntermediateDirectories: true)
+
+        var sandbox = sandboxMetadata
+        sandbox.annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "workload-42",
+            CRIShimMachineStateAnnotation.storageGeneration: "1",
+        ]
+        var request = Runtime_V1_CreateContainerRequest()
+        request.config.metadata.name = "builder"
+        request.config.image.image = "example.com/macos/workload:latest"
+        request.config.command = ["/bin/sh", "-lc", "sleep 3600"]
+
+        var mount = Runtime_V1_Mount()
+        mount.containerPath = "/Users/demo/workspace"
+        mount.hostPath = sourceA.path
+        request.config.mounts = [mount]
+        let first = try makeCRIShimWorkloadConfiguration(
+            id: "container-a",
+            request: request,
+            workloadImageDigest: "sha256:workload",
+            sandbox: sandbox
+        )
+
+        mount.hostPath = sourceB.path
+        request.config.mounts = [mount]
+        let second = try makeCRIShimWorkloadConfiguration(
+            id: "container-b",
+            request: request,
+            workloadImageDigest: "sha256:workload",
+            sandbox: sandbox
+        )
+
+        #expect(first.executionIdentity?.executionID == second.executionIdentity?.executionID)
+        #expect(first.executionIdentity?.launchFingerprint != second.executionIdentity?.launchFingerprint)
     }
 
     @Test

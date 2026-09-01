@@ -20,10 +20,26 @@ import Darwin
 import Foundation
 import RuntimeMacOSSidecarShared
 
+struct MacOSMachineStateOutcomeIndeterminate: Error, Sendable {
+    let operation: String
+    let stateID: String
+    let lifecycleState: MacOSVMRuntimeState?
+
+    var containerizationError: ContainerizationError {
+        let lifecycle = lifecycleState?.rawValue ?? "unavailable"
+        return ContainerizationError(
+            .timeout,
+            message:
+                "machine-state \(operation) outcome remains unknown for state \(stateID); sidecar and persistence lease were retained for reconciliation (lifecycle=\(lifecycle))"
+        )
+    }
+}
+
 extension MacOSSandboxService {
     private static let sidecarBootstrapStartTimeoutSeconds: TimeInterval = 120.0
     private static let sidecarRestoreTimeoutSeconds: TimeInterval = 600.0
     private static let sidecarExitEventDrainTimeoutSeconds: TimeInterval = 5.0
+    private static let sidecarReconciliationPollMicroseconds: useconds_t = 100_000
 
     func sidecarSocketPath(config: ContainerConfiguration) -> URL {
         if let path = config.macosGuest?.machineState?.controlSocketPath {
@@ -100,6 +116,21 @@ extension MacOSSandboxService {
 
     func startVirtualMachineViaSidecar(config: ContainerConfiguration, presentGUI: Bool = true) async throws {
         try validateMachineStateRuntimeConfiguration(config)
+        if let handle = sidecarHandle {
+            guard config.macosGuest?.machineState?.restoreStateID != nil, machineStateLeaseFD >= 0 else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "an existing sidecar can only be reconciled while a machine-state restore lease is held"
+                )
+            }
+            try initializeVirtualMachineViaSidecar(
+                client: handle.client,
+                config: config,
+                presentGUI: presentGUI,
+                socketConnectRetries: 120
+            )
+            return
+        }
         var retainedLease = false
         defer {
             if !retainedLease {
@@ -170,6 +201,18 @@ extension MacOSSandboxService {
             )
             retainedLease = true
             writeContainerLog(Data(("sidecar vm bootstrap succeeded [label=\(launchLabel)]\n").utf8))
+        } catch let error as MacOSMachineStateOutcomeIndeterminate {
+            sidecarHandle = SidecarHandle(
+                launchLabel: launchLabel,
+                client: client
+            )
+            retainedLease = true
+            writeContainerLog(
+                Data(
+                    ("sidecar machine-state outcome unknown; retaining sidecar and lease [label=\(launchLabel)] error=\(error.containerizationError.message)\n").utf8
+                )
+            )
+            throw error
         } catch {
             writeContainerLog(Data(("sidecar vm bootstrap failed [label=\(launchLabel)] error=\(String(describing: error))\n").utf8))
             client.setEventHandler(nil)
@@ -228,6 +271,18 @@ extension MacOSSandboxService {
             guard let self else { return }
             for await event in eventPump.stream {
                 await self.handleSidecarEvent(event)
+                do {
+                    try client.acknowledgeEvent(event)
+                } catch {
+                    self.log.warning(
+                        "failed to acknowledge consumed sidecar event",
+                        metadata: [
+                            "process_id": "\(event.processID)",
+                            "sequence": "\(event.sequence.map(String.init) ?? "-")",
+                            "error": "\(error)",
+                        ]
+                    )
+                }
             }
         }
         client.setEventHandler { event in
@@ -272,7 +327,10 @@ extension MacOSSandboxService {
         client: MacOSSidecarClient,
         config: ContainerConfiguration,
         presentGUI: Bool,
-        socketConnectRetries: Int
+        socketConnectRetries: Int,
+        operationTimeoutSeconds: TimeInterval? = nil,
+        reconciliationTimeoutSeconds: TimeInterval? = nil,
+        reconciliationPollMicroseconds: useconds_t? = nil
     ) throws {
         guard let restoreStateID = config.macosGuest?.machineState?.restoreStateID else {
             writeContainerLog(
@@ -288,28 +346,166 @@ extension MacOSSandboxService {
         }
 
         writeContainerLog(Data(("sidecar restore start [state=\(restoreStateID)]\n").utf8))
-        let restored = try client.restoreMachineState(
+        try restoreAndResumeMachineState(
+            client: client,
             stateID: restoreStateID,
-            timeoutSeconds: Self.sidecarRestoreTimeoutSeconds,
-            socketConnectRetries: socketConnectRetries
+            socketConnectRetries: socketConnectRetries,
+            operationTimeoutSeconds: operationTimeoutSeconds ?? Self.sidecarRestoreTimeoutSeconds,
+            reconciliationTimeoutSeconds: reconciliationTimeoutSeconds ?? Self.sidecarRestoreTimeoutSeconds,
+            reconciliationPollMicroseconds: reconciliationPollMicroseconds ?? Self.sidecarReconciliationPollMicroseconds
         )
-        guard restored.lifecycleState == .paused else {
-            throw ContainerizationError(
-                .invalidState,
-                message: "machine-state restore did not leave the VM paused"
-            )
-        }
-        let resumed = try client.resumeVM(timeoutSeconds: Self.sidecarRestoreTimeoutSeconds)
-        guard resumed.lifecycleState == .running else {
-            throw ContainerizationError(
-                .invalidState,
-                message: "machine-state resume did not leave the VM running"
-            )
-        }
         if config.macosGuest?.guiEnabled == true, presentGUI {
             try client.showGUI()
         }
         writeContainerLog(Data(("sidecar restore and resume succeeded [state=\(restoreStateID)]\n").utf8))
+    }
+
+    private func restoreAndResumeMachineState(
+        client: MacOSSidecarClient,
+        stateID: String,
+        socketConnectRetries: Int,
+        operationTimeoutSeconds: TimeInterval,
+        reconciliationTimeoutSeconds: TimeInterval,
+        reconciliationPollMicroseconds: useconds_t
+    ) throws {
+        let totalBudget = max(0, operationTimeoutSeconds) + max(0, reconciliationTimeoutSeconds)
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ UInt64(totalBudget * 1_000_000_000)
+        var lastLifecycleState: MacOSVMRuntimeState?
+
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else { break }
+            let remaining = TimeInterval(deadline - now) / 1_000_000_000
+            let requestTimeout = min(operationTimeoutSeconds, max(0.05, remaining))
+            let capabilities: MacOSSidecarCapabilities
+            do {
+                capabilities = try client.capabilities(
+                    timeoutSeconds: requestTimeout,
+                    distinguishTransportFailure: true
+                )
+                lastLifecycleState = capabilities.lifecycleState
+            } catch {
+                guard isIndeterminateMachineStateTransportError(error) else {
+                    throw error
+                }
+                sleepBeforeMachineStateReconciliationRetry(
+                    deadline: deadline,
+                    pollMicroseconds: reconciliationPollMicroseconds
+                )
+                continue
+            }
+
+            switch capabilities.lifecycleState {
+            case .created, .stopped, .paused:
+                do {
+                    let restored = try client.restoreMachineState(
+                        stateID: stateID,
+                        timeoutSeconds: requestTimeout,
+                        socketConnectRetries: socketConnectRetries,
+                        distinguishTransportFailure: true
+                    )
+                    try requireMachineStateResult(
+                        restored,
+                        expectedLifecycleState: .paused,
+                        expectedStateID: stateID,
+                        operation: "restore"
+                    )
+                } catch {
+                    guard isIndeterminateMachineStateTransportError(error) else {
+                        throw error
+                    }
+                    sleepBeforeMachineStateReconciliationRetry(
+                        deadline: deadline,
+                        pollMicroseconds: reconciliationPollMicroseconds
+                    )
+                    continue
+                }
+
+                do {
+                    let resumed = try client.resumeVM(
+                        timeoutSeconds: requestTimeout,
+                        distinguishTransportFailure: true
+                    )
+                    try requireMachineStateResult(
+                        resumed,
+                        expectedLifecycleState: .running,
+                        expectedStateID: stateID,
+                        operation: "resume"
+                    )
+                    return
+                } catch {
+                    guard isIndeterminateMachineStateTransportError(error) else {
+                        throw error
+                    }
+                }
+            case .restoring, .resuming:
+                break
+            case .running:
+                do {
+                    let resumed = try client.resumeVM(
+                        timeoutSeconds: requestTimeout,
+                        distinguishTransportFailure: true
+                    )
+                    try requireMachineStateResult(
+                        resumed,
+                        expectedLifecycleState: .running,
+                        expectedStateID: stateID,
+                        operation: "resume"
+                    )
+                    return
+                } catch {
+                    guard isIndeterminateMachineStateTransportError(error) else {
+                        throw error
+                    }
+                }
+            case .starting, .pausing, .saving, .stopping, .failed:
+                throw ContainerizationError(
+                    .invalidState,
+                    message:
+                        "cannot reconcile machine-state restore \(stateID) from lifecycle state \(capabilities.lifecycleState.rawValue)"
+                )
+            }
+
+            sleepBeforeMachineStateReconciliationRetry(
+                deadline: deadline,
+                pollMicroseconds: reconciliationPollMicroseconds
+            )
+        }
+
+        throw MacOSMachineStateOutcomeIndeterminate(
+            operation: lastLifecycleState == .resuming || lastLifecycleState == .running ? "resume" : "restore",
+            stateID: stateID,
+            lifecycleState: lastLifecycleState
+        )
+    }
+
+    private func requireMachineStateResult(
+        _ result: MacOSMachineStateOperationResult,
+        expectedLifecycleState: MacOSVMRuntimeState,
+        expectedStateID: String,
+        operation: String
+    ) throws {
+        guard result.lifecycleState == expectedLifecycleState, result.stateID == expectedStateID else {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "machine-state \(operation) returned lifecycle=\(result.lifecycleState.rawValue) stateID=\(result.stateID ?? "-"); expected lifecycle=\(expectedLifecycleState.rawValue) stateID=\(expectedStateID)"
+            )
+        }
+    }
+
+    private func isIndeterminateMachineStateTransportError(_ error: Error) -> Bool {
+        error is MacOSSidecarTransportFailure
+    }
+
+    private func sleepBeforeMachineStateReconciliationRetry(
+        deadline: UInt64,
+        pollMicroseconds: useconds_t
+    ) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline else { return }
+        let remainingMicroseconds = (deadline - now) / 1_000
+        usleep(useconds_t(min(UInt64(pollMicroseconds), remainingMicroseconds)))
     }
 
     func validateMachineStateRuntimeConfiguration(_ config: ContainerConfiguration) throws {
@@ -321,8 +517,27 @@ extension MacOSSandboxService {
             )
         }
         try validateMachineStateIdentifier(machineState.persistenceID, maximumLength: 64, name: "persistence id")
+        guard (machineState.restoreStateID == nil) == (machineState.restoreStateGeneration == nil) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "machine-state restore id and restore generation must be configured together"
+            )
+        }
+        if let storageGeneration = machineState.storageGeneration, storageGeneration == 0 {
+            throw ContainerizationError(.invalidArgument, message: "machine-state storage generation must be positive")
+        }
         if let restoreStateID = machineState.restoreStateID {
             try validateMachineStateIdentifier(restoreStateID, maximumLength: 128, name: "restore state id")
+            guard let restoreStateGeneration = machineState.restoreStateGeneration,
+                restoreStateGeneration > 0,
+                let storageGeneration = machineState.storageGeneration,
+                storageGeneration > restoreStateGeneration
+            else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "machine-state restore requires a positive saved generation and a newer writable storage generation"
+                )
+            }
             guard config.macosGuest?.blockDevices.first?.kind == .nbdUnixSocket else {
                 throw ContainerizationError(
                     .invalidArgument,

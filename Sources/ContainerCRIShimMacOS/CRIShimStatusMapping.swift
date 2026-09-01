@@ -242,7 +242,14 @@ func makeCRIPodSandboxStatusInfo(
         let persistenceID = metadata.annotations[CRIShimMachineStateAnnotation.persistenceID]
     {
         info["machineState"] = makeCRIStatusJSONString(
-            CRIShimMachineStateStatusInfo(persistenceID: persistenceID)
+            CRIShimMachineStateStatusInfo(
+                persistenceID: persistenceID,
+                storageGeneration: metadata.annotations[CRIShimMachineStateAnnotation.storageGeneration]
+                    .flatMap(UInt64.init),
+                restoreStateID: metadata.annotations[CRIShimMachineStateAnnotation.restoreStateID],
+                restoreStateGeneration: metadata.annotations[CRIShimMachineStateAnnotation.restoreStateGeneration]
+                    .flatMap(UInt64.init)
+            )
         )
     }
     if let sandboxSnapshot {
@@ -253,20 +260,32 @@ func makeCRIPodSandboxStatusInfo(
 
 private struct CRIShimMachineStateStatusInfo: Encodable {
     struct Restore: Encodable {
-        struct UnsupportedReason: Encodable {
-            let code = CRIShimMachineStateAnnotation.criRestoreUnsupportedReasonCode
-            let message = "CRI machine-state restore requires guest process and host workload metadata adoption"
-        }
-
-        let supported = false
-        let status = "notRequested"
-        let unsupportedReason = UnsupportedReason()
+        let supported = true
+        let status: String
+        let stateID: String?
+        let stateGeneration: UInt64?
     }
 
     let schemaVersion = 1
     let protocolVersion = 2
     let persistenceID: String
-    let restore = Restore()
+    let storageGeneration: UInt64?
+    let restore: Restore
+
+    init(
+        persistenceID: String,
+        storageGeneration: UInt64?,
+        restoreStateID: String?,
+        restoreStateGeneration: UInt64?
+    ) {
+        self.persistenceID = persistenceID
+        self.storageGeneration = storageGeneration
+        self.restore = Restore(
+            status: restoreStateID == nil ? "notRequested" : "requested",
+            stateID: restoreStateID,
+            stateGeneration: restoreStateGeneration
+        )
+    }
 }
 
 private func makeCRIPodSandboxMetadata(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandboxMetadata {

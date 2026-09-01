@@ -28,6 +28,9 @@ public enum CRIShimConfigDefaults {
     public static let machineStateControlSocketRootURL = URL(
         fileURLWithPath: "/var/run/container/machine-state/v1"
     )
+    public static let machineStateLeaseRootURL = URL(
+        fileURLWithPath: "/var/lib/container/cri-shim-macos/machine-state-leases/v1"
+    )
     public static let vmnetRecoveryStateURL = URL(fileURLWithPath: "/var/lib/container/vmnet-recovery/state.json")
     public static let vmnetRecoveryRequestURL = URL(
         fileURLWithPath: "/var/lib/container/vmnet-recovery/requests/fence.json"
@@ -188,19 +191,23 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
     public var controlSocketRoot: String?
     public var runtimeOwnerUID: UInt32?
     public var nbdSocketAllowedRoots: [String]
+    /// Root-owned directory containing exclusive stable-persistence leases.
+    public var leaseRoot: String?
 
     public init(
         enabled: Bool = false,
         storageRoot: String? = nil,
         controlSocketRoot: String? = nil,
         runtimeOwnerUID: UInt32? = nil,
-        nbdSocketAllowedRoots: [String] = []
+        nbdSocketAllowedRoots: [String] = [],
+        leaseRoot: String? = nil
     ) {
         self.enabled = enabled
         self.storageRoot = storageRoot
         self.controlSocketRoot = controlSocketRoot
         self.runtimeOwnerUID = runtimeOwnerUID
         self.nbdSocketAllowedRoots = nbdSocketAllowedRoots
+        self.leaseRoot = leaseRoot
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -209,6 +216,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         case controlSocketRoot
         case runtimeOwnerUID
         case nbdSocketAllowedRoots
+        case leaseRoot
     }
 
     public init(from decoder: any Decoder) throws {
@@ -218,6 +226,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         controlSocketRoot = try container.decodeIfPresent(String.self, forKey: .controlSocketRoot)
         runtimeOwnerUID = try container.decodeIfPresent(UInt32.self, forKey: .runtimeOwnerUID)
         nbdSocketAllowedRoots = try container.decodeIfPresent([String].self, forKey: .nbdSocketAllowedRoots) ?? []
+        leaseRoot = try container.decodeIfPresent(String.self, forKey: .leaseRoot)
     }
 
     public var normalizedStorageRoot: String {
@@ -232,6 +241,13 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
             return CRIShimConfigDefaults.machineStateControlSocketRootURL.path
         }
         return controlSocketRoot.trimmed
+    }
+
+    public var normalizedLeaseRoot: String {
+        guard let leaseRoot, !leaseRoot.trimmed.isEmpty else {
+            return CRIShimConfigDefaults.machineStateLeaseRootURL.path
+        }
+        return leaseRoot.trimmed
     }
 }
 

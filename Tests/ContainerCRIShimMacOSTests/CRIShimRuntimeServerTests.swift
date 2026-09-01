@@ -1551,8 +1551,8 @@ struct CRIShimRuntimeServerTests {
         #expect(beforeCreate.events.first?.reason == .stateFenced)
         #expect(beforeCreate.createSandboxCount == 0)
         #expect(beforeCreate.cniAddCount == 0)
-        #expect(beforeCreate.cniDeleteCount == 1)
-        #expect(beforeCreate.removeSandboxCount == 1)
+        #expect(beforeCreate.cniDeleteCount == 0)
+        #expect(beforeCreate.removeSandboxCount == 0)
 
         let beforeNetwork = try await runVMNetRecoveryAdmissionRejectionScenario(
             gate: .beforeNetworkAttach
@@ -1563,8 +1563,186 @@ struct CRIShimRuntimeServerTests {
         #expect(beforeNetwork.events.first?.reason == .stateFenced)
         #expect(beforeNetwork.createSandboxCount == 1)
         #expect(beforeNetwork.cniAddCount == 0)
-        #expect(beforeNetwork.cniDeleteCount == 1)
+        #expect(beforeNetwork.cniDeleteCount == 0)
         #expect(beforeNetwork.removeSandboxCount == 1)
+    }
+
+    @Test
+    func machineStateBindingLeaseMakesACKLossRetryIdempotentAndRefusesTakeover() async throws {
+        let socketPath = "/tmp/cri-shim-machine-lease-\(UUID().uuidString.prefix(8)).sock"
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("cri-ms-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(root.path, mode_t(0o700)) == 0)
+        let machineRoot = root.appendingPathComponent("machine", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: machineRoot,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(machineRoot.path, mode_t(0o700)) == 0)
+        let machineStatePolicy = MachineStateConfig(
+            enabled: true,
+            storageRoot: machineRoot.appendingPathComponent("states").path,
+            controlSocketRoot: machineRoot.appendingPathComponent("control").path,
+            runtimeOwnerUID: UInt32(geteuid()),
+            nbdSocketAllowedRoots: [machineRoot.appendingPathComponent("nbd").path],
+            leaseRoot: machineRoot.appendingPathComponent("leases").path
+        )
+        try CRIShimMachineStateDirectories.prepare(policy: machineStatePolicy)
+
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            stateDirectory: root.appendingPathComponent("metadata").path,
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            defaults: RuntimeProfile(
+                sandboxImage: "example.com/macos/sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: false),
+            kubeProxy: KubeProxyConfig(enabled: false),
+            machineState: machineStatePolicy
+        )
+        let metadataStore = try CRIShimMetadataStore(
+            rootURL: URL(fileURLWithPath: config.normalizedStateDirectory, isDirectory: true)
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let imageManager = RecordingImageManager(
+            images: [
+                CRIShimImageRecord(
+                    reference: "example.com/macos/sandbox:latest",
+                    digest: "sha256:sandbox",
+                    size: 16_384,
+                    annotations: ["org.apple.container.macos.image.role": "sandbox"]
+                ),
+                CRIShimImageRecord(
+                    reference: "example.com/macos/workload:latest",
+                    digest: "sha256:workload",
+                    size: 4096,
+                    annotations: MacOSImageContract.annotations(for: .workload)
+                ),
+            ]
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    metadataStore: metadataStore,
+                    readinessChecker: StaticReadinessChecker(snapshot: readyReadinessSnapshot()),
+                    runtimeManager: runtimeManager,
+                    imageManager: imageManager,
+                    cniManager: RecordingCNIManager()
+                )
+            ],
+            eventLoopGroup: group,
+            startupTasks: []
+        )
+        let serverTask = Task { try await server.run() }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
+        try await waitForSocket(at: socketPath)
+
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+        func request(podUID: String, storageGeneration: UInt64) -> Runtime_V1_RunPodSandboxRequest {
+            var request = Runtime_V1_RunPodSandboxRequest()
+            request.runtimeHandler = "macos-compat"
+            request.config.metadata.uid = podUID
+            request.config.metadata.namespace = "default"
+            request.config.metadata.name = "machine-state"
+            request.config.annotations = [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "workload-42",
+                CRIShimMachineStateAnnotation.storageGeneration: String(storageGeneration),
+            ]
+            return request
+        }
+
+        let first = try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1))
+        let retry = try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1))
+        #expect(retry.podSandboxID == first.podSandboxID)
+        #expect(runtimeManager.createSandboxCalls.count == 1)
+
+        for fenced in [
+            request(podUID: "pod-b", storageGeneration: 1),
+            request(podUID: "pod-a", storageGeneration: 2),
+        ] {
+            do {
+                _ = try await client.runPodSandbox(fenced)
+                Issue.record("different owner unexpectedly took over a machine-state binding")
+            } catch let status as GRPCStatus {
+                #expect(status.code == .unavailable)
+                #expect((status.message ?? "").contains("fenced"))
+            }
+        }
+        #expect(runtimeManager.createSandboxCalls.count == 1)
+
+        var createContainer = Runtime_V1_CreateContainerRequest()
+        createContainer.podSandboxID = first.podSandboxID
+        createContainer.config.metadata.name = "workload"
+        createContainer.config.image.image = "example.com/macos/workload:latest"
+        let createdContainer = try await client.createContainer(createContainer)
+        try CRIShimMachineStateLeaseStore.release(
+            policy: machineStatePolicy,
+            expected: .init(
+                persistenceID: "workload-42",
+                podUID: "pod-a",
+                sandboxID: first.podSandboxID,
+                restoreStateID: nil,
+                restoreStateGeneration: nil,
+                storageGeneration: 1
+            )
+        )
+        var startContainer = Runtime_V1_StartContainerRequest()
+        startContainer.containerID = createdContainer.containerID
+        do {
+            _ = try await client.startContainer(startContainer)
+            Issue.record("sandbox VM started without an active machine-state lease")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .unavailable)
+            #expect((status.message ?? "").contains("no active lease"))
+        }
+        #expect(runtimeManager.startSandboxCalls.isEmpty)
+
+        var remove = Runtime_V1_RemovePodSandboxRequest()
+        remove.podSandboxID = first.podSandboxID
+        _ = try await client.removePodSandbox(remove)
+        let successor = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 2))
+        #expect(successor.podSandboxID != first.podSandboxID)
+        #expect(runtimeManager.createSandboxCalls.count == 2)
+
+        try metadataStore.deleteSandbox(id: successor.podSandboxID)
+        do {
+            _ = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 2))
+            Issue.record("lease without completed metadata was automatically taken over")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .unavailable)
+            #expect((status.message ?? "").contains("refusing automatic takeover"))
+        }
+        #expect(runtimeManager.createSandboxCalls.count == 2)
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        await shutdown(group)
     }
 
     @Test

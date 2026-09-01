@@ -154,23 +154,28 @@ final class AgentConnection: @unchecked Sendable {
 
     private let fd: Int32
     private let lock = NSLock()
+    private let attachmentLock = NSLock()
     private let socketHandle: FileHandle
+    private let processSupervisor: GuestProcessSupervisor
     private let relayHalfCloseIdleTimeout: TimeInterval?
     private let relayPeerStateCheckInterval: TimeInterval
 
     private var buffer = Data()
     private var session: (any GuestAgentProcessSession)?
+    private var durableAttachment: GuestProcessAttachmentHandle?
     private var fileTransactions: [String: GuestAgentFileTransferTransaction] = [:]
     private var fileReadTransactions: [String: FileHandle] = [:]
 
     init(
         fd: Int32,
+        processSupervisor: GuestProcessSupervisor = .shared,
         // Raw relay EOF represents a TCP write-half-close, so no application idle deadline is imposed by default.
         relayHalfCloseIdleTimeout: TimeInterval? = nil,
         relayPeerStateCheckInterval: TimeInterval = 1
     ) {
         self.fd = fd
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        self.processSupervisor = processSupervisor
         self.relayHalfCloseIdleTimeout = relayHalfCloseIdleTimeout.map { max($0, 0) }
         self.relayPeerStateCheckInterval =
             relayPeerStateCheckInterval.isFinite
@@ -182,7 +187,17 @@ final class AgentConnection: @unchecked Sendable {
         defer { cleanupConnection() }
 
         logAgentInfo("connection fd=\(fd): sending ready frame")
-        try send(frame: .ready(capabilities: [Self.tcpConnectCapability]))
+        try send(
+            frame: .ready(
+                capabilities: [
+                    Self.tcpConnectCapability,
+                    MacOSGuestProcessProtocol.durableProcessV1,
+                    MacOSGuestProcessProtocol.durableProcessV2,
+                    MacOSGuestProcessProtocol.durableProcessV3,
+                    MacOSGuestProcessProtocol.durableProcessV4,
+                ]
+            )
+        )
         logAgentInfo("connection fd=\(fd): ready frame sent")
         var chunkBuffer = [UInt8](repeating: 0, count: 64 * 1024)
         connectionLoop: while true {
@@ -206,7 +221,7 @@ final class AgentConnection: @unchecked Sendable {
             } catch {
                 let message = "failed to consume frame: \(describeError(error))"
                 logAgentError(message)
-                try? send(frame: .error(message))
+                try? send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
                 try? send(frame: .exit(1))
                 break
             }
@@ -214,6 +229,7 @@ final class AgentConnection: @unchecked Sendable {
     }
 
     private func cleanupConnection() {
+        detachDurableProcess()
         session?.cleanup()
         for transaction in fileTransactions.values {
             logFileTransaction("aborting outstanding transaction", request: transaction.request, extra: ["reason": "connection_closed"])
@@ -263,6 +279,34 @@ final class AgentConnection: @unchecked Sendable {
     private func handle(frame: GuestAgentFrame) throws -> FrameAction {
         switch frame.type {
         case .exec:
+            if frame.durable == true {
+                let previousAttachment = currentDurableAttachment()
+                session?.cleanup()
+                session = nil
+                do {
+                    let installed = try processSupervisor.createAndAttach(
+                        frame: frame,
+                        connection: self,
+                        cursor: frame.cursor ?? 0
+                    )
+                    if let previousAttachment, previousAttachment != installed {
+                        processSupervisor.detach(previousAttachment)
+                    }
+                } catch {
+                    let message = "failed to create durable process: \(describeError(error))"
+                    logAgentError(message)
+                    try? send(
+                        frame: .error(
+                            id: frame.id,
+                            message: message,
+                            errorCode: structuredPOSIXErrorCode(error)
+                        )
+                    )
+                }
+                return .continueReading
+            }
+
+            detachDurableProcess()
             do {
                 try startProcess(frame: frame)
             } catch {
@@ -270,45 +314,174 @@ final class AgentConnection: @unchecked Sendable {
                 session = nil
                 let message = "failed to start process: \(describeError(error))"
                 logAgentError(message)
-                try? send(frame: .error(message))
+                try? send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
                 try? send(frame: .exit(1))
+            }
+            return .continueReading
+        case .processInspect:
+            do {
+                let status = try processSupervisor.inspect(executionID: frame.id)
+                try send(frame: .ack(id: status.executionID, data: try JSONEncoder().encode(status)))
+            } catch {
+                try? send(
+                    frame: .error(
+                        id: frame.id,
+                        message: "failed to inspect durable process: \(describeError(error))",
+                        errorCode: structuredPOSIXErrorCode(error)
+                    )
+                )
+            }
+            return .continueReading
+        case .processAttach:
+            let previousAttachment = currentDurableAttachment()
+            session?.cleanup()
+            session = nil
+            do {
+                let installed = try processSupervisor.attach(
+                    frame: frame,
+                    connection: self,
+                    cursor: frame.cursor ?? 0
+                )
+                if let previousAttachment, previousAttachment != installed {
+                    processSupervisor.detach(previousAttachment)
+                }
+            } catch {
+                try? send(
+                    frame: .error(
+                        id: frame.id,
+                        message: "failed to attach durable process: \(describeError(error))",
+                        errorCode: structuredPOSIXErrorCode(error)
+                    )
+                )
+            }
+            return .continueReading
+        case .processEventAck:
+            do {
+                let handle = try requireDurableAttachment(for: frame.id)
+                guard let sequence = frame.sequence else {
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain,
+                        code: Int(EINVAL),
+                        userInfo: [NSLocalizedDescriptionKey: "durable process event acknowledgement is missing sequence"]
+                    )
+                }
+                try processSupervisor.acknowledgeEvents(through: sequence, handle: handle)
+            } catch {
+                try? send(
+                    frame: .error(
+                        id: frame.id,
+                        message: "failed to acknowledge durable process events: \(describeError(error))",
+                        errorCode: structuredPOSIXErrorCode(error)
+                    )
+                )
+            }
+            return .continueReading
+        case .processStop:
+            do {
+                let handle = try requireDurableAttachment(for: frame.id)
+                try processSupervisor.stop(signal: frame.signal ?? SIGTERM, handle: handle) { status in
+                    try send(frame: .ack(id: status.executionID, data: try JSONEncoder().encode(status)))
+                }
+            } catch {
+                try? send(
+                    frame: .error(
+                        id: frame.id,
+                        message: "failed to stop durable process: \(describeError(error))",
+                        errorCode: structuredPOSIXErrorCode(error)
+                    )
+                )
+            }
+            return .continueReading
+        case .processDelete:
+            do {
+                if frame.trustedLaunchFingerprint != nil || frame.incarnation != nil || frame.storageGeneration != nil {
+                    let status = try processSupervisor.deleteOrTombstone(frame: frame)
+                    if let handle = currentDurableAttachment(), handle.executionID == frame.id {
+                        clearDurableAttachment(ifMatching: handle)
+                    }
+                    try send(
+                        frame: .ack(
+                            id: status?.executionID ?? frame.id ?? "",
+                            data: try status.map { try JSONEncoder().encode($0) }
+                        )
+                    )
+                } else {
+                    let handle = try requireDurableAttachment(for: frame.id)
+                    let status = try processSupervisor.delete(handle: handle)
+                    clearDurableAttachment(ifMatching: handle)
+                    try send(frame: .ack(id: status.executionID, data: try JSONEncoder().encode(status)))
+                }
+            } catch {
+                try? send(
+                    frame: .error(
+                        id: frame.id,
+                        message: "failed to delete durable process: \(describeError(error))",
+                        errorCode: structuredPOSIXErrorCode(error)
+                    )
+                )
             }
             return .continueReading
         case .stdin:
             if let data = frame.data {
                 do {
-                    try session?.writeStdin(data)
+                    if let handle = currentDurableAttachment() {
+                        try processSupervisor.writeStdin(data, handle: handle)
+                    } else {
+                        try session?.writeStdin(data)
+                    }
                 } catch {
                     let message = "failed to write stdin: \(describeError(error))"
                     logAgentError(message)
-                    try? send(frame: .error(message))
+                    try? send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
                 }
             }
             return .continueReading
         case .signal:
             if let signal = frame.signal {
                 do {
-                    try session?.sendSignal(signal)
+                    if let handle = currentDurableAttachment() {
+                        try processSupervisor.sendSignal(signal, handle: handle)
+                    } else {
+                        try session?.sendSignal(signal)
+                    }
                 } catch {
                     let message = "failed to send signal \(signal): \(describeError(error))"
                     logAgentError(message)
-                    try? send(frame: .error(message))
+                    try? send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
                 }
             }
             return .continueReading
         case .resize:
             if let width = frame.width, let height = frame.height {
                 do {
-                    try session?.resize(width: width, height: height)
+                    if let handle = currentDurableAttachment() {
+                        try processSupervisor.resize(width: width, height: height, handle: handle)
+                    } else {
+                        try session?.resize(width: width, height: height)
+                    }
                 } catch {
                     let message = "failed to resize tty to \(width)x\(height): \(describeError(error))"
                     logAgentError(message)
-                    try? send(frame: .error(message))
+                    try? send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
                 }
             }
             return .continueReading
         case .close:
-            session?.closeStdin()
+            if let handle = currentDurableAttachment() {
+                do {
+                    try processSupervisor.closeStdin(handle: handle)
+                } catch {
+                    try? send(
+                        frame: .error(
+                            id: handle.executionID,
+                            message: "failed to close stdin: \(describeError(error))",
+                            errorCode: structuredPOSIXErrorCode(error)
+                        )
+                    )
+                }
+            } else {
+                session?.closeStdin()
+            }
             return .continueReading
         case .tcpConnect:
             return try handleTCPConnect(frame: frame)
@@ -341,13 +514,76 @@ final class AgentConnection: @unchecked Sendable {
         }
     }
 
+    func installDurableAttachment(_ handle: GuestProcessAttachmentHandle) {
+        attachmentLock.lock()
+        durableAttachment = handle
+        attachmentLock.unlock()
+    }
+
+    private func currentDurableAttachment() -> GuestProcessAttachmentHandle? {
+        attachmentLock.lock()
+        defer { attachmentLock.unlock() }
+        return durableAttachment
+    }
+
+    private func clearDurableAttachment(ifMatching handle: GuestProcessAttachmentHandle) {
+        attachmentLock.lock()
+        if durableAttachment == handle {
+            durableAttachment = nil
+        }
+        attachmentLock.unlock()
+    }
+
+    private func detachDurableProcess() {
+        attachmentLock.lock()
+        let handle = durableAttachment
+        durableAttachment = nil
+        attachmentLock.unlock()
+        if let handle {
+            processSupervisor.detach(handle)
+        }
+    }
+
+    private func requireDurableAttachment(for executionID: String?) throws -> GuestProcessAttachmentHandle {
+        guard let handle = currentDurableAttachment() else {
+            throw NSError(
+                domain: "container.macos.guest-agent.durable-process",
+                code: Int(ENOTCONN),
+                userInfo: [NSLocalizedDescriptionKey: "connection is not attached to a durable process"]
+            )
+        }
+        if let executionID, executionID != handle.executionID {
+            throw NSError(
+                domain: "container.macos.guest-agent.durable-process",
+                code: Int(EINVAL),
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "connection controls execution \(handle.executionID), not \(executionID)"
+                ]
+            )
+        }
+        return handle
+    }
+
     private func handleTCPConnect(frame: GuestAgentFrame) throws -> FrameAction {
         guard let requestID = frame.id, !requestID.isEmpty else {
-            try send(frame: .error(id: frame.id, message: "tcpConnect requires a non-empty request id"))
+            try send(
+                frame: .error(
+                    id: frame.id,
+                    message: "tcpConnect requires a non-empty request id",
+                    errorCode: EINVAL
+                )
+            )
             return .close
         }
         guard let port = frame.port, port > 0, port <= UInt32(UInt16.max) else {
-            try send(frame: .error(id: requestID, message: "tcpConnect port must be between 1 and 65535"))
+            try send(
+                frame: .error(
+                    id: requestID,
+                    message: "tcpConnect port must be between 1 and 65535",
+                    errorCode: EINVAL
+                )
+            )
             return .close
         }
 
@@ -357,7 +593,13 @@ final class AgentConnection: @unchecked Sendable {
         } catch {
             let message = "failed to connect to loopback TCP port \(port): \(describeError(error))"
             logAgentError("connection fd=\(fd): \(message)")
-            try send(frame: .error(id: requestID, message: message))
+            try send(
+                frame: .error(
+                    id: requestID,
+                    message: message,
+                    errorCode: structuredPOSIXErrorCode(error)
+                )
+            )
             return .close
         }
 
@@ -442,7 +684,7 @@ final class AgentConnection: @unchecked Sendable {
         } catch {
             let message = "failed to configure guest network: \(describeError(error))"
             logAgentError(message)
-            try send(frame: .error(message))
+            try send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
         }
     }
 
@@ -474,6 +716,7 @@ final class AgentConnection: @unchecked Sendable {
             executable: executable,
             arguments: frame.arguments ?? [],
             environment: frame.environment ?? [],
+            rootDirectory: frame.rootDirectory,
             workingDirectory: frame.workingDirectory,
             terminal: terminal,
             identity: spawnedIdentity ?? .currentProcess(),
@@ -613,7 +856,7 @@ final class AgentConnection: @unchecked Sendable {
             let code = errno
             let message = "failed to stat path \(path): \(String(cString: strerror(code)))"
             logAgentError(message)
-            try send(frame: .error(message))
+            try send(frame: .error(message, errorCode: code))
             return
         }
 
@@ -651,7 +894,7 @@ final class AgentConnection: @unchecked Sendable {
             guard let handle = FileHandle(forReadingAtPath: path) else {
                 let message = "failed to open file for reading: \(path)"
                 logAgentError(message)
-                try send(frame: .error(message))
+                try send(frame: .error(message, errorCode: EIO))
                 return
             }
             fileReadTransactions[txID] = handle
@@ -674,7 +917,7 @@ final class AgentConnection: @unchecked Sendable {
         guard let handle = fileReadTransactions[txID] else {
             let message = "filesystem read chunk: no open transaction for tx_id=\(txID)"
             logAgentError(message)
-            try send(frame: .error(message))
+            try send(frame: .error(message, errorCode: ENOENT))
             return
         }
 
@@ -692,7 +935,7 @@ final class AgentConnection: @unchecked Sendable {
             logAgentError(message)
             try? handle.close()
             fileReadTransactions.removeValue(forKey: txID)
-            try send(frame: .error(message))
+            try send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
         }
     }
 
@@ -763,19 +1006,45 @@ final class AgentConnection: @unchecked Sendable {
         } catch {
             let message = "filesystem listdir failed tx_id=\(txID) path=\(path): \(describeError(error))"
             logAgentError(message)
-            try send(frame: .error(message))
+            try send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
         }
     }
 
-    fileprivate func send(frame: GuestAgentFrame) throws {
+    func send(frame: GuestAgentFrame, deadline: Date? = nil) throws {
         let payload = try JSONEncoder().encode(frame)
         var length = UInt32(payload.count).bigEndian
         let header = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
 
-        lock.lock()
+        if let deadline {
+            guard lock.lock(before: deadline) else {
+                throw guestAgentSocketTimeoutError()
+            }
+        } else {
+            lock.lock()
+        }
         defer { lock.unlock() }
-        try writeAllToSocket(header)
-        try writeAllToSocket(payload)
+        var originalFlags: Int32?
+        if deadline != nil {
+            let flags = Darwin.fcntl(fd, F_GETFL)
+            guard flags >= 0 else { throw POSIXError.fromErrno() }
+            if flags & O_NONBLOCK == 0 {
+                guard Darwin.fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+                    throw POSIXError.fromErrno()
+                }
+                originalFlags = flags
+            }
+        }
+        defer {
+            if let originalFlags {
+                _ = Darwin.fcntl(fd, F_SETFL, originalFlags)
+            }
+        }
+        try writeAllToSocket(header, deadline: deadline)
+        try writeAllToSocket(payload, deadline: deadline)
+    }
+
+    func invalidate() {
+        _ = Darwin.shutdown(fd, SHUT_RDWR)
     }
 
     private func readSocketChunk(into storage: inout [UInt8]) throws -> Data? {
@@ -808,14 +1077,23 @@ final class AgentConnection: @unchecked Sendable {
         }
     }
 
-    private func writeAllToSocket(_ data: Data) throws {
+    private func writeAllToSocket(_ data: Data, deadline: Date? = nil) throws {
+        let maximumWriteSize = 64 * 1024
         try data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else { return }
             var totalWritten = 0
             while totalWritten < rawBuffer.count {
+                if let deadline, deadline.timeIntervalSinceNow <= 0 {
+                    throw guestAgentSocketTimeoutError()
+                }
                 let pointer = baseAddress.advanced(by: totalWritten)
                 let remaining = rawBuffer.count - totalWritten
-                let written = Darwin.write(fd, pointer, remaining)
+                let written: Int
+                if deadline != nil {
+                    written = Darwin.send(fd, pointer, min(remaining, maximumWriteSize), MSG_DONTWAIT | MSG_NOSIGNAL)
+                } else {
+                    written = Darwin.write(fd, pointer, remaining)
+                }
                 if written > 0 {
                     totalWritten += written
                     continue
@@ -833,7 +1111,11 @@ final class AgentConnection: @unchecked Sendable {
                     continue
                 }
                 if code == EAGAIN || code == EWOULDBLOCK {
-                    usleep(10_000)
+                    if let deadline {
+                        try waitForGuestAgentSocketWritable(fd: fd, deadline: deadline)
+                    } else {
+                        usleep(10_000)
+                    }
                     continue
                 }
                 throw NSError(
@@ -1235,7 +1517,7 @@ private func abortRelay(clientFD: Int32, targetFD: Int32) {
     _ = Darwin.shutdown(targetFD, SHUT_RDWR)
 }
 
-private protocol GuestAgentProcessSession: AnyObject {
+protocol GuestAgentProcessSession: AnyObject {
     func start(stdoutHandle: FileHandle?, stderrHandle: FileHandle?) throws
     func writeStdin(_ data: Data) throws
     func closeStdin()
@@ -1359,6 +1641,7 @@ struct GuestAgentExecBootstrapPayload: Codable {
     let executable: String
     let arguments: [String]
     let environment: [String]
+    let rootDirectory: String?
     let workingDirectory: String?
     let uid: UInt32
     let gid: UInt32
@@ -1368,12 +1651,14 @@ struct GuestAgentExecBootstrapPayload: Codable {
         executable: String,
         arguments: [String],
         environment: [String],
+        rootDirectory: String?,
         workingDirectory: String?,
         identity: GuestAgentExecIdentity
     ) {
         self.executable = executable
         self.arguments = arguments
         self.environment = environment
+        self.rootDirectory = rootDirectory
         self.workingDirectory = workingDirectory
         self.uid = UInt32(identity.uid)
         self.gid = UInt32(identity.gid)
@@ -1396,22 +1681,40 @@ private struct UserBootstrapLaunch {
     let payloadFD: Int32
 }
 
-private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable {
+enum GuestProcessOutputChannel: Sendable {
+    case stdout
+    case stderr
+}
+
+protocol SpawnedProcessEventSink: AnyObject {
+    func processSession(
+        _ session: SpawnedProcessSession,
+        didOutput channel: GuestProcessOutputChannel,
+        data: Data
+    )
+    func processSession(_ session: SpawnedProcessSession, didExitWithCode code: Int32)
+}
+
+final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable {
     private let pid: pid_t
     private let terminal: Bool
-    private unowned let connection: AgentConnection
+    private weak var connection: AgentConnection?
+    private weak var eventSink: (any SpawnedProcessEventSink)?
     private let masterHandle: FileHandle?
     private let stdinHandle: FileHandle?
     private let stdoutHandle: FileHandle?
     private let stderrHandle: FileHandle?
+    private let inputLock = NSLock()
     private let outputLock = NSLock()
     private var exitSent = false
     private var cleanedUp = false
+    private var exitObservedBeforeReap = false
 
     private init(
         pid: pid_t,
         terminal: Bool,
-        connection: AgentConnection,
+        connection: AgentConnection?,
+        eventSink: (any SpawnedProcessEventSink)?,
         masterHandle: FileHandle?,
         stdinHandle: FileHandle?,
         stdoutHandle: FileHandle?,
@@ -1420,6 +1723,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         self.pid = pid
         self.terminal = terminal
         self.connection = connection
+        self.eventSink = eventSink
         self.masterHandle = masterHandle
         self.stdinHandle = stdinHandle
         self.stdoutHandle = stdoutHandle
@@ -1430,16 +1734,72 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         executable: String,
         arguments: [String],
         environment: [String],
+        rootDirectory: String?,
         workingDirectory: String?,
         terminal: Bool,
         identity: GuestAgentExecIdentity,
         connection: AgentConnection
     ) throws -> SpawnedProcessSession {
+        try spawn(
+            executable: executable,
+            arguments: arguments,
+            environment: environment,
+            rootDirectory: rootDirectory,
+            workingDirectory: workingDirectory,
+            terminal: terminal,
+            identity: identity,
+            connection: connection,
+            eventSink: nil
+        )
+    }
+
+    static func spawn(
+        executable: String,
+        arguments: [String],
+        environment: [String],
+        rootDirectory: String?,
+        workingDirectory: String?,
+        terminal: Bool,
+        identity: GuestAgentExecIdentity,
+        eventSink: any SpawnedProcessEventSink
+    ) throws -> SpawnedProcessSession {
+        try spawn(
+            executable: executable,
+            arguments: arguments,
+            environment: environment,
+            rootDirectory: rootDirectory,
+            workingDirectory: workingDirectory,
+            terminal: terminal,
+            identity: identity,
+            connection: nil,
+            eventSink: eventSink
+        )
+    }
+
+    private static func spawn(
+        executable: String,
+        arguments: [String],
+        environment: [String],
+        rootDirectory: String?,
+        workingDirectory: String?,
+        terminal: Bool,
+        identity: GuestAgentExecIdentity,
+        connection: AgentConnection?,
+        eventSink: (any SpawnedProcessEventSink)?
+    ) throws -> SpawnedProcessSession {
+        if let rootDirectory, !rootDirectory.hasPrefix("/") {
+            throw POSIXError(.EINVAL)
+        }
+        if rootDirectory != nil, let workingDirectory, !workingDirectory.hasPrefix("/") {
+            throw POSIXError(.EINVAL)
+        }
+
         let execStatus = try makePipe()
         let bootstrapLaunch = try makeUserBootstrapLaunchIfNeeded(
             executable: executable,
             arguments: arguments,
             environment: environment,
+            rootDirectory: rootDirectory,
             workingDirectory: workingDirectory,
             identity: identity,
             statusFD: execStatus.writeEnd
@@ -1458,6 +1818,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
             executableSearchCandidates(executable: childExecutable, environment: childEnvironment)
         )
         let preparedEnv = PreparedCStringArray(childEnvironment)
+        let preparedRootDirectory = (bootstrapLaunch == nil ? rootDirectory : nil).map(PreparedCString.init)
         let preparedWorkingDirectory = childWorkingDirectory.map(PreparedCString.init)
 
         var stdinPipe: RawPipe?
@@ -1498,6 +1859,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
                     executableSearch: preparedExecutableSearch.pointer,
                     arguments: preparedExec.pointer,
                     environment: preparedEnv.pointer,
+                    rootDirectory: preparedRootDirectory?.pointer,
                     workingDirectory: preparedWorkingDirectory?.pointer,
                     identity: childIdentity,
                     stdinFD: slaveFD,
@@ -1514,6 +1876,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
                     executableSearch: preparedExecutableSearch.pointer,
                     arguments: preparedExec.pointer,
                     environment: preparedEnv.pointer,
+                    rootDirectory: preparedRootDirectory?.pointer,
                     workingDirectory: preparedWorkingDirectory?.pointer,
                     identity: childIdentity,
                     stdinFD: stdinPipe?.readEnd ?? -1,
@@ -1548,6 +1911,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
             pid: pid,
             terminal: terminal,
             connection: connection,
+            eventSink: eventSink,
             masterHandle: terminal ? FileHandle(fileDescriptor: masterFD, closeOnDealloc: true) : nil,
             stdinHandle: terminal ? nil : FileHandle(fileDescriptor: stdinPipe?.writeEnd ?? -1, closeOnDealloc: true),
             stdoutHandle: terminal ? nil : FileHandle(fileDescriptor: stdoutPipe?.readEnd ?? -1, closeOnDealloc: true),
@@ -1577,7 +1941,13 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         }
     }
 
+    var processIdentifier: Int32 {
+        pid
+    }
+
     func writeStdin(_ data: Data) throws {
+        inputLock.lock()
+        defer { inputLock.unlock() }
         if terminal {
             guard let masterHandle else { return }
             try masterHandle.write(contentsOf: data)
@@ -1586,7 +1956,52 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         }
     }
 
+    func writeStdinNonblocking(_ data: Data) throws -> Int {
+        guard !data.isEmpty else { return 0 }
+
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard let handle = terminal ? masterHandle : stdinHandle else {
+            return data.count
+        }
+
+        let descriptor = handle.fileDescriptor
+        let originalFlags = Darwin.fcntl(descriptor, F_GETFL)
+        guard originalFlags >= 0 else {
+            throw POSIXError.fromErrno()
+        }
+        let changedFlags = originalFlags & O_NONBLOCK == 0
+        if changedFlags, Darwin.fcntl(descriptor, F_SETFL, originalFlags | O_NONBLOCK) != 0 {
+            throw POSIXError.fromErrno()
+        }
+        defer {
+            if changedFlags {
+                _ = Darwin.fcntl(descriptor, F_SETFL, originalFlags)
+            }
+        }
+
+        let written = data.withUnsafeBytes { rawBuffer -> Int in
+            guard let baseAddress = rawBuffer.baseAddress else { return 0 }
+            return Darwin.write(descriptor, baseAddress, rawBuffer.count)
+        }
+        if written >= 0 {
+            return written
+        }
+
+        let code = errno
+        if code == EAGAIN || code == EWOULDBLOCK {
+            return 0
+        }
+        throw NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(code),
+            userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+        )
+    }
+
     func closeStdin() {
+        inputLock.lock()
+        defer { inputLock.unlock() }
         if terminal {
             sendTerminalEOF(masterHandle)
             return
@@ -1595,6 +2010,9 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
     }
 
     func sendSignal(_ signal: Int32) throws {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+        guard !exitObservedBeforeReap, !cleanedUp else { return }
         try sendSignalToProcessTree(pid: pid, signal: signal)
     }
 
@@ -1614,26 +2032,62 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         }
         cleanedUp = true
         exitSent = true
+        if !exitObservedBeforeReap {
+            try? sendSignalToProcessTree(pid: pid, signal: SIGKILL)
+        }
         outputLock.unlock()
 
         stdoutHandle?.readabilityHandler = nil
         stderrHandle?.readabilityHandler = nil
         masterHandle?.readabilityHandler = nil
-        try? sendSignalToProcessTree(pid: pid, signal: SIGKILL)
+        inputLock.lock()
         try? masterHandle?.close()
         try? stdinHandle?.close()
+        inputLock.unlock()
         try? stdoutHandle?.close()
         try? stderrHandle?.close()
     }
 
-    private enum OutputChannel {
-        case stdout
-        case stderr
-    }
-
     private func waitForExit() {
+        var information = siginfo_t()
+        var observedExit = false
+        while true {
+            if waitid(P_PID, id_t(pid), &information, WEXITED | WNOWAIT) == 0 {
+                observedExit = true
+                break
+            }
+            if errno != EINTR {
+                break
+            }
+        }
+
+        if observedExit {
+            // WNOWAIT keeps the session leader as a zombie, reserving its PID
+            // and process-group identity until all remaining descendants have
+            // been terminated. Cleanup and signal paths are fenced before reap.
+            outputLock.lock()
+            exitObservedBeforeReap = true
+            try? sendSignalToProcessGroup(pid: pid, signal: SIGKILL)
+            outputLock.unlock()
+        }
+
+        if !observedExit {
+            outputLock.lock()
+            exitObservedBeforeReap = true
+            outputLock.unlock()
+        }
+
         var status: Int32 = 0
-        let result = waitpid(pid, &status, 0)
+        let result: pid_t
+        while true {
+            let candidate = waitpid(pid, &status, 0)
+            if candidate == -1, errno == EINTR {
+                continue
+            }
+            result = candidate
+            break
+        }
+
         let exitCode: Int32
         if result == pid {
             if wifexited(status) {
@@ -1649,7 +2103,7 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         flushOutputAndSendExit(exitCode)
     }
 
-    private func forwardAvailableData(from handle: FileHandle, channel: OutputChannel) {
+    private func forwardAvailableData(from handle: FileHandle, channel: GuestProcessOutputChannel) {
         outputLock.lock()
         defer { outputLock.unlock() }
 
@@ -1679,10 +2133,14 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         drainRemainingOutput(from: stderrHandle, channel: .stderr)
 
         exitSent = true
-        try? connection.send(frame: .exit(status))
+        if let eventSink {
+            eventSink.processSession(self, didExitWithCode: status)
+        } else {
+            try? connection?.send(frame: .exit(status))
+        }
     }
 
-    private func drainRemainingOutput(from handle: FileHandle?, channel: OutputChannel) {
+    private func drainRemainingOutput(from handle: FileHandle?, channel: GuestProcessOutputChannel) {
         guard let handle else { return }
 
         while true {
@@ -1713,12 +2171,16 @@ private final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked 
         }
     }
 
-    private func send(_ data: Data, channel: OutputChannel) {
+    private func send(_ data: Data, channel: GuestProcessOutputChannel) {
+        if let eventSink {
+            eventSink.processSession(self, didOutput: channel, data: data)
+            return
+        }
         switch channel {
         case .stdout:
-            try? connection.send(frame: .stdout(data))
+            try? connection?.send(frame: .stdout(data))
         case .stderr:
-            try? connection.send(frame: .stderr(data))
+            try? connection?.send(frame: .stderr(data))
         }
     }
 }
@@ -1900,6 +2362,7 @@ private func makeUserBootstrapLaunchIfNeeded(
     executable: String,
     arguments: [String],
     environment: [String],
+    rootDirectory: String?,
     workingDirectory: String?,
     identity: GuestAgentExecIdentity,
     statusFD: Int32
@@ -1913,6 +2376,7 @@ private func makeUserBootstrapLaunchIfNeeded(
         executable: executable,
         arguments: arguments,
         environment: environment,
+        rootDirectory: rootDirectory,
         workingDirectory: workingDirectory,
         identity: identity
     )
@@ -2057,6 +2521,8 @@ private func runExecHelper(payloadFD: Int32, statusFD: Int32) -> Never {
         guard writeExecStatus(execHelperReadyStatus, to: statusFD) else {
             _exit(127)
         }
+        clearBlockedSignals(fail: fail)
+        enterRootDirectory(payload.rootDirectory, fail: fail)
         applyProcessIdentity(payload.identity, fail: fail)
         if let workingDirectory = payload.workingDirectory, chdir(workingDirectory) != 0 {
             fail(Int32(errno))
@@ -2112,6 +2578,7 @@ private func runChild(
     executableSearch: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
     arguments: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
     environment: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+    rootDirectory: UnsafeMutablePointer<CChar>?,
     workingDirectory: UnsafeMutablePointer<CChar>?,
     identity: GuestAgentExecIdentity,
     stdinFD: Int32,
@@ -2126,6 +2593,8 @@ private func runChild(
         }
         _exit(127)
     }
+
+    clearBlockedSignals(fail: fail)
 
     if setsid() == -1 {
         fail(Int32(errno))
@@ -2155,12 +2624,72 @@ private func runChild(
         _ = Darwin.close(stderrFD)
     }
 
+    enterRootDirectory(rootDirectory, fail: fail)
     applyProcessIdentity(identity, fail: fail)
 
     if let workingDirectory, chdir(workingDirectory) != 0 {
         fail(Int32(errno))
     }
     fail(execWithPathSearch(executableSearch, arguments: arguments, environment: environment))
+}
+
+private func clearBlockedSignals(fail: (Int32) -> Never) {
+    var emptyMask = sigset_t()
+    guard sigemptyset(&emptyMask) == 0 else {
+        fail(Int32(errno))
+    }
+    guard sigprocmask(SIG_SETMASK, &emptyMask, nil) == 0 else {
+        fail(Int32(errno))
+    }
+}
+
+private func enterRootDirectory(_ rootDirectory: String?, fail: (Int32) -> Never) {
+    guard let rootDirectory else { return }
+    rootDirectory.withCString { path in
+        enterRootDirectory(path, fail: fail)
+    }
+}
+
+private func enterRootDirectory(_ rootDirectory: UnsafePointer<CChar>?, fail: (Int32) -> Never) {
+    guard let rootDirectory else { return }
+    guard chroot(rootDirectory) == 0 else {
+        fail(Int32(errno))
+    }
+    guard chdir("/") == 0 else {
+        fail(Int32(errno))
+    }
+}
+
+private func waitForGuestAgentSocketWritable(fd: Int32, deadline: Date) throws {
+    while true {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else {
+            throw guestAgentSocketTimeoutError()
+        }
+        let milliseconds = Int32(min(ceil(remaining * 1_000), Double(Int32.max)))
+        var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let result = Darwin.poll(&descriptor, 1, max(milliseconds, 1))
+        if result > 0 {
+            guard descriptor.revents & Int16(POLLOUT) != 0 else {
+                throw POSIXError(.EPIPE)
+            }
+            return
+        }
+        if result == 0 {
+            throw guestAgentSocketTimeoutError()
+        }
+        if errno != EINTR {
+            throw POSIXError.fromErrno()
+        }
+    }
+}
+
+private func guestAgentSocketTimeoutError() -> NSError {
+    NSError(
+        domain: NSPOSIXErrorDomain,
+        code: Int(ETIMEDOUT),
+        userInfo: [NSLocalizedDescriptionKey: "guest-agent socket write timed out"]
+    )
 }
 
 private func applyProcessIdentity(_ identity: GuestAgentExecIdentity, fail: (Int32) -> Never) {
@@ -2201,9 +2730,20 @@ private func sendSignalToProcessTree(pid: pid_t, signal: Int32) throws {
     throw POSIXError(POSIXErrorCode(rawValue: processGroupErrno) ?? .EIO)
 }
 
+private func sendSignalToProcessGroup(pid: pid_t, signal: Int32) throws {
+    guard Darwin.kill(-pid, signal) == 0 || errno == ESRCH else {
+        throw POSIXError.fromErrno()
+    }
+}
+
 struct GuestAgentFrame: Codable {
     enum FrameType: String, Codable {
         case exec
+        case processInspect
+        case processAttach
+        case processEventAck
+        case processStop
+        case processDelete
         case stdin
         case signal
         case resize
@@ -2236,6 +2776,14 @@ struct GuestAgentFrame: Codable {
     let rootDirectory: String?
     let workingDirectory: String?
     let terminal: Bool?
+    let durable: Bool?
+    let cursor: UInt64?
+    let sequence: UInt64?
+    let expectedLaunchFingerprint: String?
+    let trustedLaunchFingerprint: String?
+    let incarnation: String?
+    let storageGeneration: UInt64?
+    let previousStorageGeneration: UInt64?
     let user: String?
     let signal: Int32?
     let width: UInt16?
@@ -2243,6 +2791,7 @@ struct GuestAgentFrame: Codable {
     let data: Data?
     let exitCode: Int32?
     let message: String?
+    let errorCode: Int32?
     let op: MacOSSidecarFSOperation?
     let path: String?
     let mode: UInt32?
@@ -2269,6 +2818,14 @@ struct GuestAgentFrame: Codable {
         rootDirectory: String? = nil,
         workingDirectory: String? = nil,
         terminal: Bool? = nil,
+        durable: Bool? = nil,
+        cursor: UInt64? = nil,
+        sequence: UInt64? = nil,
+        expectedLaunchFingerprint: String? = nil,
+        trustedLaunchFingerprint: String? = nil,
+        incarnation: String? = nil,
+        storageGeneration: UInt64? = nil,
+        previousStorageGeneration: UInt64? = nil,
         user: String? = nil,
         signal: Int32? = nil,
         width: UInt16? = nil,
@@ -2276,6 +2833,7 @@ struct GuestAgentFrame: Codable {
         data: Data? = nil,
         exitCode: Int32? = nil,
         message: String? = nil,
+        errorCode: Int32? = nil,
         op: MacOSSidecarFSOperation? = nil,
         path: String? = nil,
         mode: UInt32? = nil,
@@ -2301,6 +2859,14 @@ struct GuestAgentFrame: Codable {
         self.rootDirectory = rootDirectory
         self.workingDirectory = workingDirectory
         self.terminal = terminal
+        self.durable = durable
+        self.cursor = cursor
+        self.sequence = sequence
+        self.expectedLaunchFingerprint = expectedLaunchFingerprint
+        self.trustedLaunchFingerprint = trustedLaunchFingerprint
+        self.incarnation = incarnation
+        self.storageGeneration = storageGeneration
+        self.previousStorageGeneration = previousStorageGeneration
         self.user = user
         self.signal = signal
         self.width = width
@@ -2308,6 +2874,7 @@ struct GuestAgentFrame: Codable {
         self.data = data
         self.exitCode = exitCode
         self.message = message
+        self.errorCode = errorCode
         self.op = op
         self.path = path
         self.mode = mode
@@ -2332,20 +2899,32 @@ struct GuestAgentFrame: Codable {
         .init(type: .stdout, data: data)
     }
 
+    static func stdout(id: String, sequence: UInt64, data: Data) -> Self {
+        .init(type: .stdout, id: id, sequence: sequence, data: data)
+    }
+
     static func stderr(_ data: Data) -> Self {
         .init(type: .stderr, data: data)
+    }
+
+    static func stderr(id: String, sequence: UInt64, data: Data) -> Self {
+        .init(type: .stderr, id: id, sequence: sequence, data: data)
     }
 
     static func exit(_ code: Int32) -> Self {
         .init(type: .exit, exitCode: code)
     }
 
-    static func error(_ message: String) -> Self {
-        .init(type: .error, message: message)
+    static func exit(id: String, sequence: UInt64, code: Int32) -> Self {
+        .init(type: .exit, id: id, sequence: sequence, exitCode: code)
     }
 
-    static func error(id: String?, message: String) -> Self {
-        .init(type: .error, id: id, message: message)
+    static func error(_ message: String, errorCode: Int32? = nil) -> Self {
+        .init(type: .error, message: message, errorCode: errorCode)
+    }
+
+    static func error(id: String?, message: String, errorCode: Int32? = nil) -> Self {
+        .init(type: .error, id: id, message: message, errorCode: errorCode)
     }
 
     static func ack(id: String, data: Data? = nil) -> Self {
@@ -2374,6 +2953,25 @@ private func configureGuestAgentSignals() {
 private func describeError(_ error: Error) -> String {
     let nsError = error as NSError
     return "\(nsError.domain) Code=\(nsError.code) \"\(nsError.localizedDescription)\""
+}
+
+private func structuredPOSIXErrorCode(_ error: Error) -> Int32? {
+    if let posixError = error as? POSIXError {
+        return posixError.code.rawValue
+    }
+
+    let nsError = error as NSError
+    if nsError.domain == NSPOSIXErrorDomain
+        || nsError.domain == "container.macos.guest-agent.durable-process"
+        || nsError.domain == "container.macos.guest-agent.exec"
+    {
+        guard nsError.code > 0, nsError.code <= Int(Int32.max) else { return nil }
+        return Int32(nsError.code)
+    }
+    if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+        return structuredPOSIXErrorCode(underlyingError)
+    }
+    return nil
 }
 
 private func readSymbolicLinkTarget(atPath path: String) -> String? {

@@ -911,6 +911,50 @@ struct MacOSSandboxServiceWaiterTests {
     }
 
     @Test
+    func stableExecutionIdentityDerivesStableGuestPathsAcrossRuntimeIDs() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        let executionID = "sandbox:container:builder-attempt-0"
+        let identity = try WorkloadExecutionIdentity(
+            executionID: executionID,
+            launchFingerprint: "sha256:\(String(repeating: "a", count: 64))",
+            restoreBinding: .init(executionID: executionID, generation: 7)
+        )
+        let first = WorkloadConfiguration(
+            id: "transient-a",
+            processConfiguration: baseProcessConfiguration(),
+            workloadImageReference: "registry.local/example/workload:latest",
+            workloadImageDigest: "sha256:workload",
+            executionIdentity: identity
+        )
+        let second = WorkloadConfiguration(
+            id: "transient-b",
+            processConfiguration: baseProcessConfiguration(),
+            workloadImageReference: "registry.local/example/workload:latest",
+            workloadImageDigest: "sha256:workload",
+            executionIdentity: identity
+        )
+
+        try await service.testingPersistWorkloadConfiguration(first)
+        try await service.testingPersistWorkloadConfiguration(second)
+
+        let firstStored = try JSONDecoder().decode(
+            WorkloadConfiguration.self,
+            from: Data(contentsOf: MacOSSandboxLayout(root: tempRoot).workloadConfigurationURL(id: first.id))
+        )
+        let secondStored = try JSONDecoder().decode(
+            WorkloadConfiguration.self,
+            from: Data(contentsOf: MacOSSandboxLayout(root: tempRoot).workloadConfigurationURL(id: second.id))
+        )
+        #expect(firstStored.guestPayloadPath == secondStored.guestPayloadPath)
+        #expect(firstStored.guestMetadataPath == secondStored.guestMetadataPath)
+        #expect(firstStored.guestPayloadPath?.contains("transient-a") == false)
+        #expect(firstStored.guestPayloadPath?.contains("transient-b") == false)
+    }
+
+    @Test
     func bootedSandboxStateReportsRunningForInspect() async throws {
         let tempRoot = makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -996,6 +1040,43 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(stderrLog.contains("hello stderr"))
         #expect(!sandboxLog.contains("hello stdout"))
         #expect(!sandboxLog.contains("hello stderr"))
+    }
+
+    @Test
+    func durableEventReplayDoesNotDuplicateConsumedOutput() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        await service.testingAddSession(
+            id: "exec-replay-dedup",
+            config: baseProcessConfiguration(),
+            started: true,
+            sessionID: "__workload__exec-replay-dedup"
+        )
+        let first = MacOSSidecarEvent(
+            event: .processStdout,
+            processID: "__workload__exec-replay-dedup",
+            data: Data("first\n".utf8),
+            sequence: 1,
+            subscriptionID: "subscription-a"
+        )
+
+        await service.handleSidecarEvent(first)
+        await service.handleSidecarEvent(first.delivered(to: "subscription-b"))
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processStdout,
+                processID: "__workload__exec-replay-dedup",
+                data: Data("second\n".utf8),
+                sequence: 2,
+                subscriptionID: "subscription-b"
+            )
+        )
+
+        let workload = try await service.testingInspectWorkload("exec-replay-dedup")
+        let stdout = try String(contentsOfFile: try #require(workload.stdoutLogPath), encoding: .utf8)
+        #expect(stdout == "first\nsecond\n")
     }
 
     @Test

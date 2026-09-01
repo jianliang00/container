@@ -23,15 +23,42 @@ import Glibc
 import Darwin
 #endif
 
+/// Normalizes absolute paths without consulting the filesystem. Foundation's
+/// path standardization resolves Darwin's system aliases after a path exists,
+/// which is unsuitable for validating managed roots before they are created.
+func criLexicallyNormalizedAbsolutePath(_ path: String) -> String? {
+    guard path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
+    var components: [Substring] = []
+    for component in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
+        switch component {
+        case "", ".":
+            continue
+        case "..":
+            guard !components.isEmpty else { return nil }
+            components.removeLast()
+        default:
+            components.append(component)
+        }
+    }
+    return "/" + components.joined(separator: "/")
+}
+
 public enum CRIShimMachineStateAnnotation {
     public static let prefix = "io.container.runtime.macos.machine-state.v1/"
     public static let enabled = prefix + "enabled"
     public static let persistenceID = prefix + "persistence-id"
     public static let restoreStateID = prefix + "restore-state-id"
+    public static let restoreStateGeneration = prefix + "restore-state-generation"
+    public static let storageGeneration = prefix + "storage-generation"
     public static let blockDevices = prefix + "block-devices"
-    public static let criRestoreUnsupportedReasonCode = "criWorkloadAdoptionUnavailable"
 
-    static let companionKeys = [persistenceID, restoreStateID, blockDevices]
+    static let companionKeys = [
+        persistenceID,
+        restoreStateID,
+        restoreStateGeneration,
+        storageGeneration,
+        blockDevices,
+    ]
 }
 
 struct CRIShimMachineStateMapping: Equatable, Sendable {
@@ -39,6 +66,13 @@ struct CRIShimMachineStateMapping: Equatable, Sendable {
     var blockDevices: [ContainerConfiguration.MacOSGuestOptions.BlockDevice]
 
     static let disabled = CRIShimMachineStateMapping(machineState: nil, blockDevices: [])
+}
+
+struct CRIShimMachineStateAnnotationValues: Equatable, Sendable {
+    var persistenceID: String
+    var restoreStateID: String?
+    var restoreStateGeneration: UInt64?
+    var storageGeneration: UInt64
 }
 
 private struct CRIShimNBDAnnotationDevice: Decodable {
@@ -129,28 +163,14 @@ func makeCRIShimMachineStateMapping(
     guard let nodeConfig, nodeConfig.enabled else {
         throw CRIShimError.unsupported("machine-state annotations are disabled by the node runtime configuration")
     }
-    let persistenceID = try requireSafeIdentifier(
-        annotations[CRIShimMachineStateAnnotation.persistenceID],
-        annotation: CRIShimMachineStateAnnotation.persistenceID,
-        maximumLength: 64
-    )
-    if let restoreStateID = annotations[CRIShimMachineStateAnnotation.restoreStateID] {
-        _ = try requireSafeIdentifier(
-            restoreStateID,
-            annotation: CRIShimMachineStateAnnotation.restoreStateID,
-            maximumLength: 128
-        )
-        throw CRIShimError.unsupported(
-            "\(CRIShimMachineStateAnnotation.criRestoreUnsupportedReasonCode): CRI machine-state restore requires guest process and host workload metadata adoption, which this runtime protocol does not support"
-        )
-    }
+    let values = try decodeEnabledMachineStateAnnotationValues(annotations)
     let blockDevices = try decodeBlockDevices(
         annotations[CRIShimMachineStateAnnotation.blockDevices],
         allowedRoots: nodeConfig.nbdSocketAllowedRoots
     )
 
-    let storageRoot = URL(fileURLWithPath: nodeConfig.normalizedStorageRoot).standardizedFileURL
-    let socketRoot = URL(fileURLWithPath: nodeConfig.normalizedControlSocketRoot).standardizedFileURL
+    let storageRoot = URL(fileURLWithPath: nodeConfig.normalizedStorageRoot, isDirectory: true)
+    let socketRoot = URL(fileURLWithPath: nodeConfig.normalizedControlSocketRoot, isDirectory: true)
     try preparePrivateDirectory(
         storageRoot,
         createIntermediates: true,
@@ -162,7 +182,7 @@ func makeCRIShimMachineStateMapping(
         ownerUID: nodeConfig.runtimeOwnerUID
     )
 
-    let storageDirectory = storageRoot.appendingPathComponent(persistenceID, isDirectory: true)
+    let storageDirectory = storageRoot.appendingPathComponent(values.persistenceID, isDirectory: true)
     try requireManagedDescendant(storageDirectory, below: storageRoot)
     try preparePrivateDirectory(
         storageDirectory,
@@ -170,7 +190,7 @@ func makeCRIShimMachineStateMapping(
         ownerUID: nodeConfig.runtimeOwnerUID
     )
 
-    let controlSocket = socketRoot.appendingPathComponent("\(persistenceID).sock", isDirectory: false)
+    let controlSocket = socketRoot.appendingPathComponent("\(values.persistenceID).sock", isDirectory: false)
     try requireManagedDescendant(controlSocket, below: socketRoot)
     let socketAddress = sockaddr_un()
     guard controlSocket.path.utf8.count < MemoryLayout.size(ofValue: socketAddress.sun_path) else {
@@ -179,12 +199,84 @@ func makeCRIShimMachineStateMapping(
 
     return CRIShimMachineStateMapping(
         machineState: .init(
-            persistenceID: persistenceID,
+            persistenceID: values.persistenceID,
             storageDirectory: storageDirectory.path,
-            controlSocketPath: controlSocket.path
+            controlSocketPath: controlSocket.path,
+            restoreStateID: values.restoreStateID,
+            restoreStateGeneration: values.restoreStateGeneration,
+            storageGeneration: values.storageGeneration
         ),
         blockDevices: blockDevices
     )
+}
+
+func decodeEnabledMachineStateAnnotationValues(
+    _ annotations: [String: String]
+) throws -> CRIShimMachineStateAnnotationValues {
+    let persistenceID = try requireSafeIdentifier(
+        annotations[CRIShimMachineStateAnnotation.persistenceID],
+        annotation: CRIShimMachineStateAnnotation.persistenceID,
+        maximumLength: 64
+    )
+    let storageGeneration = try requirePositiveGeneration(
+        annotations[CRIShimMachineStateAnnotation.storageGeneration],
+        annotation: CRIShimMachineStateAnnotation.storageGeneration
+    )
+    let restoreStateID: String?
+    let restoreStateGeneration: UInt64?
+    switch (
+        annotations[CRIShimMachineStateAnnotation.restoreStateID],
+        annotations[CRIShimMachineStateAnnotation.restoreStateGeneration]
+    ) {
+    case (nil, nil):
+        restoreStateID = nil
+        restoreStateGeneration = nil
+    case (let rawStateID?, let rawGeneration?):
+        restoreStateID = try requireSafeIdentifier(
+            rawStateID,
+            annotation: CRIShimMachineStateAnnotation.restoreStateID,
+            maximumLength: 128
+        )
+        let selectedGeneration = try requirePositiveGeneration(
+            rawGeneration,
+            annotation: CRIShimMachineStateAnnotation.restoreStateGeneration
+        )
+        guard storageGeneration > selectedGeneration else {
+            throw CRIShimError.invalidArgument(
+                "\(CRIShimMachineStateAnnotation.storageGeneration) must be newer than \(CRIShimMachineStateAnnotation.restoreStateGeneration)"
+            )
+        }
+        restoreStateGeneration = selectedGeneration
+    case (nil, _?):
+        throw CRIShimError.invalidArgument(
+            "\(CRIShimMachineStateAnnotation.restoreStateGeneration) requires \(CRIShimMachineStateAnnotation.restoreStateID)"
+        )
+    case (_?, nil):
+        throw CRIShimError.invalidArgument(
+            "\(CRIShimMachineStateAnnotation.restoreStateID) requires \(CRIShimMachineStateAnnotation.restoreStateGeneration)"
+        )
+    }
+    return CRIShimMachineStateAnnotationValues(
+        persistenceID: persistenceID,
+        restoreStateID: restoreStateID,
+        restoreStateGeneration: restoreStateGeneration,
+        storageGeneration: storageGeneration
+    )
+}
+
+private func requirePositiveGeneration(
+    _ value: String?,
+    annotation: String
+) throws -> UInt64 {
+    guard let value,
+        !value.isEmpty,
+        value.utf8.allSatisfy({ (48...57).contains($0) }),
+        let generation = UInt64(value),
+        generation > 0
+    else {
+        throw CRIShimError.invalidArgument("\(annotation) must be a positive base-10 UInt64")
+    }
+    return generation
 }
 
 private func decodeBlockDevices(
@@ -339,12 +431,18 @@ private func preparePrivateDirectory(
 }
 
 private func requireManagedDescendant(_ candidate: URL, below root: URL) throws {
-    let root = root.standardizedFileURL
-    let candidate = candidate.standardizedFileURL
-    let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
-    guard candidate.path.hasPrefix(prefix) else {
+    guard
+        let rootPath = criLexicallyNormalizedAbsolutePath(root.path),
+        let candidatePath = criLexicallyNormalizedAbsolutePath(candidate.path)
+    else {
+        throw CRIShimError.invalidArgument("managed path must be absolute and lexically normalized")
+    }
+    let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+    guard candidatePath.hasPrefix(prefix) else {
         throw CRIShimError.invalidArgument("managed path escapes its configured root")
     }
+    let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+    let candidate = URL(fileURLWithPath: candidatePath, isDirectory: candidate.hasDirectoryPath)
     try rejectSymbolicLinksInAbsolutePath(root)
     try rejectSymbolicLinksInAbsolutePath(candidate)
 

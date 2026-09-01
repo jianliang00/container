@@ -240,19 +240,30 @@ public struct ContainerConfiguration: Sendable, Codable {
             public var storageDirectory: String
             public var controlSocketPath: String
             public var restoreStateID: String?
+            /// Immutable external-storage generation captured by
+            /// `restoreStateID`. This is present only for a restore.
+            public var restoreStateGeneration: UInt64?
+            /// Generation of the currently attached writable external
+            /// storage. On restore, it must be newer than
+            /// `restoreStateGeneration`.
+            public var storageGeneration: UInt64?
 
             public init(
                 protocolVersion: Int = 2,
                 persistenceID: String,
                 storageDirectory: String,
                 controlSocketPath: String,
-                restoreStateID: String? = nil
+                restoreStateID: String? = nil,
+                restoreStateGeneration: UInt64? = nil,
+                storageGeneration: UInt64? = nil
             ) {
                 self.protocolVersion = protocolVersion
                 self.persistenceID = persistenceID
                 self.storageDirectory = storageDirectory
                 self.controlSocketPath = controlSocketPath
                 self.restoreStateID = restoreStateID
+                self.restoreStateGeneration = restoreStateGeneration
+                self.storageGeneration = storageGeneration
             }
         }
 

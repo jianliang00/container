@@ -194,7 +194,8 @@ public enum MacOSKubeadmRenderer {
                         "runtimeOwnerUID": \(containerServiceUserID),
                         "nbdSocketAllowedRoots": [
                             "/var/run/container/nbd"
-                        ]
+                        ],
+                        "leaseRoot": "/var/lib/container/cri-shim-macos/machine-state-leases/v1"
                     },
                     "podNetwork": {
                         "enabled": true,
@@ -256,7 +257,8 @@ public enum MacOSKubeadmRenderer {
                         "runtimeOwnerUID": \(containerServiceUserID),
                         "nbdSocketAllowedRoots": [
                             "/var/run/container/nbd"
-                        ]
+                        ],
+                        "leaseRoot": "/var/lib/container/cri-shim-macos/machine-state-leases/v1"
                     }
                 }
 

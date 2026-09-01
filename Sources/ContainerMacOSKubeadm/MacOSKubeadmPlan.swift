@@ -122,6 +122,19 @@ public enum MacOSKubeadmPlanner {
                 action: .createDirectory(path: options.rooted(path), mode: 0o755)
             )
         }
+        let machineStateDirectories = [
+            "/var/lib/container/cri-shim-macos/machine-state/v1",
+            "/var/run/container/machine-state/v1",
+            "/var/run/container/nbd",
+            "/var/lib/container/cri-shim-macos/machine-state-leases/v1",
+        ]
+        steps.append(
+            contentsOf: machineStateDirectories.map { path in
+                MacOSKubeadmStep(
+                    message: "ensure machine-state directory \(path)",
+                    action: .createDirectory(path: options.rooted(path), mode: 0o700)
+                )
+            })
         if options.networkMode.usesPodNetworking {
             steps.append(
                 MacOSKubeadmStep(
@@ -559,6 +572,7 @@ public enum MacOSKubeadmPlanner {
             ("/var/lib/container/flannel-vxlan/status.json", false, false),
             ("/var/lib/container/kube-proxy-macos/status.json", false, false),
             ("/var/lib/container/kubernetes-credentials", true, true),
+            ("/private/var/run/container/cri-shim-macos", true, false),
         ]
 
         for entry in generatedPaths {

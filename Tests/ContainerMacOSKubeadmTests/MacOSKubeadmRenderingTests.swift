@@ -288,7 +288,7 @@ struct MacOSKubeadmRenderingTests {
     }
 
     @Test func CRIConfigurationRendersMachineStateContractInEveryNetworkMode() throws {
-        for networkMode in [MacOSKubeadmNetworkMode.full, .compat] {
+        for networkMode in MacOSKubeadmNetworkMode.allCases {
             let rendered = MacOSKubeadmRenderer.criShimConfiguration(
                 sandboxImage: "localhost/macos-sandbox:test",
                 nodeName: "macos-ci-1",
@@ -311,6 +311,21 @@ struct MacOSKubeadmRenderingTests {
             )
             #expect(machineState["runtimeOwnerUID"] as? Int == 501)
             #expect(machineState["nbdSocketAllowedRoots"] as? [String] == ["/var/run/container/nbd"])
+            #expect(
+                machineState["leaseRoot"] as? String
+                    == "/var/lib/container/cri-shim-macos/machine-state-leases/v1"
+            )
+            #expect(
+                Set(machineState.keys)
+                    == Set([
+                        "enabled",
+                        "storageRoot",
+                        "controlSocketRoot",
+                        "runtimeOwnerUID",
+                        "nbdSocketAllowedRoots",
+                        "leaseRoot",
+                    ])
+            )
         }
     }
 

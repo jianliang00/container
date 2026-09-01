@@ -20,6 +20,10 @@ import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
 
+struct MacOSSidecarTransportFailure: Error {
+    let error: ContainerizationError
+}
+
 final class MacOSSidecarClient: @unchecked Sendable {
     private static let defaultBootstrapStartTimeoutSeconds: TimeInterval = 120.0
 
@@ -28,14 +32,25 @@ final class MacOSSidecarClient: @unchecked Sendable {
         var result: Result<MacOSSidecarResponse, Error>?
     }
 
+    private struct ControlConnection: Sendable {
+        let fd: Int32
+        let readerFD: Int32
+        let generation: UInt64
+    }
+
     private let socketPath: String
     private let log: Logger
     private let requestTimeoutSeconds: TimeInterval
     private let bootstrapStartTimeoutSeconds: TimeInterval
     private let stateLock = NSLock()
+    private let connectionLock = NSLock()
     private let writeLock = NSLock()
 
     private var controlFD: Int32 = -1
+    private var controlReaderFD: Int32 = -1
+    private var controlGeneration: UInt64 = 0
+    private var subscribedControlGeneration: UInt64?
+    private var eventSubscriptionID: String?
     private var readerThread: Thread?
     private var pending: [String: PendingResponse] = [:]
     private var lastControlError: Error?
@@ -72,6 +87,11 @@ final class MacOSSidecarClient: @unchecked Sendable {
         stateLock.unlock()
     }
 
+    func _testControlConnectionDescriptors() throws -> (owner: Int32, reader: Int32) {
+        let connection = try ensureControlConnection(retries: 1, distinguishTransportFailure: false)
+        return (connection.fd, connection.readerFD)
+    }
+
     func bootstrapStart(presentGUI: Bool = true, socketConnectRetries: Int = 120) throws {
         _ = try request(
             method: .vmBootstrapStart,
@@ -89,10 +109,15 @@ final class MacOSSidecarClient: @unchecked Sendable {
         _ = try request(method: .vmStop)
     }
 
-    func capabilities() throws -> MacOSSidecarCapabilities {
+    func capabilities(
+        timeoutSeconds: TimeInterval? = nil,
+        distinguishTransportFailure: Bool = false
+    ) throws -> MacOSSidecarCapabilities {
         let response = try request(
             method: .vmCapabilities,
-            protocolVersion: MacOSSidecarProtocolVersion.machineState
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            timeoutSeconds: timeoutSeconds,
+            distinguishTransportFailure: distinguishTransportFailure
         )
         return try decodeResponseData(MacOSSidecarCapabilities.self, response: response, method: .vmCapabilities)
     }
@@ -107,12 +132,16 @@ final class MacOSSidecarClient: @unchecked Sendable {
         return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmPause)
     }
 
-    func resumeVM(timeoutSeconds: TimeInterval = 30) throws -> MacOSMachineStateOperationResult {
+    func resumeVM(
+        timeoutSeconds: TimeInterval = 30,
+        distinguishTransportFailure: Bool = false
+    ) throws -> MacOSMachineStateOperationResult {
         let response = try request(
             method: .vmResume,
             protocolVersion: MacOSSidecarProtocolVersion.machineState,
             machineState: .init(timeoutSeconds: timeoutSeconds),
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: timeoutSeconds,
+            distinguishTransportFailure: distinguishTransportFailure
         )
         return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmResume)
     }
@@ -130,16 +159,31 @@ final class MacOSSidecarClient: @unchecked Sendable {
     func restoreMachineState(
         stateID: String,
         timeoutSeconds: TimeInterval = 300,
-        socketConnectRetries: Int = 1
+        socketConnectRetries: Int = 1,
+        distinguishTransportFailure: Bool = false
     ) throws -> MacOSMachineStateOperationResult {
         let response = try request(
             method: .vmRestoreMachineState,
             protocolVersion: MacOSSidecarProtocolVersion.machineState,
             machineState: .init(stateID: stateID, timeoutSeconds: timeoutSeconds),
             timeoutSeconds: timeoutSeconds,
-            socketConnectRetries: socketConnectRetries
+            socketConnectRetries: socketConnectRetries,
+            distinguishTransportFailure: distinguishTransportFailure
         )
         return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmRestoreMachineState)
+    }
+
+    func deleteMachineState(stateID: String) throws -> MacOSMachineStateDeleteResult {
+        let response = try request(
+            method: .vmDeleteMachineState,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            machineState: .init(stateID: stateID)
+        )
+        return try decodeResponseData(
+            MacOSMachineStateDeleteResult.self,
+            response: response,
+            method: .vmDeleteMachineState
+        )
     }
 
     func compatibilityDescription(stateID: String? = nil) throws -> MacOSMachineStateCompatibilityResult {
@@ -178,10 +222,55 @@ final class MacOSSidecarClient: @unchecked Sendable {
     }
 
     func processStart(port: UInt32, processID: String, request exec: MacOSSidecarExecRequestPayload) throws {
-        _ = try requestResponse(
-            MacOSSidecarRequest(method: .processStart, port: port, processID: processID, exec: exec),
-            socketConnectRetries: 1
-        )
+        let request = MacOSSidecarRequest(method: .processStart, port: port, processID: processID, exec: exec)
+        do {
+            _ = try requestResponse(request, socketConnectRetries: 1)
+        } catch let error as ContainerizationError where error.code == .timeout && exec.durableExecutionID != nil {
+            try recoverDurableProcessStart(
+                port: port,
+                processID: processID,
+                exec: exec,
+                originalRequest: request
+            )
+        }
+    }
+
+    private func recoverDurableProcessStart(
+        port: UInt32,
+        processID: String,
+        exec: MacOSSidecarExecRequestPayload,
+        originalRequest: MacOSSidecarRequest
+    ) throws {
+        do {
+            let response = try requestResponse(
+                MacOSSidecarRequest(method: .processInspect, port: port, processID: processID, exec: exec),
+                socketConnectRetries: 1
+            )
+            let status = try decodeResponseData(
+                MacOSGuestProcessStatusPayload.self,
+                response: response,
+                method: .processInspect
+            )
+            guard status.executionID == exec.durableExecutionID else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "sidecar durable process inspection returned a different execution identifier"
+                )
+            }
+            guard status.state == .running else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "sidecar durable process is \(status.state.rawValue) during start recovery"
+                )
+            }
+            return
+        } catch let error as ContainerizationError where error.code == .notFound {
+            // The timed-out request may still be finishing on the old control
+            // connection. A durable retry is idempotent by execution identity
+            // and launch fingerprint, so it cannot spawn a second process.
+        }
+
+        _ = try requestResponse(originalRequest, socketConnectRetries: 1)
     }
 
     func processStdin(processID: String, data: Data) throws {
@@ -196,6 +285,28 @@ final class MacOSSidecarClient: @unchecked Sendable {
             MacOSSidecarRequest(method: .processClose, processID: processID),
             socketConnectRetries: 1
         )
+    }
+
+    func processDelete(
+        port: UInt32,
+        identity: MacOSSidecarDurableProcessDeleteIdentity
+    ) throws {
+        let request = MacOSSidecarRequest(
+            method: .processDelete,
+            protocolVersion: MacOSSidecarProtocolVersion.durableProcessIdentity,
+            port: port,
+            processID: identity.executionID,
+            durableProcessDeleteIdentity: identity
+        )
+        do {
+            _ = try requestResponse(request, socketConnectRetries: 1)
+        } catch let error as ContainerizationError
+            where error.code == .timeout || error.code == .internalError || error.code == .interrupted
+        {
+            // The guest delete may have committed while its response was lost.
+            // Retrying the trusted identity converges through structured ENOENT.
+            _ = try requestResponse(request, socketConnectRetries: 3)
+        }
     }
 
     func processSignal(processID: String, signal: Int32) throws {
@@ -272,12 +383,18 @@ final class MacOSSidecarClient: @unchecked Sendable {
     }
 
     func closeControlConnection() {
+        connectionLock.lock()
+        writeLock.lock()
+
         let pendingToFail: [PendingResponse]
         stateLock.lock()
         let fd = controlFD
         controlFD = -1
+        controlReaderFD = -1
         let thread = readerThread
         readerThread = nil
+        subscribedControlGeneration = nil
+        eventSubscriptionID = nil
         pendingToFail = Array(pending.values)
         pending.removeAll()
         stateLock.unlock()
@@ -287,6 +404,8 @@ final class MacOSSidecarClient: @unchecked Sendable {
             Darwin.close(fd)
         }
         thread?.cancel()
+        writeLock.unlock()
+        connectionLock.unlock()
 
         if !pendingToFail.isEmpty {
             let error = ContainerizationError(.internalError, message: "sidecar control connection closed")
@@ -304,7 +423,8 @@ final class MacOSSidecarClient: @unchecked Sendable {
         port: UInt32? = nil,
         machineState: MacOSMachineStateRequestPayload? = nil,
         timeoutSeconds: TimeInterval? = nil,
-        socketConnectRetries: Int = 1
+        socketConnectRetries: Int = 1,
+        distinguishTransportFailure: Bool = false
     ) throws -> MacOSSidecarResponse {
         try requestResponse(
             MacOSSidecarRequest(
@@ -315,7 +435,8 @@ final class MacOSSidecarClient: @unchecked Sendable {
                 machineState: machineState
             ),
             timeoutSeconds: timeoutSeconds ?? requestTimeoutSeconds,
-            socketConnectRetries: socketConnectRetries
+            socketConnectRetries: socketConnectRetries,
+            distinguishTransportFailure: distinguishTransportFailure
         )
     }
 
@@ -333,11 +454,29 @@ final class MacOSSidecarClient: @unchecked Sendable {
     private func requestResponse(
         _ request: MacOSSidecarRequest,
         timeoutSeconds: TimeInterval? = nil,
-        socketConnectRetries: Int
+        socketConnectRetries: Int,
+        distinguishTransportFailure: Bool = false
+    ) throws -> MacOSSidecarResponse {
+        let connection = try ensureControlConnection(
+            retries: socketConnectRetries,
+            distinguishTransportFailure: distinguishTransportFailure
+        )
+        let effectiveTimeoutSeconds = timeoutSeconds ?? requestTimeoutSeconds
+        return try requestResponse(
+            request,
+            on: connection,
+            timeoutSeconds: effectiveTimeoutSeconds,
+            distinguishTransportFailure: distinguishTransportFailure
+        )
+    }
+
+    private func requestResponse(
+        _ request: MacOSSidecarRequest,
+        on connection: ControlConnection,
+        timeoutSeconds: TimeInterval,
+        distinguishTransportFailure: Bool = false
     ) throws -> MacOSSidecarResponse {
         let waiter = PendingResponse()
-        let fd = try ensureControlConnection(retries: socketConnectRetries)
-        let effectiveTimeoutSeconds = timeoutSeconds ?? requestTimeoutSeconds
 
         stateLock.lock()
         pending[request.requestID] = waiter
@@ -346,120 +485,180 @@ final class MacOSSidecarClient: @unchecked Sendable {
         do {
             writeLock.lock()
             defer { writeLock.unlock() }
-            try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(request), fd: fd)
+            stateLock.lock()
+            let isCurrentConnection =
+                controlFD == connection.fd
+                && controlGeneration == connection.generation
+            stateLock.unlock()
+            guard isCurrentConnection else {
+                let error = ContainerizationError(
+                    .internalError,
+                    message: "sidecar control connection changed before request write"
+                )
+                throw classifiedTransportFailure(error, distinguish: distinguishTransportFailure)
+            }
+            try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(request), fd: connection.fd)
         } catch {
             removePending(requestID: request.requestID)
-            handleReaderFailure(error)
-            throw error
+            handleReaderFailure(error, connection: connection, notifyDisconnect: true)
+            throw classifiedTransportFailure(error, distinguish: distinguishTransportFailure)
         }
 
-        let timeoutResult = waiter.semaphore.wait(timeout: .now() + effectiveTimeoutSeconds)
+        let timeoutResult = waiter.semaphore.wait(timeout: .now() + timeoutSeconds)
         if timeoutResult == .timedOut {
             let timeoutError = ContainerizationError(
                 .timeout,
-                message: "sidecar request \(request.method.rawValue) timed out after \(effectiveTimeoutSeconds) seconds"
+                message: "sidecar request \(request.method.rawValue) timed out after \(timeoutSeconds) seconds"
             )
             removePending(requestID: request.requestID)
-            handleReaderFailure(timeoutError)
-            throw timeoutError
+            handleReaderFailure(timeoutError, connection: connection, notifyDisconnect: false)
+            throw classifiedTransportFailure(timeoutError, distinguish: distinguishTransportFailure)
         }
         switch waiter.result {
         case .success(let response)?:
             try validate(response: response, expectedRequestID: request.requestID)
             return response
         case .failure(let error)?:
-            throw error
+            throw classifiedTransportFailure(error, distinguish: distinguishTransportFailure)
         case nil:
             throw ContainerizationError(.internalError, message: "sidecar response waiter completed without result")
         }
     }
 
-    private func ensureControlConnection(retries: Int) throws -> Int32 {
+    private func ensureControlConnection(
+        retries: Int,
+        distinguishTransportFailure: Bool
+    ) throws -> ControlConnection {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+
         stateLock.lock()
         if controlFD >= 0 {
-            let fd = controlFD
+            let connection = ControlConnection(fd: controlFD, readerFD: controlReaderFD, generation: controlGeneration)
+            let needsEventSubscription = eventHandler != nil && subscribedControlGeneration != connection.generation
             stateLock.unlock()
-            return fd
+            if needsEventSubscription {
+                try subscribeToEvents(on: connection, distinguishTransportFailure: distinguishTransportFailure)
+            }
+            return connection
         }
         stateLock.unlock()
 
-        let fd = try connectControlSocket(retries: retries)
+        let fd: Int32
         do {
-            stateLock.lock()
-            let wantsEvents = eventHandler != nil
-            stateLock.unlock()
-            if wantsEvents {
-                try subscribeToEventsSynchronously(fd: fd)
-            }
+            fd = try connectControlSocket(retries: retries)
         } catch {
+            throw classifiedTransportFailure(error, distinguish: distinguishTransportFailure)
+        }
+        let readerFD = Darwin.dup(fd)
+        guard readerFD >= 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             Darwin.close(fd)
-            throw error
+            throw classifiedTransportFailure(error, distinguish: distinguishTransportFailure)
         }
-        let thread = Thread { [weak self] in
-            self?.readerLoop(fd: fd)
-        }
-        thread.name = "container-runtime-macos-sidecar-client-reader"
+        _ = Darwin.fcntl(readerFD, F_SETFD, FD_CLOEXEC)
 
         stateLock.lock()
-        if controlFD >= 0 {
-            let existing = controlFD
-            stateLock.unlock()
-            Darwin.close(fd)
-            return existing
-        }
         controlFD = fd
+        controlReaderFD = readerFD
+        controlGeneration &+= 1
+        let connection = ControlConnection(fd: fd, readerFD: readerFD, generation: controlGeneration)
+        let thread = Thread { [weak self] in
+            self?.readerLoop(connection: connection)
+        }
+        thread.name = "container-runtime-macos-sidecar-client-reader"
         readerThread = thread
         lastControlError = nil
+        let needsEventSubscription = eventHandler != nil
         stateLock.unlock()
 
         thread.start()
-        return fd
+        if needsEventSubscription {
+            try subscribeToEvents(on: connection, distinguishTransportFailure: distinguishTransportFailure)
+        }
+        return connection
     }
 
-    private func subscribeToEventsSynchronously(fd: Int32) throws {
-        let request = MacOSSidecarRequest(
-            method: .eventsSubscribe,
-            protocolVersion: MacOSSidecarProtocolVersion.machineState
-        )
-        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(request), fd: fd)
-        while true {
-            let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
-            switch envelope.kind {
-            case .response:
-                guard let response = envelope.response, response.requestID == request.requestID else {
-                    throw ContainerizationError(
-                        .internalError,
-                        message: "sidecar event subscription returned an invalid response"
-                    )
-                }
-                // Older sidecars claimed the event connection before returning
-                // unknownMethod. Accept that response during a rolling upgrade.
-                if !response.ok, response.error?.code == "unknownMethod" {
-                    return
-                }
-                try validate(response: response, expectedRequestID: request.requestID)
-                return
-            case .event:
-                guard let event = envelope.event else {
-                    throw ContainerizationError(
-                        .internalError,
-                        message: "sidecar event subscription returned an empty event"
-                    )
-                }
+    private func subscribeToEvents(
+        on connection: ControlConnection,
+        distinguishTransportFailure: Bool
+    ) throws {
+        let response: MacOSSidecarResponse
+        do {
+            response = try requestResponse(
+                MacOSSidecarRequest(
+                    method: .eventsSubscribe,
+                    protocolVersion: MacOSSidecarProtocolVersion.durableEventAcknowledgement
+                ),
+                on: connection,
+                timeoutSeconds: requestTimeoutSeconds,
+                distinguishTransportFailure: distinguishTransportFailure
+            )
+        } catch let error as ContainerizationError where error.code == .unsupported {
+            do {
+                response = try requestResponse(
+                    MacOSSidecarRequest(
+                        method: .eventsSubscribe,
+                        protocolVersion: MacOSSidecarProtocolVersion.machineState
+                    ),
+                    on: connection,
+                    timeoutSeconds: requestTimeoutSeconds,
+                    distinguishTransportFailure: distinguishTransportFailure
+                )
+            } catch let fallbackError as ContainerizationError where fallbackError.code == .unsupported {
+                log.debug(
+                    "sidecar does not support explicit event subscription; using request compatibility",
+                    metadata: ["error": "\(fallbackError)"]
+                )
                 stateLock.lock()
-                let handler = eventHandler
+                if controlFD == connection.fd, controlGeneration == connection.generation {
+                    subscribedControlGeneration = connection.generation
+                    eventSubscriptionID = nil
+                }
                 stateLock.unlock()
-                handler?(event)
-            case .request:
-                continue
+                return
             }
         }
+
+        let subscription: MacOSSidecarEventSubscription?
+        if let data = response.data {
+            subscription = try JSONDecoder().decode(MacOSSidecarEventSubscription.self, from: data)
+        } else {
+            subscription = nil
+        }
+
+        stateLock.lock()
+        if controlFD == connection.fd, controlGeneration == connection.generation {
+            subscribedControlGeneration = connection.generation
+            eventSubscriptionID = subscription?.subscriptionID
+        }
+        stateLock.unlock()
     }
 
-    private func readerLoop(fd: Int32) {
+    func acknowledgeEvent(_ event: MacOSSidecarEvent) throws {
+        guard let sequence = event.sequence, let subscriptionID = event.subscriptionID else {
+            return
+        }
+        _ = try requestResponse(
+            MacOSSidecarRequest(
+                method: .eventsAcknowledge,
+                protocolVersion: MacOSSidecarProtocolVersion.durableEventAcknowledgement,
+                eventAcknowledgement: .init(
+                    subscriptionID: subscriptionID,
+                    processID: event.processID,
+                    sequence: sequence
+                )
+            ),
+            timeoutSeconds: requestTimeoutSeconds,
+            socketConnectRetries: 1
+        )
+    }
+
+    private func readerLoop(connection: ControlConnection) {
+        defer { Darwin.close(connection.readerFD) }
         while true {
             do {
-                let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+                let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: connection.readerFD)
                 switch envelope.kind {
                 case .response:
                     guard let response = envelope.response else {
@@ -478,7 +677,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
                     continue
                 }
             } catch {
-                handleReaderFailure(error)
+                handleReaderFailure(error, connection: connection, notifyDisconnect: true)
                 return
             }
         }
@@ -502,27 +701,43 @@ final class MacOSSidecarClient: @unchecked Sendable {
         stateLock.unlock()
     }
 
-    private func handleReaderFailure(_ error: Error) {
+    private func handleReaderFailure(
+        _ error: Error,
+        connection: ControlConnection,
+        notifyDisconnect: Bool
+    ) {
+        writeLock.lock()
+
         let pendingToFail: [PendingResponse]
         let disconnectHandler: (@Sendable (ContainerizationError) -> Void)?
         stateLock.lock()
-        let shouldHandle = controlFD >= 0
+        guard controlFD == connection.fd, controlGeneration == connection.generation else {
+            stateLock.unlock()
+            writeLock.unlock()
+            return
+        }
         let fd = controlFD
         controlFD = -1
+        controlReaderFD = -1
         readerThread = nil
+        subscribedControlGeneration = nil
+        eventSubscriptionID = nil
         lastControlError = error
         pendingToFail = Array(pending.values)
         pending.removeAll()
-        disconnectHandler = self.disconnectHandler
+        // A peer-side connection loss must restart event subscription even
+        // when a request outcome is ambiguous. Lifecycle recovery reconciles
+        // the VM and durable processes instead of treating this as VM death.
+        // A local request timeout passes notifyDisconnect=false because that
+        // caller owns operation-specific reconciliation.
+        disconnectHandler = notifyDisconnect ? self.disconnectHandler : nil
         stateLock.unlock()
 
         if fd >= 0 {
             _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
         }
-        if !shouldHandle && pendingToFail.isEmpty {
-            return
-        }
+        writeLock.unlock()
 
         let wrapped = ContainerizationError(
             .internalError,
@@ -532,8 +747,12 @@ final class MacOSSidecarClient: @unchecked Sendable {
             waiter.result = .failure(wrapped)
             waiter.semaphore.signal()
         }
-        log.error("sidecar control reader failed", metadata: ["error": "\(error)"])
-        disconnectHandler?(wrapped)
+        if disconnectHandler != nil {
+            log.error("sidecar control reader failed", metadata: ["error": "\(error)"])
+            disconnectHandler?(wrapped)
+        } else {
+            log.warning("sidecar control transport reset; request recovery remains with the caller", metadata: ["error": "\(error)"])
+        }
     }
 
     private func validate(response: MacOSSidecarResponse, expectedRequestID: String) throws {
@@ -558,9 +777,26 @@ final class MacOSSidecarClient: @unchecked Sendable {
         }
     }
 
+    private func classifiedTransportFailure(
+        _ error: Error,
+        distinguish: Bool
+    ) -> Error {
+        if let error = error as? MacOSSidecarTransportFailure {
+            return distinguish ? error : error.error
+        }
+        let normalized =
+            error as? ContainerizationError
+            ?? ContainerizationError(
+                .internalError,
+                message: "sidecar control transport failed: \(describe(error: error))"
+            )
+        return distinguish ? MacOSSidecarTransportFailure(error: normalized) : normalized
+    }
+
     private static func containerizationCode(forSidecarCode code: String) -> ContainerizationError.Code {
         switch code {
-        case "invalidArgument", "invalid_request", "invalidMachineStateID", "invalidTimeout", "unsafeMachineStatePath", "invalidStorageConfiguration":
+        case "invalidArgument", "invalid_request", "invalidMachineStateID", "invalidTimeout", "unsafeMachineStatePath", "invalidStorageConfiguration",
+            "eventAcknowledgementOutOfRange":
             .invalidArgument
         case "internalError", "request_failed", "sidecar_error", "unknown":
             .internalError
@@ -570,7 +806,8 @@ final class MacOSSidecarClient: @unchecked Sendable {
             .notFound
         case "cancelled":
             .cancelled
-        case "invalidState", "invalidLifecycleState", "operationInProgress", "machineStateIncompatible", "machineStateIncomplete", "storageUnavailable":
+        case "invalidState", "invalidLifecycleState", "operationInProgress", "machineStateInUse", "machineStateIncompatible", "machineStateIncomplete", "storageUnavailable",
+            "staleEventSubscription":
             .invalidState
         case "empty":
             .empty

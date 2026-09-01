@@ -154,7 +154,9 @@ struct ContainerConfigurationMacOSTests {
                 persistenceID: "pod-a",
                 storageDirectory: "/var/lib/container/machine-state/v1/pod-a",
                 controlSocketPath: "/var/run/container/machine-state/v1/pod-a.sock",
-                restoreStateID: "state-a"
+                restoreStateID: "state-a",
+                restoreStateGeneration: 7,
+                storageGeneration: 8
             )
         )
 
@@ -163,6 +165,8 @@ struct ContainerConfigurationMacOSTests {
             from: JSONEncoder().encode(options)
         )
         #expect(decoded == options)
+        #expect(decoded.machineState?.restoreStateGeneration == 7)
+        #expect(decoded.machineState?.storageGeneration == 8)
     }
 
     @Test

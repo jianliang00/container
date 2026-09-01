@@ -97,6 +97,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
             runtimeManager: runtimeManager
         )
         let startupTasks: [any CRIShimServerStartupTask] = [
+            CRIShimMachineStateDirectoryStartupTask(policy: config.machineState),
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
                 runtimeManager: runtimeManager
@@ -147,6 +148,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
             runtimeManager: runtimeManager
         )
         let startupTasks: [any CRIShimServerStartupTask] = [
+            CRIShimMachineStateDirectoryStartupTask(policy: config.machineState),
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
                 runtimeManager: runtimeManager

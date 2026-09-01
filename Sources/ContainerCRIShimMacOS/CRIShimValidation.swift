@@ -197,18 +197,27 @@ extension CRIShimConfig {
                 name: "machineState.controlSocketRoot",
                 issues: &issues
             )
-            if machineState.normalizedStorageRoot == machineState.normalizedControlSocketRoot {
-                issues.append("machineState.storageRoot and machineState.controlSocketRoot must be different")
+            validateManagedRoot(
+                machineState.normalizedLeaseRoot,
+                name: "machineState.leaseRoot",
+                issues: &issues
+            )
+            var managedRoots = Set([
+                machineState.normalizedStorageRoot,
+                machineState.normalizedControlSocketRoot,
+                machineState.normalizedLeaseRoot,
+            ])
+            if managedRoots.count != 3 {
+                issues.append("machineState storage, control-socket, and lease roots must be different")
             }
             if machineState.runtimeOwnerUID == UInt32.max {
                 issues.append("machineState.runtimeOwnerUID must be a valid uid")
             }
-            var allowedRoots = Set<String>()
             for (index, root) in machineState.nbdSocketAllowedRoots.enumerated() {
                 let name = "machineState.nbdSocketAllowedRoots[\(index)]"
                 validateManagedRoot(root, name: name, issues: &issues)
-                if !allowedRoots.insert(root).inserted {
-                    issues.append("\(name) duplicates an earlier allowlist root")
+                if !managedRoots.insert(root).inserted {
+                    issues.append("\(name) duplicates another managed machine-state root")
                 }
             }
         }
@@ -323,8 +332,7 @@ private func validateManagedRoot(_ value: String, name: String, issues: inout [S
         issues.append("\(name) cannot be the filesystem root")
         return
     }
-    let standardized = URL(fileURLWithPath: trimmed).standardizedFileURL.path
-    if standardized != trimmed || trimmed.split(separator: "/", omittingEmptySubsequences: false).contains("..") {
+    if criLexicallyNormalizedAbsolutePath(trimmed) != trimmed {
         issues.append("\(name) must not contain path traversal or non-canonical components")
     }
 }

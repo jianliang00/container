@@ -24,6 +24,7 @@ import ContainerizationArchive
 import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOCI
+import CryptoKit
 import Darwin
 import Dispatch
 import Foundation
@@ -229,6 +230,7 @@ public actor MacOSSandboxService {
         var exitStatus: ExitStatus?
         var lastAgentError: String?
         var lastStderr: String?
+        var durableEventCursor: UInt64 = 0
     }
 
     struct WorkloadRecord {
@@ -284,6 +286,7 @@ public actor MacOSSandboxService {
     var sidecarEventPump: SidecarEventPump?
     var sidecarEventPumpTask: Task<Void, Never>?
     var machineStateLeaseFD: Int32 = -1
+    private var sidecarControlRecoveryInProgress = false
     private var eventLoopGroup: MultiThreadedEventLoopGroup?
     private var socketForwarders: [SocketForwarderResult] = []
 
@@ -1018,6 +1021,13 @@ extension MacOSSandboxService {
             #else
             throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
             #endif
+        } catch let error as MacOSMachineStateOutcomeIndeterminate {
+            writeContainerLog(
+                Data(
+                    ("machine-state startup remains in progress; preserving sidecar, lease, and network resources: \(error.containerizationError.message)\n").utf8
+                )
+            )
+            throw error.containerizationError
         } catch {
             await stopSocketForwarders()
             #if arch(arm64)
@@ -1164,6 +1174,37 @@ extension MacOSSandboxService {
         }
         guard !isWorkloadRunning(record) else {
             throw ContainerizationError(.invalidState, message: "cannot remove running workload \(workloadID)")
+        }
+
+        if let identity = record.configuration.executionIdentity,
+            sandboxState == .booted || sandboxState == .running,
+            let sidecarHandle
+        {
+            guard let incarnation = identity.incarnation else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "durable workload \(workloadID) is missing its process incarnation"
+                )
+            }
+            do {
+                let port = containerConfiguration.macosGuest?.agentPort ?? Self.defaultAgentPort
+                try sidecarHandle.client.processDelete(
+                    port: port,
+                    identity: .init(
+                        executionID: identity.executionID,
+                        trustedLaunchFingerprint: identity.launchFingerprint,
+                        incarnation: incarnation,
+                        storageGeneration: containerConfiguration.macosGuest?.machineState?.storageGeneration
+                    )
+                )
+                writeContainerLog(
+                    Data(("deleted durable guest execution \(identity.executionID) for workload \(workloadID)\n").utf8)
+                )
+            } catch let error as ContainerizationError where error.code == .notFound {
+                writeContainerLog(
+                    Data(("durable guest execution already absent for workload \(workloadID)\n").utf8)
+                )
+            }
         }
 
         if record.configuration.isImageBacked, sandboxState == .booted || sandboxState == .running {
@@ -1490,6 +1531,7 @@ extension MacOSSandboxService {
             return configuration
         }
 
+        let guestRoot = guestWorkloadRootPath(for: configuration)
         return WorkloadConfiguration(
             id: configuration.id,
             processConfiguration: configuration.processConfiguration,
@@ -1497,9 +1539,10 @@ extension MacOSSandboxService {
             readOnlyFiles: configuration.readOnlyFiles,
             workloadImageReference: configuration.workloadImageReference,
             workloadImageDigest: configuration.workloadImageDigest,
-            guestPayloadPath: configuration.guestPayloadPath ?? guestPayloadPath(for: configuration.id),
-            guestMetadataPath: configuration.guestMetadataPath ?? guestMetadataPath(for: configuration.id),
-            injectionState: configuration.injectionState == .notRequired ? .pending : configuration.injectionState
+            guestPayloadPath: configuration.guestPayloadPath ?? "\(guestRoot)/rootfs",
+            guestMetadataPath: configuration.guestMetadataPath ?? "\(guestRoot)/meta.json",
+            injectionState: configuration.injectionState == .notRequired ? .pending : configuration.injectionState,
+            executionIdentity: configuration.executionIdentity
         )
     }
 
@@ -1521,12 +1564,17 @@ extension MacOSSandboxService {
         }
     }
 
-    private func guestPayloadPath(for workloadID: String) -> String {
-        "\(Self.guestWorkloadsRootPath)/\(workloadID)/rootfs"
-    }
-
-    private func guestMetadataPath(for workloadID: String) -> String {
-        "\(Self.guestWorkloadsRootPath)/\(workloadID)/meta.json"
+    private func guestWorkloadRootPath(for configuration: WorkloadConfiguration) -> String {
+        if let payloadPath = configuration.guestPayloadPath, !payloadPath.isEmpty {
+            return (payloadPath as NSString).deletingLastPathComponent
+        }
+        if let identity = configuration.executionIdentity {
+            let digest = SHA256.hash(data: Data(identity.executionID.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+            return "\(Self.guestWorkloadsRootPath)/execution-\(digest.prefix(32))"
+        }
+        return "\(Self.guestWorkloadsRootPath)/\(configuration.id)"
     }
 
     private struct ResolvedWorkloadImage {
@@ -1619,7 +1667,8 @@ extension MacOSSandboxService {
             workloadImageDigest: resolvedImage.imageDigest,
             guestPayloadPath: normalized.guestPayloadPath,
             guestMetadataPath: normalized.guestMetadataPath,
-            injectionState: .pending
+            injectionState: .pending,
+            executionIdentity: normalized.executionIdentity
         )
     }
 
@@ -1632,6 +1681,29 @@ extension MacOSSandboxService {
         }
         guard record.configuration.injectionState != .injected else {
             return
+        }
+        if record.configuration.executionIdentity?.restoreBinding != nil {
+            do {
+                try verifyRestoredWorkloadPayload(record.configuration)
+                var restored = record.configuration
+                restored.injectionState = .injected
+                try updateWorkloadConfiguration(restored)
+                writeContainerLog(
+                    Data(("reusing snapshotted guest payload for workload \(workloadID)\n").utf8)
+                )
+                return
+            } catch let error as ContainerizationError where error.code == .notFound {
+                // A selected machine state may still contain a durable process
+                // written under an older attempt-sensitive execution ID. There
+                // is no safe way to prove that a missing manifest represents a
+                // genuinely new container rather than that legacy process, so
+                // warm restore fails closed instead of starting a second writer.
+                throw ContainerizationError(
+                    .invalidState,
+                    message:
+                        "restored workload manifest is missing for \(workloadID); refusing to create a replacement execution"
+                )
+            }
         }
         guard let guestPayloadPath = record.configuration.guestPayloadPath,
             let guestMetadataPath = record.configuration.guestMetadataPath
@@ -1646,7 +1718,8 @@ extension MacOSSandboxService {
         let hostRootfs = try await unpackWorkloadRootfs(resolvedImage)
         let metadata = try workloadGuestMetadata(
             workloadImageDigest: resolvedImage.imageDigest,
-            processConfiguration: record.configuration.processConfiguration
+            processConfiguration: record.configuration.processConfiguration,
+            executionIdentity: record.configuration.executionIdentity
         )
         let metadataFile = try writeTemporaryWorkloadMetadataFile(metadata, workloadID: workloadID)
         defer { try? FileManager.default.removeItem(at: metadataFile) }
@@ -2269,11 +2342,15 @@ extension MacOSSandboxService {
         workloadID: String,
         containerConfig: ContainerConfiguration
     ) async throws {
+        guard let configuration = workloads[workloadID]?.configuration else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        let rootPath = guestWorkloadRootPath(for: configuration)
         try await runGuestBootstrapScript(
             processIDPrefix: "workload-prepare",
             script: """
                 set -euo pipefail
-                root=\(shQuoteForWorkloadScript("\(Self.guestWorkloadsRootPath)/\(workloadID)"))
+                root=\(shQuoteForWorkloadScript(rootPath))
                 rm -rf "$root"
                 mkdir -p "$root/rootfs"
                 """,
@@ -2285,11 +2362,15 @@ extension MacOSSandboxService {
         workloadID: String,
         containerConfig: ContainerConfiguration
     ) async throws {
+        guard let configuration = workloads[workloadID]?.configuration else {
+            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+        }
+        let rootPath = guestWorkloadRootPath(for: configuration)
         try await runGuestBootstrapScript(
             processIDPrefix: "workload-cleanup",
             script: """
                 set -euo pipefail
-                root=\(shQuoteForWorkloadScript("\(Self.guestWorkloadsRootPath)/\(workloadID)"))
+                root=\(shQuoteForWorkloadScript(rootPath))
                 rm -rf "$root"
                 """,
             containerConfig: containerConfig
@@ -2476,15 +2557,90 @@ extension MacOSSandboxService {
 
     private func workloadGuestMetadata(
         workloadImageDigest: String,
-        processConfiguration: ProcessConfiguration
+        processConfiguration: ProcessConfiguration,
+        executionIdentity: WorkloadExecutionIdentity?
     ) throws -> MacOSWorkloadGuestMetadata {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return MacOSWorkloadGuestMetadata(
             workloadImageDigest: workloadImageDigest,
             createdAt: formatter.string(from: Date()),
-            processConfiguration: processConfiguration
+            processConfiguration: processConfiguration,
+            executionID: executionIdentity?.executionID,
+            launchFingerprint: executionIdentity?.launchFingerprint
         )
+    }
+
+    private func verifyRestoredWorkloadPayload(_ configuration: WorkloadConfiguration) throws {
+        guard let identity = configuration.executionIdentity,
+            identity.restoreBinding != nil,
+            let metadataPath = configuration.guestMetadataPath,
+            let imageDigest = configuration.workloadImageDigest
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "restored image-backed workload is missing its recovery identity"
+            )
+        }
+
+        let data = try readGuestFile(path: metadataPath, maximumSize: 1024 * 1024)
+        let metadata: MacOSWorkloadGuestMetadata
+        do {
+            metadata = try JSONDecoder().decode(MacOSWorkloadGuestMetadata.self, from: data)
+        } catch {
+            throw ContainerizationError(
+                .invalidState,
+                message: "restored image-backed workload metadata is invalid"
+            )
+        }
+        guard metadata.schemaVersion == MacOSWorkloadGuestMetadata.schemaVersion,
+            metadata.workloadImageDigest == imageDigest,
+            metadata.executionID == identity.executionID,
+            metadata.launchFingerprint == identity.launchFingerprint
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "restored image-backed workload does not match the saved execution manifest"
+            )
+        }
+    }
+
+    private func readGuestFile(path: String, maximumSize: UInt64) throws -> Data {
+        let txID = "runtime-verify-\(UUID().uuidString)"
+        let metadata = try sendFSReadBegin(.init(txID: txID, path: path))
+        var ended = false
+        defer {
+            if !ended {
+                try? sendFSReadEnd(txID: txID)
+            }
+        }
+        guard metadata.fileType == .file,
+            let size = metadata.size,
+            size <= maximumSize,
+            size <= UInt64(Int.max)
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "restored workload manifest is not a bounded regular file"
+            )
+        }
+
+        var result = Data()
+        result.reserveCapacity(Int(size))
+        var offset: UInt64 = 0
+        while offset < size {
+            let length = Int(min(UInt64(64 * 1024), size - offset))
+            guard let chunk = try sendFSReadChunk(.init(txID: txID, offset: offset, maxLength: length)),
+                !chunk.isEmpty, chunk.count <= length
+            else {
+                throw ContainerizationError(.invalidState, message: "restored workload manifest ended unexpectedly")
+            }
+            result.append(chunk)
+            offset += UInt64(chunk.count)
+        }
+        try sendFSReadEnd(txID: txID)
+        ended = true
+        return result
     }
 
     private func updateWorkloadConfiguration(_ configuration: WorkloadConfiguration) throws {
@@ -3567,29 +3723,7 @@ extension MacOSSandboxService {
         writeContainerLog(Data(("sidecar process.start begin for \(processID) on vsock port \(agentPort)\n").utf8))
         sessions[processID] = session
 
-        let launchConfiguration = try await resolveLaunchProcessConfiguration(
-            for: processID,
-            sessionConfiguration: session.config
-        )
-        let execIdentity: (user: String?, uid: UInt32?, gid: UInt32?) =
-            switch launchConfiguration.user {
-            case .raw(let userString):
-                (userString, nil, nil)
-            case .id(let uid, let gid):
-                (nil, uid, gid)
-            }
-        let request = MacOSSidecarExecRequestPayload(
-            executable: launchConfiguration.executable,
-            arguments: launchConfiguration.arguments,
-            environment: launchConfiguration.environment,
-            workingDirectory: launchConfiguration.workingDirectory,
-            terminal: launchConfiguration.terminal,
-            user: execIdentity.user,
-            uid: execIdentity.uid,
-            gid: execIdentity.gid,
-            supplementalGroups: launchConfiguration.supplementalGroups.isEmpty ? nil : launchConfiguration.supplementalGroups,
-            stdin: nil
-        )
+        let request = try await sidecarProcessStartRequest(for: session, containerConfig: containerConfig)
 
         do {
             try await startProcessViaSidecarWithRetries(port: agentPort, processID: processID, request: request)
@@ -3617,6 +3751,61 @@ extension MacOSSandboxService {
                 cause: wrappedError.cause ?? ((error as? ContainerizationError) == nil ? error : nil)
             )
         }
+    }
+
+    private func sidecarProcessStartRequest(
+        for session: Session,
+        containerConfig: ContainerConfiguration
+    ) async throws -> MacOSSidecarExecRequestPayload {
+        let launchConfiguration = try await resolveLaunchProcessConfiguration(
+            for: session.processID,
+            sessionConfiguration: session.config
+        )
+        let execIdentity: (user: String?, uid: UInt32?, gid: UInt32?) =
+            switch launchConfiguration.user {
+            case .raw(let userString):
+                (userString, nil, nil)
+            case .id(let uid, let gid):
+                (nil, uid, gid)
+            }
+        let durableExecutionIdentity: WorkloadExecutionIdentity? =
+            if session.includeInSnapshots, let workloadID = session.targetWorkloadID {
+                workloads[workloadID]?.configuration.executionIdentity
+            } else {
+                nil
+            }
+        let currentStorageGeneration = containerConfig.macosGuest?.machineState?.storageGeneration
+        if durableExecutionIdentity != nil,
+            currentStorageGeneration != nil,
+            durableExecutionIdentity?.incarnation == nil
+        {
+            throw ContainerizationError(
+                .invalidState,
+                message: "generation-fenced durable workload is missing its process incarnation"
+            )
+        }
+        let previousStorageGeneration =
+            currentStorageGeneration == nil
+            ? nil
+            : durableExecutionIdentity?.restoreBinding?.generation
+        return MacOSSidecarExecRequestPayload(
+            executable: launchConfiguration.executable,
+            arguments: launchConfiguration.arguments,
+            environment: launchConfiguration.environment,
+            workingDirectory: launchConfiguration.workingDirectory,
+            terminal: launchConfiguration.terminal,
+            user: execIdentity.user,
+            uid: execIdentity.uid,
+            gid: execIdentity.gid,
+            supplementalGroups: launchConfiguration.supplementalGroups.isEmpty ? nil : launchConfiguration.supplementalGroups,
+            stdin: nil,
+            durableExecutionID: durableExecutionIdentity?.executionID,
+            durableLaunchFingerprint: durableExecutionIdentity?.launchFingerprint,
+            durableIncarnation: durableExecutionIdentity?.incarnation,
+            storageGeneration: durableExecutionIdentity == nil ? nil : currentStorageGeneration,
+            previousStorageGeneration: previousStorageGeneration,
+            replayCursor: durableExecutionIdentity == nil ? nil : session.durableEventCursor
+        )
     }
     #endif
 
@@ -3763,6 +3952,12 @@ extension MacOSSandboxService {
         }
         guard var session = sessions[processID] else {
             return
+        }
+        if let sequence = event.sequence {
+            guard sequence > session.durableEventCursor else {
+                return
+            }
+            session.durableEventCursor = sequence
         }
 
         switch event.event {
@@ -3995,6 +4190,21 @@ extension MacOSSandboxService {
         visibleSessionCount()
     }
 
+    func testingHasSidecarHandle() -> Bool {
+        sidecarHandle != nil
+    }
+
+    func testingMachineStateLeaseIsHeld() -> Bool {
+        machineStateLeaseFD >= 0
+    }
+
+    func testingRemoveSidecarClient() {
+        sidecarHandle?.client.setEventHandler(nil)
+        sidecarHandle?.client.setDisconnectHandler(nil)
+        sidecarHandle?.client.closeControlConnection()
+        sidecarHandle = nil
+    }
+
     func testingSessionID(for workloadID: String) -> String? {
         workloads[workloadID]?.sessionID
     }
@@ -4123,12 +4333,63 @@ extension MacOSSandboxService {
         sidecarHandle = SidecarHandle(launchLabel: launchLabel, client: client)
     }
 
-    func handleUnexpectedSidecarDisconnect(_ error: ContainerizationError) async {
-        guard sidecarHandle != nil else {
+    func handleUnexpectedSidecarDisconnect(
+        _ error: ContainerizationError,
+        recoveryAttempts: Int = 10,
+        recoveryDelayNanoseconds: UInt64 = 200_000_000
+    ) async {
+        guard let handle = sidecarHandle else {
             return
         }
 
         writeContainerLog(Data(("sidecar disconnected unexpectedly: \(error.message)\n").utf8))
+        if let config = configuration, config.macosGuest?.machineState != nil {
+            guard !sidecarControlRecoveryInProgress else { return }
+            sidecarControlRecoveryInProgress = true
+            defer { sidecarControlRecoveryInProgress = false }
+            var confirmedTerminal = false
+
+            for attempt in 1...max(1, recoveryAttempts) {
+                guard sidecarHandle?.client === handle.client else { return }
+                do {
+                    let capabilities = try handle.client.capabilities(timeoutSeconds: 1)
+                    if capabilities.lifecycleState == .stopped || capabilities.lifecycleState == .failed {
+                        confirmedTerminal = true
+                        break
+                    }
+                    #if arch(arm64)
+                    await recoverDurableProcessStreamsAfterSidecarReconnect(containerConfig: config)
+                    #endif
+                    writeContainerLog(
+                        Data(
+                            ("sidecar control connection recovered [attempt=\(attempt)] [lifecycle=\(capabilities.lifecycleState.rawValue)]\n").utf8
+                        )
+                    )
+                    return
+                } catch {
+                    writeContainerLog(
+                        Data(
+                            ("sidecar control reconnect attempt \(attempt)/\(max(1, recoveryAttempts)) failed: \(describeError(error))\n").utf8
+                        )
+                    )
+                    if attempt < max(1, recoveryAttempts) {
+                        try? await Task.sleep(nanoseconds: recoveryDelayNanoseconds)
+                    }
+                }
+            }
+
+            if !confirmedTerminal {
+                // A transport failure alone cannot prove that a Virtualization
+                // operation or durable guest process stopped. Keep the sidecar
+                // handle, process sessions, and persistence lease for a later
+                // control request to reconcile.
+                writeContainerLog(
+                    Data("sidecar control recovery remains pending; preserving sidecar, sessions, and machine-state lease\n".utf8)
+                )
+                return
+            }
+        }
+
         sidecarHandle?.client.setEventHandler(nil)
         sidecarHandle?.client.setDisconnectHandler(nil)
         sidecarHandle = nil
@@ -4138,6 +4399,37 @@ extension MacOSSandboxService {
         closeAllSessions()
         sandboxState = .stopped(255)
     }
+
+    #if arch(arm64)
+    private func recoverDurableProcessStreamsAfterSidecarReconnect(
+        containerConfig: ContainerConfiguration
+    ) async {
+        let durableProcessIDs = sessions.values.compactMap { session -> String? in
+            guard session.started,
+                session.exitStatus == nil,
+                session.includeInSnapshots,
+                let workloadID = session.targetWorkloadID,
+                workloads[workloadID]?.configuration.executionIdentity != nil
+            else {
+                return nil
+            }
+            return session.processID
+        }
+
+        for processID in durableProcessIDs.sorted() {
+            guard var session = sessions[processID], session.exitStatus == nil else { continue }
+            do {
+                try await startSessionViaSidecarProcessStream(&session, containerConfig: containerConfig)
+            } catch {
+                session.lastAgentError = "sidecar reconnect failed: \(describeError(error))"
+                sessions[processID] = session
+                writeContainerLog(
+                    Data(("failed to reattach durable process \(processID): \(describeError(error))\n").utf8)
+                )
+            }
+        }
+    }
+    #endif
 
     func handleSandboxNetworkInvalidation(_ invalidation: SandboxNetworkInvalidation) async {
         let recovery =

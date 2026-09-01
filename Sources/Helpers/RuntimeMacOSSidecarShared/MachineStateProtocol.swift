@@ -17,12 +17,18 @@
 import Foundation
 
 /// Version 1 is the original unversioned control protocol. Version 2 adds
-/// capability discovery and machine-state lifecycle operations.
+/// capability discovery and machine-state lifecycle operations. Version 3
+/// adds consumer acknowledgements for durable event delivery. Version 4 adds
+/// trusted durable-process delete identities. Version 5 separates trusted and
+/// guest launch fingerprints and fences requests by process incarnation.
 public enum MacOSSidecarProtocolVersion {
     public static let legacy = 1
     public static let machineState = 2
-    public static let current = machineState
-    public static let supported = [legacy, machineState]
+    public static let durableEventAcknowledgement = 3
+    public static let durableProcessDeleteIdentity = 4
+    public static let durableProcessIdentity = 5
+    public static let current = durableProcessIdentity
+    public static let supported = [legacy, machineState, durableEventAcknowledgement, durableProcessDeleteIdentity, durableProcessIdentity]
 }
 
 public enum MacOSVMRuntimeState: String, Codable, Sendable {
@@ -155,6 +161,8 @@ public struct MacOSMachineStateCompatibilityDescription: Codable, Sendable, Equa
     public let hostIdentifier: String
     public let hardwareModelFingerprint: String
     public let machineIdentifierFingerprint: String
+    /// Writable external-disk generation present when this state was saved.
+    public let storageGeneration: UInt64?
     public let configuration: MacOSMachineStateVMConfigurationDescription
 
     public init(
@@ -166,6 +174,7 @@ public struct MacOSMachineStateCompatibilityDescription: Codable, Sendable, Equa
         hostIdentifier: String,
         hardwareModelFingerprint: String,
         machineIdentifierFingerprint: String,
+        storageGeneration: UInt64? = nil,
         configuration: MacOSMachineStateVMConfigurationDescription
     ) {
         self.schemaVersion = schemaVersion
@@ -176,6 +185,7 @@ public struct MacOSMachineStateCompatibilityDescription: Codable, Sendable, Equa
         self.hostIdentifier = hostIdentifier
         self.hardwareModelFingerprint = hardwareModelFingerprint
         self.machineIdentifierFingerprint = machineIdentifierFingerprint
+        self.storageGeneration = storageGeneration
         self.configuration = configuration
     }
 }
@@ -212,5 +222,15 @@ public struct MacOSMachineStateOperationResult: Codable, Sendable, Equatable {
         self.lifecycleState = lifecycleState
         self.stateID = stateID
         self.compatibility = compatibility
+    }
+}
+
+public struct MacOSMachineStateDeleteResult: Codable, Sendable, Equatable {
+    public let stateID: String
+    public let deleted: Bool
+
+    public init(stateID: String, deleted: Bool) {
+        self.stateID = stateID
+        self.deleted = deleted
     }
 }

@@ -288,8 +288,9 @@ metadata:
   annotations:
     io.container.runtime.macos.machine-state.v1/enabled: "true"
     io.container.runtime.macos.machine-state.v1/persistence-id: example-vm
+    io.container.runtime.macos.machine-state.v1/storage-generation: "1"
     io.container.runtime.macos.machine-state.v1/block-devices: >-
-      [{"identifier":"root","unixSocket":"/var/run/container/nbd/example-vm.sock","readOnly":false,"timeoutSeconds":30}]
+      [{"identifier":"root","unixSocket":"/var/run/container/nbd/example-vm.sock","exportName":"root","readOnly":false,"timeoutSeconds":30}]
 ```
 
 The first block device is the root device and must have identifier `root`.
@@ -311,35 +312,87 @@ the CRI shim keeps its managed state and control directories private (`0700`)
 and owned by that UID. Existing configurations that omit the field retain their
 current directory ownership behavior.
 
-`restore-state-id` is recognized by the v1 annotation decoder but CRI restore is
-currently rejected with `criWorkloadAdoptionUnavailable`. Restoring only the VM
-would leave the old guest process tied to a closed sidecar stream, while a new
-CRI `CreateContainer`/`StartContainer` would launch a duplicate process with a
-new container ID. The runtime therefore does not publish a warm-restore success
-signal and does not fall back to a cold start. A future CRI restore protocol must
-atomically adopt guest process identity, host workload metadata, logs, exec
-sessions, and exit events before this annotation can succeed.
-
-For enabled cold-started sandboxes, verbose CRI `PodSandboxStatus` includes a
-`machineState` JSON entry with schema version, runtime protocol version,
-`persistenceID`, and `restore.supported=false` plus the same structured reason
-code. No `restored=true` signal exists in this release.
-
-For example, the following additional annotation is deliberately rejected by
-this release rather than reported as a warm restore:
+`storage-generation` identifies the current writable disk generation and must
+be a positive decimal integer. It is part of the sandbox lease and workload
+recovery identity. A restore selects both the immutable state and the disk
+generation captured with that state, then moves the writable side to a newer
+generation. For a state named `checkpoint-1` saved from generation 1, the
+replacement Pod uses:
 
 ```yaml
 metadata:
   annotations:
+    io.container.runtime.macos.machine-state.v1/enabled: "true"
+    io.container.runtime.macos.machine-state.v1/persistence-id: example-vm
     io.container.runtime.macos.machine-state.v1/restore-state-id: checkpoint-1
+    io.container.runtime.macos.machine-state.v1/restore-state-generation: "1"
+    io.container.runtime.macos.machine-state.v1/storage-generation: "2"
+    io.container.runtime.macos.machine-state.v1/block-devices: >-
+      [{"identifier":"root","unixSocket":"/var/run/container/nbd/example-vm.sock","exportName":"root","readOnly":false,"timeoutSeconds":30}]
 ```
 
-Direct runtime protocol v2 VM restore remains available outside CRI. It restores
-before a VM cold start, leaves the VM paused, and requires an explicit resume.
-Saved state is bound to the physical Mac, macOS build, VM hardware model,
-machine identifier, VM configuration, and runtime protocol version. It must not
-be moved to another physical Mac. This VM-level result is not a Kubernetes
-workload restore result.
+`restore-state-id` and `restore-state-generation` must be supplied together, and
+the current `storage-generation` must be greater than the saved generation. The
+NBD Unix-socket path is part of VM compatibility and remains stable across the
+transition. The storage service behind it must make the saved disk point
+immutable, create exactly one writable successor, revoke stale writers, and
+serve the successor before the replacement Pod starts. The annotation alone
+does not clone or fence external storage.
+
+To suspend a CRI workload, pause the VM through sidecar protocol v2, establish
+the matching disk point, and save machine state while the VM remains paused.
+The old Pod can then be removed. Removing its sandbox releases the active lease
+but preserves the state and VM identity below the persistence directory. A new
+Pod with a new UID can restore from that state using the same persistence ID and
+the newer writable generation.
+
+For a Deployment or another workload controller, first scale to zero and wait
+until the old Pod and sandbox are gone. Prepare the writable successor, update
+the Pod template with the restore annotations, and only then scale up. Do not
+use a rolling update that overlaps the old and replacement Pods; node leases and
+the external storage service must both preserve a unique writer.
+
+Restore occurs before a VM cold start and reaches the `paused` lifecycle state;
+the runtime then explicitly resumes the VM. A replacement CRI container receives
+a new container ID. If the container existed in the saved state, its stable
+execution ID, image payload, launch fingerprint, and durable guest process are
+verified and adopted instead of starting a duplicate. The container name and
+image digest, effective command and environment, and mounts must match the saved
+execution. CRI attempt is not part of the logical execution identity because a
+replacement Pod resets it to zero. A selected restore with a missing, legacy, or
+otherwise incompatible workload manifest fails closed instead of injecting a
+second primary process. Snapshots written with a nonzero attempt-sensitive
+identity require an offline metadata migration or a cold start and new snapshot;
+adding, removing, or renaming a primary container is also a cold-start topology
+change. Transient exec or attach clients reconnect through new CRI requests;
+restore completion requires the replacement Pod to be `Ready` and `Running` and
+its first exec request to succeed.
+
+Snapshot V1 is the initial CRI warm-restore feature and is independent of the
+sidecar and durable-process protocol version numbers. Its durable adoption
+manages the primary process and descendants that remain in the original process
+group. It is not unrestricted process-tree capture. A long-lived descendant
+that enters an independent session or process group by using `setsid(2)`,
+`setpgid(2)`, double-fork daemonization, or an equivalent launcher is outside
+the lifecycle, fencing, output-adoption, and cleanup guarantees. The trusted
+controller or admission policy must enable snapshot mode only for templates
+that keep long-lived work in the primary process group. It must reject snapshot
+enablement for daemonizing workloads or configure them to remain in the
+foreground; the runtime does not infer this eligibility from the command line.
+
+Verbose CRI `PodSandboxStatus` includes a `machineState` JSON entry with schema
+version 1, runtime protocol version 2, `persistenceID`, `storageGeneration`, and
+`restore.supported=true`. Restore status is `notRequested` for the initial boot
+and `requested` with the selected state ID and generation for a restore Pod.
+
+Saved VM state remains bound to the physical Mac, macOS build, VM hardware
+model, machine identifier, VM configuration, and runtime protocol version. It
+must not be moved to another physical Mac.
+
+Machine-state annotations grant access to host persistence and NBD sockets.
+Restrict them to a trusted controller or admission policy. Runtime path,
+allowlist, lease, generation, compatibility, and workload-fingerprint checks do
+not authenticate the annotation author or replace storage-service fencing.
 
 On a joined macOS node with a bootable root disk exported over a local NBD Unix
 socket, run the real kubelet integration entry from the source checkout as the
@@ -350,13 +403,29 @@ sudo env \
   MACOS_CRI_MACHINE_STATE_NODE=macos-node-1 \
   MACOS_CRI_MACHINE_STATE_IMAGE=ghcr.io/example/macos-workload@sha256:<digest> \
   MACOS_CRI_MACHINE_STATE_NBD_SOCKET=/var/run/container/nbd/integration.sock \
+  MACOS_CRI_MACHINE_STATE_PREPARE_RESTORE_HELPER=/usr/local/libexec/prepare-machine-state-restore \
   scripts/macos-cri-machine-state-integration.sh
 ```
 
-The check verifies protocol v2 capability, pause, save, and resume calls through
-short-lived control clients without disrupting runtime exec, logs, or process
-progress. It then deletes the Pod, creates a Pod with a new UID and the restore
-annotation, and requires rejection before a CRI container ID is created.
+The check verifies protocol v2 capability and pause/resume through short-lived
+control clients. Its foreground workload keeps a random boot token and
+monotonic counter only in process memory and emits token, PID, and counter
+samples to stdout. It never stores the continuity state in the VM filesystem.
+The check pauses and saves generation 1 without resuming, deletes the Pod, and
+recreates it with the same persistence ID, the selected state and generation 1,
+and writable storage generation 2. Success requires a different Pod UID, a
+`Ready` and `Running` Pod, a CRI container ID, an independent first-exec
+readiness probe, and replacement-Pod log samples with the same boot token and
+guest PID and an advancing counter. The script does not implement the external
+disk snapshot, clone, export switch, or stale-writer revocation. After the old
+paused Pod is removed, it invokes
+`MACOS_CRI_MACHINE_STATE_PREPARE_RESTORE_HELPER` with the stable NBD socket path,
+state ID, saved generation, and successor generation; the helper must return
+only after the next NBD connection will receive the writable successor. For a
+runtime-only check that intentionally reuses the quiesced disk, omit the helper
+and set
+`MACOS_CRI_MACHINE_STATE_ALLOW_IN_PLACE_RESTORE=true`. That mode does not
+validate an external storage snapshot or fencing implementation.
 
 Use `container-macos-kubeadm status` to inspect installed files, generated
 configuration, the CRI socket, and launchd state. Use

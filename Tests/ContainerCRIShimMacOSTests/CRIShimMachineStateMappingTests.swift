@@ -23,6 +23,15 @@ import Testing
 @Suite(.serialized)
 struct CRIShimMachineStateMappingTests {
     @Test
+    func lexicalPathNormalizationDoesNotConsultFilesystem() {
+        #expect(criLexicallyNormalizedAbsolutePath("/var/run/container/../nbd/root.sock") == "/var/run/nbd/root.sock")
+        #expect(criLexicallyNormalizedAbsolutePath("/private//var/./run/container") == "/private/var/run/container")
+        #expect(criLexicallyNormalizedAbsolutePath("../../relative") == nil)
+        #expect(criLexicallyNormalizedAbsolutePath("/../../escape") == nil)
+        #expect(criLexicallyNormalizedAbsolutePath("/safe\0unsafe") == nil)
+    }
+
+    @Test
     func absentOrExplicitlyDisabledAnnotationsPreserveLegacyConfiguration() throws {
         #expect(try makeCRIShimMachineStateMapping(annotations: [:], nodeConfig: nil) == .disabled)
         #expect(
@@ -44,6 +53,7 @@ struct CRIShimMachineStateMappingTests {
             annotations: [
                 CRIShimMachineStateAnnotation.enabled: "true",
                 CRIShimMachineStateAnnotation.persistenceID: "pod-uid-1",
+                CRIShimMachineStateAnnotation.storageGeneration: "1",
                 CRIShimMachineStateAnnotation.blockDevices: """
                 [{"identifier":"root","unixSocket":"\(roots.nbdSocket.path)","exportName":"root-disk","timeoutSeconds":8}]
                 """,
@@ -55,6 +65,8 @@ struct CRIShimMachineStateMappingTests {
         #expect(mapping.machineState?.protocolVersion == 2)
         #expect(mapping.machineState?.persistenceID == "pod-uid-1")
         #expect(mapping.machineState?.restoreStateID == nil)
+        #expect(mapping.machineState?.restoreStateGeneration == nil)
+        #expect(mapping.machineState?.storageGeneration == 1)
         #expect(mapping.machineState?.storageDirectory == roots.storageRoot.appendingPathComponent("pod-uid-1").path)
         #expect(mapping.machineState?.controlSocketPath == roots.controlRoot.appendingPathComponent("pod-uid-1.sock").path)
         #expect(mapping.blockDevices.map(\.identifier) == ["root"])
@@ -69,6 +81,7 @@ struct CRIShimMachineStateMappingTests {
         let annotations = [
             CRIShimMachineStateAnnotation.enabled: "true",
             CRIShimMachineStateAnnotation.persistenceID: "stable-pod",
+            CRIShimMachineStateAnnotation.storageGeneration: "1",
         ]
 
         let first = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: roots.config)
@@ -87,7 +100,7 @@ struct CRIShimMachineStateMappingTests {
     }
 
     @Test
-    func rejectsInvalidEnablementIdentifiersAndCRIWorkloadRestore() throws {
+    func rejectsInvalidEnablementAndMapsRestoreGenerations() throws {
         let roots = try MachineStateTestRoots()
         defer { roots.remove() }
 
@@ -108,20 +121,32 @@ struct CRIShimMachineStateMappingTests {
                 annotations: [
                     CRIShimMachineStateAnnotation.enabled: "true",
                     CRIShimMachineStateAnnotation.persistenceID: "../escape",
+                    CRIShimMachineStateAnnotation.storageGeneration: "1",
                 ],
                 nodeConfig: roots.config
             )
         }
-        #expect(
-            throws: CRIShimError.unsupported(
-                "criWorkloadAdoptionUnavailable: CRI machine-state restore requires guest process and host workload metadata adoption, which this runtime protocol does not support"
-            )
-        ) {
+        let restored = try makeCRIShimMachineStateMapping(
+            annotations: [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "pod-a",
+                CRIShimMachineStateAnnotation.restoreStateID: "state-a",
+                CRIShimMachineStateAnnotation.restoreStateGeneration: "7",
+                CRIShimMachineStateAnnotation.storageGeneration: "8",
+            ],
+            nodeConfig: roots.config
+        )
+        #expect(restored.machineState?.restoreStateID == "state-a")
+        #expect(restored.machineState?.restoreStateGeneration == 7)
+        #expect(restored.machineState?.storageGeneration == 8)
+
+        #expect(throws: CRIShimError.self) {
             try makeCRIShimMachineStateMapping(
                 annotations: [
                     CRIShimMachineStateAnnotation.enabled: "true",
                     CRIShimMachineStateAnnotation.persistenceID: "pod-a",
                     CRIShimMachineStateAnnotation.restoreStateID: "state-a",
+                    CRIShimMachineStateAnnotation.storageGeneration: "8",
                 ],
                 nodeConfig: roots.config
             )
@@ -174,6 +199,7 @@ struct CRIShimMachineStateMappingTests {
                 annotations: [
                     CRIShimMachineStateAnnotation.enabled: "true",
                     CRIShimMachineStateAnnotation.persistenceID: "pod-a",
+                    CRIShimMachineStateAnnotation.storageGeneration: "1",
                 ],
                 nodeConfig: roots.config
             )
@@ -205,6 +231,7 @@ struct CRIShimMachineStateMappingTests {
                 annotations: [
                     CRIShimMachineStateAnnotation.enabled: "true",
                     CRIShimMachineStateAnnotation.persistenceID: "pod-a",
+                    CRIShimMachineStateAnnotation.storageGeneration: "1",
                 ],
                 nodeConfig: linkedConfig
             )
@@ -220,6 +247,7 @@ private func mappingWithBlockDevices(
         annotations: [
             CRIShimMachineStateAnnotation.enabled: "true",
             CRIShimMachineStateAnnotation.persistenceID: "pod-a",
+            CRIShimMachineStateAnnotation.storageGeneration: "1",
             CRIShimMachineStateAnnotation.blockDevices: blockDevices,
         ],
         nodeConfig: roots.config
@@ -251,7 +279,8 @@ private struct MachineStateTestRoots {
             storageRoot: storageRoot.path,
             controlSocketRoot: controlRoot.path,
             runtimeOwnerUID: UInt32(geteuid()),
-            nbdSocketAllowedRoots: [nbdRoot.path]
+            nbdSocketAllowedRoots: [nbdRoot.path],
+            leaseRoot: root.appendingPathComponent("leases", isDirectory: true).path
         )
     }
 

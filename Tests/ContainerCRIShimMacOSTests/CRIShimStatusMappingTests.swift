@@ -67,11 +67,14 @@ struct CRIShimStatusMappingTests {
     }
 
     @Test
-    func verboseStatusDistinguishesEnabledVMStateFromUnsupportedCRIWorkloadRestore() throws {
+    func verboseStatusReportsDurableRestoreGeneration() throws {
         var metadata = readyMetadata()
         metadata.annotations = [
             CRIShimMachineStateAnnotation.enabled: "true",
             CRIShimMachineStateAnnotation.persistenceID: "stable-workload",
+            CRIShimMachineStateAnnotation.restoreStateID: "snapshot-7",
+            CRIShimMachineStateAnnotation.restoreStateGeneration: "7",
+            CRIShimMachineStateAnnotation.storageGeneration: "8",
         ]
 
         let info = makeCRIPodSandboxStatusInfo(metadata, sandboxSnapshot: nil)
@@ -80,14 +83,15 @@ struct CRIShimStatusMappingTests {
             JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]
         )
         let restore = try #require(object["restore"] as? [String: Any])
-        let unsupportedReason = try #require(restore["unsupportedReason"] as? [String: Any])
 
         #expect(object["schemaVersion"] as? Int == 1)
         #expect(object["protocolVersion"] as? Int == 2)
         #expect(object["persistenceID"] as? String == "stable-workload")
-        #expect(restore["supported"] as? Bool == false)
-        #expect(restore["status"] as? String == "notRequested")
-        #expect(unsupportedReason["code"] as? String == "criWorkloadAdoptionUnavailable")
+        #expect(object["storageGeneration"] as? Int == 8)
+        #expect(restore["supported"] as? Bool == true)
+        #expect(restore["status"] as? String == "requested")
+        #expect(restore["stateID"] as? String == "snapshot-7")
+        #expect(restore["stateGeneration"] as? Int == 7)
     }
 
     @Test

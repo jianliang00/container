@@ -145,6 +145,7 @@ struct MacOSImageBackedWorkloadTests {
         await service.testingInstallSidecarClient(socketPath: socketPath)
 
         let workloadID = "image-backed-workload"
+        let durableExecutionID = "sandbox:container:image-backed-attempt-0"
         let workloadConfiguration = WorkloadConfiguration(
             id: workloadID,
             processConfiguration: ProcessConfiguration(
@@ -156,7 +157,11 @@ struct MacOSImageBackedWorkloadTests {
                 user: .id(uid: 0, gid: 0)
             ),
             workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
-            workloadImageDigest: image.indexDigest
+            workloadImageDigest: image.indexDigest,
+            executionIdentity: try .init(
+                executionID: durableExecutionID,
+                launchFingerprint: "sha256:\(String(repeating: "b", count: 64))"
+            )
         )
 
         try await service.testingCreateWorkload(workloadConfiguration)
@@ -174,7 +179,7 @@ struct MacOSImageBackedWorkloadTests {
         #expect(snapshot.configuration.processConfiguration.environment.contains("PATH=/usr/bin:/bin"))
 
         let requests = server.recordedRequests()
-        let guestRoot = "/var/lib/container/workloads/\(workloadID)/rootfs"
+        let guestRoot = try #require(snapshot.configuration.guestPayloadPath)
         let injectedPaths = requests.compactMap { $0.fsBegin?.path }
 
         #expect(injectedPaths.contains("\(guestRoot)/bin"))
@@ -192,12 +197,15 @@ struct MacOSImageBackedWorkloadTests {
         #expect(helloBegin.gid == 20)
 
         let metadataPayload = try #require(
-            requests.first(where: { $0.fsBegin?.path == "/var/lib/container/workloads/\(workloadID)/meta.json" })?.fsBegin?.inlineData
+            requests.first(where: { $0.fsBegin?.path == snapshot.configuration.guestMetadataPath })?.fsBegin?.inlineData
         )
         let metadata = try JSONDecoder().decode(MacOSWorkloadGuestMetadata.self, from: metadataPayload)
+        #expect(metadata.schemaVersion == 2)
         #expect(metadata.workloadImageDigest == image.indexDigest)
         #expect(metadata.processConfiguration.executable == "/bin/hello")
         #expect(metadata.processConfiguration.arguments == ["override-arg"])
+        #expect(metadata.executionID == durableExecutionID)
+        #expect(metadata.launchFingerprint == "sha256:\(String(repeating: "b", count: 64))")
 
         let prepareRequest = try #require(
             requests.first(where: { $0.method == .processStart && ($0.processID?.hasPrefix("workload-prepare-") ?? false) })
@@ -212,6 +220,206 @@ struct MacOSImageBackedWorkloadTests {
         #expect(workloadStartRequest.exec?.arguments == ["override-arg"])
         #expect(workloadStartRequest.exec?.workingDirectory == "\(guestRoot)/workspace")
         #expect(workloadStartRequest.exec?.user == "nobody")
+        #expect(workloadStartRequest.exec?.durableExecutionID == durableExecutionID)
+        #expect(workloadStartRequest.exec?.durableLaunchFingerprint == "sha256:\(String(repeating: "b", count: 64))")
+        #expect(workloadStartRequest.exec?.storageGeneration == nil)
+        #expect(workloadStartRequest.exec?.replayCursor == 0)
+    }
+
+    @Test
+    func restoredImageBackedWorkloadReusesOnlyMatchingSavedPayload() async throws {
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-restore-manifest-tests")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let image = try Self.makeWorkloadImage(in: tempDirectory)
+        let workloadID = "restored-image-backed-workload"
+        let executionID = "workload-42:container:restored-attempt-0"
+        let launchFingerprint = "sha256:\(String(repeating: "c", count: 64))"
+        let guestRoot = "/var/lib/container/workloads/restored/rootfs"
+        let metadataPath = "/var/lib/container/workloads/restored/meta.json"
+        let requestedProcess = ProcessConfiguration(
+            executable: "",
+            arguments: ["restored-arg"],
+            environment: ["RESTORED=1"],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+        let metadata = MacOSWorkloadGuestMetadata(
+            workloadImageDigest: image.indexDigest,
+            createdAt: "2026-09-01T00:00:00.000Z",
+            processConfiguration: requestedProcess,
+            executionID: executionID,
+            launchFingerprint: launchFingerprint
+        )
+        let socketPath = "/tmp/sidecar-restored-payload-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(
+            socketPath: socketPath,
+            guestFiles: [metadataPath: try JSONEncoder().encode(metadata)]
+        )
+        defer { server.stop() }
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        try await service.testingPrepareSandbox(Self.baseContainerConfiguration(indexDigest: image.indexDigest))
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+        try await service.testingCreateWorkload(
+            WorkloadConfiguration(
+                id: workloadID,
+                processConfiguration: requestedProcess,
+                workloadImageReference: "registry.local/example/workload:restored@\(image.indexDigest)",
+                workloadImageDigest: image.indexDigest,
+                guestPayloadPath: guestRoot,
+                guestMetadataPath: metadataPath,
+                executionIdentity: try .init(
+                    executionID: executionID,
+                    launchFingerprint: launchFingerprint,
+                    restoreBinding: try .init(executionID: executionID, generation: 7)
+                )
+            )
+        )
+
+        try await service.testingStartWorkload(workloadID)
+        server.stop()
+        try server.waitForCompletion()
+
+        let snapshot = try await service.testingInspectWorkload(workloadID)
+        #expect(snapshot.configuration.injectionState == .injected)
+        let requests = server.recordedRequests()
+        #expect(requests.contains { $0.method == .fsReadBegin && $0.fsReadBegin?.path == metadataPath })
+        #expect(!requests.contains { $0.method == .fsBegin })
+    }
+
+    @Test
+    func restoredImageBackedWorkloadFailsClosedWhenLegacyAttemptManifestIsMissing() async throws {
+        // A snapshot created by the attempt-sensitive identity scheme can
+        // contain a durable process under its old execution ID while the new
+        // stable slot has no manifest. Starting a replacement would create a
+        // second primary process, so absence must remain a hard failure.
+        let imageDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-restore-reject-tests")
+        defer { try? FileManager.default.removeItem(at: imageDirectory) }
+        let image = try Self.makeWorkloadImage(in: imageDirectory)
+        let executionID = "workload-42:container:reject-attempt-0"
+        let launchFingerprint = "sha256:\(String(repeating: "d", count: 64))"
+        let metadataPath = "/var/lib/container/workloads/reject/meta.json"
+        let process = ProcessConfiguration(
+            executable: "",
+            arguments: [],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-restore-new-execution")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let socketPath = "/tmp/sidecar-new-payload-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        try await service.testingPrepareSandbox(Self.baseContainerConfiguration(indexDigest: image.indexDigest))
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+        try await service.testingCreateWorkload(
+            WorkloadConfiguration(
+                id: "new-restored-workload-attempt",
+                processConfiguration: process,
+                workloadImageReference: "registry.local/example/workload:reject@\(image.indexDigest)",
+                workloadImageDigest: image.indexDigest,
+                guestPayloadPath: "/var/lib/container/workloads/reject/rootfs",
+                guestMetadataPath: metadataPath,
+                executionIdentity: try .init(
+                    executionID: executionID,
+                    launchFingerprint: launchFingerprint,
+                    restoreBinding: try .init(executionID: executionID, generation: 7)
+                )
+            )
+        )
+
+        await #expect(throws: Error.self) {
+            try await service.testingStartWorkload("new-restored-workload-attempt")
+        }
+        server.stop()
+        try server.waitForCompletion()
+        let requests = server.recordedRequests()
+        #expect(requests.contains { $0.method == .fsReadBegin && $0.fsReadBegin?.path == metadataPath })
+        #expect(!requests.contains { $0.method == .fsBegin })
+        #expect(!requests.contains { $0.method == .processStart && $0.processID?.hasPrefix("__workload__") == true })
+    }
+
+    @Test
+    func restoredImageBackedWorkloadRejectsMismatchedSavedPayload() async throws {
+        let imageDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-restore-mismatch-tests")
+        defer { try? FileManager.default.removeItem(at: imageDirectory) }
+        let image = try Self.makeWorkloadImage(in: imageDirectory)
+        let executionID = "workload-42:container:reject-attempt-0"
+        let launchFingerprint = "sha256:\(String(repeating: "d", count: 64))"
+        let metadataPath = "/var/lib/container/workloads/reject/meta.json"
+        let process = ProcessConfiguration(
+            executable: "",
+            arguments: [],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+        let mismatchedMetadata = MacOSWorkloadGuestMetadata(
+            workloadImageDigest: image.indexDigest,
+            createdAt: "2026-09-01T00:00:00.000Z",
+            processConfiguration: process,
+            executionID: executionID,
+            launchFingerprint: "sha256:\(String(repeating: "e", count: 64))"
+        )
+        let tempDirectory = try Self.makeTemporaryDirectory(prefix: "macos-workload-restore-mismatch-case")
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let socketPath = "/tmp/sidecar-reject-payload-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingSidecarServer(
+            socketPath: socketPath,
+            guestFiles: [metadataPath: try JSONEncoder().encode(mismatchedMetadata)]
+        )
+        defer { server.stop() }
+        server.start()
+
+        let service = MacOSSandboxService(
+            root: tempDirectory.appendingPathComponent("sandbox"),
+            connection: nil,
+            log: Logger(label: "MacOSImageBackedWorkloadTests"),
+            contentStore: image.store
+        )
+        try await service.testingPrepareSandbox(Self.baseContainerConfiguration(indexDigest: image.indexDigest))
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+        try await service.testingCreateWorkload(
+            WorkloadConfiguration(
+                id: "rejected-restored-workload",
+                processConfiguration: process,
+                workloadImageReference: "registry.local/example/workload:reject@\(image.indexDigest)",
+                workloadImageDigest: image.indexDigest,
+                guestPayloadPath: "/var/lib/container/workloads/reject/rootfs",
+                guestMetadataPath: metadataPath,
+                executionIdentity: try .init(
+                    executionID: executionID,
+                    launchFingerprint: launchFingerprint,
+                    restoreBinding: try .init(executionID: executionID, generation: 7)
+                )
+            )
+        )
+
+        await #expect(throws: Error.self) {
+            try await service.testingStartWorkload("rejected-restored-workload")
+        }
+        server.stop()
+        try server.waitForCompletion()
+        #expect(!server.recordedRequests().contains { $0.method == .fsBegin })
     }
 
     @Test
@@ -813,11 +1021,27 @@ struct MacOSImageBackedWorkloadTests {
             log: Logger(label: "MacOSImageBackedWorkloadTests"),
             contentStore: image.store
         )
-        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        let machineStateDirectory = tempDirectory.appendingPathComponent("machine-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: machineStateDirectory, withIntermediateDirectories: false)
+        var containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
+        containerConfiguration.macosGuest = .init(
+            snapshotEnabled: true,
+            guiEnabled: false,
+            agentPort: 27_000,
+            machineState: .init(
+                persistenceID: "workload-remove-test",
+                storageDirectory: machineStateDirectory.path,
+                controlSocketPath: socketPath,
+                storageGeneration: 17
+            )
+        )
         try await service.testingPrepareSandbox(containerConfiguration, state: "running")
         await service.testingInstallSidecarClient(socketPath: socketPath)
 
         let workloadID = "image-backed-removed"
+        let executionID = "sandbox:container:image-backed-removed"
+        let launchFingerprint = "sha256:\(String(repeating: "d", count: 64))"
+        let incarnation = "sha256:\(String(repeating: "e", count: 64))"
         let workloadConfiguration = WorkloadConfiguration(
             id: workloadID,
             processConfiguration: ProcessConfiguration(
@@ -829,7 +1053,12 @@ struct MacOSImageBackedWorkloadTests {
                 user: .id(uid: 0, gid: 0)
             ),
             workloadImageReference: "registry.local/example/workload:latest@\(image.indexDigest)",
-            workloadImageDigest: image.indexDigest
+            workloadImageDigest: image.indexDigest,
+            executionIdentity: try .init(
+                executionID: executionID,
+                launchFingerprint: launchFingerprint,
+                incarnation: incarnation
+            )
         )
 
         try await service.testingCreateWorkload(workloadConfiguration)
@@ -843,6 +1072,9 @@ struct MacOSImageBackedWorkloadTests {
         let layout = MacOSSandboxLayout(root: root)
         let workloadStateDirectory = layout.workloadDirectoryURL(id: workloadID)
         #expect(FileManager.default.fileExists(atPath: workloadStateDirectory.path))
+        let storedBeforeRemoval = try #require(await service.testingWorkloadConfiguration(workloadID))
+        let guestPayloadPath = try #require(storedBeforeRemoval.guestPayloadPath)
+        let guestInstanceDirectory = URL(fileURLWithPath: guestPayloadPath).deletingLastPathComponent().path
 
         try await service.testingRemoveWorkload(workloadID)
 
@@ -861,8 +1093,16 @@ struct MacOSImageBackedWorkloadTests {
             })
         )
         let cleanupScript = cleanupRequest.exec?.arguments.last ?? ""
-        #expect(cleanupScript.contains("root='/var/lib/container/workloads/\(workloadID)'"))
+        #expect(cleanupScript.contains("root='\(guestInstanceDirectory)'"))
         #expect(cleanupScript.contains("rm -rf \"$root\""))
+
+        let deleteRequest = try #require(server.recordedRequests().first(where: { $0.method == .processDelete }))
+        #expect(deleteRequest.protocolVersion == MacOSSidecarProtocolVersion.durableProcessIdentity)
+        #expect(deleteRequest.processID == executionID)
+        #expect(deleteRequest.durableProcessDeleteIdentity?.executionID == executionID)
+        #expect(deleteRequest.durableProcessDeleteIdentity?.trustedLaunchFingerprint == launchFingerprint)
+        #expect(deleteRequest.durableProcessDeleteIdentity?.incarnation == incarnation)
+        #expect(deleteRequest.durableProcessDeleteIdentity?.storageGeneration == 17)
     }
 
     @Test
@@ -1359,6 +1599,7 @@ private final class RecordingSidecarServer: @unchecked Sendable {
     private let socketPath: String
     private let immediateExitPrefixes: [String]
     private let exitOnSignalPrefixes: [String]
+    private let guestFiles: [String: Data]
     private let requests = LockedBox<[MacOSSidecarRequest]>([])
     private let done = DispatchSemaphore(value: 0)
     private let errorBox = LockedBox<Error?>(nil)
@@ -1368,11 +1609,13 @@ private final class RecordingSidecarServer: @unchecked Sendable {
     init(
         socketPath: String,
         immediateExitPrefixes: [String] = ["workload-prepare-", "workload-cleanup-"],
-        exitOnSignalPrefixes: [String] = []
+        exitOnSignalPrefixes: [String] = [],
+        guestFiles: [String: Data] = [:]
     ) throws {
         self.socketPath = socketPath
         self.immediateExitPrefixes = immediateExitPrefixes
         self.exitOnSignalPrefixes = exitOnSignalPrefixes
+        self.guestFiles = guestFiles
         let listeningFD = try makeUnixListener(path: socketPath)
         self.listenFD.withLock { fd in
             fd = listeningFD
@@ -1402,6 +1645,7 @@ private final class RecordingSidecarServer: @unchecked Sendable {
                     closeIfValid(ownedClientFD)
                 }
 
+                var readTransactions: [String: Data] = [:]
                 while true {
                     let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: accepted)
                     guard envelope.kind == .request, let request = envelope.request else {
@@ -1411,6 +1655,42 @@ private final class RecordingSidecarServer: @unchecked Sendable {
 
                     switch request.method {
                     case .fsBegin, .fsChunk, .fsEnd:
+                        try writeResponse(.success(requestID: request.requestID), to: accepted)
+
+                    case .fsReadBegin:
+                        guard let payload = request.fsReadBegin, let data = guestFiles[payload.path] else {
+                            try writeResponse(
+                                .failure(requestID: request.requestID, code: "notFound", message: "guest file not found"),
+                                to: accepted
+                            )
+                            continue
+                        }
+                        readTransactions[payload.txID] = data
+                        let response = MacOSSidecarFSReadBeginResponsePayload(fileType: .file, size: UInt64(data.count))
+                        try writeResponse(
+                            .success(requestID: request.requestID, data: try JSONEncoder().encode(response)),
+                            to: accepted
+                        )
+
+                    case .fsReadChunk:
+                        guard let payload = request.fsReadChunk, let data = readTransactions[payload.txID] else {
+                            try writeResponse(
+                                .failure(requestID: request.requestID, code: "notFound", message: "read transaction not found"),
+                                to: accepted
+                            )
+                            continue
+                        }
+                        let start = min(Int(payload.offset), data.count)
+                        let end = min(start + max(0, payload.maxLength), data.count)
+                        try writeResponse(
+                            .success(requestID: request.requestID, data: data.subdata(in: start..<end)),
+                            to: accepted
+                        )
+
+                    case .fsReadEnd:
+                        if let txID = request.processID {
+                            readTransactions.removeValue(forKey: txID)
+                        }
                         try writeResponse(.success(requestID: request.requestID), to: accepted)
 
                     case .processStart:

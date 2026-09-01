@@ -17,6 +17,7 @@
 import ContainerCRI
 import ContainerResource
 import ContainerizationOCI
+import CryptoKit
 import Foundation
 
 func makeCRIShimSandboxMetadata(
@@ -65,6 +66,10 @@ func makeCRIShimSandboxConfiguration(
     guard !sandboxID.isEmpty else {
         throw CRIShimError.invalidArgument("sandbox id is required")
     }
+    let machineState = try makeCRIShimMachineStateMapping(
+        annotations: request.config.annotations,
+        nodeConfig: machineStateConfig
+    )
 
     var configuration = ContainerConfiguration(
         id: sandboxID,
@@ -93,11 +98,12 @@ func makeCRIShimSandboxConfiguration(
         )
     }
     if handler.usesPodNetworking {
+        let hostname = machineState.machineState?.persistenceID ?? sandboxID
         configuration.networks = [
             AttachmentConfiguration(
                 network: handler.network,
                 options: AttachmentOptions(
-                    hostname: sandboxID,
+                    hostname: hostname,
                     mtu: networkMTUOverride ?? handler.networkMTU
                 )
             )
@@ -112,10 +118,6 @@ func makeCRIShimSandboxConfiguration(
     if let metadata {
         configuration.labels[CRIShimCoreLabel.sandboxMetadata] = try makeCRIShimCoreMetadataLabel(metadata)
     }
-    let machineState = try makeCRIShimMachineStateMapping(
-        annotations: request.config.annotations,
-        nodeConfig: machineStateConfig
-    )
     configuration.macosGuest = ContainerConfiguration.MacOSGuestOptions(
         snapshotEnabled: machineState.machineState != nil,
         guiEnabled: handler.guiEnabled,
@@ -213,7 +215,8 @@ func makeCRIShimImageDescription(
 func makeCRIShimWorkloadConfiguration(
     id: String,
     request: Runtime_V1_CreateContainerRequest,
-    workloadImageDigest: String? = nil
+    workloadImageDigest: String? = nil,
+    sandbox: CRIShimSandboxMetadata? = nil
 ) throws -> WorkloadConfiguration {
     let containerID = id.trimmed
     guard !containerID.isEmpty else {
@@ -229,8 +232,101 @@ func makeCRIShimWorkloadConfiguration(
         mounts: mounts.filesystems,
         readOnlyFiles: mounts.readOnlyFiles,
         workloadImageReference: image,
-        workloadImageDigest: emptyStringAsNil(workloadImageDigest ?? "")
+        workloadImageDigest: emptyStringAsNil(workloadImageDigest ?? ""),
+        executionIdentity: try makeCRIShimWorkloadExecutionIdentity(
+            request: request,
+            workloadImageDigest: workloadImageDigest,
+            sandbox: sandbox,
+            mounts: mounts.filesystems
+        )
     )
+}
+
+private struct CRIShimWorkloadLaunchFingerprintInput: Codable {
+    struct Mount: Codable {
+        let type: Filesystem.FSType
+        let source: String
+        let destination: String
+        let options: [String]
+    }
+
+    let schemaVersion: Int
+    let imageDigest: String
+    let containerName: String
+    let containerAttempt: UInt32
+    let processConfiguration: ProcessConfiguration
+    let mounts: [Mount]
+}
+
+private func makeCRIShimWorkloadExecutionIdentity(
+    request: Runtime_V1_CreateContainerRequest,
+    workloadImageDigest: String?,
+    sandbox: CRIShimSandboxMetadata?,
+    mounts: [Filesystem]
+) throws -> WorkloadExecutionIdentity? {
+    guard let sandbox,
+        sandbox.annotations[CRIShimMachineStateAnnotation.enabled] == "true"
+    else {
+        return nil
+    }
+    let machineState = try decodeEnabledMachineStateAnnotationValues(sandbox.annotations)
+
+    let name = containerName(from: request.config)
+    // Kubernetes resets the CRI attempt to zero when it recreates a Pod. Use
+    // the attempt-zero representation as the stable logical container slot so
+    // an execution captured after an in-Pod restart can be adopted by the
+    // replacement Pod. This also preserves compatibility with identity records
+    // written by the original schema for attempt-zero containers.
+    let logicalAttempt: UInt32 = 0
+    let nameDigest = sha256Hex(Data("\(name)\u{0}\(logicalAttempt)".utf8))
+    let executionID = "\(machineState.persistenceID):container:\(nameDigest.prefix(24))"
+    let digest = emptyStringAsNil(workloadImageDigest ?? "") ?? "unresolved"
+    let fingerprintInput = CRIShimWorkloadLaunchFingerprintInput(
+        schemaVersion: 1,
+        imageDigest: digest,
+        containerName: name,
+        containerAttempt: logicalAttempt,
+        // Values are consumed only by this in-memory digest. The persisted
+        // identity never contains environment values or credentials.
+        processConfiguration: makeProcessConfiguration(request.config),
+        mounts: mounts.map {
+            .init(
+                type: $0.type,
+                source: $0.source,
+                destination: $0.destination,
+                options: $0.options.sorted()
+            )
+        }.sorted {
+            if $0.destination != $1.destination { return $0.destination < $1.destination }
+            if $0.source != $1.source { return $0.source < $1.source }
+            return $0.options.lexicographicallyPrecedes($1.options)
+        }
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let launchFingerprint = "sha256:\(sha256Hex(try encoder.encode(fingerprintInput)))"
+    let podIncarnation = sandbox.podUID ?? sandbox.id
+    let incarnation = "sha256:\(sha256Hex(Data("\(podIncarnation)\u{0}\(name)\u{0}\(request.config.metadata.attempt)".utf8)))"
+
+    let restoreBinding: WorkloadExecutionIdentity.RestoreBinding?
+    if machineState.restoreStateID != nil {
+        guard let generation = machineState.restoreStateGeneration else {
+            throw CRIShimError.invalidArgument("persisted macOS VM restore generation is incomplete")
+        }
+        restoreBinding = try .init(executionID: executionID, generation: generation)
+    } else {
+        restoreBinding = nil
+    }
+    return try WorkloadExecutionIdentity(
+        executionID: executionID,
+        launchFingerprint: launchFingerprint,
+        incarnation: incarnation,
+        restoreBinding: restoreBinding
+    )
+}
+
+private func sha256Hex(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
 private func makeCRIShimMacOSNetworkBackend(

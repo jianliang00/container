@@ -39,6 +39,7 @@ Unknown methods are decoded without dropping the request id and return `unknownM
 | `vm.resume` | 2 | optional `machineState.timeoutSeconds` | Lifecycle state and restored state id, if any |
 | `vm.saveMachineState` | 2 | `machineState.stateID`, optional timeout | Lifecycle state, state id, and compatibility description |
 | `vm.restoreMachineState` | 2 | `machineState.stateID`, optional timeout | Paused lifecycle state, state id, and saved compatibility description |
+| `vm.deleteMachineState` | 2 | `machineState.stateID` | State id and whether committed or incomplete state files were deleted |
 | `vm.compatibilityDescription` | 2 | optional `machineState.stateID` | Current description and, when requested, saved description plus mismatch reasons |
 | `vm.stop` | 1 or 2 | none | Existing stop behavior |
 
@@ -59,6 +60,8 @@ The sidecar serializes VM lifecycle transitions through one coordinator.
 
 Only one transitional operation may exist. A concurrent stop, save, restore, pause, resume, or start returns `operationInProgress` with the current operation and lifecycle state. An invalid source state returns `invalidLifecycleState`. A failed operation returns to its stable source state; an inconsistent internal completion moves the coordinator to `failed`.
 
+`process.start` acquires a short-lived lifecycle admission before contacting the guest. Admission is available only while the VM is `running` and is held through the guest start acknowledgement or failure, not for the lifetime of the process. Pause and other lifecycle transitions cannot begin while a process-start admission is held. Once a lifecycle transition begins, subsequent process starts are rejected, so a process cannot appear after the VM has entered quiescing.
+
 `timeoutSeconds` must be finite and between 1 and 600 seconds. It is the caller's response deadline and does not cancel an operation already submitted to Virtualization.framework. When a client times out, it closes that control connection; the sidecar keeps the lifecycle state transitional until the framework callback completes. The client must reconnect and query `vm.capabilities` or the requested compatibility description before retrying. This prevents a timeout from allowing a concurrent stop or a second save/restore to race an operation that is still active.
 
 ## Managed files
@@ -72,9 +75,61 @@ compatibility.json
 
 The caller supplies only an opaque state id. It may contain letters, digits, dot, underscore, and hyphen and is limited to 128 characters. Slash, `.` and `..` ids are rejected. The runtime root and every existing path component are checked with `lstat`; symbolic links are rejected. The managed directory is mode `0700`, and state and compatibility files are mode `0600`.
 
-Saving first reserves the final state directory with mode `0700`. Virtualization.framework writes the machine state directly to its stable final URL because the saved state is bound to that URL. The runtime then validates the state as a regular file and atomically writes the compatibility manifest as the commit marker. Any validation, framework, or manifest failure removes the reserved directory. A completed state id is immutable and is not overwritten.
+Saving first reserves the final state directory with mode `0700`. Virtualization.framework writes the machine state directly to the final `machine-state.vzstate` URL because the saved state is bound to the URL passed to the framework; the state file or directory cannot be published later by rename. The runtime validates the state as a regular file and atomically publishes `compatibility.json` last. Readers treat that manifest as the commit marker and never load a directory that contains only the state file. Any validation, framework, or manifest failure removes the reserved directory. A completed state id is immutable and is not overwritten.
 
 Restore validates that the state file and compatibility description are regular files below the managed directory before calling `restoreMachineStateFrom(url:)`.
+
+Delete is idempotent: a missing state returns `deleted: false`. A completed state or an incomplete reserved directory returns `deleted: true` after its managed directory is removed. Delete is rejected while save or restore is in flight for that state. A successfully restored state also remains protected while its VM is paused or resuming; it can be deleted only after resume reaches `running`, or after the VM no longer has that state active.
+
+## CRI configuration and binding leases
+
+CRI integration is disabled unless `machineState.enabled` is explicitly set to `true`. The remaining node policy fields select the machine-state, sidecar-control, local-NBD, and lease directories. `machineState.runtimeOwnerUID` is the effective uid of the runtime sidecar and local NBD proxy. On startup, a root CRI shim creates the configured state, control, and NBD leaf directories with mode `0700` and transfers only those leaves to `runtimeOwnerUID`. A non-root shim requires `runtimeOwnerUID` to equal its own effective uid. Symbolic-link components, untrusted owners, and group- or world-writable parents are rejected. The lease directory remains private to the CRI shim.
+
+Pod sandbox configuration uses individual annotations in the versioned `io.container.runtime.macos.machine-state.v1/` namespace:
+
+| Annotation suffix | Requirement | Meaning |
+| --- | --- | --- |
+| `enabled` | Required, exactly `"true"` | Opts the sandbox into CRI machine-state handling. |
+| `persistence-id` | Required | Stable identifier used for the persistent state directory, sidecar socket, lease, and durable workload identity. |
+| `storage-generation` | Required, positive decimal `UInt64` | Generation of the current writable disk export. |
+| `restore-state-id` | Optional as a pair | Immutable saved machine-state identifier selected for restore. |
+| `restore-state-generation` | Optional as a pair | Disk generation captured by the selected state. |
+| `block-devices` | Optional for cold boot; required with an NBD root for restore | Strict JSON array of local Unix-socket NBD devices. The first device must be the writable `root` device. |
+
+Companion annotations are rejected unless `enabled` is present and true. `restore-state-id` and `restore-state-generation` must either both be absent or both be present. A first cold boot uses `storage-generation: "1"` without restore annotations. Restoring a state saved from generation `N` supplies that state id, `restore-state-generation: "N"`, and a current `storage-generation` greater than `N`. The runtime requires an explicit NBD root for this restore path.
+
+Before creating sandbox metadata, the CRI shim atomically acquires `<persistence-id>.json` in the lease directory. The lease binds the persistence id to the Kubernetes Pod UID, sandbox id, selected state and saved generation, and current storage generation. A retry by the same owner returns the persisted sandbox id, which makes a lost `RunPodSandbox` acknowledgement idempotent. A different Pod UID, saved generation, or storage generation is fenced while that lease is active. The runtime verifies the exact lease again before the first VM start. `RemovePodSandbox` releases only a lease whose complete persisted owner still matches the sandbox metadata; machine-state and identity files remain available below the persistent state directory.
+
+The generation annotation does not create, clone, revoke, or fence an NBD export. A trusted storage controller must make generation `N` immutable after the save point, create one writable successor, and expose that successor through the same configured Unix-socket path before restore. The CRI lease prevents conflicting sandbox ownership on the node, while the storage service remains responsible for preventing stale writers.
+
+## CRI Pod recreation and durable workload adoption
+
+A machine-state restore intentionally creates new Kubernetes and CRI objects while retaining the saved VM and primary workload process state:
+
+1. Start the initial Pod with a persistence id and writable storage generation `N`.
+2. Pause the VM, establish the corresponding disk point, and save machine state while the VM remains paused.
+3. Remove the old Pod so its sandbox lease is released. Persistent machine-state files are not removed.
+4. Prepare a writable disk successor, then create a new Pod with the same persistence id, the saved state id and generation `N`, and a newer writable storage generation.
+5. The runtime restores the VM to `paused`, resumes it, and creates a new CRI container record. For a workload that existed in the snapshot, the runtime verifies its saved image payload and launch fingerprint and attaches the new record to the durable guest process instead of starting a duplicate process.
+6. Treat the restore as complete only after the new Pod is `Ready` and `Running`, a CRI container id is present, and the first exec request succeeds.
+
+For a Deployment or another workload controller, scale-to-zero must complete before its Pod template is changed to the restore annotations. Wait until the old Pod and sandbox are gone, prepare the writable successor, update the template, and only then scale up. Overlapping old and replacement Pods are rejected by the CRI lease while it is active and must also be prevented by the storage controller's writer fencing.
+
+The logical execution slot is derived from the persistence id and container name. CRI attempt is deliberately excluded: an in-Pod restart with attempt greater than zero and a replacement Pod whose attempt resets to zero address the same durable execution. Adoption still requires the saved image digest, effective process configuration, and mounts to match. A conflicting payload or launch fingerprint is a hard failure.
+
+Warm restore never creates a replacement execution when the selected state lacks the expected workload manifest. This fail-closed rule covers snapshots written with legacy metadata and snapshots whose execution id included a nonzero CRI attempt; either may still contain a durable process that the current runtime cannot identify safely. Existing attempt-zero identity records remain address-compatible. An incompatible snapshot requires an explicit offline metadata migration or a cold start and a new snapshot. Adding, removing, or renaming a primary container is likewise a cold-start topology change, not a warm-restore operation. Transient exec and attach clients reconnect through new CRI requests and are not part of the retained primary workload identity.
+
+The runtime-to-guest durable process protocol advertises `durableProcessV2` for generation-fenced adoption. A v2 request carries the trusted runtime launch fingerprint, the current writable storage generation, and, only during warm adoption, the selected saved generation. A normal reconnect must match the process's bound generation. Warm adoption succeeds only when the process is bound to the selected saved generation and the current generation is newer; the guest then advances the binding atomically after acknowledging the new controller. The returned process status includes both the guest launch fingerprint and the bound generation. A guest that advertises only `durableProcessV1` cannot receive a generation-fenced request.
+
+### Snapshot V1 durable-process boundary
+
+Snapshot V1 is the initial CRI warm-restore feature and is independent of the sidecar and durable-process protocol version numbers. Its durable process supervisor retains the primary process and manages descendants that remain in that process's original process group. This is a process-group lifecycle contract, not macOS cgroup semantics or arbitrary process-tree discovery. A long-lived descendant that creates an independent session or process group through `setsid(2)`, `setpgid(2)`, double-fork daemonization, or an equivalent launcher escapes that contract. Snapshot V1 cannot guarantee lifecycle fencing, output adoption, or cleanup for such a descendant, even though the VM machine state may contain it.
+
+Snapshot mode is therefore limited to workload templates whose long-lived processes remain in the primary process group. The trusted controller or admission policy must reject snapshot enablement for workloads that daemonize into independent sessions or groups, or configure those workloads to remain in the foreground. The runtime does not infer this eligibility from a command line and must not be treated as capturing an unrestricted process tree.
+
+Verbose `PodSandboxStatus` exposes a `machineState` JSON entry with schema version 1, runtime protocol version 2, the persistence id and storage generation, and `restore.supported: true`. Its restore status is `notRequested` for a cold boot and `requested` with the selected state id and generation for a restore request.
+
+These annotations select host persistence and writable node storage and therefore form a privileged orchestration boundary, not a tenant authorization token. Clusters must restrict them to a trusted controller or admission policy. The runtime validates identifiers, managed paths, NBD socket allowlists, leases, saved compatibility, and workload fingerprints, but it does not authenticate an annotation author or prove that an external storage service implemented the claimed generation transition.
 
 ## Compatibility description
 
@@ -86,8 +141,11 @@ The compatibility schema contains:
 - SHA-256 fingerprints of `VZMacHardwareModel` and `VZMacMachineIdentifier` data;
 - effective CPU count, memory size, boot loader, network backend, ordered block devices, directory-share count, graphics and virtio-socket presence;
 - a SHA-256 fingerprint of critical runtime configuration, including block devices, mounts, GUI mode, and guest-agent port.
+- the positive storage generation of the writable external disk used when the state was saved, when external generation tracking is configured.
 
 Restore performs a conservative exact comparison before invoking Virtualization.framework. A different IOPlatform UUID returns `differentPhysicalHost`; a host update returns `hostBuildMismatch`; hardware, machine identifier, or configuration changes return their corresponding mismatch codes. Machine state is never presented as portable across physical Macs. Virtualization.framework additionally enforces its host-bound encryption and saved-state format checks.
+
+For CRI-managed external disks, the saved manifest's storage generation must equal the annotation's selected saved `generation`. The annotation's `storageGeneration` instead identifies the newly cloned writable disk used by the resumed VM, so it is deliberately excluded from ordinary current-versus-saved configuration comparison. Retrying a save for an existing state id is accepted only when its manifest has the same storage generation as the current writable disk. Legacy local-disk states that omit generation tracking remain compatible only with requests that also omit it.
 
 ## Block-device configuration
 
@@ -112,7 +170,9 @@ Stable machine-state error codes include:
 - `invalidMachineStateID`
 - `machineStateNotFound`
 - `machineStateIncomplete`
+- `machineStateInUse`
 - `machineStateAlreadyExists`
+- `machineStateStorageGenerationMismatch`
 - `unsafeMachineStatePath`
 - `machineStateIncompatible`
 - `unsupportedHostArchitecture`
@@ -132,3 +192,5 @@ CONTAINER_MACOS_MACHINE_STATE_INTEGRATION_ROOT=/absolute/runtime/root \
 ```
 
 The test discovers save/restore support, starts the VM, pauses it, saves state, stops it, creates a fresh sidecar service over the same runtime directory, restores to paused, resumes, and stops. Compatibility unit tests cover a different physical host, host-build change, and configuration change without requiring access to a second Mac. Storage tests cover invalid paths, Unix-socket connection, reconnect observation, and managed-file cleanup.
+
+On a joined Kubernetes node, `scripts/macos-cri-machine-state-integration.sh` validates Pod recreation and durable workload adoption. It starts at storage generation 1, exercises pause/resume, then pauses and saves without resuming. The foreground guest process keeps a random boot token and monotonic counter only in memory and emits token, PID, and counter samples to stdout. The test never writes this continuity state to the VM filesystem. After the original Pod is removed, the test creates a new Pod UID with the selected state generation 1 and writable generation 2. Success requires a `Ready` and `Running` Pod, a CRI container id, an independent first-exec readiness probe, and log-stream samples that retain the token and PID while the counter advances. Reading continuity only from the replacement Pod's live log stream prevents a disk-carried token from satisfying the restore check. For full storage validation, provide the script's restore-preparation helper so the stable NBD socket selects a fenced writable clone before the replacement Pod starts. The explicit in-place mode reuses the quiesced disk and validates only the runtime restore path.

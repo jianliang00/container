@@ -77,7 +77,7 @@ struct MachineStateSupportTests {
     }
 
     @Test
-    func managedStorePublishesAtomicallyWithPrivatePermissions() throws {
+    func managedStoreKeepsStatePathStableAndUsesPrivatePermissions() throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -89,9 +89,9 @@ struct MachineStateSupportTests {
         try store.commit(staging, compatibility: compatibility)
         let stored = try store.load(stateID: "state-1")
         #expect(stored.compatibility == compatibility)
+        #expect(stored.stateURL == staging.stateURL)
         #expect(try permissions(stored.stateURL) == 0o600)
         #expect(try permissions(stored.stateURL.deletingLastPathComponent()) == 0o700)
-        #expect(!FileManager.default.fileExists(atPath: staging.directoryURL.path))
     }
 
     @Test
@@ -127,7 +127,6 @@ struct MachineStateSupportTests {
         store.abort(staging)
 
         #expect(!FileManager.default.fileExists(atPath: staging.directoryURL.path))
-        #expect(!FileManager.default.fileExists(atPath: staging.finalURL.path))
     }
 
     @Test
@@ -145,7 +144,6 @@ struct MachineStateSupportTests {
         }
 
         let staging = try store.createStaging(stateID: "incomplete")
-        try FileManager.default.moveItem(at: staging.directoryURL, to: staging.finalURL)
         do {
             _ = try store.load(stateID: "incomplete")
             Issue.record("expected incomplete state to fail")

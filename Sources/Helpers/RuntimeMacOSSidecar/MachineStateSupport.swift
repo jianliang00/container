@@ -132,7 +132,6 @@ struct MacOSMachineStateStore: Sendable {
     struct Staging: Sendable {
         let directoryURL: URL
         let stateURL: URL
-        let finalURL: URL
     }
 
     struct StoredState: Sendable {
@@ -162,16 +161,14 @@ struct MacOSMachineStateStore: Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
-        let stagingURL = statesURL.appendingPathComponent(".tmp-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: false)
-        guard chmod(stagingURL.path, mode_t(S_IRWXU)) == 0 else {
-            try? FileManager.default.removeItem(at: stagingURL)
+        try FileManager.default.createDirectory(at: finalURL, withIntermediateDirectories: false)
+        guard chmod(finalURL.path, mode_t(S_IRWXU)) == 0 else {
+            try? FileManager.default.removeItem(at: finalURL)
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         return Staging(
-            directoryURL: stagingURL,
-            stateURL: stagingURL.appendingPathComponent("machine-state.vzstate"),
-            finalURL: finalURL
+            directoryURL: finalURL,
+            stateURL: finalURL.appendingPathComponent("machine-state.vzstate")
         )
     }
 
@@ -183,22 +180,14 @@ struct MacOSMachineStateStore: Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
+        // Virtualization.framework binds a saved machine state to the URL used by
+        // saveMachineState. Keep that URL stable and publish the manifest last as
+        // the atomic commit marker for readers.
         let manifestURL = staging.directoryURL.appendingPathComponent("compatibility.json")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(compatibility).write(to: manifestURL, options: .atomic)
         guard chmod(manifestURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        guard
-            renameatx_np(
-                AT_FDCWD,
-                staging.directoryURL.path,
-                AT_FDCWD,
-                staging.finalURL.path,
-                UInt32(RENAME_EXCL)
-            ) == 0
-        else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }

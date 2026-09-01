@@ -1402,6 +1402,15 @@ struct MacOSKubeadmPlanTests {
         }
     }
 
+    @Test func joinPlanRejectsReservedContainerServiceUID() throws {
+        var options = try makeOptions(startServices: false)
+        options.containerServiceUserID = Int(UInt32.max)
+
+        #expect(throws: MacOSKubeadmError.invalidInput("--container-service-user must be a valid uid")) {
+            try MacOSKubeadmPlanner.joinPlan(options: options)
+        }
+    }
+
     @Test func resetRequiresForceUnlessDryRun() throws {
         #expect(throws: MacOSKubeadmError.invalidInput("reset requires --force unless --dry-run is set")) {
             try MacOSKubeadmPlanner.resetPlan(

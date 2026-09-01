@@ -653,9 +653,10 @@ public enum MacOSKubeadmPlanner {
             throw MacOSKubeadmError.invalidInput("discovered flannel-macos token is required")
         }
         guard options.containerServiceUserID >= 0,
-            UInt32(exactly: options.containerServiceUserID) != nil
+            let containerServiceUID = UInt32(exactly: options.containerServiceUserID),
+            containerServiceUID != UInt32.max
         else {
-            throw MacOSKubeadmError.invalidInput("--container-service-user must be a non-negative uid")
+            throw MacOSKubeadmError.invalidInput("--container-service-user must be a valid uid")
         }
         guard !options.clusterDNS.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MacOSKubeadmError.invalidInput("--cluster-dns is required")

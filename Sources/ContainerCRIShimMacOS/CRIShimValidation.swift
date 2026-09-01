@@ -200,6 +200,9 @@ extension CRIShimConfig {
             if machineState.normalizedStorageRoot == machineState.normalizedControlSocketRoot {
                 issues.append("machineState.storageRoot and machineState.controlSocketRoot must be different")
             }
+            if machineState.runtimeOwnerUID == UInt32.max {
+                issues.append("machineState.runtimeOwnerUID must be a valid uid")
+            }
             var allowedRoots = Set<String>()
             for (index, root) in machineState.nbdSocketAllowedRoots.enumerated() {
                 let name = "machineState.nbdSocketAllowedRoots[\(index)]"

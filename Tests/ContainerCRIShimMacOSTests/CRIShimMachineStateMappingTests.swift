@@ -82,6 +82,8 @@ struct CRIShimMachineStateMappingTests {
         #expect(try Data(contentsOf: marker) == Data("preserved".utf8))
         #expect(try permissions(firstStorage) == 0o700)
         #expect(try permissions(roots.controlRoot) == 0o700)
+        #expect(try owner(firstStorage) == geteuid())
+        #expect(try owner(roots.controlRoot) == geteuid())
     }
 
     @Test
@@ -248,6 +250,7 @@ private struct MachineStateTestRoots {
             enabled: true,
             storageRoot: storageRoot.path,
             controlSocketRoot: controlRoot.path,
+            runtimeOwnerUID: UInt32(geteuid()),
             nbdSocketAllowedRoots: [nbdRoot.path]
         )
     }
@@ -315,4 +318,12 @@ private final class MachineStateUnixListener: @unchecked Sendable {
 private func permissions(_ url: URL) throws -> UInt16 {
     let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
     return UInt16((attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0)
+}
+
+private func owner(_ url: URL) throws -> uid_t {
+    var value = stat()
+    guard lstat(url.path, &value) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    return value.st_uid
 }

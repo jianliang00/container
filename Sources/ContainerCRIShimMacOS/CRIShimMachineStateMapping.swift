@@ -151,12 +151,24 @@ func makeCRIShimMachineStateMapping(
 
     let storageRoot = URL(fileURLWithPath: nodeConfig.normalizedStorageRoot).standardizedFileURL
     let socketRoot = URL(fileURLWithPath: nodeConfig.normalizedControlSocketRoot).standardizedFileURL
-    try preparePrivateDirectory(storageRoot, createIntermediates: true)
-    try preparePrivateDirectory(socketRoot, createIntermediates: true)
+    try preparePrivateDirectory(
+        storageRoot,
+        createIntermediates: true,
+        ownerUID: nodeConfig.runtimeOwnerUID
+    )
+    try preparePrivateDirectory(
+        socketRoot,
+        createIntermediates: true,
+        ownerUID: nodeConfig.runtimeOwnerUID
+    )
 
     let storageDirectory = storageRoot.appendingPathComponent(persistenceID, isDirectory: true)
     try requireManagedDescendant(storageDirectory, below: storageRoot)
-    try preparePrivateDirectory(storageDirectory, createIntermediates: false)
+    try preparePrivateDirectory(
+        storageDirectory,
+        createIntermediates: false,
+        ownerUID: nodeConfig.runtimeOwnerUID
+    )
 
     let controlSocket = socketRoot.appendingPathComponent("\(persistenceID).sock", isDirectory: false)
     try requireManagedDescendant(controlSocket, below: socketRoot)
@@ -266,7 +278,14 @@ private func requireSafeIdentifier(
     return value
 }
 
-private func preparePrivateDirectory(_ url: URL, createIntermediates: Bool) throws {
+private func preparePrivateDirectory(
+    _ url: URL,
+    createIntermediates: Bool,
+    ownerUID: UInt32?
+) throws {
+    if ownerUID == UInt32.max {
+        throw CRIShimError.invalidArgument("machineState.runtimeOwnerUID must be a valid uid")
+    }
     try rejectSymbolicLinksInAbsolutePath(url)
     var value = stat()
     if lstat(url.path, &value) != 0 {
@@ -287,12 +306,36 @@ private func preparePrivateDirectory(_ url: URL, createIntermediates: Bool) thro
         }
         try rejectSymbolicLinksInAbsolutePath(url)
     }
+
+    let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else {
+        throw CRIShimError.internalError("failed to open managed directory \(url.path): \(posixMessage())")
+    }
+    defer { _ = close(fd) }
+    guard fstat(fd, &value) == 0 else {
+        throw CRIShimError.internalError("failed to inspect managed directory \(url.path): \(posixMessage())")
+    }
     guard (value.st_mode & S_IFMT) == S_IFDIR else {
         throw CRIShimError.invalidArgument("managed path must be a directory and cannot be a symbolic link: \(url.path)")
     }
-    guard chmod(url.path, mode_t(S_IRWXU)) == 0 else {
+    if let ownerUID {
+        let requestedOwner = uid_t(ownerUID)
+        if value.st_uid != requestedOwner {
+            let effectiveOwner = geteuid()
+            guard effectiveOwner == 0, value.st_uid == effectiveOwner else {
+                throw CRIShimError.invalidArgument(
+                    "managed directory has unexpected owner \(value.st_uid): \(url.path)"
+                )
+            }
+            guard fchown(fd, requestedOwner, gid_t.max) == 0 else {
+                throw CRIShimError.internalError("failed to set owner on \(url.path): \(posixMessage())")
+            }
+        }
+    }
+    guard fchmod(fd, mode_t(S_IRWXU)) == 0 else {
         throw CRIShimError.internalError("failed to set private permissions on \(url.path): \(posixMessage())")
     }
+    try rejectSymbolicLinksInAbsolutePath(url)
 }
 
 private func requireManagedDescendant(_ candidate: URL, below root: URL) throws {

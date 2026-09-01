@@ -292,7 +292,8 @@ struct MacOSKubeadmRenderingTests {
             let rendered = MacOSKubeadmRenderer.criShimConfiguration(
                 sandboxImage: "localhost/macos-sandbox:test",
                 nodeName: "macos-ci-1",
-                networkMode: networkMode
+                networkMode: networkMode,
+                containerServiceUserID: 501
             )
             let object = try #require(
                 JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any]
@@ -308,6 +309,7 @@ struct MacOSKubeadmRenderingTests {
                 machineState["controlSocketRoot"] as? String
                     == "/var/run/container/machine-state/v1"
             )
+            #expect(machineState["runtimeOwnerUID"] as? Int == 501)
             #expect(machineState["nbdSocketAllowedRoots"] as? [String] == ["/var/run/container/nbd"])
         }
     }

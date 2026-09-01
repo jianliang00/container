@@ -186,17 +186,20 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var storageRoot: String?
     public var controlSocketRoot: String?
+    public var runtimeOwnerUID: UInt32?
     public var nbdSocketAllowedRoots: [String]
 
     public init(
         enabled: Bool = false,
         storageRoot: String? = nil,
         controlSocketRoot: String? = nil,
+        runtimeOwnerUID: UInt32? = nil,
         nbdSocketAllowedRoots: [String] = []
     ) {
         self.enabled = enabled
         self.storageRoot = storageRoot
         self.controlSocketRoot = controlSocketRoot
+        self.runtimeOwnerUID = runtimeOwnerUID
         self.nbdSocketAllowedRoots = nbdSocketAllowedRoots
     }
 
@@ -204,6 +207,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         case enabled
         case storageRoot
         case controlSocketRoot
+        case runtimeOwnerUID
         case nbdSocketAllowedRoots
     }
 
@@ -212,6 +216,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         storageRoot = try container.decodeIfPresent(String.self, forKey: .storageRoot)
         controlSocketRoot = try container.decodeIfPresent(String.self, forKey: .controlSocketRoot)
+        runtimeOwnerUID = try container.decodeIfPresent(UInt32.self, forKey: .runtimeOwnerUID)
         nbdSocketAllowedRoots = try container.decodeIfPresent([String].self, forKey: .nbdSocketAllowedRoots) ?? []
     }
 

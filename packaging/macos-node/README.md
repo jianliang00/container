@@ -297,13 +297,19 @@ Every configured device is a local Unix-socket NBD attachment with full disk
 synchronization. Socket paths must be absolute, canonical, reachable, and below
 a root listed in `machineState.nbdSocketAllowedRoots`. Unknown JSON fields,
 duplicate identifiers, unavailable sockets, symbolic links, and paths outside
-the allowlist are rejected before the sandbox is created.
+the allowlist are rejected before the sandbox is created. The NBD service must
+make each allowlist directory traversable and each socket connectable by the
+container service UID.
 
 The runtime derives the persistent state directory as
 `<storageRoot>/<persistence-id>` and the discoverable sidecar socket as
 `<controlSocketRoot>/<persistence-id>.sock`. Only one active sandbox may hold a
 persistence ID. Machine states and VM identity remain in the state directory
 after CRI sandbox removal; the volatile control socket does not.
+`machineState.runtimeOwnerUID` is rendered from the container service account;
+the CRI shim keeps its managed state and control directories private (`0700`)
+and owned by that UID. Existing configurations that omit the field retain their
+current directory ownership behavior.
 
 `restore-state-id` is recognized by the v1 annotation decoder but CRI restore is
 currently rejected with `criWorkloadAdoptionUnavailable`. Restoring only the VM

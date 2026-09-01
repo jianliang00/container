@@ -39,6 +39,7 @@
         "enabled": true,
         "storageRoot": "/var/lib/container/cri-shim-macos/machine-state/v1",
         "controlSocketRoot": "/var/run/container/machine-state/v1",
+        "runtimeOwnerUID": 0,
         "nbdSocketAllowedRoots": [
             "/var/run/container/nbd"
         ]

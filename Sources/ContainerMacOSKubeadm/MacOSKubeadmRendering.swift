@@ -191,6 +191,7 @@ public enum MacOSKubeadmRenderer {
                         "enabled": true,
                         "storageRoot": "/var/lib/container/cri-shim-macos/machine-state/v1",
                         "controlSocketRoot": "/var/run/container/machine-state/v1",
+                        "runtimeOwnerUID": \(containerServiceUserID),
                         "nbdSocketAllowedRoots": [
                             "/var/run/container/nbd"
                         ]
@@ -252,6 +253,7 @@ public enum MacOSKubeadmRenderer {
                         "enabled": true,
                         "storageRoot": "/var/lib/container/cri-shim-macos/machine-state/v1",
                         "controlSocketRoot": "/var/run/container/machine-state/v1",
+                        "runtimeOwnerUID": \(containerServiceUserID),
                         "nbdSocketAllowedRoots": [
                             "/var/run/container/nbd"
                         ]

@@ -18,6 +18,7 @@ import ContainerNetworkClient
 import ContainerResource
 import ContainerXPC
 import ContainerizationError
+import CryptoKit
 import Foundation
 import Logging
 @preconcurrency import Virtualization
@@ -50,6 +51,7 @@ protocol MacOSNetworkBackend {
     func prepareNetwork(
         containerConfig: ContainerConfiguration,
         existingLease: MacOSGuestNetworkLease?,
+        virtualMachineIdentity: Data,
         log: Logger
     ) async throws -> PreparedMacOSNetwork
 }
@@ -71,10 +73,12 @@ struct VirtualizationNATNetworkBackend: MacOSNetworkBackend {
     func prepareNetwork(
         containerConfig: ContainerConfiguration,
         existingLease: MacOSGuestNetworkLease?,
+        virtualMachineIdentity: Data,
         log: Logger
     ) async throws -> PreparedMacOSNetwork {
         let device = VZVirtioNetworkDeviceConfiguration()
         device.attachment = VZNATNetworkDeviceAttachment()
+        device.macAddress = try MacOSNATNetworkIdentity.macAddress(virtualMachineIdentity: virtualMachineIdentity)
         return PreparedMacOSNetwork(
             devices: [device],
             lease: nil,
@@ -84,12 +88,29 @@ struct VirtualizationNATNetworkBackend: MacOSNetworkBackend {
     }
 }
 
+enum MacOSNATNetworkIdentity {
+    static func addressString(virtualMachineIdentity: Data) -> String {
+        var octets = Array(SHA256.hash(data: virtualMachineIdentity).prefix(6))
+        octets[0] = (octets[0] | 0x02) & 0xfe
+        return octets.map { String(format: "%02x", $0) }.joined(separator: ":")
+    }
+
+    static func macAddress(virtualMachineIdentity: Data) throws -> VZMACAddress {
+        let value = addressString(virtualMachineIdentity: virtualMachineIdentity)
+        guard let address = VZMACAddress(string: value) else {
+            throw ContainerizationError(.internalError, message: "failed to derive the VM network identity")
+        }
+        return address
+    }
+}
+
 struct VMNetSharedNetworkBackend: MacOSNetworkBackend {
     let backendID: ContainerConfiguration.MacOSGuestOptions.NetworkBackend = .vmnetShared
 
     func prepareNetwork(
         containerConfig: ContainerConfiguration,
         existingLease: MacOSGuestNetworkLease?,
+        virtualMachineIdentity: Data,
         log: Logger
     ) async throws -> PreparedMacOSNetwork {
         guard #available(macOS 26, *) else {

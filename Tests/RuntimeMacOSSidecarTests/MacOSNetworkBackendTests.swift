@@ -29,9 +29,11 @@ struct MacOSNetworkBackendTests {
         let config = try makeContainerConfiguration(networkBackend: "virtualizationNAT")
 
         let backend = MacOSNetworkBackendFactory.backend(for: config)
+        let virtualMachineIdentity = Data("network-backend-vm".utf8)
         let prepared = try await backend.prepareNetwork(
             containerConfig: config,
             existingLease: nil,
+            virtualMachineIdentity: virtualMachineIdentity,
             log: Logger(label: "RuntimeMacOSSidecarTests")
         )
 
@@ -42,6 +44,43 @@ struct MacOSNetworkBackendTests {
 
         let device = try #require(prepared.devices.first as? VZVirtioNetworkDeviceConfiguration)
         #expect(device.attachment is VZNATNetworkDeviceAttachment)
+        #expect(
+            device.macAddress.description
+                == MacOSNATNetworkIdentity.addressString(virtualMachineIdentity: virtualMachineIdentity)
+        )
+    }
+
+    @Test
+    func virtualizationNATBackendUsesStablePerVMNetworkIdentity() async throws {
+        let config = try makeContainerConfiguration(networkBackend: "virtualizationNAT")
+        let backend = MacOSNetworkBackendFactory.backend(for: config)
+        let virtualMachineIdentity = Data("stable-vm".utf8)
+        let otherVirtualMachineIdentity = Data("other-vm".utf8)
+
+        let first = try await backend.prepareNetwork(
+            containerConfig: config,
+            existingLease: nil,
+            virtualMachineIdentity: virtualMachineIdentity,
+            log: Logger(label: "RuntimeMacOSSidecarTests")
+        )
+        let second = try await backend.prepareNetwork(
+            containerConfig: config,
+            existingLease: nil,
+            virtualMachineIdentity: virtualMachineIdentity,
+            log: Logger(label: "RuntimeMacOSSidecarTests")
+        )
+        let other = try await backend.prepareNetwork(
+            containerConfig: config,
+            existingLease: nil,
+            virtualMachineIdentity: otherVirtualMachineIdentity,
+            log: Logger(label: "RuntimeMacOSSidecarTests")
+        )
+
+        let firstDevice = try #require(first.devices.first as? VZVirtioNetworkDeviceConfiguration)
+        let secondDevice = try #require(second.devices.first as? VZVirtioNetworkDeviceConfiguration)
+        let otherDevice = try #require(other.devices.first as? VZVirtioNetworkDeviceConfiguration)
+        #expect(firstDevice.macAddress.description == secondDevice.macAddress.description)
+        #expect(firstDevice.macAddress.description != otherDevice.macAddress.description)
     }
 
     @Test
@@ -62,6 +101,7 @@ struct MacOSNetworkBackendTests {
             _ = try await backend.prepareNetwork(
                 containerConfig: config,
                 existingLease: nil,
+                virtualMachineIdentity: Data("vmnet-vm".utf8),
                 log: Logger(label: "RuntimeMacOSSidecarTests")
             )
         }

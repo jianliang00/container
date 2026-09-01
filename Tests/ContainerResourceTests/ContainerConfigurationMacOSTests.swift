@@ -108,6 +108,32 @@ struct ContainerConfigurationMacOSTests {
         let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: legacyData)
 
         #expect(decoded.macosGuest?.networkBackend == .virtualizationNAT)
+        #expect(decoded.macosGuest?.blockDevices == [])
+    }
+
+    @Test
+    func macOSGuestBlockDeviceConfigurationRoundTrips() throws {
+        let options = ContainerConfiguration.MacOSGuestOptions(
+            snapshotEnabled: false,
+            guiEnabled: false,
+            agentPort: 27_000,
+            blockDevices: [
+                .init(
+                    identifier: "root",
+                    kind: .nbdUnixSocket,
+                    path: "/var/run/vm-storage/root.sock",
+                    exportName: "root-disk",
+                    timeoutSeconds: 8,
+                    synchronizationMode: .full
+                )
+            ]
+        )
+
+        let decoded = try JSONDecoder().decode(
+            ContainerConfiguration.MacOSGuestOptions.self,
+            from: JSONEncoder().encode(options)
+        )
+        #expect(decoded == options)
     }
 
     @Test

@@ -89,6 +89,67 @@ final class MacOSSidecarClient: @unchecked Sendable {
         _ = try request(method: .vmStop)
     }
 
+    func capabilities() throws -> MacOSSidecarCapabilities {
+        let response = try request(
+            method: .vmCapabilities,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState
+        )
+        return try decodeResponseData(MacOSSidecarCapabilities.self, response: response, method: .vmCapabilities)
+    }
+
+    func pauseVM(timeoutSeconds: TimeInterval = 30) throws -> MacOSMachineStateOperationResult {
+        let response = try request(
+            method: .vmPause,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            machineState: .init(timeoutSeconds: timeoutSeconds),
+            timeoutSeconds: timeoutSeconds
+        )
+        return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmPause)
+    }
+
+    func resumeVM(timeoutSeconds: TimeInterval = 30) throws -> MacOSMachineStateOperationResult {
+        let response = try request(
+            method: .vmResume,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            machineState: .init(timeoutSeconds: timeoutSeconds),
+            timeoutSeconds: timeoutSeconds
+        )
+        return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmResume)
+    }
+
+    func saveMachineState(stateID: String, timeoutSeconds: TimeInterval = 300) throws -> MacOSMachineStateOperationResult {
+        let response = try request(
+            method: .vmSaveMachineState,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            machineState: .init(stateID: stateID, timeoutSeconds: timeoutSeconds),
+            timeoutSeconds: timeoutSeconds
+        )
+        return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmSaveMachineState)
+    }
+
+    func restoreMachineState(stateID: String, timeoutSeconds: TimeInterval = 300) throws -> MacOSMachineStateOperationResult {
+        let response = try request(
+            method: .vmRestoreMachineState,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            machineState: .init(stateID: stateID, timeoutSeconds: timeoutSeconds),
+            timeoutSeconds: timeoutSeconds
+        )
+        return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmRestoreMachineState)
+    }
+
+    func compatibilityDescription(stateID: String? = nil) throws -> MacOSMachineStateCompatibilityResult {
+        let response = try request(
+            method: .vmCompatibilityDescription,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            machineState: .init(stateID: stateID)
+        )
+        return try decodeResponseData(
+            MacOSMachineStateCompatibilityResult.self,
+            response: response,
+            method: .vmCompatibilityDescription
+        )
+    }
+
     func quit() throws {
         _ = try request(method: .sidecarQuit)
     }
@@ -233,16 +294,35 @@ final class MacOSSidecarClient: @unchecked Sendable {
 
     private func request(
         method: MacOSSidecarMethod,
+        protocolVersion: Int? = nil,
         presentGUI: Bool? = nil,
         port: UInt32? = nil,
+        machineState: MacOSMachineStateRequestPayload? = nil,
         timeoutSeconds: TimeInterval? = nil,
         socketConnectRetries: Int = 1
     ) throws -> MacOSSidecarResponse {
         try requestResponse(
-            MacOSSidecarRequest(method: method, presentGUI: presentGUI, port: port),
+            MacOSSidecarRequest(
+                method: method,
+                protocolVersion: protocolVersion,
+                presentGUI: presentGUI,
+                port: port,
+                machineState: machineState
+            ),
             timeoutSeconds: timeoutSeconds ?? requestTimeoutSeconds,
             socketConnectRetries: socketConnectRetries
         )
+    }
+
+    private func decodeResponseData<T: Decodable>(
+        _ type: T.Type,
+        response: MacOSSidecarResponse,
+        method: MacOSSidecarMethod
+    ) throws -> T {
+        guard let data = response.data else {
+            throw ContainerizationError(.internalError, message: "sidecar \(method.rawValue) response missing data")
+        }
+        return try JSONDecoder().decode(T.self, from: data)
     }
 
     private func requestResponse(
@@ -409,33 +489,38 @@ final class MacOSSidecarClient: @unchecked Sendable {
             let rawCode = error?.code ?? "unknown"
             let message = error?.message ?? "unknown sidecar error"
             let details = error?.details.map { " (\($0))" } ?? ""
+            let metadata =
+                error?.metadata.map { values in
+                    let rendered = values.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",")
+                    return rendered.isEmpty ? "" : " {\(rendered)}"
+                } ?? ""
             let codeSuffix = rawCode == "internalError" || rawCode == "unknown" ? "" : " [code=\(rawCode)]"
             throw ContainerizationError(
                 Self.containerizationCode(forSidecarCode: rawCode),
-                message: "sidecar \(message)\(details)\(codeSuffix)"
+                message: "sidecar \(message)\(details)\(metadata)\(codeSuffix)"
             )
         }
     }
 
     private static func containerizationCode(forSidecarCode code: String) -> ContainerizationError.Code {
         switch code {
-        case "invalidArgument", "invalid_request":
+        case "invalidArgument", "invalid_request", "invalidMachineStateID", "invalidTimeout", "unsafeMachineStatePath", "invalidStorageConfiguration":
             .invalidArgument
         case "internalError", "request_failed", "sidecar_error", "unknown":
             .internalError
-        case "exists":
+        case "exists", "machineStateAlreadyExists":
             .exists
-        case "notFound":
+        case "notFound", "machineStateNotFound":
             .notFound
         case "cancelled":
             .cancelled
-        case "invalidState":
+        case "invalidState", "invalidLifecycleState", "operationInProgress", "machineStateIncompatible", "machineStateIncomplete", "storageUnavailable":
             .invalidState
         case "empty":
             .empty
         case "timeout":
             .timeout
-        case "unsupported":
+        case "unsupported", "protocolVersionMismatch", "unknownMethod", "unsupportedHostArchitecture", "unsupportedVMConfiguration":
             .unsupported
         case "interrupted":
             .interrupted

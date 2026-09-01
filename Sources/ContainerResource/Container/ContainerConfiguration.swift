@@ -184,28 +184,74 @@ public struct ContainerConfiguration: Sendable, Codable {
             case vmnetShared
         }
 
+        public struct BlockDevice: Sendable, Codable, Equatable {
+            public enum Kind: String, Sendable, Codable, Equatable {
+                /// A disk image below the sandbox runtime directory.
+                case runtimeDiskImage
+                /// An NBD server reachable through a local Unix-domain socket.
+                case nbdUnixSocket
+            }
+
+            public enum SynchronizationMode: String, Sendable, Codable, Equatable {
+                case full
+                case none
+            }
+
+            public var identifier: String
+            public var kind: Kind
+            public var path: String
+            public var exportName: String?
+            public var readOnly: Bool
+            public var timeoutSeconds: Double
+            public var synchronizationMode: SynchronizationMode
+
+            public init(
+                identifier: String,
+                kind: Kind,
+                path: String,
+                exportName: String? = nil,
+                readOnly: Bool = false,
+                timeoutSeconds: Double = 5,
+                synchronizationMode: SynchronizationMode = .full
+            ) {
+                self.identifier = identifier
+                self.kind = kind
+                self.path = path
+                self.exportName = exportName
+                self.readOnly = readOnly
+                self.timeoutSeconds = timeoutSeconds
+                self.synchronizationMode = synchronizationMode
+            }
+        }
+
         public var snapshotEnabled: Bool
         public var guiEnabled: Bool
         public var agentPort: UInt32
         public var networkBackend: NetworkBackend
+        /// Block devices in guest-visible order. An empty list preserves the
+        /// existing Disk.img-backed root device behavior.
+        public var blockDevices: [BlockDevice]
 
         enum CodingKeys: String, CodingKey {
             case snapshotEnabled
             case guiEnabled
             case agentPort
             case networkBackend
+            case blockDevices
         }
 
         public init(
             snapshotEnabled: Bool,
             guiEnabled: Bool,
             agentPort: UInt32,
-            networkBackend: NetworkBackend = .virtualizationNAT
+            networkBackend: NetworkBackend = .virtualizationNAT,
+            blockDevices: [BlockDevice] = []
         ) {
             self.snapshotEnabled = snapshotEnabled
             self.guiEnabled = guiEnabled
             self.agentPort = agentPort
             self.networkBackend = networkBackend
+            self.blockDevices = blockDevices
         }
 
         public init(from decoder: Decoder) throws {
@@ -214,6 +260,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             guiEnabled = try container.decode(Bool.self, forKey: .guiEnabled)
             agentPort = try container.decode(UInt32.self, forKey: .agentPort)
             networkBackend = try container.decodeIfPresent(NetworkBackend.self, forKey: .networkBackend) ?? .virtualizationNAT
+            blockDevices = try container.decodeIfPresent([BlockDevice].self, forKey: .blockDevices) ?? []
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -222,6 +269,9 @@ public struct ContainerConfiguration: Sendable, Codable {
             try container.encode(guiEnabled, forKey: .guiEnabled)
             try container.encode(agentPort, forKey: .agentPort)
             try container.encode(networkBackend, forKey: .networkBackend)
+            if !blockDevices.isEmpty {
+                try container.encode(blockDevices, forKey: .blockDevices)
+            }
         }
     }
 

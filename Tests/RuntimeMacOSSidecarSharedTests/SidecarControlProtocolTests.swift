@@ -22,6 +22,59 @@ import Testing
 
 struct SidecarControlProtocolTests {
     @Test
+    func legacyRequestWithoutVersionRemainsDecodable() throws {
+        let data = Data(#"{"requestID":"legacy","method":"vm.stop"}"#.utf8)
+        let request = try JSONDecoder().decode(MacOSSidecarRequest.self, from: data)
+
+        #expect(request.requestID == "legacy")
+        #expect(request.method == .vmStop)
+        #expect(request.protocolVersion == nil)
+    }
+
+    @Test
+    func unknownMethodRemainsStructuredAndPreservesRequestID() throws {
+        let data = Data(#"{"requestID":"future","method":"vm.futureMethod","protocolVersion":2}"#.utf8)
+        let request = try JSONDecoder().decode(MacOSSidecarRequest.self, from: data)
+
+        #expect(request.requestID == "future")
+        #expect(request.method == .unknown("vm.futureMethod"))
+        #expect(request.method.rawValue == "vm.futureMethod")
+        #expect(MacOSSidecarMethod(rawValue: "vm.stop") == .vmStop)
+        #expect(MacOSSidecarMethod(rawValue: "vm.futureMethod") == nil)
+        #expect(try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request)).method == request.method)
+    }
+
+    @Test
+    func machineStateV2PayloadRoundTrips() throws {
+        let request = MacOSSidecarRequest(
+            requestID: "save-1",
+            method: .vmSaveMachineState,
+            protocolVersion: MacOSSidecarProtocolVersion.machineState,
+            machineState: .init(stateID: "checkpoint-1", timeoutSeconds: 120)
+        )
+
+        let decoded = try JSONDecoder().decode(MacOSSidecarRequest.self, from: JSONEncoder().encode(request))
+        #expect(decoded.protocolVersion == 2)
+        #expect(decoded.machineState == .init(stateID: "checkpoint-1", timeoutSeconds: 120))
+    }
+
+    @Test
+    func diagnosticErrorMetadataRoundTrips() throws {
+        let response = MacOSSidecarResponse.failure(
+            requestID: "bad-version",
+            code: "protocolVersionMismatch",
+            message: "unsupported version",
+            metadata: ["requestedVersion": "99", "supportedVersions": "1,2"],
+            protocolVersion: 2
+        )
+        let decoded = try JSONDecoder().decode(MacOSSidecarResponse.self, from: JSONEncoder().encode(response))
+
+        #expect(decoded.ok == false)
+        #expect(decoded.error?.metadata?["requestedVersion"] == "99")
+        #expect(decoded.protocolVersion == 2)
+    }
+
+    @Test
     func envelopeJSONFrameRoundTripPreservesPayload() throws {
         let payload = Data("sidecar-stdin".utf8)
         let request = MacOSSidecarRequest(

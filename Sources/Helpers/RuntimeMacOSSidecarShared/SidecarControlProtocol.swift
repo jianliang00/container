@@ -17,24 +17,101 @@
 import Darwin
 import Foundation
 
-public enum MacOSSidecarMethod: String, Codable, Sendable {
-    case vmBootstrapStart = "vm.bootstrapStart"
-    case vmShowGUI = "vm.showGUI"
-    case vmConnectVsock = "vm.connectVsock"
-    case processStart = "process.start"
-    case processStdin = "process.stdin"
-    case processSignal = "process.signal"
-    case processResize = "process.resize"
-    case processClose = "process.close"
-    case fsBegin = "fs.begin"
-    case fsChunk = "fs.chunk"
-    case fsEnd = "fs.end"
-    case fsReadBegin = "fs.read.begin"
-    case fsReadChunk = "fs.read.chunk"
-    case fsReadEnd = "fs.read.end"
-    case fsListDir = "fs.listdir"
-    case vmStop = "vm.stop"
-    case sidecarQuit = "sidecar.quit"
+public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
+    case vmBootstrapStart
+    case vmShowGUI
+    case vmConnectVsock
+    case processStart
+    case processStdin
+    case processSignal
+    case processResize
+    case processClose
+    case fsBegin
+    case fsChunk
+    case fsEnd
+    case fsReadBegin
+    case fsReadChunk
+    case fsReadEnd
+    case fsListDir
+    case vmCapabilities
+    case vmPause
+    case vmResume
+    case vmSaveMachineState
+    case vmRestoreMachineState
+    case vmCompatibilityDescription
+    case vmStop
+    case sidecarQuit
+    case unknown(String)
+
+    public var rawValue: String {
+        switch self {
+        case .vmBootstrapStart: "vm.bootstrapStart"
+        case .vmShowGUI: "vm.showGUI"
+        case .vmConnectVsock: "vm.connectVsock"
+        case .processStart: "process.start"
+        case .processStdin: "process.stdin"
+        case .processSignal: "process.signal"
+        case .processResize: "process.resize"
+        case .processClose: "process.close"
+        case .fsBegin: "fs.begin"
+        case .fsChunk: "fs.chunk"
+        case .fsEnd: "fs.end"
+        case .fsReadBegin: "fs.read.begin"
+        case .fsReadChunk: "fs.read.chunk"
+        case .fsReadEnd: "fs.read.end"
+        case .fsListDir: "fs.listdir"
+        case .vmCapabilities: "vm.capabilities"
+        case .vmPause: "vm.pause"
+        case .vmResume: "vm.resume"
+        case .vmSaveMachineState: "vm.saveMachineState"
+        case .vmRestoreMachineState: "vm.restoreMachineState"
+        case .vmCompatibilityDescription: "vm.compatibilityDescription"
+        case .vmStop: "vm.stop"
+        case .sidecarQuit: "sidecar.quit"
+        case .unknown(let value): value
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unknown(value)
+    }
+
+    public init?(rawValue: String) {
+        guard let method = Self.knownMethods[rawValue] else { return nil }
+        self = method
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    private static let knownMethods: [String: Self] = [
+        Self.vmBootstrapStart.rawValue: .vmBootstrapStart,
+        Self.vmShowGUI.rawValue: .vmShowGUI,
+        Self.vmConnectVsock.rawValue: .vmConnectVsock,
+        Self.processStart.rawValue: .processStart,
+        Self.processStdin.rawValue: .processStdin,
+        Self.processSignal.rawValue: .processSignal,
+        Self.processResize.rawValue: .processResize,
+        Self.processClose.rawValue: .processClose,
+        Self.fsBegin.rawValue: .fsBegin,
+        Self.fsChunk.rawValue: .fsChunk,
+        Self.fsEnd.rawValue: .fsEnd,
+        Self.fsReadBegin.rawValue: .fsReadBegin,
+        Self.fsReadChunk.rawValue: .fsReadChunk,
+        Self.fsReadEnd.rawValue: .fsReadEnd,
+        Self.fsListDir.rawValue: .fsListDir,
+        Self.vmCapabilities.rawValue: .vmCapabilities,
+        Self.vmPause.rawValue: .vmPause,
+        Self.vmResume.rawValue: .vmResume,
+        Self.vmSaveMachineState.rawValue: .vmSaveMachineState,
+        Self.vmRestoreMachineState.rawValue: .vmRestoreMachineState,
+        Self.vmCompatibilityDescription.rawValue: .vmCompatibilityDescription,
+        Self.vmStop.rawValue: .vmStop,
+        Self.sidecarQuit.rawValue: .sidecarQuit,
+    ]
 }
 
 public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
@@ -80,6 +157,7 @@ public struct MacOSSidecarExecRequestPayload: Codable, Sendable {
 public struct MacOSSidecarRequest: Codable, Sendable {
     public let requestID: String
     public let method: MacOSSidecarMethod
+    public let protocolVersion: Int?
     public let presentGUI: Bool?
     public let port: UInt32?
     public let processID: String?
@@ -94,10 +172,12 @@ public struct MacOSSidecarRequest: Codable, Sendable {
     public let fsReadBegin: MacOSSidecarFSReadBeginRequestPayload?
     public let fsReadChunk: MacOSSidecarFSReadChunkRequestPayload?
     public let fsListDir: MacOSSidecarFSListDirRequestPayload?
+    public let machineState: MacOSMachineStateRequestPayload?
 
     public init(
         requestID: String = UUID().uuidString,
         method: MacOSSidecarMethod,
+        protocolVersion: Int? = nil,
         presentGUI: Bool? = nil,
         port: UInt32? = nil,
         processID: String? = nil,
@@ -111,10 +191,12 @@ public struct MacOSSidecarRequest: Codable, Sendable {
         fsEnd: MacOSSidecarFSEndRequestPayload? = nil,
         fsReadBegin: MacOSSidecarFSReadBeginRequestPayload? = nil,
         fsReadChunk: MacOSSidecarFSReadChunkRequestPayload? = nil,
-        fsListDir: MacOSSidecarFSListDirRequestPayload? = nil
+        fsListDir: MacOSSidecarFSListDirRequestPayload? = nil,
+        machineState: MacOSMachineStateRequestPayload? = nil
     ) {
         self.requestID = requestID
         self.method = method
+        self.protocolVersion = protocolVersion
         self.presentGUI = presentGUI
         self.port = port
         self.processID = processID
@@ -129,6 +211,7 @@ public struct MacOSSidecarRequest: Codable, Sendable {
         self.fsReadBegin = fsReadBegin
         self.fsReadChunk = fsReadChunk
         self.fsListDir = fsListDir
+        self.machineState = machineState
     }
 }
 
@@ -136,11 +219,13 @@ public struct MacOSSidecarErrorPayload: Codable, Sendable {
     public let code: String
     public let message: String
     public let details: String?
+    public let metadata: [String: String]?
 
-    public init(code: String, message: String, details: String? = nil) {
+    public init(code: String, message: String, details: String? = nil, metadata: [String: String]? = nil) {
         self.code = code
         self.message = message
         self.details = details
+        self.metadata = metadata
     }
 }
 
@@ -150,31 +235,55 @@ public struct MacOSSidecarResponse: Codable, Sendable {
     public let fdAttached: Bool?
     public let error: MacOSSidecarErrorPayload?
     public let data: Data?
+    public let protocolVersion: Int?
 
     public init(
         requestID: String,
         ok: Bool,
         fdAttached: Bool? = nil,
         error: MacOSSidecarErrorPayload? = nil,
-        data: Data? = nil
+        data: Data? = nil,
+        protocolVersion: Int? = nil
     ) {
         self.requestID = requestID
         self.ok = ok
         self.fdAttached = fdAttached
         self.error = error
         self.data = data
+        self.protocolVersion = protocolVersion
     }
 
     public static func success(
         requestID: String,
         fdAttached: Bool? = nil,
-        data: Data? = nil
+        data: Data? = nil,
+        protocolVersion: Int? = nil
     ) -> Self {
-        .init(requestID: requestID, ok: true, fdAttached: fdAttached, error: nil, data: data)
+        .init(
+            requestID: requestID,
+            ok: true,
+            fdAttached: fdAttached,
+            error: nil,
+            data: data,
+            protocolVersion: protocolVersion
+        )
     }
 
-    public static func failure(requestID: String, code: String, message: String, details: String? = nil) -> Self {
-        .init(requestID: requestID, ok: false, fdAttached: nil, error: .init(code: code, message: message, details: details))
+    public static func failure(
+        requestID: String,
+        code: String,
+        message: String,
+        details: String? = nil,
+        metadata: [String: String]? = nil,
+        protocolVersion: Int? = nil
+    ) -> Self {
+        .init(
+            requestID: requestID,
+            ok: false,
+            fdAttached: nil,
+            error: .init(code: code, message: message, details: details, metadata: metadata),
+            protocolVersion: protocolVersion
+        )
     }
 }
 

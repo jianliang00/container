@@ -678,7 +678,11 @@ let package = Package(
                 "RuntimeMacOSSidecarShared",
                 "ContainerVersion",
             ],
-            path: "Sources/Helpers/RuntimeMacOSSidecar"
+            path: "Sources/Helpers/RuntimeMacOSSidecar",
+            linkerSettings: [
+                .linkedFramework("CryptoKit"),
+                .linkedFramework("IOKit"),
+            ]
         ),
         .executableTarget(
             name: "container-macos-guest-agent",

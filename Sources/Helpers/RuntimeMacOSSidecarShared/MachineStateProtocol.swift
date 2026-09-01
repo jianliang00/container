@@ -112,6 +112,7 @@ public struct MacOSMachineStateVMConfigurationDescription: Codable, Sendable, Eq
     public let memorySize: UInt64
     public let bootLoader: String
     public let networkBackend: String
+    public let networkDeviceMACAddresses: [String]?
     public let storageDevices: [MacOSMachineStateStorageDescription]
     public let directoryShareCount: Int
     public let hasGraphics: Bool
@@ -123,6 +124,7 @@ public struct MacOSMachineStateVMConfigurationDescription: Codable, Sendable, Eq
         memorySize: UInt64,
         bootLoader: String,
         networkBackend: String,
+        networkDeviceMACAddresses: [String]? = nil,
         storageDevices: [MacOSMachineStateStorageDescription],
         directoryShareCount: Int,
         hasGraphics: Bool,
@@ -133,6 +135,7 @@ public struct MacOSMachineStateVMConfigurationDescription: Codable, Sendable, Eq
         self.memorySize = memorySize
         self.bootLoader = bootLoader
         self.networkBackend = networkBackend
+        self.networkDeviceMACAddresses = networkDeviceMACAddresses
         self.storageDevices = storageDevices
         self.directoryShareCount = directoryShareCount
         self.hasGraphics = hasGraphics

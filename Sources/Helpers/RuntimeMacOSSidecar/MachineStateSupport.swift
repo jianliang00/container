@@ -394,6 +394,7 @@ enum MacOSCompatibilityDescriptionBuilder {
         let cpuCount: Int
         let memorySize: UInt64
         let networkBackend: String
+        let networkDeviceMACAddresses: [String]
         let blockDevices: [ContainerConfiguration.MacOSGuestOptions.BlockDevice]
         let mounts: [Filesystem]
         let guiEnabled: Bool
@@ -404,6 +405,7 @@ enum MacOSCompatibilityDescriptionBuilder {
         containerConfig: ContainerConfiguration,
         hardwareModelData: Data,
         machineIdentifierData: Data,
+        networkDeviceMACAddresses: [String],
         storageDescriptions: [MacOSMachineStateStorageDescription]
     ) throws -> MacOSMachineStateCompatibilityDescription {
         let cpuCount = max(
@@ -419,6 +421,7 @@ enum MacOSCompatibilityDescriptionBuilder {
             cpuCount: cpuCount,
             memorySize: memorySize,
             networkBackend: (options?.networkBackend ?? .virtualizationNAT).rawValue,
+            networkDeviceMACAddresses: networkDeviceMACAddresses,
             blockDevices: options?.blockDevices ?? [],
             mounts: containerConfig.mounts,
             guiEnabled: options?.guiEnabled ?? false,
@@ -440,6 +443,7 @@ enum MacOSCompatibilityDescriptionBuilder {
                 memorySize: memorySize,
                 bootLoader: "macOS",
                 networkBackend: input.networkBackend,
+                networkDeviceMACAddresses: input.networkDeviceMACAddresses,
                 storageDevices: storageDescriptions,
                 directoryShareCount: directoryShareCount,
                 hasGraphics: true,

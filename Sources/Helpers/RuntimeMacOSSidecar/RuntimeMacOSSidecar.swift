@@ -988,6 +988,7 @@ actor MacOSSidecarService {
         let preparedNetwork = try await networkBackend.prepareNetwork(
             containerConfig: containerConfig,
             existingLease: existingLease,
+            virtualMachineIdentity: machineIdentifier.dataRepresentation,
             log: log
         )
         networkLease = preparedNetwork.lease
@@ -1012,6 +1013,9 @@ actor MacOSSidecarService {
             containerConfig: containerConfig,
             hardwareModelData: hardwareData,
             machineIdentifierData: machineIdentifier.dataRepresentation,
+            networkDeviceMACAddresses: preparedNetwork.devices.compactMap {
+                ($0 as? VZVirtioNetworkDeviceConfiguration)?.macAddress.description
+            },
             storageDescriptions: storage.descriptions
         )
         return vmConfiguration

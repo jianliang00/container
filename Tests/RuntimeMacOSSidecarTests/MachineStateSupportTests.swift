@@ -143,7 +143,7 @@ struct MachineStateSupportTests {
             #expect(error.code == "machineStateNotFound")
         }
 
-        let staging = try store.createStaging(stateID: "incomplete")
+        _ = try store.createStaging(stateID: "incomplete")
         do {
             _ = try store.load(stateID: "incomplete")
             Issue.record("expected incomplete state to fail")

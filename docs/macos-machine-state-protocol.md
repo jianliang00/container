@@ -72,7 +72,7 @@ compatibility.json
 
 The caller supplies only an opaque state id. It may contain letters, digits, dot, underscore, and hyphen and is limited to 128 characters. Slash, `.` and `..` ids are rejected. The runtime root and every existing path component are checked with `lstat`; symbolic links are rejected. The managed directory is mode `0700`, and state and compatibility files are mode `0600`.
 
-Saving writes into a randomly named private staging directory. The state file is validated as a regular file, the compatibility file is written atomically, and the whole staging directory is renamed into place. Any validation, framework, write, or publish failure removes the staging directory. A completed state id is immutable and is not overwritten.
+Saving first reserves the final state directory with mode `0700`. Virtualization.framework writes the machine state directly to its stable final URL because the saved state is bound to that URL. The runtime then validates the state as a regular file and atomically writes the compatibility manifest as the commit marker. Any validation, framework, or manifest failure removes the reserved directory. A completed state id is immutable and is not overwritten.
 
 Restore validates that the state file and compatibility description are regular files below the managed directory before calling `restoreMachineStateFrom(url:)`.
 

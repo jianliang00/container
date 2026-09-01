@@ -642,20 +642,20 @@ actor MacOSSidecarService {
             throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
         }
 
-        let staging: MacOSMachineStateStore.Staging
+        let reservation: MacOSMachineStateStore.Reservation
         do {
-            staging = try store.createStaging(stateID: stateID)
+            reservation = try store.reserve(stateID: stateID)
         } catch {
             lifecycle.complete(.save, succeeded: false)
             throw error
         }
         do {
-            try await saveVirtualMachine(vm, to: staging.stateURL)
-            try store.commit(staging, compatibility: compatibility)
+            try await saveVirtualMachine(vm, to: reservation.stateURL)
+            try store.commit(reservation, compatibility: compatibility)
             lifecycle.complete(.save, succeeded: true)
             return .init(lifecycleState: state, stateID: stateID, compatibility: compatibility)
         } catch {
-            store.abort(staging)
+            store.abort(reservation)
             lifecycle.complete(.save, succeeded: false)
             throw error
         }
@@ -691,11 +691,14 @@ actor MacOSSidecarService {
                 throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
             }
             try await restoreVirtualMachine(vm, from: stored.stateURL)
+            try await activatePreparedNetworks()
             lifecycle.complete(.restore, succeeded: true)
             return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
         } catch {
-            vm = nil
-            vmDelegate = nil
+            if let vm, vm.state != .stopped {
+                try? await stopVirtualMachine(vm)
+            }
+            await discardVirtualMachineResources()
             lifecycle.complete(.restore, succeeded: false)
             throw error
         }

@@ -129,7 +129,7 @@ struct MacOSVMLifecycleCoordinator: Sendable {
 }
 
 struct MacOSMachineStateStore: Sendable {
-    struct Staging: Sendable {
+    struct Reservation: Sendable {
         let directoryURL: URL
         let stateURL: URL
     }
@@ -147,7 +147,7 @@ struct MacOSMachineStateStore: Sendable {
         statesURL = rootURL.appendingPathComponent("MachineStates", isDirectory: true)
     }
 
-    func createStaging(stateID: String) throws -> Staging {
+    func reserve(stateID: String) throws -> Reservation {
         try Self.validateStateID(stateID)
         try validateRuntimeRoot()
         try createPrivateDirectory(statesURL)
@@ -166,24 +166,24 @@ struct MacOSMachineStateStore: Sendable {
             try? FileManager.default.removeItem(at: finalURL)
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        return Staging(
+        return Reservation(
             directoryURL: finalURL,
             stateURL: finalURL.appendingPathComponent("machine-state.vzstate")
         )
     }
 
-    func commit(_ staging: Staging, compatibility: MacOSMachineStateCompatibilityDescription) throws {
+    func commit(_ reservation: Reservation, compatibility: MacOSMachineStateCompatibilityDescription) throws {
         try requireDirectory(statesURL)
-        try requireDirectory(staging.directoryURL)
-        try requireRegularFile(staging.stateURL)
-        guard chmod(staging.stateURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+        try requireDirectory(reservation.directoryURL)
+        try requireRegularFile(reservation.stateURL)
+        guard chmod(reservation.stateURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
         // Virtualization.framework binds a saved machine state to the URL used by
         // saveMachineState. Keep that URL stable and publish the manifest last as
         // the atomic commit marker for readers.
-        let manifestURL = staging.directoryURL.appendingPathComponent("compatibility.json")
+        let manifestURL = reservation.directoryURL.appendingPathComponent("compatibility.json")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(compatibility).write(to: manifestURL, options: .atomic)
@@ -192,8 +192,8 @@ struct MacOSMachineStateStore: Sendable {
         }
     }
 
-    func abort(_ staging: Staging) {
-        try? FileManager.default.removeItem(at: staging.directoryURL)
+    func abort(_ reservation: Reservation) {
+        try? FileManager.default.removeItem(at: reservation.directoryURL)
     }
 
     func load(stateID: String) throws -> StoredState {

@@ -82,14 +82,14 @@ struct MachineStateSupportTests {
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let store = MacOSMachineStateStore(runtimeRootURL: root)
-        let staging = try store.createStaging(stateID: "state-1")
-        try Data("machine-state".utf8).write(to: staging.stateURL)
+        let reservation = try store.reserve(stateID: "state-1")
+        try Data("machine-state".utf8).write(to: reservation.stateURL)
         let compatibility = makeCompatibility()
 
-        try store.commit(staging, compatibility: compatibility)
+        try store.commit(reservation, compatibility: compatibility)
         let stored = try store.load(stateID: "state-1")
         #expect(stored.compatibility == compatibility)
-        #expect(stored.stateURL == staging.stateURL)
+        #expect(stored.stateURL == reservation.stateURL)
         #expect(try permissions(stored.stateURL) == 0o600)
         #expect(try permissions(stored.stateURL.deletingLastPathComponent()) == 0o700)
     }
@@ -108,7 +108,7 @@ struct MachineStateSupportTests {
         try FileManager.default.createSymbolicLink(at: linkedRoot, withDestinationURL: realRoot)
 
         do {
-            _ = try MacOSMachineStateStore(runtimeRootURL: linkedRoot).createStaging(stateID: "state")
+            _ = try MacOSMachineStateStore(runtimeRootURL: linkedRoot).reserve(stateID: "state")
             Issue.record("expected symbolic-link runtime root to be rejected")
         } catch let error as SidecarRPCError {
             #expect(error.code == "unsafeMachineStatePath")
@@ -116,17 +116,17 @@ struct MachineStateSupportTests {
     }
 
     @Test
-    func managedStoreAbortRemovesIncompleteStagingDirectory() throws {
+    func managedStoreAbortRemovesIncompleteReservedDirectory() throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let store = MacOSMachineStateStore(runtimeRootURL: root)
-        let staging = try store.createStaging(stateID: "incomplete")
-        try Data("partial".utf8).write(to: staging.stateURL)
+        let reservation = try store.reserve(stateID: "incomplete")
+        try Data("partial".utf8).write(to: reservation.stateURL)
 
-        store.abort(staging)
+        store.abort(reservation)
 
-        #expect(!FileManager.default.fileExists(atPath: staging.directoryURL.path))
+        #expect(!FileManager.default.fileExists(atPath: reservation.directoryURL.path))
     }
 
     @Test
@@ -143,7 +143,7 @@ struct MachineStateSupportTests {
             #expect(error.code == "machineStateNotFound")
         }
 
-        _ = try store.createStaging(stateID: "incomplete")
+        _ = try store.reserve(stateID: "incomplete")
         do {
             _ = try store.load(stateID: "incomplete")
             Issue.record("expected incomplete state to fail")

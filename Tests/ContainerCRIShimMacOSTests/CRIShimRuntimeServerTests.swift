@@ -1573,6 +1573,90 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func preparedLaunchMarkerWithoutSidecarCanBeCleanedAndRetired() async throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("cri-ms-prepared-cleanup-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(root.path, mode_t(0o700)) == 0)
+        let policy = MachineStateConfig(
+            enabled: true,
+            storageRoot: root.appendingPathComponent("states").path,
+            controlSocketRoot: root.appendingPathComponent("control").path,
+            runtimeOwnerUID: UInt32(geteuid()),
+            nbdSocketAllowedRoots: [root.appendingPathComponent("nbd").path],
+            leaseRoot: root.appendingPathComponent("leases").path
+        )
+        try CRIShimMachineStateDirectories.prepare(policy: policy)
+        let persistenceID = "workload-prepared"
+        let storageDirectory = URL(
+            fileURLWithPath: policy.normalizedStorageRoot,
+            isDirectory: true
+        ).appendingPathComponent(persistenceID, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: storageDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(storageDirectory.path, mode_t(0o700)) == 0)
+        let acquired = try CRIShimMachineStateLeaseStore.acquire(
+            policy: policy,
+            machineState: .init(
+                persistenceID: persistenceID,
+                storageDirectory: storageDirectory.path,
+                controlSocketPath: URL(
+                    fileURLWithPath: policy.normalizedControlSocketRoot,
+                    isDirectory: true
+                ).appendingPathComponent("\(persistenceID).sock").path,
+                storageGeneration: 1
+            ),
+            podUID: "pod-prepared",
+            proposedSandboxID: "sandbox-prepared"
+        )
+        let creationStarted = try CRIShimMachineStateLeaseStore.markRuntimeCreationStarted(
+            policy: policy,
+            expected: acquired.lease
+        )
+        let launchMarked = try CRIShimMachineStateLeaseStore.markSidecarLaunchMayHaveStarted(
+            policy: policy,
+            expected: creationStarted
+        )
+
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let confirmation = try await CRIShimMachineStateRuntimeCleaner(runtimeManager: runtimeManager).cleanup(
+            lease: launchMarked,
+            policy: policy
+        )
+
+        #expect(confirmation.lease.admissionState == .runtimeDeletionConfirmed)
+        #expect(runtimeManager.removeSandboxCalls.last?.id == launchMarked.sandboxID)
+        #expect(runtimeManager.removeSandboxRuntimeServiceCalls.last == launchMarked.sandboxID)
+        #expect(runtimeManager.removeMachineStateSidecarCalls.last?.persistenceID == persistenceID)
+        #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.last?.id == launchMarked.sandboxID)
+        try CRIShimMachineStateLeaseStore.release(policy: policy, expected: confirmation.lease)
+        #expect(
+            try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID) == nil
+        )
+
+        let barrier = try #require(launchMarked.sidecarLifecycleBarrier)
+        #expect(throws: (any Error).self) {
+            _ = try MacOSSidecarLifecycleLock(
+                protocolVersion: barrier.protocolVersion,
+                persistenceID: persistenceID,
+                sandboxID: launchMarked.sandboxID,
+                bootNonce: barrier.bootNonce,
+                storageDirectory: storageDirectory.path
+            )
+        }
+    }
+
+    @Test
     func legacyMachineStateCleanupAlwaysRetainsLeaseWithoutProcessAttestation() async throws {
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("cri-ms-legacy-\(UUID().uuidString.prefix(8))", isDirectory: true)

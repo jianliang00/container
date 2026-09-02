@@ -33,7 +33,7 @@ struct CRIShimMachineStateLeaseTests {
             persistenceID: "workload-incomplete-barrier",
             sandboxID: "sandbox-incomplete-barrier",
             podUID: "pod-incomplete-barrier",
-            storageGeneration: 2
+            storageGeneration: 8
         )
         let storage = URL(
             fileURLWithPath: fixture.policy.normalizedStorageRoot,
@@ -68,7 +68,7 @@ struct CRIShimMachineStateLeaseTests {
     }
 
     @Test
-    func lifecycleBarrierRequiresChildProcessExitAndRetiresDelayedStartNonce() throws {
+    func preparedLifecycleBarrierRequiresDelayedChildExitAndRetiresItsNonce() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let acquisition = try acquireLease(
@@ -116,12 +116,6 @@ struct CRIShimMachineStateLeaseTests {
             return
         }
 
-        try writeLifecycleAttestation(
-            policy: fixture.policy,
-            lease: launchStarted,
-            processID: child.processIdentifier,
-            state: .active
-        )
         let cleanupLock = try CRIShimMachineStateSidecarLifecycleLock(
             binding: launchStarted,
             barrier: barrier,
@@ -134,22 +128,12 @@ struct CRIShimMachineStateLeaseTests {
 
         child.terminate()
         child.waitUntilExit()
-        #expect(throws: (any Error).self) {
-            _ = try MacOSSidecarLifecycleLock(
-                protocolVersion: barrier.protocolVersion,
-                persistenceID: launchStarted.persistenceID,
-                sandboxID: launchStarted.sandboxID,
-                bootNonce: barrier.bootNonce,
-                storageDirectory: URL(
-                    fileURLWithPath: fixture.policy.normalizedStorageRoot,
-                    isDirectory: true
-                ).appendingPathComponent(launchStarted.persistenceID, isDirectory: true).path
-            )
-        }
-        #expect(
-            try readLifecycleAttestation(policy: fixture.policy, persistenceID: "workload-child").processID
-                == child.processIdentifier
+        let prepared = try readLifecycleAttestation(
+            policy: fixture.policy,
+            persistenceID: "workload-child"
         )
+        #expect(prepared.state == .prepared)
+        #expect(prepared.processID == 0)
         try cleanupLock.retireAndAcquireExitProof()
         #expect(try readLifecycleAttestation(policy: fixture.policy, persistenceID: "workload-child").state == .retired)
 

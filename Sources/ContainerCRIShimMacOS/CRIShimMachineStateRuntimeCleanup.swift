@@ -75,11 +75,6 @@ struct CRIShimMachineStateRuntimeCleaner {
                 policy: policy,
                 expectedOwnerUID: ownerUID
             )
-            if lifecycleLock.initialState == .prepared, barrier.launchMayHaveStarted {
-                throw CRIShimError.unavailable(
-                    "sidecar lifecycle barrier was never activated after launch could have started"
-                )
-            }
             return .init(strategy: .lifecycleLock(lifecycleLock))
         }
 

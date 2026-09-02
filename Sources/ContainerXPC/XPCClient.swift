@@ -135,7 +135,28 @@ extension XPCClient {
     @discardableResult
     public func send(_ message: XPCMessage, responseTimeout: Duration? = nil) async throws -> XPCMessage {
         let route = message.string(key: XPCMessage.routeKey) ?? "nil"
-        return try await withCheckedThrowingContinuation { cont in
+        return try await Self.awaitReply(
+            responseTimeout: responseTimeout,
+            service: self.service,
+            route: route
+        ) { finish in
+            xpc_connection_send_message_with_reply(self.connection, message.underlying, nil) { reply in
+                do {
+                    finish(.success(try self.parseReply(reply)))
+                } catch {
+                    finish(.failure(error))
+                }
+            }
+        }
+    }
+
+    static func awaitReply(
+        responseTimeout: Duration?,
+        service: String,
+        route: String,
+        send: (@Sendable @escaping (Result<XPCMessage, Error>) -> Void) -> Void
+    ) async throws -> XPCMessage {
+        try await withCheckedThrowingContinuation { cont in
             // The XPC reply callback may never fire on timeout, so we gate completion
             // manually instead of relying on task-group cancellation semantics.
             let state = XPCClientCompletionState()
@@ -147,13 +168,7 @@ extension XPCClient {
                 cont.resume(with: result)
             }
 
-            xpc_connection_send_message_with_reply(self.connection, message.underlying, nil) { reply in
-                do {
-                    finish(.success(try self.parseReply(reply)))
-                } catch {
-                    finish(.failure(error))
-                }
-            }
+            send(finish)
 
             guard let responseTimeout else {
                 return
@@ -169,7 +184,7 @@ extension XPCClient {
                     .failure(
                         ContainerizationError(
                             .internalError,
-                            message: "XPC timeout for request to \(self.service)/\(route)"
+                            message: "XPC timeout for request to \(service)/\(route)"
                         )))
             }
             state.installTimeoutTask(timeoutTask)

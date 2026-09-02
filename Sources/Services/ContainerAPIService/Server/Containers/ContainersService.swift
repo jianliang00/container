@@ -37,6 +37,7 @@ private struct SendableXPCEndpoint: @unchecked Sendable {
 
 public actor ContainersService {
     private static let macOSRuntimeName = "container-runtime-macos"
+    static let killedInitExitWaitTimeout: Duration = .seconds(5)
 
     enum StartProcessResult: Sendable {
         case exec
@@ -1242,7 +1243,12 @@ public actor ContainersService {
             let rawSignal = Int32(exactly: signal),
             Signal(rawValue: rawSignal) == .kill
         {
-            try await handleContainerExit(id: id)
+            let exitStatus = await exitStatusAfterKillingInitProcess(
+                containerID: id,
+                processID: processID,
+                client: client
+            )
+            try await handleContainerExit(id: id, code: exitStatus)
         }
     }
 
@@ -1271,11 +1277,51 @@ public actor ContainersService {
         let client = try state.getClient()
         try await client.kill(processID, signal: signal)
 
-        // SIGKILL is guaranteed to terminate the target. When directed at the
-        // container's init process, follow up with the same API-server cleanup
-        // that `stop` performs.
         if processID == id, (try? Signal(signal)) == .kill {
-            try await handleContainerExit(id: id)
+            let exitStatus = await exitStatusAfterKillingInitProcess(
+                containerID: id,
+                processID: processID,
+                client: client
+            )
+            try await handleContainerExit(id: id, code: exitStatus)
+        }
+    }
+
+    private func exitStatusAfterKillingInitProcess(
+        containerID: String,
+        processID: String,
+        client: RuntimeClient
+    ) async -> ExitStatus {
+        do {
+            return try await client.wait(
+                processID,
+                responseTimeout: Self.killedInitExitWaitTimeout
+            )
+        } catch {
+            log.warning(
+                "failed to wait for killed init process; continuing cleanup with unknown exit status",
+                metadata: [
+                    "id": "\(containerID)",
+                    "error": "\(error)",
+                ]
+            )
+            let fallback = ExitStatus(exitCode: 255, exitedAt: Date())
+            do {
+                try WorkloadExitStateStore.saveIfAbsent(
+                    WorkloadExitState(exitCode: fallback.exitCode, exitedAt: fallback.exitedAt),
+                    workloadID: processID,
+                    in: MacOSSandboxLayout(root: containerRoot.appendingPathComponent(containerID))
+                )
+            } catch {
+                log.error(
+                    "failed to persist unknown init exit status",
+                    metadata: [
+                        "id": "\(containerID)",
+                        "error": "\(error)",
+                    ]
+                )
+            }
+            return fallback
         }
     }
 
@@ -1840,7 +1886,7 @@ public actor ContainersService {
         )
     }
 
-    private static func loadPersistedWorkloadSnapshots(
+    static func loadPersistedWorkloadSnapshots(
         root: URL,
         configuration: ContainerConfiguration
     ) throws -> [WorkloadSnapshot] {
@@ -1874,12 +1920,15 @@ public actor ContainersService {
         }
 
         return
-            configurations
+            try configurations
             .sorted(by: { $0.id < $1.id })
             .map { workload in
-                WorkloadSnapshot(
+                let exitState = try WorkloadExitStateStore.load(workloadID: workload.id, from: layout)
+                return WorkloadSnapshot(
                     configuration: workload,
                     status: .stopped,
+                    exitCode: exitState?.exitCode,
+                    exitedAt: exitState?.exitedAt,
                     stdoutLogPath: layout.workloadStdoutLogURL(id: workload.id).path,
                     stderrLogPath: layout.workloadStderrLogURL(id: workload.id).path
                 )

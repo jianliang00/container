@@ -15,9 +15,12 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import Foundation
 import Testing
 
+@testable import ContainerAPIService
 @testable import ContainerRuntimeClient
+@testable import ContainerXPC
 
 struct RuntimeClientTests {
     @Test
@@ -37,5 +40,31 @@ struct RuntimeClientTests {
                 options: ContainerStopOptions(timeoutInSeconds: .max, signal: "SIGTERM")
             ) == .seconds(4_294_967_299)
         )
+    }
+
+    @Test
+    func xpcWaitReturnsWhenReplyNeverArrives() async {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+
+        do {
+            _ = try await XPCClient.awaitReply(
+                responseTimeout: .milliseconds(20),
+                service: "test.runtime",
+                route: "wait"
+            ) { _ in
+                // Intentionally leave the request unanswered.
+            }
+            Issue.record("expected the unanswered request to time out")
+        } catch {
+            // The timeout callback can be delayed by the test runner's shared
+            // cooperative executor when the full suite runs concurrently.
+            #expect(clock.now - startedAt < .seconds(30))
+        }
+    }
+
+    @Test
+    func killedInitWaitUsesBoundedTimeout() {
+        #expect(ContainersService.killedInitExitWaitTimeout == .seconds(5))
     }
 }

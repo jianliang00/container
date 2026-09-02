@@ -185,6 +185,8 @@ public actor MacOSSandboxService {
     private static let guestAgentLogGuestPath = "/var/log/container-macos-guest-agent.log"
     private static let guestWorkloadsRootPath = "/var/lib/container/workloads"
     private static let primaryAttachmentID = "__primary__"
+    private static let closedWorkloadSessionLifetime: TimeInterval = 30
+    private static let maximumClosedWorkloadSessionCount = 256
 
     private enum State: Equatable {
         case created
@@ -239,6 +241,12 @@ public actor MacOSSandboxService {
         var stderrLogPath: String
     }
 
+    private struct ClosedWorkloadSession {
+        let workloadID: String
+        let fallbackExitedAt: Date
+        let expiresAt: Date
+    }
+
     struct SidecarHandle {
         let launchLabel: String
         let client: MacOSSidecarClient
@@ -263,6 +271,7 @@ public actor MacOSSandboxService {
     var sessions: [String: Session] = [:]
     private var workloads: [String: WorkloadRecord] = [:]
     private var workloadSessions: [String: String] = [:]
+    private var closedWorkloadSessions: [String: ClosedWorkloadSession] = [:]
     private var externalProcessIDs: Set<String> = []
     private var waiters: [String: [SessionWaiter]] = [:]
     var guestMountsPrepared = false
@@ -1243,6 +1252,7 @@ extension MacOSSandboxService {
         try await prepareGuestMountsIfNeeded(containerConfig: configuration)
         try await prepareReadOnlyInjectionsIfNeeded()
         try await prepareWorkloadReadOnlyInjectionsIfNeeded(workloadID: workloadID)
+        try resetWorkloadExitStateForStart(workloadID: workloadID, session: &session)
         try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
         writeContainerLog(Data(("startWorkload using sidecar process stream path for \(workloadID) session=\(sessionID)\n").utf8))
         #else
@@ -1404,6 +1414,18 @@ extension MacOSSandboxService {
         try persistJSON(normalized, to: workloadConfigurationPath(for: normalized.id))
     }
 
+    private func persistWorkloadExitState(workloadID: String, status: ExitStatus) throws {
+        try WorkloadExitStateStore.save(
+            WorkloadExitState(exitCode: status.exitCode, exitedAt: status.exitedAt),
+            workloadID: workloadID,
+            in: layout
+        )
+    }
+
+    private func removePersistedWorkloadExitState(workloadID: String) throws {
+        try WorkloadExitStateStore.remove(workloadID: workloadID, from: layout)
+    }
+
     private func persistJSON<Value: Encodable>(_ value: Value, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1429,6 +1451,7 @@ extension MacOSSandboxService {
             processConfiguration: containerConfig.initProcess
         )
         upsertWorkloadRecord(configuration: initConfiguration)
+        try restorePersistedWorkloadExitStateIfPresent(workloadID: initConfiguration.id)
 
         let fm = FileManager.default
         guard fm.fileExists(atPath: workloadsDirectory().path) else {
@@ -1448,7 +1471,18 @@ extension MacOSSandboxService {
                 try loadJSON(WorkloadConfiguration.self, from: configURL)
             )
             upsertWorkloadRecord(configuration: workloadConfiguration)
+            try restorePersistedWorkloadExitStateIfPresent(workloadID: workloadConfiguration.id)
         }
+    }
+
+    private func restorePersistedWorkloadExitStateIfPresent(workloadID: String) throws {
+        guard let persisted = try WorkloadExitStateStore.load(workloadID: workloadID, from: layout),
+            var record = workloads[workloadID]
+        else {
+            return
+        }
+        record.exitStatus = ExitStatus(exitCode: persisted.exitCode, exitedAt: persisted.exitedAt)
+        workloads[workloadID] = record
     }
 
     private func normalizeWorkloadConfiguration(_ configuration: WorkloadConfiguration) -> WorkloadConfiguration {
@@ -2811,6 +2845,8 @@ extension MacOSSandboxService {
         guard var record = workloads[workloadID] else {
             return
         }
+        discardClosedWorkloadSessions(for: workloadID)
+        closedWorkloadSessions.removeValue(forKey: sessionID)
         if let previousSessionID = record.sessionID, previousSessionID != sessionID {
             workloadSessions.removeValue(forKey: previousSessionID)
         }
@@ -2828,16 +2864,97 @@ extension MacOSSandboxService {
         workloads[workloadID] = record
     }
 
+    private func resetWorkloadExitStateForStart(workloadID: String, session: inout Session) throws {
+        try removePersistedWorkloadExitState(workloadID: workloadID)
+        discardClosedWorkloadSessions(for: workloadID)
+        if var record = workloads[workloadID] {
+            record.startedAt = nil
+            record.exitStatus = nil
+            workloads[workloadID] = record
+        }
+        session.startedAt = nil
+        session.exitStatus = nil
+    }
+
     private func markWorkloadExited(workloadID: String, status: ExitStatus) {
         guard var record = workloads[workloadID] else {
             return
         }
+        discardClosedWorkloadSessions(for: workloadID)
         record.exitStatus = status
         workloads[workloadID] = record
+        do {
+            try persistWorkloadExitState(workloadID: workloadID, status: status)
+        } catch {
+            log.error(
+                "failed to persist workload exit state",
+                metadata: [
+                    "workload": "\(workloadID)",
+                    "error": "\(error)",
+                ]
+            )
+        }
     }
 
     private func workloadID(forSession sessionID: String) -> String? {
         workloadSessions[sessionID]
+    }
+
+    func isWorkloadSession(_ sessionID: String) -> Bool {
+        workloadSessions[sessionID] != nil
+    }
+
+    private func rememberClosedWorkloadSession(
+        sessionID: String,
+        workloadID: String,
+        fallbackStatus: ExitStatus
+    ) {
+        pruneClosedWorkloadSessions()
+        closedWorkloadSessions[sessionID] = ClosedWorkloadSession(
+            workloadID: workloadID,
+            fallbackExitedAt: fallbackStatus.exitedAt,
+            expiresAt: Date().addingTimeInterval(Self.closedWorkloadSessionLifetime)
+        )
+        if closedWorkloadSessions.count > Self.maximumClosedWorkloadSessionCount,
+            let oldest = closedWorkloadSessions.min(by: { $0.value.expiresAt < $1.value.expiresAt })
+        {
+            closedWorkloadSessions.removeValue(forKey: oldest.key)
+        }
+    }
+
+    private func consumeClosedWorkloadSession(sessionID: String, status: ExitStatus) -> String? {
+        pruneClosedWorkloadSessions()
+        guard let closed = closedWorkloadSessions.removeValue(forKey: sessionID),
+            var record = workloads[closed.workloadID],
+            record.sessionID == nil,
+            record.exitStatus?.exitCode == 255,
+            record.exitStatus?.exitedAt == closed.fallbackExitedAt
+        else {
+            return nil
+        }
+
+        record.exitStatus = status
+        workloads[closed.workloadID] = record
+        do {
+            try persistWorkloadExitState(workloadID: closed.workloadID, status: status)
+        } catch {
+            log.error(
+                "failed to persist late workload exit state",
+                metadata: [
+                    "workload": "\(closed.workloadID)",
+                    "error": "\(error)",
+                ]
+            )
+        }
+        return closed.workloadID
+    }
+
+    private func discardClosedWorkloadSessions(for workloadID: String) {
+        closedWorkloadSessions = closedWorkloadSessions.filter { $0.value.workloadID != workloadID }
+    }
+
+    private func pruneClosedWorkloadSessions(now: Date = Date()) {
+        closedWorkloadSessions = closedWorkloadSessions.filter { $0.value.expiresAt > now }
     }
 
     private func sessionID(forWorkload workloadID: String) throws -> String {
@@ -3305,20 +3422,23 @@ extension MacOSSandboxService {
         }
     }
 
-    private func completeProcess(id: String, status: ExitStatus) {
+    @discardableResult
+    private func completeProcess(id: String, status: ExitStatus) -> String? {
         guard var session = sessions[id] else {
             writeContainerLog(Data(("completeProcess missing session \(id) code=\(status.exitCode); waking waiters anyway\n").utf8))
+            let workloadID = consumeClosedWorkloadSession(sessionID: id, status: status)
             resumeWaiters(for: id, fallbackStatus: status, reason: "process_completed_without_session")
-            return
+            return workloadID
         }
         session.exitStatus = status
         sessions[id] = session
-        if let workloadID = workloadID(forSession: id) {
+        let workloadID = workloadID(forSession: id)
+        if let workloadID {
             if var record = workloads[workloadID] {
                 record.startedAt = record.startedAt ?? session.startedAt
-                record.exitStatus = status
                 workloads[workloadID] = record
             }
+            markWorkloadExited(workloadID: workloadID, status: status)
         }
 
         let continuations = removeWaiters(for: id)
@@ -3326,6 +3446,7 @@ extension MacOSSandboxService {
         for continuation in continuations {
             continuation.resume(returning: status)
         }
+        return workloadID
     }
 
     func waitForWorkload(_ workloadID: String, timeout: Int32 = 0) async throws -> ExitStatus {
@@ -3381,16 +3502,40 @@ extension MacOSSandboxService {
     }
 
     private func closeAllSessions() {
-        resumeAllWaiters(reason: "sessions_closed")
         let fallbackStatus = ExitStatus(exitCode: 255, exitedAt: Date())
         for (sessionID, session) in sessions {
             if let workloadID = workloadID(forSession: sessionID), var record = workloads[workloadID] {
+                let observedExitStatus = record.exitStatus ?? session.exitStatus
+                let finalExitStatus = observedExitStatus ?? fallbackStatus
                 record.startedAt = record.startedAt ?? session.startedAt
-                record.exitStatus = record.exitStatus ?? session.exitStatus ?? fallbackStatus
+                record.exitStatus = finalExitStatus
                 record.sessionID = nil
                 workloads[workloadID] = record
                 workloadSessions.removeValue(forKey: sessionID)
+                if observedExitStatus == nil {
+                    rememberClosedWorkloadSession(
+                        sessionID: sessionID,
+                        workloadID: workloadID,
+                        fallbackStatus: finalExitStatus
+                    )
+                } else {
+                    closedWorkloadSessions.removeValue(forKey: sessionID)
+                }
+                do {
+                    try persistWorkloadExitState(workloadID: workloadID, status: finalExitStatus)
+                } catch {
+                    log.error(
+                        "failed to persist workload exit state before closing sessions",
+                        metadata: [
+                            "workload": "\(workloadID)",
+                            "error": "\(error)",
+                        ]
+                    )
+                }
             }
+        }
+        resumeAllWaiters(reason: "sessions_closed")
+        for session in sessions.values {
             closeSessionResources(session)
         }
         sessions.removeAll()
@@ -3605,6 +3750,17 @@ extension MacOSSandboxService {
 
     func handleSidecarEvent(_ event: MacOSSidecarEvent) async {
         let processID = event.processID
+        if event.event == .processExit, sessions[processID] == nil {
+            let code = event.exitCode ?? 1
+            writeContainerLog(Data(("late sidecar process exit event for \(processID) code=\(code)\n").utf8))
+            let status = ExitStatus(exitCode: code, exitedAt: Date())
+            let workloadID = completeProcess(id: processID, status: status)
+            if workloadID == configuration?.id {
+                await stopSocketForwarders()
+                sandboxState = .stopped(status.exitCode)
+            }
+            return
+        }
         guard var session = sessions[processID] else {
             return
         }
@@ -3651,8 +3807,8 @@ extension MacOSSandboxService {
             if processID == guestAgentLogCaptureProcessID {
                 guestAgentLogCaptureProcessID = nil
             }
-            completeProcess(id: processID, status: status)
-            if workloadID(forSession: processID) == configuration?.id {
+            let workloadID = completeProcess(id: processID, status: status)
+            if workloadID == configuration?.id {
                 await stopSocketForwarders()
                 sandboxState = .stopped(status.exitCode)
             }
@@ -3815,6 +3971,11 @@ extension MacOSSandboxService {
         closeAllSessions()
     }
 
+    func testingClosedWorkloadSessionCount() -> Int {
+        pruneClosedWorkloadSessions()
+        return closedWorkloadSessions.count
+    }
+
     func testingWaiterCount(for id: String) -> Int {
         if let sessionID = workloads[id]?.sessionID {
             return waiters[sessionID]?.count ?? 0
@@ -3952,12 +4113,7 @@ extension MacOSSandboxService {
 
     func testingInstallSidecarClient(socketPath: String, launchLabel: String = "testing-sidecar") {
         let client = MacOSSidecarClient(socketPath: socketPath, log: log)
-        client.setEventHandler { [weak self] event in
-            guard let self else { return }
-            Task {
-                await self.handleSidecarEvent(event)
-            }
-        }
+        installSidecarEventPump(for: client)
         client.setDisconnectHandler { [weak self] error in
             guard let self else { return }
             Task {
@@ -3975,11 +4131,8 @@ extension MacOSSandboxService {
         writeContainerLog(Data(("sidecar disconnected unexpectedly: \(error.message)\n").utf8))
         sidecarHandle?.client.setEventHandler(nil)
         sidecarHandle?.client.setDisconnectHandler(nil)
-        sidecarEventPump?.finish()
-        sidecarEventPumpTask?.cancel()
-        sidecarEventPump = nil
-        sidecarEventPumpTask = nil
         sidecarHandle = nil
+        await finishAndDrainSidecarEventPump()
         releaseMachineStateLeaseIfPresent()
         await stopSocketForwarders()
         closeAllSessions()

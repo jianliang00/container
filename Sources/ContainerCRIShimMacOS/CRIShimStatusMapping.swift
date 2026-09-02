@@ -88,6 +88,7 @@ func makeCRIContainer(
 }
 
 func makeCRIContainerStatus(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_ContainerStatus {
+    let metadata = metadata.normalizedTerminalStatus()
     var status = Runtime_V1_ContainerStatus()
     status.id = metadata.id
     status.metadata = makeCRIContainerMetadata(metadata)
@@ -101,6 +102,9 @@ func makeCRIContainerStatus(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_
     status.labels = metadata.labels
     status.annotations = metadata.annotations
     status.logPath = metadata.logPath ?? ""
+    status.exitCode = metadata.exitCode ?? 0
+    status.reason = metadata.reason ?? ""
+    status.message = metadata.message ?? ""
     return status
 }
 
@@ -108,11 +112,7 @@ func makeCRIContainerStatus(
     _ metadata: CRIShimContainerMetadata,
     workloadSnapshot: WorkloadSnapshot?
 ) -> Runtime_V1_ContainerStatus {
-    var status = makeCRIContainerStatus(metadata.applying(workloadSnapshot: workloadSnapshot))
-    if let exitCode = workloadSnapshot?.exitCode {
-        status.exitCode = exitCode
-    }
-    return status
+    makeCRIContainerStatus(metadata.applying(workloadSnapshot: workloadSnapshot))
 }
 
 func makeCRIContainerStats(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_ContainerStats {
@@ -357,20 +357,26 @@ extension CRIShimSandboxMetadata {
 
         var metadata = self
         if sandboxSnapshot.failureReason == .networkInvalidated {
-            metadata.state = .stopped
-            return metadata.applyingNetworkAttachments(from: sandboxSnapshot)
-        }
-        switch sandboxSnapshot.status {
-        case .running:
-            metadata.state = .running
-        case .stopping:
-            metadata.state = .stopped
-        case .stopped:
-            if metadata.state != .ready {
+            if metadata.state.lifecycleRank < State.stopped.lifecycleRank {
                 metadata.state = .stopped
             }
+            return metadata.applyingNetworkAttachments(from: sandboxSnapshot)
+        }
+        let observedState: State?
+        switch sandboxSnapshot.status {
+        case .running:
+            observedState = .running
+        case .stopping:
+            observedState = .stopped
+        case .stopped:
+            observedState = metadata.state == .ready ? nil : .stopped
         case .unknown:
-            break
+            observedState = nil
+        }
+        if let observedState,
+            observedState.lifecycleRank >= metadata.state.lifecycleRank
+        {
+            metadata.state = observedState
         }
 
         return metadata.applyingNetworkAttachments(from: sandboxSnapshot)
@@ -387,7 +393,10 @@ extension CRIShimSandboxMetadata {
 }
 
 extension CRIShimContainerMetadata {
-    func applying(workloadSnapshot: WorkloadSnapshot?) -> CRIShimContainerMetadata {
+    func applying(
+        workloadSnapshot: WorkloadSnapshot?,
+        observedAt: Date = Date()
+    ) -> CRIShimContainerMetadata {
         guard let workloadSnapshot else {
             return self
         }
@@ -399,15 +408,24 @@ extension CRIShimContainerMetadata {
                 metadata.state = .running
             }
         case .stopped:
-            if metadata.state != .removed {
-                metadata.state = .exited
+            if let exitCode = workloadSnapshot.exitCode {
+                if exitCode != 0 || (workloadSnapshot.exitedAt?.timeIntervalSince1970 ?? 0) > 0 {
+                    metadata.recordRuntimeExit(
+                        code: exitCode,
+                        at: workloadSnapshot.exitedAt,
+                        observedAt: observedAt
+                    )
+                } else {
+                    metadata.recordUnknownExit(at: observedAt)
+                }
+            } else {
+                metadata.recordUnknownExit(at: workloadSnapshot.exitedAt ?? observedAt)
             }
         case .unknown:
             break
         }
 
         metadata.startedAt = workloadSnapshot.startedDate ?? metadata.startedAt
-        metadata.exitedAt = workloadSnapshot.exitedAt ?? metadata.exitedAt
         return metadata
     }
 }

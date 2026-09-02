@@ -123,12 +123,16 @@ public struct CRIShimReconciler {
     ) -> CRIShimReconcilePlan {
         let sandboxSteps = reconcile(
             kind: .sandbox,
-            stored: store.sandboxes.map { ($0.id, $0.reconcileFingerprint) },
+            stored: store.sandboxes.map {
+                (id: $0.id, fingerprint: $0.reconcileFingerprint, canDelete: $0.state == .released)
+            },
             runtime: inventory.sandboxes.map { ($0.id, $0.state, $0.fingerprint) }
         )
         let containerSteps = reconcile(
             kind: .container,
-            stored: store.containers.map { ($0.id, $0.reconcileFingerprint) },
+            stored: store.containers.map {
+                (id: $0.id, fingerprint: $0.reconcileFingerprint, canDelete: $0.state == .removed)
+            },
             runtime: inventory.containers.map { ($0.id, $0.state, $0.fingerprint) }
         )
         return CRIShimReconcilePlan(sandboxSteps: sandboxSteps, containerSteps: containerSteps)
@@ -136,18 +140,21 @@ public struct CRIShimReconciler {
 
     private func reconcile(
         kind: CRIShimReconcileStep.Kind,
-        stored: [(String, String)],
+        stored: [(id: String, fingerprint: String, canDelete: Bool)],
         runtime: [(String, CRIShimRuntimeObjectState, String)]
     ) -> [CRIShimReconcileStep] {
-        let storedByID = Dictionary(stored, uniquingKeysWith: { _, new in new })
+        let storedByID = Dictionary(
+            stored.map { ($0.id, (fingerprint: $0.fingerprint, canDelete: $0.canDelete)) },
+            uniquingKeysWith: { _, new in new }
+        )
         let runtimeByID = Dictionary(runtime.map { ($0.0, ($0.1, $0.2)) }, uniquingKeysWith: { _, new in new })
         let ids = Set(storedByID.keys).union(runtimeByID.keys).sorted()
         var steps: [CRIShimReconcileStep] = []
 
         for id in ids {
-            let storeFingerprint = storedByID[id]
+            let storedEntry = storedByID[id]
             let runtimeEntry = runtimeByID[id]
-            switch (storeFingerprint, runtimeEntry) {
+            switch (storedEntry, runtimeEntry) {
             case (nil, nil):
                 continue
             case (nil, let runtimeEntry?):
@@ -160,17 +167,19 @@ public struct CRIShimReconciler {
                         runtimeFingerprint: runtimeEntry.1
                     )
                 )
-            case (let storeFingerprint?, nil):
+            case (let storedEntry?, nil) where storedEntry.canDelete:
                 steps.append(
                     CRIShimReconcileStep(
                         kind: kind,
                         action: .delete,
                         id: id,
-                        reason: "stored \(kind.rawValue) missing from runtime inventory",
-                        storeFingerprint: storeFingerprint
+                        reason: "terminal stored \(kind.rawValue) missing from runtime inventory",
+                        storeFingerprint: storedEntry.fingerprint
                     )
                 )
-            case (let storeFingerprint?, let runtimeEntry?):
+            case (_?, nil):
+                continue
+            case (let storedEntry?, let runtimeEntry?):
                 if runtimeEntry.0 == .released {
                     steps.append(
                         CRIShimReconcileStep(
@@ -178,18 +187,18 @@ public struct CRIShimReconciler {
                             action: .release,
                             id: id,
                             reason: "runtime reported released \(kind.rawValue)",
-                            storeFingerprint: storeFingerprint,
+                            storeFingerprint: storedEntry.fingerprint,
                             runtimeFingerprint: runtimeEntry.1
                         )
                     )
-                } else if storeFingerprint != runtimeEntry.1 {
+                } else if storedEntry.fingerprint != runtimeEntry.1 {
                     steps.append(
                         CRIShimReconcileStep(
                             kind: kind,
                             action: .update,
                             id: id,
                             reason: "stored \(kind.rawValue) metadata differs from runtime inventory",
-                            storeFingerprint: storeFingerprint,
+                            storeFingerprint: storedEntry.fingerprint,
                             runtimeFingerprint: runtimeEntry.1
                         )
                     )
@@ -237,7 +246,10 @@ public struct CRIShimRuntimeSnapshotInventory: Sendable {
 
             for workloadSnapshot in sandboxSnapshot.workloads {
                 let containerMetadata =
-                    storedContainers[workloadSnapshot.id]?.applying(workloadSnapshot: workloadSnapshot)
+                    storedContainers[workloadSnapshot.id]?.applying(
+                        workloadSnapshot: workloadSnapshot,
+                        observedAt: now
+                    )
                     ?? makeCRIShimContainerMetadata(
                         workloadSnapshot: workloadSnapshot,
                         sandboxID: sandboxID,
@@ -411,21 +423,27 @@ private struct CRIShimReconcileExecutionContext {
     }
 
     private mutating func updateSandboxMetadata(_ step: CRIShimReconcileStep) throws {
-        guard
-            var metadata = try metadataStore.sandbox(id: step.id),
-            let snapshot = sandboxSnapshotsByID[step.id]
-        else {
+        guard let snapshot = sandboxSnapshotsByID[step.id] else {
             skippedSteps.append(step)
             return
         }
-        metadata = metadata.applying(sandboxSnapshot: snapshot)
-        metadata.updatedAt = now
-        try metadataStore.upsertSandbox(metadata)
+        let updatedMetadata = try metadataStore.updateSandbox(id: step.id) { metadata in
+            metadata = metadata.applying(sandboxSnapshot: snapshot)
+            metadata.updatedAt = now
+        }
+        guard updatedMetadata != nil else {
+            skippedSteps.append(step)
+            return
+        }
         appliedSteps.append(step)
     }
 
     private mutating func deleteSandboxMetadata(_ step: CRIShimReconcileStep) throws {
         let containers = try metadataStore.listContainers().filter { $0.sandboxID == step.id }
+        guard containers.allSatisfy({ $0.state == .removed }) else {
+            skippedSteps.append(step)
+            return
+        }
         for container in containers {
             try? metadataStore.deleteContainer(id: container.id)
         }
@@ -434,13 +452,14 @@ private struct CRIShimReconcileExecutionContext {
     }
 
     private mutating func releaseSandboxMetadata(_ step: CRIShimReconcileStep) throws {
-        guard var metadata = try metadataStore.sandbox(id: step.id) else {
+        let updatedMetadata = try metadataStore.updateSandbox(id: step.id) { metadata in
+            metadata.state = .released
+            metadata.updatedAt = now
+        }
+        guard updatedMetadata != nil else {
             skippedSteps.append(step)
             return
         }
-        metadata.state = .released
-        metadata.updatedAt = now
-        try metadataStore.upsertSandbox(metadata)
         appliedSteps.append(step)
     }
 
@@ -471,18 +490,20 @@ private struct CRIShimReconcileExecutionContext {
     }
 
     private mutating func updateContainerMetadata(_ step: CRIShimReconcileStep) throws {
-        guard
-            var metadata = try metadataStore.container(id: step.id),
-            let workload = workloadSnapshotsByID[step.id]
-        else {
+        guard let workload = workloadSnapshotsByID[step.id] else {
             skippedSteps.append(step)
             return
         }
-        metadata =
-            metadata
-            .applying(workloadSnapshot: workload.snapshot)
-            .applyingReconciledLogPath()
-        try metadataStore.upsertContainer(metadata)
+        let updatedMetadata = try metadataStore.updateContainer(id: step.id) { metadata in
+            metadata =
+                metadata
+                .applying(workloadSnapshot: workload.snapshot, observedAt: now)
+                .applyingReconciledLogPath()
+        }
+        guard updatedMetadata != nil else {
+            skippedSteps.append(step)
+            return
+        }
         appliedSteps.append(step)
     }
 
@@ -492,13 +513,14 @@ private struct CRIShimReconcileExecutionContext {
     }
 
     private mutating func releaseContainerMetadata(_ step: CRIShimReconcileStep) throws {
-        guard var metadata = try metadataStore.container(id: step.id) else {
+        let updatedMetadata = try metadataStore.updateContainer(id: step.id) { metadata in
+            metadata.state = .removed
+            metadata.exitedAt = metadata.exitedAt ?? now
+        }
+        guard updatedMetadata != nil else {
             skippedSteps.append(step)
             return
         }
-        metadata.state = .removed
-        metadata.exitedAt = metadata.exitedAt ?? now
-        try metadataStore.upsertContainer(metadata)
         appliedSteps.append(step)
     }
 }
@@ -575,7 +597,7 @@ private func makeCRIShimContainerMetadata(
         startedAt: workloadSnapshot.startedDate,
         exitedAt: workloadSnapshot.exitedAt
     )
-    metadata = metadata.applying(workloadSnapshot: workloadSnapshot)
+    metadata = metadata.applying(workloadSnapshot: workloadSnapshot, observedAt: now)
     return metadata
 }
 

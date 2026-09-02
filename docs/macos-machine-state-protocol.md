@@ -119,7 +119,20 @@ The logical execution slot is derived from the persistence id and container name
 
 Warm restore never creates a replacement execution when the selected state lacks the expected workload manifest. This fail-closed rule covers snapshots written with legacy metadata and snapshots whose execution id included a nonzero CRI attempt; either may still contain a durable process that the current runtime cannot identify safely. Existing attempt-zero identity records remain address-compatible. An incompatible snapshot requires an explicit offline metadata migration or a cold start and a new snapshot. Adding, removing, or renaming a primary container is likewise a cold-start topology change, not a warm-restore operation. Transient exec and attach clients reconnect through new CRI requests and are not part of the retained primary workload identity.
 
-The runtime-to-guest durable process protocol advertises `durableProcessV2` for generation-fenced adoption. A v2 request carries the trusted runtime launch fingerprint, the current writable storage generation, and, only during warm adoption, the selected saved generation. A normal reconnect must match the process's bound generation. Warm adoption succeeds only when the process is bound to the selected saved generation and the current generation is newer; the guest then advances the binding atomically after acknowledging the new controller. The returned process status includes both the guest launch fingerprint and the bound generation. A guest that advertises only `durableProcessV1` cannot receive a generation-fenced request.
+The runtime-to-guest durable process protocol uses four cumulative capabilities.
+`durableProcessV1` provides the durable process lifecycle, `durableProcessV2`
+adds storage-generation fencing, `durableProcessV3` adds acknowledged event
+delivery, and `durableProcessV4` adds runtime-incarnation fencing. A
+generation-fenced request carries the trusted runtime launch fingerprint, the
+current writable storage generation, and, only during warm adoption, the
+selected saved generation. A normal reconnect must match the process's bound
+generation. Warm adoption succeeds only when the process is bound to the
+selected saved generation and the current generation is newer; the guest then
+advances the binding atomically after acknowledging the new controller. The
+returned process status includes the guest launch fingerprint, bound generation,
+and active runtime incarnation. Snapshot-capable releases require all four
+capabilities so that no part of the fencing or replay contract is silently
+disabled.
 
 ### Snapshot V1 durable-process boundary
 

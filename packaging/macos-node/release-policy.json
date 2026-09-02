@@ -2,7 +2,11 @@
   "schemaVersion": 1,
   "guestAgent": {
     "requiredCapabilities": [
-      "tcpConnectV1"
+      "tcpConnectV1",
+      "durableProcessV1",
+      "durableProcessV2",
+      "durableProcessV3",
+      "durableProcessV4"
     ]
   },
   "deploymentPairing": {

@@ -193,10 +193,11 @@ select the desired sandbox image with `spec.runtimeClassName`, for example
 
 Pin every production sandbox image by digest. Release metadata and rollback
 assets must bind the node package checksum, sandbox digest, package guest-agent
-checksum, sandbox guest-agent checksum, and required capabilities. PortForward
-requires `tcpConnectV1` and fails closed when the guest agent does not advertise
-it. Restore the package and its matching sandbox image together during
-rollback.
+checksum, sandbox guest-agent checksum, and required capabilities. The release
+pair must advertise `tcpConnectV1` and `durableProcessV1` through
+`durableProcessV4`; release validation fails closed when either guest-agent copy
+does not provide the full set. Restore the package and its matching sandbox
+image together during rollback.
 
 Use `--gui-runtime-class <name>=<sandbox-image>` instead of `--runtime-class`
 for an additional handler that presents the sandbox GUI. GUI enablement is an

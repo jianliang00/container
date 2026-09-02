@@ -42,6 +42,14 @@ The private pairing manifest must pin:
 - sandbox guest-agent SHA-256 and required capabilities;
 - workload image index and platform manifest digests.
 
+When a release introduces new required guest-agent capabilities, the workflow
+may use the previously accepted pairing only while creating a package-only
+draft. That draft remains non-deployable, validates the new package against the
+public capability policy, and supplies the signed guest agent used to refresh
+the sandbox image. Promotion restores the strict requirement that the private
+pairing and public policy contain the same ordered capability list and that the
+package and sandbox guest-agent checksums match.
+
 The deployment system must verify the private manifest against the SHA-256 published in the Release before passing image references to `container-macos-kubeadm join` and RuntimeClass configuration.
 
 ## Deployment order

@@ -95,6 +95,8 @@ jobs:
           echo "RELEASE_PAIRING_PATH=${release_pairing_path}" >> "$GITHUB_ENV"
 
       - name: Validate release pairing
+        env:
+          PREPARE_UNPAIRED_DRAFT: ${{ inputs.prepare_unpaired_draft }}
         run: |
           set -euo pipefail
           jq -e '
@@ -134,8 +136,11 @@ jobs:
           private_capabilities="$(jq -cS '.sandboxImage.guestAgent.requiredCapabilities' "${RELEASE_PAIRING_PATH}")"
           public_capabilities="$(jq -cS '.guestAgent.requiredCapabilities' "${RELEASE_POLICY_PATH}")"
           if [[ "${private_capabilities}" != "${public_capabilities}" ]]; then
-            echo "::error::Private release pairing capabilities do not match the public release policy"
-            exit 1
+            if [[ "${PREPARE_UNPAIRED_DRAFT}" != "true" ]]; then
+              echo "::error::Private release pairing capabilities do not match the public release policy"
+              exit 1
+            fi
+            echo "::warning::Using the previously accepted pairing only to stage an unpaired package draft; promotion still requires an exact capability match"
           fi
 
           while IFS= read -r sensitive_value; do
@@ -744,7 +749,7 @@ jobs:
               echo "package guest agent does not contain required capability ${capability}" >&2
               exit 1
             fi
-          done < <(jq -r '.sandboxImage.guestAgent.requiredCapabilities[]' "${RELEASE_PAIRING_PATH}")
+          done < <(jq -r '.guestAgent.requiredCapabilities[]' "${RELEASE_POLICY_PATH}")
           echo "PACKAGE_GUEST_AGENT_SHA256=${package_guest_agent_sha256}" >> "$GITHUB_ENV"
 
           kubelet_path="${work_dir}/pkg/Payload/usr/local/bin/kubelet"

@@ -22,6 +22,68 @@ import Testing
 
 struct CRIShimMachineStateDirectoriesTests {
     @Test
+    func canonicalizesOnlyDarwinSystemAliasPrefixes() {
+        #expect(criCanonicalizedManagedDirectoryPath("/var/lib/container") == "/private/var/lib/container")
+        #expect(criCanonicalizedManagedDirectoryPath("/tmp/runtime") == "/private/tmp/runtime")
+        #expect(criCanonicalizedManagedDirectoryPath("/etc/container") == "/private/etc/container")
+        #expect(criCanonicalizedManagedDirectoryPath("/private/var/lib/container") == "/private/var/lib/container")
+        #expect(criCanonicalizedManagedDirectoryPath("/opt/runtime") == "/opt/runtime")
+        #expect(criCanonicalizedManagedDirectoryPath("/var/lib/../runtime") == nil)
+    }
+
+    @Test
+    func defaultMachineStateRootsCanonicalizeToPhysicalDarwinPaths() {
+        #expect(
+            criCanonicalizedManagedDirectoryPath(CRIShimConfigDefaults.machineStateStorageRootURL.path)
+                == "/private/var/lib/container/cri-shim-macos/machine-state/v1"
+        )
+        #expect(
+            criCanonicalizedManagedDirectoryPath(CRIShimConfigDefaults.machineStateControlSocketRootURL.path)
+                == "/private/var/run/container/machine-state/v1"
+        )
+        #expect(
+            criCanonicalizedManagedDirectoryPath(CRIShimConfigDefaults.machineStateLeaseRootURL.path)
+                == "/private/var/lib/container/cri-shim-macos/machine-state-leases/v1"
+        )
+    }
+
+    @Test
+    func acceptsOnlyKnownWritableDarwinSystemParents() {
+        #expect(
+            criHasTrustedMachineStateParentWritePermissions(
+                path: "/private/var/run",
+                ownerID: 0,
+                groupID: 1,
+                mode: mode_t(S_IFDIR | 0o775)
+            )
+        )
+        #expect(
+            criHasTrustedMachineStateParentWritePermissions(
+                path: "/private/tmp",
+                ownerID: 0,
+                groupID: 0,
+                mode: mode_t(S_IFDIR | S_ISVTX | 0o777)
+            )
+        )
+        #expect(
+            !criHasTrustedMachineStateParentWritePermissions(
+                path: "/private/var/lib",
+                ownerID: 0,
+                groupID: 0,
+                mode: mode_t(S_IFDIR | 0o775)
+            )
+        )
+        #expect(
+            !criHasTrustedMachineStateParentWritePermissions(
+                path: "/private/var/run",
+                ownerID: 0,
+                groupID: 20,
+                mode: mode_t(S_IFDIR | 0o775)
+            )
+        )
+    }
+
+    @Test
     func startupCreatesPrivateSidecarAndLeaseDirectories() throws {
         let root = privateTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -91,6 +153,130 @@ struct CRIShimMachineStateDirectoriesTests {
             Issue.record("symbolic-link machine-state directory was accepted")
         } catch let error as CRIShimError {
             #expect(error.description.contains("must not traverse symbolic links"))
+        }
+    }
+
+    @Test
+    func startupAcceptsSystemAliasPrefixButRejectsInnerSymbolicLink() throws {
+        let aliasRoot = URL(
+            fileURLWithPath: "/tmp/CRIShimMachineStateDirectoriesTests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let physicalRoot = URL(fileURLWithPath: "/private\(aliasRoot.path)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: physicalRoot) }
+        try createPrivateRoot(physicalRoot)
+
+        let valid = policy(below: aliasRoot)
+        try CRIShimMachineStateDirectories.prepare(policy: valid)
+        for path in managedPaths(valid) {
+            var value = stat()
+            #expect(lstat(path, &value) == 0)
+            #expect((value.st_mode & S_IFMT) == S_IFDIR)
+        }
+
+        let target = physicalRoot.appendingPathComponent("target", isDirectory: true)
+        let link = physicalRoot.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let invalid = MachineStateConfig(
+            enabled: true,
+            storageRoot: aliasRoot.appendingPathComponent("link/state", isDirectory: true).path,
+            controlSocketRoot: valid.normalizedControlSocketRoot,
+            runtimeOwnerUID: UInt32(geteuid()),
+            nbdSocketAllowedRoots: valid.nbdSocketAllowedRoots,
+            leaseRoot: valid.normalizedLeaseRoot
+        )
+
+        do {
+            try CRIShimMachineStateDirectories.prepare(policy: invalid)
+            Issue.record("inner symbolic-link machine-state directory was accepted")
+        } catch let error as CRIShimError {
+            #expect(error.description.contains("must not traverse symbolic links"))
+        }
+    }
+
+    @Test
+    func startupCreatesMissingTrustedIntermediateDirectories() throws {
+        let aliasRoot = URL(
+            fileURLWithPath: "/tmp/CRIShimMachineStateDirectoriesTests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let physicalRoot = URL(fileURLWithPath: "/private\(aliasRoot.path)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: physicalRoot) }
+        try createPrivateRoot(physicalRoot)
+        let policy = MachineStateConfig(
+            enabled: true,
+            storageRoot: aliasRoot.appendingPathComponent("persistent/state/v1", isDirectory: true).path,
+            controlSocketRoot: aliasRoot.appendingPathComponent("volatile/control/v1", isDirectory: true).path,
+            runtimeOwnerUID: UInt32(geteuid()),
+            nbdSocketAllowedRoots: [aliasRoot.appendingPathComponent("volatile/nbd/v1", isDirectory: true).path],
+            leaseRoot: aliasRoot.appendingPathComponent("persistent/leases/v1", isDirectory: true).path
+        )
+
+        try CRIShimMachineStateDirectories.prepare(policy: policy)
+
+        for path in managedPaths(policy) {
+            var value = stat()
+            #expect(lstat(path, &value) == 0)
+            #expect((value.st_mode & S_IFMT) == S_IFDIR)
+            #expect((value.st_mode & 0o777) == 0o700)
+        }
+        for relativePath in ["persistent", "persistent/state", "persistent/leases", "volatile", "volatile/control", "volatile/nbd"] {
+            var value = stat()
+            let path = aliasRoot.appendingPathComponent(relativePath, isDirectory: true).path
+            #expect(lstat(path, &value) == 0)
+            #expect((value.st_mode & S_IFMT) == S_IFDIR)
+            #expect(value.st_uid == geteuid())
+            #expect((value.st_mode & 0o777) == 0o711)
+        }
+    }
+
+    @Test
+    func startupRejectsWritableExistingIntermediateDirectory() throws {
+        let root = privateTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try createPrivateRoot(root)
+        let writable = root.appendingPathComponent("writable", isDirectory: true)
+        try FileManager.default.createDirectory(at: writable, withIntermediateDirectories: false)
+        #expect(chmod(writable.path, mode_t(0o777)) == 0)
+        let invalid = MachineStateConfig(
+            enabled: true,
+            storageRoot: writable.appendingPathComponent("state/v1", isDirectory: true).path,
+            controlSocketRoot: root.appendingPathComponent("control/v1", isDirectory: true).path,
+            runtimeOwnerUID: UInt32(geteuid()),
+            leaseRoot: root.appendingPathComponent("leases/v1", isDirectory: true).path
+        )
+
+        do {
+            try CRIShimMachineStateDirectories.prepare(policy: invalid)
+            Issue.record("writable machine-state parent hierarchy was accepted")
+        } catch let error as CRIShimError {
+            #expect(error.description.contains("untrusted group- or world-writable"))
+        }
+    }
+
+    @Test
+    func startupRejectsExistingIntermediateDirectoryWithUnexpectedOwner() throws {
+        let root = privateTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try createPrivateRoot(root)
+        let unexpectedEffectiveUserID = geteuid() &+ 1
+        let invalid = MachineStateConfig(
+            enabled: true,
+            storageRoot: root.appendingPathComponent("state/v1", isDirectory: true).path,
+            controlSocketRoot: root.appendingPathComponent("control/v1", isDirectory: true).path,
+            runtimeOwnerUID: UInt32(unexpectedEffectiveUserID),
+            leaseRoot: root.appendingPathComponent("leases/v1", isDirectory: true).path
+        )
+
+        do {
+            try CRIShimMachineStateDirectories.prepare(
+                policy: invalid,
+                effectiveUserID: unexpectedEffectiveUserID
+            )
+            Issue.record("machine-state parent hierarchy with an unexpected owner was accepted")
+        } catch let error as CRIShimError {
+            #expect(error.description.contains("unexpected owner"))
         }
     }
 

@@ -69,12 +69,12 @@ enum CRIShimMachineStateDirectories {
         effectiveUserID: uid_t,
         targetOwnerID: uid_t
     ) throws {
-        guard let normalizedPath = criLexicallyNormalizedAbsolutePath(path),
-            path != "/", normalizedPath == path
+        guard let normalizedPath = criCanonicalizedManagedDirectoryPath(path),
+            normalizedPath != "/"
         else {
             throw CRIShimError.invalidArgument("\(field) must be a normalized absolute directory")
         }
-        try rejectSymbolicLinkComponents(path: path, field: field)
+        try rejectSymbolicLinkComponents(path: normalizedPath, field: field)
 
         let url = URL(fileURLWithPath: normalizedPath, isDirectory: true)
         let parentPath = url.deletingLastPathComponent().path
@@ -83,16 +83,12 @@ enum CRIShimMachineStateDirectories {
             throw CRIShimError.invalidArgument("\(field) must identify a leaf directory")
         }
 
-        let parentFD = open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        guard parentFD >= 0 else {
-            throw CRIShimError.internalError("failed to open the parent of \(field)")
-        }
-        defer { Darwin.close(parentFD) }
-        try validateTrustedParent(
-            fd: parentFD,
+        let parentFD = try openOrCreateTrustedDirectoryHierarchy(
+            path: parentPath,
             field: field,
             effectiveUserID: effectiveUserID
         )
+        defer { Darwin.close(parentFD) }
 
         if mkdirat(parentFD, leafName, mode_t(0o700)) != 0, errno != EEXIST {
             throw CRIShimError.internalError("failed to create \(field)")
@@ -129,23 +125,93 @@ enum CRIShimMachineStateDirectories {
         else {
             throw CRIShimError.internalError("failed to verify \(field) after ownership transfer")
         }
-        try rejectSymbolicLinkComponents(path: path, field: field)
+        try rejectSymbolicLinkComponents(path: normalizedPath, field: field)
     }
 
-    private static func validateTrustedParent(
+    private static func openOrCreateTrustedDirectoryHierarchy(
+        path: String,
+        field: String,
+        effectiveUserID: uid_t
+    ) throws -> Int32 {
+        let components = NSString(string: path).pathComponents.filter { $0 != "/" }
+        var directoryFD = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directoryFD >= 0 else {
+            throw CRIShimError.internalError("failed to open the filesystem root for \(field)")
+        }
+        var currentPath = "/"
+        do {
+            try validateTrustedDirectory(
+                fd: directoryFD,
+                path: "/",
+                field: field,
+                effectiveUserID: effectiveUserID
+            )
+            for component in components {
+                currentPath =
+                    URL(fileURLWithPath: currentPath, isDirectory: true)
+                    .appendingPathComponent(component, isDirectory: true).path
+                var created = false
+                var value = stat()
+                if fstatat(directoryFD, component, &value, AT_SYMLINK_NOFOLLOW) != 0 {
+                    guard errno == ENOENT else {
+                        throw CRIShimError.internalError("failed to inspect the parent hierarchy of \(field)")
+                    }
+                    if mkdirat(directoryFD, component, mode_t(0o711)) == 0 {
+                        created = true
+                    } else if errno != EEXIST {
+                        throw CRIShimError.internalError("failed to create the parent hierarchy of \(field)")
+                    }
+                }
+
+                let nextFD = openat(directoryFD, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard nextFD >= 0 else {
+                    throw CRIShimError.invalidArgument(
+                        "the parent hierarchy of \(field) must contain only directories without symbolic links"
+                    )
+                }
+                Darwin.close(directoryFD)
+                directoryFD = nextFD
+                try validateTrustedDirectory(
+                    fd: directoryFD,
+                    path: currentPath,
+                    field: field,
+                    effectiveUserID: effectiveUserID
+                )
+                if created, fchmod(directoryFD, mode_t(0o711)) != 0 {
+                    throw CRIShimError.internalError("failed to secure the parent hierarchy of \(field)")
+                }
+            }
+            return directoryFD
+        } catch {
+            Darwin.close(directoryFD)
+            throw error
+        }
+    }
+
+    private static func validateTrustedDirectory(
         fd: Int32,
+        path: String,
         field: String,
         effectiveUserID: uid_t
     ) throws {
         var value = stat()
         guard fstat(fd, &value) == 0, (value.st_mode & S_IFMT) == S_IFDIR else {
-            throw CRIShimError.invalidArgument("the parent of \(field) must be a directory")
+            throw CRIShimError.invalidArgument("the parent hierarchy of \(field) must contain only directories")
         }
         guard value.st_uid == 0 || value.st_uid == effectiveUserID else {
-            throw CRIShimError.invalidArgument("the parent of \(field) has an unexpected owner")
+            throw CRIShimError.invalidArgument("the parent hierarchy of \(field) has an unexpected owner")
         }
-        guard value.st_mode & mode_t(0o022) == 0 else {
-            throw CRIShimError.invalidArgument("the parent of \(field) must not be group- or world-writable")
+        guard
+            criHasTrustedMachineStateParentWritePermissions(
+                path: path,
+                ownerID: value.st_uid,
+                groupID: value.st_gid,
+                mode: value.st_mode
+            )
+        else {
+            throw CRIShimError.invalidArgument(
+                "the parent hierarchy of \(field) must not contain untrusted group- or world-writable directories"
+            )
         }
     }
 
@@ -171,4 +237,40 @@ enum CRIShimMachineStateDirectories {
             throw CRIShimError.internalError("failed to inspect \(field)")
         }
     }
+}
+
+func criHasTrustedMachineStateParentWritePermissions(
+    path: String,
+    ownerID: uid_t,
+    groupID: gid_t,
+    mode: mode_t
+) -> Bool {
+    if mode & mode_t(0o002) != 0 {
+        return path == "/private/tmp"
+            && ownerID == 0
+            && groupID == 0
+            && mode & mode_t(S_ISVTX) != 0
+    }
+    if mode & mode_t(0o020) != 0 {
+        return path == "/private/var/run" && ownerID == 0 && groupID == 1
+    }
+    return true
+}
+
+/// Converts Darwin's fixed top-level filesystem aliases to their physical
+/// locations before managed-directory traversal checks. Only the leading
+/// system alias is translated; symbolic links anywhere below it remain
+/// subject to the normal component-by-component rejection.
+func criCanonicalizedManagedDirectoryPath(_ path: String) -> String? {
+    guard let normalized = criLexicallyNormalizedAbsolutePath(path), normalized == path else {
+        return nil
+    }
+    #if os(macOS)
+    for alias in ["/etc", "/tmp", "/var"] {
+        if normalized == alias || normalized.hasPrefix(alias + "/") {
+            return "/private" + normalized
+        }
+    }
+    #endif
+    return normalized
 }

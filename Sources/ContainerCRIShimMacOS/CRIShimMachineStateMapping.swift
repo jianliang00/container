@@ -292,21 +292,93 @@ private func preparePrivateDirectory(
         guard errno == ENOENT else {
             throw CRIShimError.internalError("failed to inspect managed directory \(url.path): \(posixMessage())")
         }
-        do {
-            try FileManager.default.createDirectory(
-                at: url,
-                withIntermediateDirectories: createIntermediates,
-                attributes: [.posixPermissions: 0o700]
-            )
-        } catch {
-            throw CRIShimError.internalError("failed to create managed directory \(url.path): \(error.localizedDescription)")
+        if createIntermediates {
+            try createPrivateDirectoryHierarchy(url, ownerUID: ownerUID)
+        } else {
+            guard mkdir(url.path, mode_t(S_IRWXU)) == 0 || errno == EEXIST else {
+                throw CRIShimError.internalError("failed to create managed directory \(url.path): \(posixMessage())")
+            }
         }
-        guard lstat(url.path, &value) == 0 else {
-            throw CRIShimError.internalError("failed to inspect managed directory \(url.path): \(posixMessage())")
-        }
-        try rejectSymbolicLinksInAbsolutePath(url)
     }
 
+    if createIntermediates {
+        try repairPrivateDirectoryAncestors(url, ownerUID: ownerUID)
+    }
+    try securePrivateDirectory(url, ownerUID: ownerUID)
+    try rejectSymbolicLinksInAbsolutePath(url)
+}
+
+private func createPrivateDirectoryHierarchy(_ url: URL, ownerUID: UInt32?) throws {
+    var current = URL(fileURLWithPath: "/", isDirectory: true)
+    for component in url.standardizedFileURL.pathComponents.dropFirst() {
+        current.appendPathComponent(component, isDirectory: true)
+        var value = stat()
+        if lstat(current.path, &value) == 0 {
+            continue
+        }
+        guard errno == ENOENT else {
+            throw CRIShimError.internalError("failed to inspect managed directory \(current.path): \(posixMessage())")
+        }
+        guard mkdir(current.path, mode_t(S_IRWXU)) == 0 || errno == EEXIST else {
+            throw CRIShimError.internalError("failed to create managed directory \(current.path): \(posixMessage())")
+        }
+        try securePrivateDirectory(current, ownerUID: ownerUID)
+    }
+}
+
+private func repairPrivateDirectoryAncestors(_ url: URL, ownerUID: UInt32?) throws {
+    guard let ownerUID else { return }
+    let requestedOwner = uid_t(ownerUID)
+    var child = url.standardizedFileURL
+    var current = child.deletingLastPathComponent()
+
+    while current.path != "/" {
+        var value = stat()
+        guard lstat(current.path, &value) == 0 else {
+            throw CRIShimError.internalError("failed to inspect managed directory \(current.path): \(posixMessage())")
+        }
+        if (value.st_mode & S_IFMT) == S_IFLNK {
+            return
+        }
+        guard (value.st_mode & S_IFMT) == S_IFDIR else {
+            throw CRIShimError.invalidArgument("managed path ancestor must be a directory: \(current.path)")
+        }
+
+        let permissions = value.st_mode & mode_t(0o777)
+        if (value.st_uid == requestedOwner && permissions & mode_t(S_IXUSR) != 0)
+            || permissions & mode_t(S_IXOTH) != 0
+        {
+            return
+        }
+
+        // A previous recursive creation can leave a root-owned 0700 chain
+        // above the runtime-owned leaf. Adopt only an unambiguous private
+        // single-child chain; never broaden access to a shared ancestor.
+        let entries: [String]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(atPath: current.path)
+        } catch {
+            throw CRIShimError.internalError(
+                "failed to inspect managed directory contents \(current.path): \(error.localizedDescription)"
+            )
+        }
+        guard value.st_uid == geteuid(),
+            permissions == mode_t(S_IRWXU),
+            entries.count == 1,
+            entries[0] == child.lastPathComponent
+        else {
+            throw CRIShimError.invalidArgument(
+                "managed directory ancestor is not traversable by runtime owner \(ownerUID): \(current.path)"
+            )
+        }
+        try securePrivateDirectory(current, ownerUID: ownerUID)
+        child = current
+        current.deleteLastPathComponent()
+    }
+}
+
+private func securePrivateDirectory(_ url: URL, ownerUID: UInt32?) throws {
+    var value = stat()
     let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
     guard fd >= 0 else {
         throw CRIShimError.internalError("failed to open managed directory \(url.path): \(posixMessage())")
@@ -335,7 +407,6 @@ private func preparePrivateDirectory(
     guard fchmod(fd, mode_t(S_IRWXU)) == 0 else {
         throw CRIShimError.internalError("failed to set private permissions on \(url.path): \(posixMessage())")
     }
-    try rejectSymbolicLinksInAbsolutePath(url)
 }
 
 private func requireManagedDescendant(_ candidate: URL, below root: URL) throws {

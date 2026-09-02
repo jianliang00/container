@@ -39,6 +39,53 @@ public struct CRIShimRuntimeVersionInfo: Equatable, Sendable {
 }
 
 private let criShimPodSandboxStopOptions = ContainerStopOptions(timeoutInSeconds: 0, signal: SIGKILL)
+private let criShimLifecycleConfirmationAttempts = 3
+private let criShimLifecycleConfirmationInterval = Duration.milliseconds(100)
+
+private actor CRIShimLifecycleCoordinator {
+    private var lockedKeys: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(_ key: String) async {
+        guard lockedKeys.contains(key) else {
+            lockedKeys.insert(key)
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters[key, default: []].append(continuation)
+        }
+    }
+
+    func release(_ key: String) {
+        guard var queuedWaiters = waiters[key], !queuedWaiters.isEmpty else {
+            lockedKeys.remove(key)
+            waiters.removeValue(forKey: key)
+            return
+        }
+        let next = queuedWaiters.removeFirst()
+        if queuedWaiters.isEmpty {
+            waiters.removeValue(forKey: key)
+        } else {
+            waiters[key] = queuedWaiters
+        }
+        next.resume()
+    }
+}
+
+private enum CRIShimWorkloadObservation {
+    case snapshot(WorkloadSnapshot)
+    case missing
+}
+
+private enum CRIShimStoppedWorkloadObservation {
+    case snapshot(WorkloadSnapshot)
+    case missing
+}
+
+private enum CRIShimSandboxObservation {
+    case snapshot(SandboxSnapshot)
+    case missing
+}
 
 public enum CRIShimPodAnnotation {
     public static let sandboxImage = "container-macos.io/sandbox-image"
@@ -57,6 +104,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let vmnetRecoveryController: CRIShimVMNetRecoveryController
     private let streamingServer: CRIShimStreamingServer?
     private let handlerLogger: CRIShimGRPCHandlerLogger
+    private let lifecycleCoordinator = CRIShimLifecycleCoordinator()
 
     public init(
         config: CRIShimConfig,
@@ -301,14 +349,16 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StopPodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.stopPodSandbox.rawValue) {
-            var metadata = try sandboxMetadata(
-                id: request.podSandboxID,
-                operation: "StopPodSandbox"
-            )
-            if metadata.state != .released {
-                try await stopSandboxResources(metadata: &metadata)
+            try await withSandboxLifecycleLock(id: request.podSandboxID) {
+                var metadata = try sandboxMetadata(
+                    id: request.podSandboxID,
+                    operation: "StopPodSandbox"
+                )
+                if metadata.state != .released {
+                    try await stopSandboxResources(metadata: &metadata)
+                }
+                return Runtime_V1_StopPodSandboxResponse()
             }
-            return Runtime_V1_StopPodSandboxResponse()
         }
     }
 
@@ -317,28 +367,30 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemovePodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.removePodSandbox.rawValue) {
-            var metadata = try sandboxMetadata(
-                id: request.podSandboxID,
-                operation: "RemovePodSandbox"
-            )
-            if metadata.state != .released {
-                try await stopSandboxResources(metadata: &metadata)
-            }
+            try await withSandboxLifecycleLock(id: request.podSandboxID) {
+                var metadata = try sandboxMetadata(
+                    id: request.podSandboxID,
+                    operation: "RemovePodSandbox"
+                )
+                if metadata.state != .released {
+                    try await stopSandboxResources(metadata: &metadata)
+                }
 
-            do {
-                try await runtimeManager.removeSandbox(id: metadata.id, force: true)
-            } catch {
-                try throwUnlessNotFound(error)
-            }
+                do {
+                    try await runtimeManager.removeSandbox(id: metadata.id, force: true)
+                } catch {
+                    try throwUnlessNotFound(error)
+                }
 
-            let containers = try metadataStore.listContainers()
-                .filter { $0.sandboxID == metadata.id }
-            for container in containers {
-                await logManager.stop(containerID: container.id, removeState: true)
-                try metadataStore.deleteContainer(id: container.id)
+                let containers = try metadataStore.listContainers()
+                    .filter { $0.sandboxID == metadata.id }
+                for container in containers {
+                    await logManager.stop(containerID: container.id, removeState: true)
+                    try metadataStore.deleteContainer(id: container.id)
+                }
+                try metadataStore.deleteSandbox(id: metadata.id)
+                return Runtime_V1_RemovePodSandboxResponse()
             }
-            try metadataStore.deleteSandbox(id: metadata.id)
-            return Runtime_V1_RemovePodSandboxResponse()
         }
     }
 
@@ -420,19 +472,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 throw CRIShimError.invalidArgument("PodSandboxStatus pod_sandbox_id is required")
             }
 
-            guard let metadata = try metadataStore.sandbox(id: sandboxID) else {
-                throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
-            }
-
-            var response = Runtime_V1_PodSandboxStatusResponse()
-            let snapshot = await sandboxSnapshot(for: metadata)
-            let workloadSnapshots = workloadSnapshotsByID(snapshot)
-            response.status = makeCRIPodSandboxStatus(
-                metadata,
-                sandboxSnapshot: snapshot,
-                dualStackEnabled: config.podNetwork?.dualStackEnabled == true
-            )
-            response.containersStatuses = try metadataStore.listContainers()
+            let storedContainers = try metadataStore.listContainers()
                 .filter { $0.sandboxID == sandboxID }
                 .sorted(by: { lhs, rhs in
                     if lhs.createdAt == rhs.createdAt {
@@ -440,12 +480,54 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     }
                     return lhs.createdAt < rhs.createdAt
                 })
-                .map { makeCRIContainerStatus($0, workloadSnapshot: workloadSnapshots[$0.id]) }
-            response.timestamp = Int64((Date().timeIntervalSince1970 * 1_000_000_000).rounded())
-            if request.verbose {
-                response.info = makeCRIPodSandboxStatusInfo(metadata, sandboxSnapshot: snapshot)
+            for container in storedContainers {
+                _ = try await reconciledContainerMetadata(
+                    container,
+                    includeRuntimeDetailsForExitedContainer: true
+                )
             }
-            return response
+
+            return try await withSandboxLifecycleLock(id: sandboxID) {
+                guard let current = try metadataStore.sandbox(id: sandboxID) else {
+                    throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
+                }
+                let currentContainers = try metadataStore.listContainers()
+                    .filter { $0.sandboxID == sandboxID }
+                    .sorted(by: { lhs, rhs in
+                        if lhs.createdAt == rhs.createdAt {
+                            return lhs.id < rhs.id
+                        }
+                        return lhs.createdAt < rhs.createdAt
+                    })
+                let hasActiveContainers = currentContainers.contains {
+                    $0.state == .created || $0.state == .running
+                }
+                let observation = try await reconciledSandboxObservationLocked(
+                    for: current,
+                    hasActiveContainers: hasActiveContainers
+                )
+                guard let metadata = observation?.metadata else {
+                    throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
+                }
+                let snapshot = observation?.snapshot
+                let effectiveSnapshot =
+                    snapshot?.status != .running
+                        && hasActiveContainers
+                    ? nil : snapshot
+
+                var response = Runtime_V1_PodSandboxStatusResponse()
+                response.status = makeCRIPodSandboxStatus(
+                    metadata,
+                    sandboxSnapshot: effectiveSnapshot,
+                    dualStackEnabled: config.podNetwork?.dualStackEnabled == true
+                )
+                response.containersStatuses = currentContainers.map(makeCRIContainerStatus)
+                response.timestamp = Int64((Date().timeIntervalSince1970 * 1_000_000_000).rounded())
+                if request.verbose {
+                    response.info = makeCRIPodSandboxStatusInfo(metadata, sandboxSnapshot: effectiveSnapshot)
+                }
+                return response
+            }
         }
     }
 
@@ -459,7 +541,21 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             let storedSandboxes = try metadataStore.listSandboxes()
             sandboxes.reserveCapacity(storedSandboxes.count)
             for metadata in storedSandboxes {
-                sandboxes.append(metadata.applying(sandboxSnapshot: await sandboxSnapshot(for: metadata)))
+                let reconciled = try await withSandboxLifecycleLock(id: metadata.id) {
+                    guard let current = try metadataStore.sandbox(id: metadata.id) else {
+                        return nil as CRIShimSandboxMetadata?
+                    }
+                    let hasActiveContainers = try metadataStore.listContainers().contains {
+                        $0.sandboxID == metadata.id && ($0.state == .created || $0.state == .running)
+                    }
+                    return try await reconciledSandboxObservationLocked(
+                        for: current,
+                        hasActiveContainers: hasActiveContainers
+                    )?.metadata
+                }
+                if let reconciled {
+                    sandboxes.append(reconciled)
+                }
             }
             response.items = filterCRIPodSandboxes(sandboxes, request: request)
                 .map(makeCRIPodSandbox)
@@ -508,54 +604,56 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 throw CRIShimError.invalidArgument("CreateContainer pod_sandbox_id is required")
             }
 
-            guard let sandbox = try metadataStore.sandbox(id: sandboxID) else {
-                throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
-            }
+            return try await withSandboxLifecycleLock(id: sandboxID) {
+                guard let sandbox = try metadataStore.sandbox(id: sandboxID) else {
+                    throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: sandboxID)
+                }
 
-            guard sandbox.state.allowsContainerCreation else {
-                throw CRIShimError.invalidArgument(
-                    "CreateContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
+                guard sandbox.state.allowsContainerCreation else {
+                    throw CRIShimError.invalidArgument(
+                        "CreateContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
+                    )
+                }
+
+                let containerID = UUID().uuidString.lowercased()
+                let requestedImage = try CRIShimImageReference.resolve(request.config.image)
+                let workloadImage = try await findImage(reference: requestedImage)
+                try validateCRIShimImage(
+                    workloadImage,
+                    expectedRole: .workload,
+                    requestedReference: requestedImage
                 )
+                let workloadImageDigest = workloadImage.digest.trimmed
+                guard !workloadImageDigest.isEmpty else {
+                    throw CRIShimError.invalidArgument("workload image \(requestedImage) is missing a resolved digest")
+                }
+                let metadata = try makeCRIShimContainerMetadata(
+                    id: containerID,
+                    request: request,
+                    sandbox: sandbox
+                )
+                let workloadConfiguration = try makeCRIShimWorkloadConfiguration(
+                    id: containerID,
+                    request: request,
+                    workloadImageDigest: workloadImageDigest
+                )
+
+                try await runtimeManager.createWorkload(
+                    sandboxID: sandbox.id,
+                    configuration: workloadConfiguration
+                )
+
+                do {
+                    try metadataStore.upsertContainer(metadata)
+                } catch {
+                    try? await runtimeManager.removeWorkload(sandboxID: sandbox.id, workloadID: containerID)
+                    throw error
+                }
+
+                var response = Runtime_V1_CreateContainerResponse()
+                response.containerID = containerID
+                return response
             }
-
-            let containerID = UUID().uuidString.lowercased()
-            let requestedImage = try CRIShimImageReference.resolve(request.config.image)
-            let workloadImage = try await findImage(reference: requestedImage)
-            try validateCRIShimImage(
-                workloadImage,
-                expectedRole: .workload,
-                requestedReference: requestedImage
-            )
-            let workloadImageDigest = workloadImage.digest.trimmed
-            guard !workloadImageDigest.isEmpty else {
-                throw CRIShimError.invalidArgument("workload image \(requestedImage) is missing a resolved digest")
-            }
-            let metadata = try makeCRIShimContainerMetadata(
-                id: containerID,
-                request: request,
-                sandbox: sandbox
-            )
-            let workloadConfiguration = try makeCRIShimWorkloadConfiguration(
-                id: containerID,
-                request: request,
-                workloadImageDigest: workloadImageDigest
-            )
-
-            try await runtimeManager.createWorkload(
-                sandboxID: sandbox.id,
-                configuration: workloadConfiguration
-            )
-
-            do {
-                try metadataStore.upsertContainer(metadata)
-            } catch {
-                try? await runtimeManager.removeWorkload(sandboxID: sandbox.id, workloadID: containerID)
-                throw error
-            }
-
-            var response = Runtime_V1_CreateContainerResponse()
-            response.containerID = containerID
-            return response
         }
     }
 
@@ -564,54 +662,80 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StartContainerResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.startContainer.rawValue) {
-            var metadata = try containerMetadata(
-                id: request.containerID,
-                operation: "StartContainer"
-            )
-            guard metadata.state == .created else {
-                throw CRIShimError.invalidArgument(
-                    "StartContainer requires a created container, got \(metadata.state.rawValue)"
+            try await withContainerLifecycleLock(id: request.containerID) {
+                let initialMetadata = try containerMetadata(
+                    id: request.containerID,
+                    operation: "StartContainer"
                 )
-            }
-            var sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "StartContainer")
-            guard sandbox.state.allowsContainerCreation else {
-                throw CRIShimError.invalidArgument(
-                    "StartContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
-                )
-            }
-            if sandbox.state == .ready {
-                let runtimeHandler = sandbox.runtimeHandler.trimmed.isEmpty ? nil : sandbox.runtimeHandler
-                let handler = try config.resolveRuntimeHandler(runtimeHandler)
-                try await runtimeManager.startSandbox(id: sandbox.id, presentGUI: handler.guiEnabled)
-                sandbox.state = .running
-                sandbox.updatedAt = Date()
-                try metadataStore.upsertSandbox(sandbox)
-            }
+                return try await withSandboxLifecycleLock(id: initialMetadata.sandboxID) {
+                    let metadata = try containerMetadata(
+                        id: request.containerID,
+                        operation: "StartContainer"
+                    )
+                    guard metadata.state == .created else {
+                        throw CRIShimError.invalidArgument(
+                            "StartContainer requires a created container, got \(metadata.state.rawValue)"
+                        )
+                    }
+                    let sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "StartContainer")
+                    guard sandbox.state.allowsContainerCreation else {
+                        throw CRIShimError.invalidArgument(
+                            "StartContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
+                        )
+                    }
+                    if sandbox.state == .ready {
+                        let runtimeHandler = sandbox.runtimeHandler.trimmed.isEmpty ? nil : sandbox.runtimeHandler
+                        let handler = try config.resolveRuntimeHandler(runtimeHandler)
+                        try await runtimeManager.startSandbox(id: sandbox.id, presentGUI: handler.guiEnabled)
+                        _ = try metadataStore.updateSandbox(id: sandbox.id) { current in
+                            if current.state == .ready {
+                                current.state = .running
+                                current.updatedAt = Date()
+                            }
+                        }
+                    }
 
-            let workloadSnapshot = try await runtimeManager.inspectWorkload(
-                sandboxID: metadata.sandboxID,
-                workloadID: metadata.id
-            )
-            try await logManager.start(
-                container: metadata,
-                workloadSnapshot: workloadSnapshot
-            )
+                    let workloadSnapshot = try await runtimeManager.inspectWorkload(
+                        sandboxID: metadata.sandboxID,
+                        workloadID: metadata.id
+                    )
+                    try await logManager.start(
+                        container: metadata,
+                        workloadSnapshot: workloadSnapshot
+                    )
 
-            do {
-                try await runtimeManager.startWorkload(
-                    sandboxID: metadata.sandboxID,
-                    workloadID: metadata.id
-                )
-            } catch {
-                await logManager.stop(containerID: metadata.id, removeState: false)
-                throw error
+                    do {
+                        try await runtimeManager.startWorkload(
+                            sandboxID: metadata.sandboxID,
+                            workloadID: metadata.id
+                        )
+                    } catch {
+                        await logManager.stop(containerID: metadata.id, removeState: false)
+                        throw error
+                    }
+
+                    let startedAt = Date()
+                    guard
+                        let updated = try metadataStore.updateContainer(
+                            id: metadata.id,
+                            expectedLifecycleVersion: metadata.lifecycleVersion,
+                            { current in
+                                guard current.state == .created else {
+                                    return
+                                }
+                                current.state = .running
+                                current.startedAt = startedAt
+                                current.exitedAt = nil
+                            })
+                    else {
+                        throw CRIShimMetadataStoreError.notFound(kind: .container, id: metadata.id)
+                    }
+                    guard updated.state == .running else {
+                        throw CRIShimError.internalError("container lifecycle changed while StartContainer was in progress")
+                    }
+                    return Runtime_V1_StartContainerResponse()
+                }
             }
-
-            metadata.state = .running
-            metadata.startedAt = Date()
-            metadata.exitedAt = nil
-            try metadataStore.upsertContainer(metadata)
-            return Runtime_V1_StartContainerResponse()
         }
     }
 
@@ -620,37 +744,76 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StopContainerResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.stopContainer.rawValue) {
-            var metadata = try containerMetadata(
-                id: request.containerID,
-                operation: "StopContainer"
-            )
-            let options = try makeCRIShimStopOptions(request)
-            if metadata.state == .exited {
-                return Runtime_V1_StopContainerResponse()
-            }
-            guard metadata.state == .running else {
-                throw CRIShimError.invalidArgument(
-                    "StopContainer requires a running container, got \(metadata.state.rawValue)"
+            try await withContainerLifecycleLock(id: request.containerID) {
+                let initialMetadata = try containerMetadata(
+                    id: request.containerID,
+                    operation: "StopContainer"
                 )
-            }
+                return try await withSandboxLifecycleLock(id: initialMetadata.sandboxID) {
+                    let metadata = try containerMetadata(
+                        id: request.containerID,
+                        operation: "StopContainer"
+                    )
+                    let options = try makeCRIShimStopOptions(request)
+                    if metadata.state == .exited {
+                        return Runtime_V1_StopContainerResponse()
+                    }
+                    guard metadata.state == .running else {
+                        throw CRIShimError.invalidArgument(
+                            "StopContainer requires a running container, got \(metadata.state.rawValue)"
+                        )
+                    }
 
-            do {
-                try await runtimeManager.stopWorkload(
-                    sandboxID: metadata.sandboxID,
-                    workloadID: metadata.id,
-                    options: options
-                )
-            } catch {
-                guard await waitForStoppedWorkload(metadata: metadata, stopOptions: options) else {
-                    throw error
+                    var stopError: (any Error)?
+                    do {
+                        try await runtimeManager.stopWorkload(
+                            sandboxID: metadata.sandboxID,
+                            workloadID: metadata.id,
+                            options: options
+                        )
+                    } catch {
+                        stopError = error
+                    }
+
+                    guard
+                        let observation = await waitForStoppedWorkload(
+                            metadata: metadata,
+                            stopOptions: options
+                        )
+                    else {
+                        if let stopError {
+                            throw stopError
+                        }
+                        throw CRIShimError.internalError(
+                            "workload did not reach a terminal state after StopContainer"
+                        )
+                    }
+
+                    let observedAt = Date()
+                    guard
+                        let updated = try metadataStore.updateContainer(
+                            id: metadata.id,
+                            expectedLifecycleVersion: metadata.lifecycleVersion,
+                            { current in
+                                switch observation {
+                                case .snapshot(let snapshot):
+                                    current = current.applying(workloadSnapshot: snapshot)
+                                case .missing:
+                                    current.recordUnknownExit(at: observedAt)
+                                }
+                            })
+                    else {
+                        throw CRIShimMetadataStoreError.notFound(kind: .container, id: metadata.id)
+                    }
+                    guard updated.state == .exited || updated.state == .removed else {
+                        throw CRIShimError.internalError(
+                            "workload terminal state could not be persisted after StopContainer"
+                        )
+                    }
+                    await logManager.stop(containerID: metadata.id, removeState: false)
+                    return Runtime_V1_StopContainerResponse()
                 }
             }
-
-            metadata.state = .exited
-            metadata.exitedAt = Date()
-            try metadataStore.upsertContainer(metadata)
-            await logManager.stop(containerID: metadata.id, removeState: false)
-            return Runtime_V1_StopContainerResponse()
         }
     }
 
@@ -659,33 +822,46 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemoveContainerResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.removeContainer.rawValue) {
-            let storedMetadata = try containerMetadata(
-                id: request.containerID,
-                operation: "RemoveContainer"
-            )
-            guard let reconciled = try await reconciledContainerMetadata(storedMetadata) else {
-                throw CRIShimMetadataStoreError.notFound(kind: .container, id: storedMetadata.id)
-            }
-            let metadata = reconciled.metadata
-            guard metadata.state != .running else {
-                throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
-            }
-
-            if let sandbox = try metadataStore.sandbox(id: metadata.sandboxID),
-                sandbox.state == .ready || sandbox.state == .running
-            {
-                do {
-                    try await runtimeManager.removeWorkload(
-                        sandboxID: metadata.sandboxID,
-                        workloadID: metadata.id
+            try await withContainerLifecycleLock(id: request.containerID) {
+                let initialMetadata = try containerMetadata(
+                    id: request.containerID,
+                    operation: "RemoveContainer"
+                )
+                return try await withSandboxLifecycleLock(id: initialMetadata.sandboxID) {
+                    let storedMetadata = try containerMetadata(
+                        id: request.containerID,
+                        operation: "RemoveContainer"
                     )
-                } catch {
-                    try throwUnlessNotFound(error)
+                    guard
+                        let reconciled = try await reconciledContainerMetadataLocked(
+                            storedMetadata,
+                            includeRuntimeDetailsForExitedContainer: false
+                        )
+                    else {
+                        throw CRIShimMetadataStoreError.notFound(kind: .container, id: storedMetadata.id)
+                    }
+                    let metadata = reconciled.metadata
+                    guard metadata.state != .running else {
+                        throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
+                    }
+
+                    if let sandbox = try metadataStore.sandbox(id: metadata.sandboxID),
+                        sandbox.state == .ready || sandbox.state == .running
+                    {
+                        do {
+                            try await runtimeManager.removeWorkload(
+                                sandboxID: metadata.sandboxID,
+                                workloadID: metadata.id
+                            )
+                        } catch {
+                            try throwUnlessNotFound(error)
+                        }
+                    }
+                    await logManager.stop(containerID: metadata.id, removeState: true)
+                    try metadataStore.deleteContainer(id: metadata.id)
+                    return Runtime_V1_RemoveContainerResponse()
                 }
             }
-            await logManager.stop(containerID: metadata.id, removeState: true)
-            try metadataStore.deleteContainer(id: metadata.id)
-            return Runtime_V1_RemoveContainerResponse()
         }
     }
 
@@ -806,35 +982,41 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         _ metadata: CRIShimContainerMetadata,
         includeRuntimeDetailsForExitedContainer: Bool = false
     ) async throws -> (metadata: CRIShimContainerMetadata, workloadSnapshot: WorkloadSnapshot?)? {
+        try await withContainerLifecycleLock(id: metadata.id) {
+            try await withSandboxLifecycleLock(id: metadata.sandboxID) {
+                guard let current = try metadataStore.container(id: metadata.id) else {
+                    return nil
+                }
+                return try await reconciledContainerMetadataLocked(
+                    current,
+                    includeRuntimeDetailsForExitedContainer: includeRuntimeDetailsForExitedContainer
+                )
+            }
+        }
+    }
+
+    private func reconciledContainerMetadataLocked(
+        _ metadata: CRIShimContainerMetadata,
+        includeRuntimeDetailsForExitedContainer: Bool
+    ) async throws -> (metadata: CRIShimContainerMetadata, workloadSnapshot: WorkloadSnapshot?)? {
         if !includeRuntimeDetailsForExitedContainer,
             metadata.state == .exited || metadata.state == .removed
         {
             return (metadata, nil)
         }
 
-        let workloadSnapshot: WorkloadSnapshot?
-        do {
-            workloadSnapshot = try await runtimeManager.inspectWorkload(
-                sandboxID: metadata.sandboxID,
-                workloadID: metadata.id
-            )
-        } catch {
-            guard isNotFound(error) else {
-                throw error
-            }
-            workloadSnapshot = nil
-        }
-
-        let missingWorkloadExitDate = Date()
+        let observation = try await confirmedWorkloadObservation(for: metadata)
+        let observedAt = Date()
         guard
             let reconciledMetadata = try metadataStore.updateContainer(
                 id: metadata.id,
+                expectedLifecycleVersion: metadata.lifecycleVersion,
                 { currentMetadata in
-                    if let workloadSnapshot {
+                    switch observation {
+                    case .snapshot(let workloadSnapshot):
                         currentMetadata = currentMetadata.applying(workloadSnapshot: workloadSnapshot)
-                    } else if currentMetadata.state == .created || currentMetadata.state == .running {
-                        currentMetadata.state = .exited
-                        currentMetadata.exitedAt = currentMetadata.exitedAt ?? missingWorkloadExitDate
+                    case .missing:
+                        currentMetadata.recordUnknownExit(at: observedAt)
                     }
                 })
         else {
@@ -844,39 +1026,166 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         if metadata.state == .running, reconciledMetadata.state == .exited {
             await logManager.stop(containerID: metadata.id, removeState: false)
         }
+        let workloadSnapshot: WorkloadSnapshot?
+        switch observation {
+        case .snapshot(let snapshot):
+            workloadSnapshot = snapshot
+        case .missing:
+            workloadSnapshot = nil
+        }
         return (reconciledMetadata, workloadSnapshot)
+    }
+
+    private func confirmedWorkloadObservation(
+        for metadata: CRIShimContainerMetadata,
+        confirmSuccessfulTerminal: Bool = false
+    ) async throws -> CRIShimWorkloadObservation {
+        let requiresConfirmation = metadata.state == .created || metadata.state == .running
+        let attempts = requiresConfirmation ? criShimLifecycleConfirmationAttempts : 1
+        var inconclusiveSnapshot: WorkloadSnapshot?
+        var successfulTerminalSnapshot: WorkloadSnapshot?
+        var consecutiveSuccessfulTerminalObservations = 0
+
+        for attempt in 0..<attempts {
+            do {
+                let snapshot = try await runtimeManager.inspectWorkload(
+                    sandboxID: metadata.sandboxID,
+                    workloadID: metadata.id
+                )
+                switch snapshot.status {
+                case .running, .stopping:
+                    return .snapshot(snapshot)
+                case .stopped:
+                    if hasCompleteRuntimeExit(snapshot) {
+                        guard confirmSuccessfulTerminal, snapshot.exitCode == 0 else {
+                            return .snapshot(snapshot)
+                        }
+                        successfulTerminalSnapshot = snapshot
+                        consecutiveSuccessfulTerminalObservations += 1
+                        if consecutiveSuccessfulTerminalObservations >= criShimLifecycleConfirmationAttempts {
+                            return .snapshot(snapshot)
+                        }
+                    } else {
+                        successfulTerminalSnapshot = nil
+                        consecutiveSuccessfulTerminalObservations = 0
+                        inconclusiveSnapshot = snapshot
+                    }
+                case .unknown:
+                    successfulTerminalSnapshot = nil
+                    consecutiveSuccessfulTerminalObservations = 0
+                    inconclusiveSnapshot = snapshot
+                }
+            } catch {
+                successfulTerminalSnapshot = nil
+                consecutiveSuccessfulTerminalObservations = 0
+                guard isNotFound(error) else {
+                    throw error
+                }
+            }
+
+            if attempt < attempts - 1 {
+                try await Task.sleep(for: criShimLifecycleConfirmationInterval)
+            }
+        }
+
+        if let successfulTerminalSnapshot {
+            return .snapshot(successfulTerminalSnapshot)
+        }
+        if let inconclusiveSnapshot {
+            return .snapshot(inconclusiveSnapshot)
+        }
+        return .missing
     }
 
     private func waitForStoppedWorkload(
         metadata: CRIShimContainerMetadata,
         stopOptions: ContainerStopOptions
-    ) async -> Bool {
+    ) async -> CRIShimStoppedWorkloadObservation? {
         let confirmationSeconds = max(30, Int(stopOptions.timeoutInSeconds) + 5)
         let attempts = confirmationSeconds * 10
+        var consecutiveMissingObservations = 0
+        var consecutiveMissingSandboxObservations = 0
+        var consecutiveStoppedSandboxObservations = 0
+        var incompleteStoppedSnapshot: WorkloadSnapshot?
+        var consecutiveIncompleteStoppedObservations = 0
+        var successfulStoppedSnapshot: WorkloadSnapshot?
+        var consecutiveSuccessfulStoppedObservations = 0
+        let confirmSuccessfulTerminal = stopOptions.signal == String(SIGKILL)
         for attempt in 0..<attempts {
-            if await workloadIsStoppedOrMissing(metadata: metadata) {
-                return true
+            do {
+                let snapshot = try await runtimeManager.inspectWorkload(
+                    sandboxID: metadata.sandboxID,
+                    workloadID: metadata.id
+                )
+                consecutiveMissingObservations = 0
+                if snapshot.status == .stopped {
+                    if hasCompleteRuntimeExit(snapshot) {
+                        guard confirmSuccessfulTerminal, snapshot.exitCode == 0 else {
+                            return .snapshot(snapshot)
+                        }
+                        successfulStoppedSnapshot = snapshot
+                        consecutiveSuccessfulStoppedObservations += 1
+                        if consecutiveSuccessfulStoppedObservations >= criShimLifecycleConfirmationAttempts {
+                            return .snapshot(snapshot)
+                        }
+                    } else {
+                        successfulStoppedSnapshot = nil
+                        consecutiveSuccessfulStoppedObservations = 0
+                        incompleteStoppedSnapshot = snapshot
+                        consecutiveIncompleteStoppedObservations += 1
+                        if consecutiveIncompleteStoppedObservations >= criShimLifecycleConfirmationAttempts {
+                            return .snapshot(snapshot)
+                        }
+                    }
+                } else {
+                    successfulStoppedSnapshot = nil
+                    consecutiveSuccessfulStoppedObservations = 0
+                    incompleteStoppedSnapshot = nil
+                    consecutiveIncompleteStoppedObservations = 0
+                }
+            } catch {
+                successfulStoppedSnapshot = nil
+                consecutiveSuccessfulStoppedObservations = 0
+                if isNotFound(error) {
+                    consecutiveMissingObservations += 1
+                } else {
+                    consecutiveMissingObservations = 0
+                }
             }
-            if await sandboxIsStoppedOrMissing(id: metadata.sandboxID) {
-                return true
+
+            do {
+                let sandboxSnapshot = try await runtimeManager.inspectSandbox(id: metadata.sandboxID)
+                consecutiveMissingSandboxObservations = 0
+                if sandboxSnapshot.status == .stopped {
+                    consecutiveStoppedSandboxObservations += 1
+                } else {
+                    consecutiveStoppedSandboxObservations = 0
+                }
+            } catch {
+                consecutiveStoppedSandboxObservations = 0
+                if isNotFound(error) {
+                    consecutiveMissingSandboxObservations += 1
+                } else {
+                    consecutiveMissingSandboxObservations = 0
+                }
+            }
+            if consecutiveMissingObservations >= criShimLifecycleConfirmationAttempts
+                || consecutiveMissingSandboxObservations >= criShimLifecycleConfirmationAttempts
+                || consecutiveStoppedSandboxObservations >= criShimLifecycleConfirmationAttempts
+            {
+                if let successfulStoppedSnapshot {
+                    return .snapshot(successfulStoppedSnapshot)
+                }
+                return incompleteStoppedSnapshot.map(CRIShimStoppedWorkloadObservation.snapshot) ?? .missing
             }
             if attempt < attempts - 1 {
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
-        return false
-    }
-
-    private func workloadIsStoppedOrMissing(metadata: CRIShimContainerMetadata) async -> Bool {
-        do {
-            let snapshot = try await runtimeManager.inspectWorkload(
-                sandboxID: metadata.sandboxID,
-                workloadID: metadata.id
-            )
-            return snapshot.status == .stopped
-        } catch {
-            return isNotFound(error)
+        if let successfulStoppedSnapshot {
+            return .snapshot(successfulStoppedSnapshot)
         }
+        return incompleteStoppedSnapshot.map(CRIShimStoppedWorkloadObservation.snapshot)
     }
 
     private func waitForStoppedSandbox(
@@ -885,9 +1194,23 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async -> Bool {
         let confirmationSeconds = max(30, Int(stopOptions.timeoutInSeconds) + 5)
         let attempts = confirmationSeconds * 10
+        var consecutiveMissingObservations = 0
         for attempt in 0..<attempts {
-            if await sandboxIsStoppedOrMissing(id: metadata.id) {
-                return true
+            do {
+                let snapshot = try await runtimeManager.inspectSandbox(id: metadata.id)
+                consecutiveMissingObservations = 0
+                if snapshot.status == .stopped {
+                    return true
+                }
+            } catch {
+                if isNotFound(error) {
+                    consecutiveMissingObservations += 1
+                    if consecutiveMissingObservations >= criShimLifecycleConfirmationAttempts {
+                        return true
+                    }
+                } else {
+                    consecutiveMissingObservations = 0
+                }
             }
             if attempt < attempts - 1 {
                 try? await Task.sleep(for: .milliseconds(100))
@@ -896,16 +1219,96 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         return false
     }
 
-    private func sandboxIsStoppedOrMissing(id: String) async -> Bool {
-        do {
-            return try await runtimeManager.inspectSandbox(id: id).status == .stopped
-        } catch {
-            return isNotFound(error)
+    private func reconciledSandboxObservationLocked(
+        for metadata: CRIShimSandboxMetadata,
+        hasActiveContainers: Bool
+    ) async throws -> (metadata: CRIShimSandboxMetadata, snapshot: SandboxSnapshot?)? {
+        switch try await confirmedSandboxObservation(for: metadata) {
+        case .snapshot(let snapshot):
+            var observed = metadata.applying(sandboxSnapshot: snapshot)
+            if hasActiveContainers,
+                snapshot.status != .running,
+                snapshot.failureReason != .networkInvalidated
+            {
+                observed.state = metadata.state
+            }
+            return (observed, snapshot)
+        case .missing:
+            guard !hasActiveContainers else {
+                return (metadata, nil)
+            }
+            let observedAt = Date()
+            guard
+                let updated = try metadataStore.updateSandbox(
+                    id: metadata.id,
+                    { current in
+                        if current.state != .stopped, current.state != .released {
+                            current.state = .stopped
+                            current.updatedAt = observedAt
+                        }
+                    })
+            else {
+                return nil
+            }
+            return (updated, nil)
         }
     }
 
-    private func sandboxSnapshot(for metadata: CRIShimSandboxMetadata) async -> SandboxSnapshot? {
-        try? await runtimeManager.inspectSandbox(id: metadata.id)
+    private func confirmedSandboxObservation(
+        for metadata: CRIShimSandboxMetadata
+    ) async throws -> CRIShimSandboxObservation {
+        let requiresConfirmation = metadata.state == .pending || metadata.state == .ready || metadata.state == .running
+        let attempts = requiresConfirmation ? criShimLifecycleConfirmationAttempts : 1
+        var inconclusiveSnapshot: SandboxSnapshot?
+        for attempt in 0..<attempts {
+            do {
+                let snapshot = try await runtimeManager.inspectSandbox(id: metadata.id)
+                if snapshot.status == .running {
+                    return .snapshot(snapshot)
+                }
+                inconclusiveSnapshot = snapshot
+            } catch {
+                guard isNotFound(error) else {
+                    throw error
+                }
+            }
+            if attempt < attempts - 1 {
+                try await Task.sleep(for: criShimLifecycleConfirmationInterval)
+            }
+        }
+        if let inconclusiveSnapshot {
+            return .snapshot(inconclusiveSnapshot)
+        }
+        return .missing
+    }
+
+    private func withContainerLifecycleLock<Result>(
+        id: String,
+        _ operation: () async throws -> Result
+    ) async throws -> Result {
+        try await withLifecycleLock(key: "container:\(id.trimmed)", operation)
+    }
+
+    private func withSandboxLifecycleLock<Result>(
+        id: String,
+        _ operation: () async throws -> Result
+    ) async throws -> Result {
+        try await withLifecycleLock(key: "sandbox:\(id.trimmed)", operation)
+    }
+
+    private func withLifecycleLock<Result>(
+        key: String,
+        _ operation: () async throws -> Result
+    ) async throws -> Result {
+        await lifecycleCoordinator.acquire(key)
+        do {
+            let result = try await operation()
+            await lifecycleCoordinator.release(key)
+            return result
+        } catch {
+            await lifecycleCoordinator.release(key)
+            throw error
+        }
     }
 
     private func sandboxMetadata(id rawID: String, operation: String) throws -> CRIShimSandboxMetadata {
@@ -927,7 +1330,6 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             }
         }
 
-        let now = Date()
         let containers = try metadataStore.listContainers()
             .filter { $0.sandboxID == metadata.id }
         var sandboxStopped = metadata.state == .stopped
@@ -937,27 +1339,61 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 try await runtimeManager.stopSandbox(id: metadata.id, options: criShimPodSandboxStopOptions)
                 sandboxStopped = true
             } catch {
-                if isNotFound(error) {
+                let isStopped = await waitForStoppedSandbox(
+                    metadata: metadata,
+                    stopOptions: criShimPodSandboxStopOptions
+                )
+                if isStopped {
                     sandboxStopped = true
                 } else {
-                    let isStopped = await waitForStoppedSandbox(
-                        metadata: metadata,
-                        stopOptions: criShimPodSandboxStopOptions
-                    )
-                    if isStopped {
-                        sandboxStopped = true
-                    } else {
-                        record(error)
-                    }
+                    record(error)
                 }
             }
         }
 
         if sandboxStopped {
-            for var container in containers where container.state == .created || container.state == .running {
-                container.state = .exited
-                container.exitedAt = now
-                try metadataStore.upsertContainer(container)
+            let stoppedAt = Date()
+            guard
+                let stoppedMetadata = try metadataStore.updateSandbox(
+                    id: metadata.id,
+                    { current in
+                        if current.state != .released {
+                            current.state = .stopped
+                            current.updatedAt = stoppedAt
+                        }
+                    })
+            else {
+                throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: metadata.id)
+            }
+            metadata = stoppedMetadata
+
+            let finalSandboxObservation = try? await confirmedSandboxObservation(for: metadata)
+            let finalSandboxSnapshot: SandboxSnapshot?
+            if case .snapshot(let snapshot) = finalSandboxObservation {
+                finalSandboxSnapshot = snapshot
+            } else {
+                finalSandboxSnapshot = nil
+            }
+            let finalWorkloads = workloadSnapshotsByID(finalSandboxSnapshot)
+            for container in containers where container.state == .created || container.state == .running {
+                var finalWorkloadSnapshot = finalWorkloads[container.id]
+                if finalWorkloadSnapshot.map(hasCompleteRuntimeExit) != true || finalWorkloadSnapshot?.exitCode == 0,
+                    let observation = try? await confirmedWorkloadObservation(
+                        for: container,
+                        confirmSuccessfulTerminal: true
+                    ),
+                    case .snapshot(let snapshot) = observation
+                {
+                    finalWorkloadSnapshot = snapshot
+                }
+
+                _ = try metadataStore.updateContainer(id: container.id) { current in
+                    if let finalWorkloadSnapshot, finalWorkloadSnapshot.status == .stopped {
+                        current = current.applying(workloadSnapshot: finalWorkloadSnapshot)
+                    } else if current.state == .created || current.state == .running {
+                        current.recordUnknownExit(at: stoppedAt)
+                    }
+                }
                 await logManager.stop(containerID: container.id, removeState: false)
             }
         }
@@ -988,11 +1424,21 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             throw firstError
         }
 
-        metadata.networkLeaseID = nil
-        metadata.networkAttachments = []
-        metadata.state = .stopped
-        metadata.updatedAt = now
-        try metadataStore.upsertSandbox(metadata)
+        guard
+            let updatedMetadata = try metadataStore.updateSandbox(
+                id: metadata.id,
+                { current in
+                    current.networkLeaseID = nil
+                    current.networkAttachments = []
+                    if current.state != .released {
+                        current.state = .stopped
+                        current.updatedAt = Date()
+                    }
+                })
+        else {
+            throw CRIShimMetadataStoreError.notFound(kind: .sandbox, id: metadata.id)
+        }
+        metadata = updatedMetadata
     }
 
     private func resolveSandboxImage(reference: String) async throws -> CRIShimImageRecord {
@@ -1046,6 +1492,12 @@ private func workloadSnapshotsByID(_ sandboxSnapshot: SandboxSnapshot?) -> [Stri
     return sandboxSnapshot.workloads.reduce(into: [:]) { snapshots, workload in
         snapshots[workload.id] = workload
     }
+}
+
+private func hasCompleteRuntimeExit(_ snapshot: WorkloadSnapshot) -> Bool {
+    snapshot.status == .stopped
+        && snapshot.exitCode != nil
+        && (snapshot.exitedAt?.timeIntervalSince1970 ?? 0) > 0
 }
 
 private func isNotFound(_ error: any Error) -> Bool {

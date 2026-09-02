@@ -639,6 +639,252 @@ struct MacOSSandboxServiceWaiterTests {
     }
 
     @Test
+    func workloadExitStateSurvivesSessionTeardownAndServiceRecovery() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try baseContainerConfiguration()
+        let workloadID = configuration.id
+        let sessionID = "__workload__persisted-exit"
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(configuration, state: "booted")
+        await service.testingAddSession(
+            id: workloadID,
+            config: configuration.initProcess,
+            started: true,
+            sessionID: sessionID
+        )
+        let waitTask = Task {
+            try await service.testingWaitForProcess(workloadID)
+        }
+        try await waitUntilWaiterRegistered(service: service, id: workloadID)
+
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processExit,
+                processID: sessionID,
+                exitCode: 137
+            )
+        )
+        let waited = try await waitTask.value
+        #expect(waited.exitCode == 137)
+
+        let layout = MacOSSandboxLayout(root: tempRoot)
+        let persisted = try #require(
+            try WorkloadExitStateStore.load(workloadID: workloadID, from: layout)
+        )
+        #expect(persisted.exitCode == 137)
+
+        await service.testingCloseAllSessions()
+
+        let recoveredService = makeSandboxService(root: tempRoot)
+        try await recoveredService.testingPrepareSandbox(configuration, state: "stopped")
+        let recovered = try await recoveredService.testingInspectWorkload(workloadID)
+
+        #expect(recovered.status == .stopped)
+        #expect(recovered.exitCode == 137)
+        #expect(recovered.exitedAt == persisted.exitedAt)
+    }
+
+    @Test
+    func workloadRecoveryWithoutExitStateRemainsCompatible() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try baseContainerConfiguration()
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(configuration, state: "stopped")
+
+        let snapshot = try await service.testingInspectWorkload(configuration.id)
+
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.exitCode == nil)
+        #expect(snapshot.exitedAt == nil)
+    }
+
+    @Test
+    func sessionTeardownWithoutExitEventPersistsFallbackAcrossRecovery() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try baseContainerConfiguration()
+        let workloadID = configuration.id
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(configuration, state: "booted")
+        await service.testingAddSession(
+            id: workloadID,
+            config: configuration.initProcess,
+            started: true,
+            sessionID: "__workload__missing-exit-event"
+        )
+
+        await service.testingCloseAllSessions()
+
+        let recoveredService = makeSandboxService(root: tempRoot)
+        try await recoveredService.testingPrepareSandbox(configuration, state: "stopped")
+        let recovered = try await recoveredService.testingInspectWorkload(workloadID)
+
+        #expect(recovered.status == .stopped)
+        #expect(recovered.exitCode == 255)
+        let exitedAt = try #require(recovered.exitedAt)
+        #expect(exitedAt.timeIntervalSince1970 > 0)
+    }
+
+    @Test
+    func lateExitAfterSessionTeardownReplacesFallbackAcrossRecovery() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try baseContainerConfiguration()
+        let workloadID = configuration.id
+        let sessionID = "__workload__late-exit"
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(configuration, state: "booted")
+        await service.testingAddSession(
+            id: workloadID,
+            config: configuration.initProcess,
+            started: true,
+            sessionID: sessionID
+        )
+
+        await service.testingCloseAllSessions()
+        #expect(await service.testingClosedWorkloadSessionCount() == 1)
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(event: .processExit, processID: sessionID, exitCode: 137)
+        )
+        #expect(await service.testingClosedWorkloadSessionCount() == 0)
+
+        let recoveredService = makeSandboxService(root: tempRoot)
+        try await recoveredService.testingPrepareSandbox(configuration, state: "stopped")
+        let recovered = try await recoveredService.testingInspectWorkload(workloadID)
+
+        #expect(recovered.status == .stopped)
+        #expect(recovered.exitCode == 137)
+        let exitedAt = try #require(recovered.exitedAt)
+        #expect(exitedAt.timeIntervalSince1970 > 0)
+    }
+
+    @Test
+    func newWorkloadSessionRejectsLateExitFromPreviousSession() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try baseContainerConfiguration()
+        let workloadID = configuration.id
+        let previousSessionID = "__workload__previous"
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(configuration, state: "booted")
+        await service.testingAddSession(
+            id: workloadID,
+            config: configuration.initProcess,
+            started: true,
+            sessionID: previousSessionID
+        )
+        await service.testingCloseAllSessions()
+
+        await service.testingAddSession(
+            id: workloadID,
+            config: configuration.initProcess,
+            started: true,
+            sessionID: "__workload__current"
+        )
+        #expect(await service.testingClosedWorkloadSessionCount() == 0)
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(event: .processExit, processID: previousSessionID, exitCode: 137)
+        )
+
+        let current = try await service.testingInspectWorkload(workloadID)
+        #expect(current.status == .running)
+        #expect(current.exitCode == nil)
+        #expect(current.exitedAt == nil)
+    }
+
+    @Test
+    func sidecarTeardownDrainsLateExitEventBeforeClosingSessions() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try baseContainerConfiguration()
+        let workloadID = configuration.id
+        let sessionID = "__workload__pump-late-exit"
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(configuration, state: "booted")
+        await service.testingAddSession(
+            id: workloadID,
+            config: configuration.initProcess,
+            started: true,
+            sessionID: sessionID
+        )
+
+        let socketPath = tempRoot.appendingPathComponent("sidecar.sock").path
+        let server = try RecordingExecSidecarServer(
+            socketPath: socketPath,
+            exitAfterQuitProcessIDs: [sessionID: 137]
+        )
+        defer { server.stop() }
+        server.start()
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        await service.stopAndQuitSidecarIfPresent()
+        await service.testingCloseAllSessions()
+
+        let recoveredService = makeSandboxService(root: tempRoot)
+        try await recoveredService.testingPrepareSandbox(configuration, state: "stopped")
+        let recovered = try await recoveredService.testingInspectWorkload(workloadID)
+        #expect(recovered.exitCode == 137)
+        #expect(await service.testingClosedWorkloadSessionCount() == 0)
+
+        server.stop()
+        try server.waitForCompletion()
+    }
+
+    @Test
+    func startingWorkloadClearsPersistedExitState() async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try baseContainerConfiguration()
+        let workloadID = configuration.id
+        let layout = MacOSSandboxLayout(root: tempRoot)
+        try WorkloadExitStateStore.save(
+            WorkloadExitState(
+                exitCode: 137,
+                exitedAt: Date(timeIntervalSince1970: 1_711_111_111)
+            ),
+            workloadID: workloadID,
+            in: layout
+        )
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(configuration, state: "booted")
+        await service.testingAddSession(
+            id: workloadID,
+            config: configuration.initProcess,
+            sessionID: "__workload__new-incarnation"
+        )
+
+        let restored = try await service.testingInspectWorkload(workloadID)
+        #expect(restored.exitCode == 137)
+
+        let socketPath = tempRoot.appendingPathComponent("sidecar.sock").path
+        let server = try RecordingExecSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start()
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        try await service.testingStartWorkload(workloadID)
+
+        let running = try await service.testingInspectWorkload(workloadID)
+        #expect(running.status == .running)
+        #expect(running.exitCode == nil)
+        #expect(running.exitedAt == nil)
+        #expect(!FileManager.default.fileExists(atPath: layout.workloadExitStateURL(id: workloadID).path))
+
+        server.stop()
+        try server.waitForCompletion()
+    }
+
+    @Test
     func persistingImageBackedWorkloadFillsDefaultGuestPathsAndPendingInjection() async throws {
         let tempRoot = makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -1027,6 +1273,7 @@ private func baseContainerConfiguration() throws -> ContainerConfiguration {
 private final class RecordingExecSidecarServer: @unchecked Sendable {
     private let socketPath: String
     private let exitOnSignalProcessIDs: Set<String>
+    private let exitAfterQuitProcessIDs: [String: Int32]
     private let processStartFailures: [String: MacOSSidecarErrorPayload]
     private let requests = LockedBox<[MacOSSidecarRequest]>([])
     private let errorBox = LockedBox<Error?>(nil)
@@ -1037,10 +1284,12 @@ private final class RecordingExecSidecarServer: @unchecked Sendable {
     init(
         socketPath: String,
         exitOnSignalProcessIDs: Set<String> = [],
+        exitAfterQuitProcessIDs: [String: Int32] = [:],
         processStartFailures: [String: MacOSSidecarErrorPayload] = [:]
     ) throws {
         self.socketPath = socketPath
         self.exitOnSignalProcessIDs = exitOnSignalProcessIDs
+        self.exitAfterQuitProcessIDs = exitAfterQuitProcessIDs
         self.processStartFailures = processStartFailures
         let listeningFD = try makeUnixListener(path: socketPath)
         self.listenFD.withLock { $0 = listeningFD }
@@ -1091,6 +1340,15 @@ private final class RecordingExecSidecarServer: @unchecked Sendable {
                         )
                     } else {
                         try writeResponse(.success(requestID: request.requestID), to: accepted)
+                        if request.method == .sidecarQuit {
+                            Thread.sleep(forTimeInterval: 0.05)
+                            for (processID, exitCode) in exitAfterQuitProcessIDs.sorted(by: { $0.key < $1.key }) {
+                                try writeEvent(
+                                    .init(event: .processExit, processID: processID, exitCode: exitCode),
+                                    to: accepted
+                                )
+                            }
+                        }
                         if request.method == .processSignal,
                             let processID = request.processID,
                             exitOnSignalProcessIDs.contains(processID)

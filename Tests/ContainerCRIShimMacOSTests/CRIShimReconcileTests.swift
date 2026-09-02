@@ -56,6 +56,14 @@ struct CRIShimReconcileTests {
                     createdAt: .init(),
                     updatedAt: .init()
                 ),
+                CRIShimSandboxMetadata(
+                    id: "sandbox-5",
+                    runtimeHandler: "macos",
+                    sandboxImage: "image:v1",
+                    state: .released,
+                    createdAt: .init(),
+                    updatedAt: .init()
+                ),
             ],
             containers: [
                 storedContainer,
@@ -69,6 +77,17 @@ struct CRIShimReconcileTests {
                     createdAt: .init(),
                     startedAt: nil,
                     exitedAt: nil
+                ),
+                CRIShimContainerMetadata(
+                    id: "container-5",
+                    sandboxID: "sandbox-5",
+                    name: "released",
+                    image: "image:v1",
+                    runtimeHandler: "macos",
+                    state: .removed,
+                    createdAt: .init(),
+                    startedAt: nil,
+                    exitedAt: .init()
                 ),
             ]
         )
@@ -113,14 +132,16 @@ struct CRIShimReconcileTests {
         let plan = CRIShimReconciler().makePlan(store: snapshot, inventory: inventory)
 
         #expect(plan.sandboxSteps.contains(where: { $0.id == "sandbox-1" && $0.action == .update }))
-        #expect(plan.sandboxSteps.contains(where: { $0.id == "sandbox-2" && $0.action == .delete }))
+        #expect(!plan.sandboxSteps.contains(where: { $0.id == "sandbox-2" }))
         #expect(plan.sandboxSteps.contains(where: { $0.id == "sandbox-3" && $0.action == .create }))
         #expect(plan.sandboxSteps.contains(where: { $0.id == "sandbox-4" && $0.action == .release }))
+        #expect(plan.sandboxSteps.contains(where: { $0.id == "sandbox-5" && $0.action == .delete }))
 
         #expect(plan.containerSteps.contains(where: { $0.id == "container-1" && $0.action == .update }))
-        #expect(plan.containerSteps.contains(where: { $0.id == "container-2" && $0.action == .delete }))
+        #expect(!plan.containerSteps.contains(where: { $0.id == "container-2" }))
         #expect(plan.containerSteps.contains(where: { $0.id == "container-3" && $0.action == .create }))
         #expect(plan.containerSteps.contains(where: { $0.id == "container-4" && $0.action == .release }))
+        #expect(plan.containerSteps.contains(where: { $0.id == "container-5" && $0.action == .delete }))
     }
 
     @Test
@@ -223,6 +244,9 @@ struct CRIShimReconcileTests {
         #expect(container.state == .exited)
         #expect(container.startedAt == newStart)
         #expect(container.exitedAt == exitedAt)
+        #expect(container.exitCode == 0)
+        #expect(container.reason == "Completed")
+        #expect(container.exitStatusSource == .runtime)
         #expect(
             container.logPath
                 == "/var/log/pods/.container-cri-shim-macos-reconciled/container-1/0.log"
@@ -272,7 +296,7 @@ struct CRIShimReconcileTests {
     }
 
     @Test
-    func executorDeletesMetadataMissingFromRuntimeSnapshots() throws {
+    func executorPreservesActiveMetadataMissingFromSingleRuntimeInventory() throws {
         let storeURL = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: storeURL) }
         let store = try CRIShimMetadataStore(rootURL: storeURL)
@@ -302,9 +326,87 @@ struct CRIShimReconcileTests {
             runtimeSnapshots: CRIShimRuntimeSnapshotInventory()
         )
 
-        #expect(containsStep(result.appliedSteps, kind: .sandbox, action: .delete, id: "sandbox-1"))
-        #expect(try store.sandbox(id: "sandbox-1") == nil)
-        #expect(try store.container(id: "container-1") == nil)
+        #expect(result.plan.isEmpty)
+        #expect(result.appliedSteps.isEmpty)
+        #expect(try store.sandbox(id: "sandbox-1")?.state == .running)
+        #expect(try store.container(id: "container-1")?.state == .running)
+    }
+
+    @Test
+    func executorDoesNotCascadeDeleteActiveContainerFromReleasedSandbox() throws {
+        let storeURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = try CRIShimMetadataStore(rootURL: storeURL)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        try store.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-released",
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                state: .released,
+                createdAt: now,
+                updatedAt: now
+            ))
+        try store.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-running",
+                sandboxID: "sandbox-released",
+                name: "workload",
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos",
+                state: .running,
+                createdAt: now,
+                startedAt: now
+            ))
+
+        let result = try CRIShimReconcileExecutor().execute(
+            metadataStore: store,
+            runtimeSnapshots: CRIShimRuntimeSnapshotInventory(),
+            now: now
+        )
+
+        #expect(containsStep(result.skippedSteps, kind: .sandbox, action: .delete, id: "sandbox-released"))
+        #expect(try store.sandbox(id: "sandbox-released") != nil)
+        #expect(try store.container(id: "container-running")?.state == .running)
+    }
+
+    @Test
+    func executorDeletesOnlyMetadataAlreadyMarkedRemoved() throws {
+        let storeURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = try CRIShimMetadataStore(rootURL: storeURL)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        try store.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-removed",
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                state: .released,
+                createdAt: now,
+                updatedAt: now
+            ))
+        try store.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-removed",
+                sandboxID: "sandbox-removed",
+                name: "workload",
+                image: "example.com/macos/workload:latest",
+                runtimeHandler: "macos",
+                state: .removed,
+                createdAt: now,
+                exitedAt: now
+            ))
+
+        let result = try CRIShimReconcileExecutor().execute(
+            metadataStore: store,
+            runtimeSnapshots: CRIShimRuntimeSnapshotInventory(),
+            now: now
+        )
+
+        #expect(containsStep(result.appliedSteps, kind: .sandbox, action: .delete, id: "sandbox-removed"))
+        #expect(containsStep(result.appliedSteps, kind: .container, action: .delete, id: "container-removed"))
+        #expect(try store.sandbox(id: "sandbox-removed") == nil)
+        #expect(try store.container(id: "container-removed") == nil)
     }
 }
 

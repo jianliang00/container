@@ -164,6 +164,33 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
             state.rawValue,
         ]
     }
+
+    fileprivate func mergingMonotonically(with incoming: CRIShimSandboxMetadata) -> CRIShimSandboxMetadata {
+        guard state.lifecycleRank <= incoming.state.lifecycleRank else {
+            return self
+        }
+        var merged = incoming
+        merged.createdAt = createdAt
+        merged.updatedAt = max(updatedAt, incoming.updatedAt)
+        return merged
+    }
+}
+
+extension CRIShimSandboxMetadata.State {
+    var lifecycleRank: Int {
+        switch self {
+        case .pending:
+            0
+        case .ready:
+            1
+        case .running:
+            2
+        case .stopped:
+            3
+        case .released:
+            4
+        }
+    }
 }
 
 public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiable, Hashable {
@@ -173,6 +200,20 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         case exited
         case removed
     }
+
+    public enum ExitStatusSource: String, Codable, Sendable, Equatable {
+        case unknown
+        case runtime
+    }
+
+    public enum ExitTimeSource: String, Codable, Sendable, Equatable {
+        case observed
+        case runtime
+    }
+
+    static let unknownExitCode: Int32 = 255
+    static let unknownExitReason = "ContainerStatusUnknown"
+    static let unknownExitMessage = "The runtime did not report complete container exit status."
 
     public var id: String
     public var sandboxID: String
@@ -190,6 +231,12 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
     public var createdAt: Date
     public var startedAt: Date?
     public var exitedAt: Date?
+    public var exitCode: Int32?
+    public var reason: String?
+    public var message: String?
+    public var exitStatusSource: ExitStatusSource?
+    public var exitTimeSource: ExitTimeSource?
+    public var lifecycleVersion: UInt64
 
     public init(
         id: String,
@@ -207,7 +254,13 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         state: State,
         createdAt: Date,
         startedAt: Date? = nil,
-        exitedAt: Date? = nil
+        exitedAt: Date? = nil,
+        exitCode: Int32? = nil,
+        reason: String? = nil,
+        message: String? = nil,
+        exitStatusSource: ExitStatusSource? = nil,
+        exitTimeSource: ExitTimeSource? = nil,
+        lifecycleVersion: UInt64 = 0
     ) {
         self.id = id
         self.sandboxID = sandboxID
@@ -225,6 +278,12 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         self.createdAt = createdAt
         self.startedAt = startedAt
         self.exitedAt = exitedAt
+        self.exitCode = exitCode
+        self.reason = reason
+        self.message = message
+        self.exitStatusSource = exitStatusSource
+        self.exitTimeSource = exitTimeSource
+        self.lifecycleVersion = lifecycleVersion
     }
 
     enum CodingKeys: String, CodingKey {
@@ -244,6 +303,12 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         case createdAt
         case startedAt
         case exitedAt
+        case exitCode
+        case reason
+        case message
+        case exitStatusSource
+        case exitTimeSource
+        case lifecycleVersion
     }
 
     public init(from decoder: any Decoder) throws {
@@ -264,8 +329,15 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
             state: try container.decode(State.self, forKey: .state),
             createdAt: try container.decode(Date.self, forKey: .createdAt),
             startedAt: try container.decodeIfPresent(Date.self, forKey: .startedAt),
-            exitedAt: try container.decodeIfPresent(Date.self, forKey: .exitedAt)
+            exitedAt: try container.decodeIfPresent(Date.self, forKey: .exitedAt),
+            exitCode: try container.decodeIfPresent(Int32.self, forKey: .exitCode),
+            reason: try container.decodeIfPresent(String.self, forKey: .reason),
+            message: try container.decodeIfPresent(String.self, forKey: .message),
+            exitStatusSource: try container.decodeIfPresent(ExitStatusSource.self, forKey: .exitStatusSource),
+            exitTimeSource: try container.decodeIfPresent(ExitTimeSource.self, forKey: .exitTimeSource),
+            lifecycleVersion: try container.decodeIfPresent(UInt64.self, forKey: .lifecycleVersion) ?? 0
         )
+        normalizeTerminalStatus(observedAt: exitedAt ?? startedAt ?? createdAt)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -286,6 +358,12 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(startedAt, forKey: .startedAt)
         try container.encodeIfPresent(exitedAt, forKey: .exitedAt)
+        try container.encodeIfPresent(exitCode, forKey: .exitCode)
+        try container.encodeIfPresent(reason, forKey: .reason)
+        try container.encodeIfPresent(message, forKey: .message)
+        try container.encodeIfPresent(exitStatusSource, forKey: .exitStatusSource)
+        try container.encodeIfPresent(exitTimeSource, forKey: .exitTimeSource)
+        try container.encode(lifecycleVersion, forKey: .lifecycleVersion)
     }
 
     public var reconcileFingerprint: String {
@@ -309,8 +387,303 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
             state.rawValue,
             startedAt.map(criShimMetadataDateString(from:)) ?? "",
             exitedAt.map(criShimMetadataDateString(from:)) ?? "",
+            exitCode.map { String($0) } ?? "",
+            reason ?? "",
+            message ?? "",
+            exitStatusSource?.rawValue ?? "",
+            exitTimeSource?.rawValue ?? "",
         ]
     }
+
+    mutating func recordUnknownExit(
+        at observedAt: Date,
+        message: String = CRIShimContainerMetadata.unknownExitMessage
+    ) {
+        state = state == .removed ? .removed : .exited
+        inferExitStatusSourceIfNeeded()
+        recordObservedExitTimeIfNeeded(at: observedAt)
+        guard exitStatusSource != .runtime || exitCode == nil else {
+            return
+        }
+        exitCode = Self.unknownExitCode
+        reason = Self.unknownExitReason
+        self.message = self.message ?? message
+        exitStatusSource = .unknown
+    }
+
+    mutating func recordRuntimeExit(
+        code: Int32,
+        at exitedAt: Date?,
+        observedAt: Date
+    ) {
+        state = state == .removed ? .removed : .exited
+        inferExitStatusSourceIfNeeded()
+
+        let shouldReplaceStatus =
+            exitStatusSource != .runtime
+            || exitCode == nil
+            || (exitCode == 0 && code != 0)
+        let replacesRuntimeStatus = shouldReplaceStatus && exitStatusSource == .runtime
+        if replacesRuntimeStatus, (exitedAt?.timeIntervalSince1970 ?? 0) <= 0 {
+            self.exitedAt = Self.validTerminalTime(nil, fallback: observedAt)
+            exitTimeSource = .observed
+        } else {
+            recordRuntimeExitTimeIfAvailable(
+                exitedAt,
+                observedAt: observedAt,
+                replaceRuntimeTime: replacesRuntimeStatus
+            )
+        }
+        guard shouldReplaceStatus else {
+            return
+        }
+
+        exitCode = code
+        reason = code == 0 ? "Completed" : "Error"
+        message = code == 0 ? "Container exited normally." : "Container exited with code \(code)."
+        exitStatusSource = .runtime
+    }
+
+    func normalizedTerminalStatus(observedAt: Date? = nil) -> CRIShimContainerMetadata {
+        var metadata = self
+        metadata.normalizeTerminalStatus(observedAt: observedAt ?? terminalObservationFallback)
+        return metadata
+    }
+
+    func mergingMonotonically(with incoming: CRIShimContainerMetadata) -> CRIShimContainerMetadata {
+        var current = self
+        current.normalizeTerminalStatus(observedAt: current.terminalObservationFallback)
+        var merged = incoming
+        merged.normalizeTerminalStatus(observedAt: merged.terminalObservationFallback)
+
+        let lifecycleAdvanced = merged.state.lifecycleRank > current.state.lifecycleRank
+        merged.createdAt = current.createdAt
+        if lifecycleAdvanced || (current.state == .running && incoming.state == .running) {
+            merged.startedAt = merged.startedAt ?? current.startedAt
+        } else {
+            merged.startedAt = current.startedAt ?? merged.startedAt
+        }
+        if current.state.lifecycleRank > merged.state.lifecycleRank {
+            merged.state = current.state
+        }
+        merged.mergeExitStatus(from: current)
+        merged.mergeExitTime(from: current)
+
+        let previousVersion = max(current.lifecycleVersion, incoming.lifecycleVersion)
+        merged.lifecycleVersion = previousVersion
+        if merged.lifecycleFields != current.lifecycleFields {
+            merged.lifecycleVersion = previousVersion == .max ? .max : previousVersion + 1
+        }
+        return merged
+    }
+
+    fileprivate mutating func normalizeTerminalStatus(observedAt: Date) {
+        guard state.isTerminal else {
+            return
+        }
+        if exitCode == nil {
+            recordUnknownExit(at: observedAt)
+            return
+        }
+
+        inferExitStatusSourceIfNeeded()
+        recordObservedExitTimeIfNeeded(at: observedAt)
+        if reason == nil {
+            reason = exitStatusSource == .unknown ? Self.unknownExitReason : (exitCode == 0 ? "Completed" : "Error")
+        }
+        if message == nil {
+            if exitStatusSource == .unknown {
+                message = Self.unknownExitMessage
+            } else if let exitCode {
+                message = exitCode == 0 ? "Container exited normally." : "Container exited with code \(exitCode)."
+            }
+        }
+    }
+
+    private mutating func mergeExitStatus(from current: CRIShimContainerMetadata) {
+        guard current.state.isTerminal || state.isTerminal else {
+            return
+        }
+
+        let currentPrecedence = current.exitStatusSource.precedence
+        let incomingPrecedence = exitStatusSource.precedence
+        if currentPrecedence > incomingPrecedence
+            || (currentPrecedence == incomingPrecedence && shouldPreserveExitCode(current.exitCode, over: exitCode))
+        {
+            exitCode = current.exitCode ?? exitCode
+            reason = current.reason ?? reason
+            message = current.message ?? message
+            exitStatusSource = current.exitStatusSource ?? exitStatusSource
+        }
+    }
+
+    private mutating func mergeExitTime(from current: CRIShimContainerMetadata) {
+        guard current.state.isTerminal || state.isTerminal else {
+            return
+        }
+
+        let currentPrecedence = current.exitTimeSource.precedence
+        let incomingPrecedence = exitTimeSource.precedence
+        let runtimeFailureReplacesSuccess =
+            current.exitStatusSource == .runtime
+            && current.exitCode == 0
+            && exitStatusSource == .runtime
+            && exitCode != nil
+            && exitCode != 0
+        if !runtimeFailureReplacesSuccess,
+            currentPrecedence >= incomingPrecedence
+        {
+            exitedAt = current.exitedAt ?? exitedAt
+            exitTimeSource = current.exitTimeSource ?? exitTimeSource
+        }
+    }
+
+    fileprivate var terminalObservationFallback: Date {
+        if let exitedAt, exitedAt.timeIntervalSince1970 > 0 {
+            return exitedAt
+        }
+        if let startedAt, startedAt.timeIntervalSince1970 > 0 {
+            return startedAt
+        }
+        if createdAt.timeIntervalSince1970 > 0 {
+            return createdAt
+        }
+        return Date()
+    }
+
+    private static func validTerminalTime(_ date: Date?, fallback: Date) -> Date {
+        if let date, date.timeIntervalSince1970 > 0 {
+            return date
+        }
+        if fallback.timeIntervalSince1970 > 0 {
+            return fallback
+        }
+        return Date()
+    }
+
+    private mutating func inferExitStatusSourceIfNeeded() {
+        guard exitStatusSource == nil, let exitCode else {
+            return
+        }
+        exitStatusSource = exitCode == Self.unknownExitCode && reason == Self.unknownExitReason ? .unknown : .runtime
+    }
+
+    private mutating func inferExitTimeSourceIfNeeded() {
+        guard exitTimeSource == nil, let exitedAt, exitedAt.timeIntervalSince1970 > 0 else {
+            return
+        }
+        exitTimeSource = exitStatusSource == .runtime ? .runtime : .observed
+    }
+
+    private mutating func recordObservedExitTimeIfNeeded(at observedAt: Date) {
+        inferExitTimeSourceIfNeeded()
+        if let exitedAt, exitedAt.timeIntervalSince1970 > 0 {
+            exitTimeSource = exitTimeSource ?? .observed
+            return
+        }
+        exitedAt = Self.validTerminalTime(nil, fallback: observedAt)
+        exitTimeSource = .observed
+    }
+
+    private mutating func recordRuntimeExitTimeIfAvailable(
+        _ exitedAt: Date?,
+        observedAt: Date,
+        replaceRuntimeTime: Bool
+    ) {
+        inferExitTimeSourceIfNeeded()
+        if let exitedAt, exitedAt.timeIntervalSince1970 > 0 {
+            if !replaceRuntimeTime,
+                exitTimeSource == .runtime,
+                let currentExitedAt = self.exitedAt,
+                currentExitedAt.timeIntervalSince1970 > 0
+            {
+                return
+            }
+            self.exitedAt = exitedAt
+            exitTimeSource = .runtime
+            return
+        }
+        recordObservedExitTimeIfNeeded(at: observedAt)
+    }
+
+    private var lifecycleFields: LifecycleFields {
+        LifecycleFields(
+            state: state,
+            startedAt: startedAt,
+            exitedAt: exitedAt,
+            exitCode: exitCode,
+            reason: reason,
+            message: message,
+            exitStatusSource: exitStatusSource,
+            exitTimeSource: exitTimeSource
+        )
+    }
+
+    private struct LifecycleFields: Equatable {
+        var state: State
+        var startedAt: Date?
+        var exitedAt: Date?
+        var exitCode: Int32?
+        var reason: String?
+        var message: String?
+        var exitStatusSource: ExitStatusSource?
+        var exitTimeSource: ExitTimeSource?
+    }
+}
+
+extension CRIShimContainerMetadata.State {
+    fileprivate var lifecycleRank: Int {
+        switch self {
+        case .created:
+            0
+        case .running:
+            1
+        case .exited:
+            2
+        case .removed:
+            3
+        }
+    }
+
+    fileprivate var isTerminal: Bool {
+        self == .exited || self == .removed
+    }
+}
+
+extension Optional where Wrapped == CRIShimContainerMetadata.ExitStatusSource {
+    fileprivate var precedence: Int {
+        switch self {
+        case .none:
+            0
+        case .some(.unknown):
+            1
+        case .some(.runtime):
+            2
+        }
+    }
+}
+
+extension Optional where Wrapped == CRIShimContainerMetadata.ExitTimeSource {
+    fileprivate var precedence: Int {
+        switch self {
+        case .none:
+            0
+        case .some(.observed):
+            1
+        case .some(.runtime):
+            2
+        }
+    }
+}
+
+private func shouldPreserveExitCode(_ current: Int32?, over incoming: Int32?) -> Bool {
+    guard let current else {
+        return false
+    }
+    guard let incoming else {
+        return true
+    }
+    return current != 0 || incoming == 0
 }
 
 public final class CRIShimMetadataStore {
@@ -379,13 +752,19 @@ public final class CRIShimMetadataStore {
 
     public func upsertSandbox(_ metadata: CRIShimSandboxMetadata) throws {
         try withLock {
-            try sandboxStore.upsert(metadata)
+            let merged = try sandboxStore.retrieve(id: metadata.id)?.mergingMonotonically(with: metadata) ?? metadata
+            try sandboxStore.upsert(merged)
         }
     }
 
     public func upsertContainer(_ metadata: CRIShimContainerMetadata) throws {
         try withLock {
-            try containerStore.upsert(metadata)
+            var incoming = metadata
+            if incoming.state.isTerminal {
+                incoming.normalizeTerminalStatus(observedAt: incoming.terminalObservationFallback)
+            }
+            let merged = try containerStore.retrieve(id: metadata.id)?.mergingMonotonically(with: incoming) ?? incoming
+            try containerStore.upsert(merged)
         }
     }
 
@@ -401,16 +780,39 @@ public final class CRIShimMetadataStore {
         }
     }
 
+    func updateSandbox(
+        id: String,
+        _ update: (inout CRIShimSandboxMetadata) -> Void
+    ) throws -> CRIShimSandboxMetadata? {
+        try withLock {
+            guard var metadata = try sandboxStore.retrieve(id: id) else {
+                return nil
+            }
+            let previousMetadata = metadata
+            update(&metadata)
+            metadata = previousMetadata.mergingMonotonically(with: metadata)
+            if metadata != previousMetadata {
+                try sandboxStore.upsert(metadata)
+            }
+            return metadata
+        }
+    }
+
     func updateContainer(
         id: String,
+        expectedLifecycleVersion: UInt64? = nil,
         _ update: (inout CRIShimContainerMetadata) -> Void
     ) throws -> CRIShimContainerMetadata? {
         try withLock {
             guard var metadata = try containerStore.retrieve(id: id) else {
                 return nil
             }
+            guard expectedLifecycleVersion == nil || expectedLifecycleVersion == metadata.lifecycleVersion else {
+                return metadata
+            }
             let previousMetadata = metadata
             update(&metadata)
+            metadata = previousMetadata.mergingMonotonically(with: metadata)
             if metadata != previousMetadata {
                 try containerStore.upsert(metadata)
             }

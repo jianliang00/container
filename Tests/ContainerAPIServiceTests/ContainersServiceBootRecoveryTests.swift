@@ -114,6 +114,57 @@ struct ContainersServiceBootRecoveryTests {
         #expect(recovered.snapshot.status == .running)
     }
 
+    @Test
+    func persistedWorkloadSnapshotRestoresActualExitState() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try makeContainerConfiguration(id: "persisted-exit")
+        let exitedAt = Date(timeIntervalSince1970: 1_711_111_111)
+        try WorkloadExitStateStore.saveIfAbsent(
+            WorkloadExitState(exitCode: 255, exitedAt: exitedAt.addingTimeInterval(-1)),
+            workloadID: configuration.id,
+            in: MacOSSandboxLayout(root: tempRoot)
+        )
+        try WorkloadExitStateStore.save(
+            WorkloadExitState(exitCode: 137, exitedAt: exitedAt),
+            workloadID: configuration.id,
+            in: MacOSSandboxLayout(root: tempRoot)
+        )
+        try WorkloadExitStateStore.saveIfAbsent(
+            WorkloadExitState(exitCode: 255, exitedAt: exitedAt.addingTimeInterval(1)),
+            workloadID: configuration.id,
+            in: MacOSSandboxLayout(root: tempRoot)
+        )
+
+        let workloads = try ContainersService.loadPersistedWorkloadSnapshots(
+            root: tempRoot,
+            configuration: configuration
+        )
+        let workload = try #require(workloads.first(where: { $0.id == configuration.id }))
+
+        #expect(workload.status == .stopped)
+        #expect(workload.exitCode == 137)
+        #expect(workload.exitedAt == exitedAt)
+    }
+
+    @Test
+    func persistedWorkloadSnapshotWithoutExitStateUsesUnknownExitFacts() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try makeContainerConfiguration(id: "legacy-workload")
+        let workloads = try ContainersService.loadPersistedWorkloadSnapshots(
+            root: tempRoot,
+            configuration: configuration
+        )
+        let workload = try #require(workloads.first(where: { $0.id == configuration.id }))
+
+        #expect(workload.status == .stopped)
+        #expect(workload.exitCode == nil)
+        #expect(workload.exitedAt == nil)
+    }
+
     private func makeContainerState(
         status: RuntimeStatus,
         networks: [ContainerResource.Attachment],

@@ -105,6 +105,10 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
         workloadDirectoryURL(id: id).appendingPathComponent("config.json")
     }
 
+    public func workloadExitStateURL(id: String) -> URL {
+        workloadDirectoryURL(id: id).appendingPathComponent("exit.json")
+    }
+
     public func workloadReadonlyInjectionDirectoryURL(id: String) -> URL {
         workloadDirectoryURL(id: id).appendingPathComponent("readonly")
     }

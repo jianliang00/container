@@ -4288,6 +4288,597 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func concurrentLifecycleQueriesPreserveRunningAfterTransientWorkloadGap() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [runningWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.inspectWorkloadResults["container-1"] = [nil, runningWorkload]
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            async let listed = client.listContainers(Runtime_V1_ListContainersRequest())
+            async let containerStatus = client.containerStatus(
+                Runtime_V1_ContainerStatusRequest.with { $0.containerID = "container-1" }
+            )
+            async let sandboxStatus = client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+
+            let (listResponse, containerResponse, sandboxResponse) = try await (
+                listed,
+                containerStatus,
+                sandboxStatus
+            )
+            #expect(listResponse.containers.map(\.state) == [.containerRunning])
+            #expect(containerResponse.status.state == .containerRunning)
+            #expect(containerResponse.status.finishedAt == 0)
+            #expect(sandboxResponse.status.state == .sandboxReady)
+            #expect(sandboxResponse.containersStatuses.map(\.state) == [.containerRunning])
+        }
+
+        let stored = try #require(try metadataStore.container(id: "container-1"))
+        #expect(stored.state == .running)
+        #expect(stored.exitedAt == nil)
+        #expect(stored.exitCode == nil)
+    }
+
+    @Test
+    func sandboxStatusAndListPreserveReadyAfterTransientRuntimeGap() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let runningSandbox = makeLifecycleSandboxSnapshot(
+            status: .running,
+            workloads: [runningWorkload]
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: ["sandbox-1": runningSandbox],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.inspectSandboxResults["sandbox-1"] = [nil, runningSandbox]
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            let status = try await client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            #expect(status.status.state == .sandboxReady)
+
+            runtimeManager.inspectSandboxResults["sandbox-1"] = [nil, runningSandbox]
+            let listed = try await client.listPodSandbox(Runtime_V1_ListPodSandboxRequest())
+            #expect(listed.items.map(\.state) == [.sandboxReady])
+        }
+
+        #expect(try metadataStore.sandbox(id: "sandbox-1")?.state == .running)
+    }
+
+    @Test
+    func confirmedMissingSandboxPreservesReadyWhenWorkloadIsRunning() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            let status = try await client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            #expect(status.status.state == .sandboxReady)
+            #expect(status.containersStatuses.map(\.state) == [.containerRunning])
+
+            let listed = try await client.listPodSandbox(Runtime_V1_ListPodSandboxRequest())
+            #expect(listed.items.map(\.state) == [.sandboxReady])
+        }
+
+        #expect(try metadataStore.sandbox(id: "sandbox-1")?.state == .running)
+    }
+
+    @Test
+    func stoppedSandboxSnapshotPreservesReadyWithCreatedWorkload() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(
+            at: stateDirectory,
+            containerState: .created
+        )
+        let unknownWorkload = makeLifecycleWorkloadSnapshot(status: .unknown)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .stopped,
+                    workloads: [unknownWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": unknownWorkload]
+        )
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            let status = try await client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            #expect(status.status.state == .sandboxReady)
+            #expect(status.containersStatuses.map(\.state) == [.containerCreated])
+        }
+
+        #expect(try metadataStore.sandbox(id: "sandbox-1")?.state == .running)
+    }
+
+    @Test
+    func confirmedMissingSandboxPersistsStoppedWithoutActiveWorkloads() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        try metadataStore.deleteContainer(id: "container-1")
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            let status = try await client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            #expect(status.status.state == .sandboxNotready)
+
+            let listed = try await client.listPodSandbox(Runtime_V1_ListPodSandboxRequest())
+            #expect(listed.items.map(\.state) == [.sandboxNotready])
+        }
+
+        #expect(try metadataStore.sandbox(id: "sandbox-1")?.state == .stopped)
+    }
+
+    @Test
+    func podSandboxStatusUsesStateAfterConcurrentStop() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [runningWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.stopSandboxWorkloadExitCode = 137
+        runtimeManager.stopSandboxWorkloadExitedAt = Date(timeIntervalSince1970: 1_780_000_321)
+        let workloadGate = RecordingPortForwardCallGate()
+        runtimeManager.inspectWorkloadHook = {
+            await workloadGate.wait()
+        }
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            let statusTask = Task {
+                try await client.podSandboxStatus(
+                    Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+                )
+            }
+            try await waitForCondition(description: "sandbox status workload observation") {
+                workloadGate.hasEntered
+            }
+            let stopTask = Task {
+                try await client.stopPodSandbox(
+                    Runtime_V1_StopPodSandboxRequest.with { $0.podSandboxID = "sandbox-1" }
+                )
+            }
+            try await Task.sleep(for: .milliseconds(50))
+            workloadGate.release()
+
+            _ = try await stopTask.value
+            let status = try await statusTask.value
+            #expect(status.status.state == .sandboxNotready)
+            #expect(status.containersStatuses.map(\.exitCode) == [137])
+        }
+    }
+
+    @Test
+    func confirmedMissingWorkloadUsesExplicitUnknownFailureStatus() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(status: .running)
+            ]
+        )
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            let response = try await client.containerStatus(
+                Runtime_V1_ContainerStatusRequest.with { $0.containerID = "container-1" }
+            )
+            #expect(response.status.state == .containerExited)
+            #expect(response.status.exitCode == CRIShimContainerMetadata.unknownExitCode)
+            #expect(response.status.finishedAt > 0)
+            #expect(response.status.reason == CRIShimContainerMetadata.unknownExitReason)
+            #expect(!response.status.message.isEmpty)
+        }
+    }
+
+    @Test
+    func runtimeExit137SurvivesLaterWorkloadDisappearance() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let exitedAt = Date(timeIntervalSince1970: 1_780_000_123)
+        let stoppedWorkload = makeLifecycleWorkloadSnapshot(
+            status: .stopped,
+            exitCode: 137,
+            exitedAt: exitedAt
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [stoppedWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": stoppedWorkload]
+        )
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            let request = Runtime_V1_ContainerStatusRequest.with { $0.containerID = "container-1" }
+            let first = try await client.containerStatus(request)
+            #expect(first.status.exitCode == 137)
+            #expect(first.status.finishedAt == 1_780_000_123_000_000_000)
+
+            runtimeManager.inspectWorkloadError = CRIShimError.notFound("workload missing from runtime")
+            let second = try await client.containerStatus(request)
+            #expect(second.status.exitCode == 137)
+            #expect(second.status.finishedAt == first.status.finishedAt)
+            #expect(second.status.reason == "Error")
+        }
+    }
+
+    @Test
+    func stopContainerPersistsRuntimeExit137AndTimestamp() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [runningWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.stopWorkloadExitCode = 137
+        runtimeManager.stopWorkloadExitedAt = Date(timeIntervalSince1970: 1_780_000_456)
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            _ = try await client.stopContainer(
+                Runtime_V1_StopContainerRequest.with {
+                    $0.containerID = "container-1"
+                    $0.timeout = 0
+                }
+            )
+            let response = try await client.containerStatus(
+                Runtime_V1_ContainerStatusRequest.with { $0.containerID = "container-1" }
+            )
+            #expect(response.status.state == .containerExited)
+            #expect(response.status.exitCode == 137)
+            #expect(response.status.finishedAt == 1_780_000_456_000_000_000)
+        }
+    }
+
+    @Test
+    func stopContainerPrefersConfirmedFailureOverTransientSuccess() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let transientSuccess = makeLifecycleWorkloadSnapshot(
+            status: .stopped,
+            exitCode: 0,
+            exitedAt: Date(timeIntervalSince1970: 1_780_000_500)
+        )
+        let confirmedFailure = makeLifecycleWorkloadSnapshot(
+            status: .stopped,
+            exitCode: 137,
+            exitedAt: Date(timeIntervalSince1970: 1_780_000_501)
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [runningWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.stopWorkloadChangesState = false
+        runtimeManager.inspectWorkloadResults["container-1"] = [transientSuccess, confirmedFailure]
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            _ = try await client.stopContainer(
+                Runtime_V1_StopContainerRequest.with {
+                    $0.containerID = "container-1"
+                    $0.timeout = 0
+                }
+            )
+            let status = try await client.containerStatus(
+                Runtime_V1_ContainerStatusRequest.with { $0.containerID = "container-1" }
+            )
+            #expect(status.status.exitCode == 137)
+            #expect(status.status.finishedAt == 1_780_000_501_000_000_000)
+        }
+    }
+
+    @Test
+    func stopContainerIgnoresTransientWorkloadAndSandboxNotFound() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let exitedAt = Date(timeIntervalSince1970: 1_780_000_654)
+        let stoppedWorkload = makeLifecycleWorkloadSnapshot(
+            status: .stopped,
+            exitCode: 137,
+            exitedAt: exitedAt
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [runningWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.stopWorkloadChangesState = false
+        runtimeManager.stopWorkloadError = CRIShimError.notFound("workload temporarily unavailable")
+        runtimeManager.inspectWorkloadResults["container-1"] = [nil, runningWorkload, stoppedWorkload]
+        runtimeManager.inspectSandboxResults["sandbox-1"] = [nil]
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            _ = try await client.stopContainer(
+                Runtime_V1_StopContainerRequest.with {
+                    $0.containerID = "container-1"
+                    $0.timeout = 0
+                }
+            )
+            let status = try await client.containerStatus(
+                Runtime_V1_ContainerStatusRequest.with { $0.containerID = "container-1" }
+            )
+            #expect(status.status.exitCode == 137)
+            #expect(status.status.finishedAt == 1_780_000_654_000_000_000)
+        }
+    }
+
+    @Test
+    func stopContainerRetriesIncompleteStoppedSnapshotForRuntimeExitFacts() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let incompleteStoppedWorkload = makeLifecycleWorkloadSnapshot(status: .stopped)
+        let exitedAt = Date(timeIntervalSince1970: 1_780_000_655)
+        let completeStoppedWorkload = makeLifecycleWorkloadSnapshot(
+            status: .stopped,
+            exitCode: 137,
+            exitedAt: exitedAt
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [runningWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.stopWorkloadChangesState = false
+        runtimeManager.inspectWorkloadResults["container-1"] = [
+            incompleteStoppedWorkload,
+            completeStoppedWorkload,
+        ]
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            _ = try await client.stopContainer(
+                Runtime_V1_StopContainerRequest.with {
+                    $0.containerID = "container-1"
+                    $0.timeout = 0
+                }
+            )
+            let status = try await client.containerStatus(
+                Runtime_V1_ContainerStatusRequest.with { $0.containerID = "container-1" }
+            )
+            #expect(status.status.exitCode == 137)
+            #expect(status.status.finishedAt == 1_780_000_655_000_000_000)
+        }
+    }
+
+    @Test
+    func stopPodSandboxPersistsRuntimeExit137AndTimestamp() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [runningWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.stopSandboxWorkloadExitCode = 137
+        runtimeManager.stopSandboxWorkloadExitedAt = Date(timeIntervalSince1970: 1_780_000_789)
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            _ = try await client.stopPodSandbox(
+                Runtime_V1_StopPodSandboxRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            let response = try await client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            #expect(response.status.state == .sandboxNotready)
+            #expect(response.containersStatuses.map(\.exitCode) == [137])
+            #expect(response.containersStatuses.map(\.finishedAt) == [1_780_000_789_000_000_000])
+        }
+    }
+
+    @Test
+    func stopPodSandboxConfirmsTransientNotFoundBeforeStopping() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let runningWorkload = makeLifecycleWorkloadSnapshot(status: .running)
+        let runningSandbox = makeLifecycleSandboxSnapshot(
+            status: .running,
+            workloads: [runningWorkload]
+        )
+        let stoppedSandbox = makeLifecycleSandboxSnapshot(status: .stopped)
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: ["sandbox-1": runningSandbox],
+            workloadSnapshots: ["container-1": runningWorkload]
+        )
+        runtimeManager.stopSandboxChangesState = false
+        runtimeManager.stopSandboxError = CRIShimError.notFound("sandbox temporarily unavailable")
+        runtimeManager.inspectSandboxResults["sandbox-1"] = [nil, runningSandbox, stoppedSandbox]
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            _ = try await client.stopPodSandbox(
+                Runtime_V1_StopPodSandboxRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            let status = try await client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            #expect(status.status.state == .sandboxNotready)
+        }
+
+        #expect(runtimeManager.inspectSandboxCalls.count >= 4)
+    }
+
+    @Test
+    func stopPodSandboxRetriesIncompleteSnapshotForRuntimeExitFacts() async throws {
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let metadataStore = try makeRunningLifecycleMetadataStore(at: stateDirectory)
+        let incompleteStoppedWorkload = makeLifecycleWorkloadSnapshot(status: .stopped)
+        let exitedAt = Date(timeIntervalSince1970: 1_780_000_790)
+        let completeStoppedWorkload = makeLifecycleWorkloadSnapshot(
+            status: .stopped,
+            exitCode: 137,
+            exitedAt: exitedAt
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            sandboxSnapshots: [
+                "sandbox-1": makeLifecycleSandboxSnapshot(
+                    status: .running,
+                    workloads: [incompleteStoppedWorkload]
+                )
+            ],
+            workloadSnapshots: ["container-1": incompleteStoppedWorkload]
+        )
+        runtimeManager.inspectWorkloadResults["container-1"] = [
+            incompleteStoppedWorkload,
+            completeStoppedWorkload,
+        ]
+
+        try await withLifecycleRuntimeClient(
+            stateDirectory: stateDirectory,
+            metadataStore: metadataStore,
+            runtimeManager: runtimeManager
+        ) { client in
+            _ = try await client.stopPodSandbox(
+                Runtime_V1_StopPodSandboxRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            let status = try await client.podSandboxStatus(
+                Runtime_V1_PodSandboxStatusRequest.with { $0.podSandboxID = "sandbox-1" }
+            )
+            #expect(status.containersStatuses.map(\.exitCode) == [137])
+            #expect(status.containersStatuses.map(\.finishedAt) == [1_780_000_790_000_000_000])
+        }
+    }
+
+    @Test
     func runtimeOperationSurfaceHasDeterministicUnsupportedMessages() {
         for operation in CRIRuntimeOperationSurface.all {
             #expect(!CRIRuntimeOperationSurface.unsupportedReason(for: operation).isEmpty)
@@ -4297,6 +4888,121 @@ struct CRIShimRuntimeServerTests {
         #expect(CRIRuntimeOperationSurface.all.contains(.runPodSandbox))
         #expect(CRIRuntimeOperationSurface.all.contains(.stopPodSandbox))
         #expect(CRIRuntimeOperationSurface.all.contains(.portForward))
+    }
+}
+
+private func makeRunningLifecycleMetadataStore(
+    at stateDirectory: URL,
+    containerState: CRIShimContainerMetadata.State = .running
+) throws -> CRIShimMetadataStore {
+    let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectory)
+    try metadataStore.upsertSandbox(
+        CRIShimSandboxMetadata(
+            id: "sandbox-1",
+            runtimeHandler: "macos",
+            sandboxImage: "example.com/macos/sandbox:latest",
+            state: .running,
+            createdAt: Date(timeIntervalSince1970: 1_780_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_780_000_001)
+        )
+    )
+    try metadataStore.upsertContainer(
+        CRIShimContainerMetadata(
+            id: "container-1",
+            sandboxID: "sandbox-1",
+            name: "workload",
+            image: "example.com/macos/workload:latest",
+            runtimeHandler: "macos",
+            state: containerState,
+            createdAt: Date(timeIntervalSince1970: 1_780_000_010),
+            startedAt: containerState == .running ? Date(timeIntervalSince1970: 1_780_000_011) : nil
+        )
+    )
+    return metadataStore
+}
+
+private func makeLifecycleWorkloadSnapshot(
+    status: RuntimeStatus,
+    exitCode: Int32? = nil,
+    exitedAt: Date? = nil
+) -> WorkloadSnapshot {
+    WorkloadSnapshot(
+        configuration: WorkloadConfiguration(
+            id: "container-1",
+            processConfiguration: ProcessConfiguration(
+                executable: "/bin/sh",
+                arguments: ["-c", "while :; do sleep 60; done"],
+                environment: []
+            )
+        ),
+        status: status,
+        exitCode: exitCode,
+        startedDate: Date(timeIntervalSince1970: 1_780_000_011),
+        exitedAt: exitedAt
+    )
+}
+
+private func makeLifecycleSandboxSnapshot(
+    status: RuntimeStatus,
+    workloads: [WorkloadSnapshot] = []
+) -> SandboxSnapshot {
+    SandboxSnapshot(
+        status: status,
+        networks: [],
+        containers: [],
+        workloads: workloads
+    )
+}
+
+private func withLifecycleRuntimeClient<Result>(
+    stateDirectory: URL,
+    metadataStore: CRIShimMetadataStore,
+    runtimeManager: RecordingRuntimeManager,
+    _ operation: (Runtime_V1_RuntimeServiceAsyncClient) async throws -> Result
+) async throws -> Result {
+    let socketPath = "/tmp/cri-shim-lifecycle-\(UUID().uuidString.prefix(8)).sock"
+    var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+    config.stateDirectory = stateDirectory.path
+    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    let server = CRIShimGRPCServer(
+        socketPath: socketPath,
+        serviceProviders: [
+            CRIShimRuntimeServiceProvider(
+                config: config,
+                metadataStore: metadataStore,
+                runtimeManager: runtimeManager,
+                imageManager: RecordingImageManager(images: []),
+                cniManager: RecordingCNIManager()
+            )
+        ],
+        eventLoopGroup: group,
+        startupTasks: []
+    )
+    let serverTask = Task {
+        try await server.run()
+    }
+    defer {
+        serverTask.cancel()
+        _ = try? FileManager.default.removeItem(atPath: socketPath)
+    }
+
+    try await waitForSocket(at: socketPath)
+    let channel = ClientConnection.insecure(group: group)
+        .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+    let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+    do {
+        let result = try await operation(client)
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        await shutdown(group)
+        return result
+    } catch {
+        try? await channel.close().get()
+        await server.stop()
+        _ = try? await serverTask.value
+        await shutdown(group)
+        throw error
     }
 }
 
@@ -5015,11 +5721,18 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var streamExecCalls: [RecordingStreamExecCall] = []
     var stopSandboxChangesState = true
     var stopSandboxError: (any Error)?
+    var stopSandboxWorkloadExitCode: Int32?
+    var stopSandboxWorkloadExitedAt: Date?
     var stopWorkloadChangesState = true
     var stopWorkloadError: (any Error)?
+    var stopWorkloadExitCode: Int32 = 42
+    var stopWorkloadExitedAt: Date?
     var removeWorkloadError: (any Error)?
     var inspectSandboxError: (any Error)?
+    var inspectSandboxResults: [String: [SandboxSnapshot?]] = [:]
     var inspectWorkloadError: (any Error)?
+    var inspectWorkloadResults: [String: [WorkloadSnapshot?]] = [:]
+    var inspectWorkloadHook: (@Sendable () async -> Void)?
     var streamExecWaitsForStartPermission = false
     var streamExecRejectsResizeBeforeStart = false
     var createSandboxHook: (@Sendable () throws -> Void)?
@@ -5135,6 +5848,19 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             snapshot.status = .stopped
             sandboxSnapshots[id] = snapshot
         }
+        if let stopSandboxWorkloadExitCode {
+            let exitedAt = stopSandboxWorkloadExitedAt ?? Date()
+            for workloadID in workloadSnapshots.keys.sorted() {
+                guard var workload = workloadSnapshots[workloadID] else {
+                    continue
+                }
+                workload.status = .stopped
+                workload.exitCode = stopSandboxWorkloadExitCode
+                workload.exitedAt = exitedAt
+                workloadSnapshots[workloadID] = workload
+                replaceWorkloadSnapshot(workload, sandboxID: id)
+            }
+        }
         stopSandboxCalls.append((id: id, options: options))
         if let stopSandboxError {
             throw stopSandboxError
@@ -5159,6 +5885,14 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         id: String
     ) async throws -> SandboxSnapshot {
         inspectSandboxCalls.append(id)
+        if var results = inspectSandboxResults[id], !results.isEmpty {
+            let result = results.removeFirst()
+            inspectSandboxResults[id] = results
+            guard let result else {
+                throw CRIShimError.notFound("sandbox \(id) not found")
+            }
+            return result
+        }
         if let inspectSandboxError {
             throw inspectSandboxError
         }
@@ -5243,9 +5977,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             let snapshot = WorkloadSnapshot(
                 configuration: configuration,
                 status: .stopped,
-                exitCode: 42,
+                exitCode: stopWorkloadExitCode,
                 startedDate: existingSnapshot?.startedDate,
-                exitedAt: Date(),
+                exitedAt: stopWorkloadExitedAt ?? Date(),
                 stdoutLogPath: existingSnapshot?.stdoutLogPath,
                 stderrLogPath: existingSnapshot?.stderrLogPath
             )
@@ -5280,6 +6014,15 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         workloadID: String
     ) async throws -> WorkloadSnapshot {
+        await inspectWorkloadHook?()
+        if var results = inspectWorkloadResults[workloadID], !results.isEmpty {
+            let result = results.removeFirst()
+            inspectWorkloadResults[workloadID] = results
+            guard let result else {
+                throw CRIShimError.notFound("workload \(workloadID) not found")
+            }
+            return result
+        }
         if let inspectWorkloadError {
             throw inspectWorkloadError
         }

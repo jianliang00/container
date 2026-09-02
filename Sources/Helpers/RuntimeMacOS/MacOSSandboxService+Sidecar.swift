@@ -23,6 +23,7 @@ import RuntimeMacOSSidecarShared
 extension MacOSSandboxService {
     private static let sidecarBootstrapStartTimeoutSeconds: TimeInterval = 120.0
     private static let sidecarRestoreTimeoutSeconds: TimeInterval = 600.0
+    private static let sidecarExitEventDrainTimeoutSeconds: TimeInterval = 5.0
 
     func sidecarSocketPath(config: ContainerConfiguration) -> URL {
         if let path = config.macosGuest?.machineState?.controlSocketPath {
@@ -140,24 +141,13 @@ extension MacOSSandboxService {
             log: log,
             bootstrapStartTimeoutSeconds: Self.sidecarBootstrapStartTimeoutSeconds
         )
-        let eventPump = SidecarEventPump()
-        let eventPumpTask = Task { [weak self] in
-            guard let self else { return }
-            for await event in eventPump.stream {
-                await self.handleSidecarEvent(event)
-            }
-        }
-        client.setEventHandler { event in
-            eventPump.yield(event)
-        }
+        installSidecarEventPump(for: client)
         client.setDisconnectHandler { [weak self] error in
             guard let self else { return }
             Task {
                 await self.handleUnexpectedSidecarDisconnect(error)
             }
         }
-        sidecarEventPump = eventPump
-        sidecarEventPumpTask = eventPumpTask
         do {
             let restoreStateID = config.macosGuest?.machineState?.restoreStateID
             log.info(
@@ -184,10 +174,7 @@ extension MacOSSandboxService {
             writeContainerLog(Data(("sidecar vm bootstrap failed [label=\(launchLabel)] error=\(String(describing: error))\n").utf8))
             client.setEventHandler(nil)
             client.setDisconnectHandler(nil)
-            eventPump.finish()
-            eventPumpTask.cancel()
-            sidecarEventPump = nil
-            sidecarEventPumpTask = nil
+            await finishAndDrainSidecarEventPump()
             try? client.quit()
             try? bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
             sidecarHandle = nil
@@ -216,25 +203,69 @@ extension MacOSSandboxService {
         } catch {
             writeContainerLog(Data(("sidecar stopVM failed [label=\(handle.launchLabel)] error=\(String(describing: error))\n").utf8))
         }
+        handle.client.setDisconnectHandler(nil)
         do {
             try handle.client.quit()
         } catch {
             writeContainerLog(Data(("sidecar quit failed [label=\(handle.launchLabel)] error=\(String(describing: error))\n").utf8))
         }
+        await drainPendingSidecarExitEvents()
+        handle.client.setEventHandler(nil)
+        await finishAndDrainSidecarEventPump()
+        sidecarHandle = nil
+        handle.client.closeControlConnection()
         do {
             try bootoutLaunchAgent(fullLabel: "\(sidecarGUIDomain())/\(handle.launchLabel)")
         } catch {
             writeContainerLog(Data(("sidecar bootout failed [label=\(handle.launchLabel)] error=\(String(describing: error))\n").utf8))
         }
-        handle.client.setEventHandler(nil)
-        handle.client.setDisconnectHandler(nil)
-        handle.client.closeControlConnection()
-        sidecarEventPump?.finish()
-        sidecarEventPumpTask?.cancel()
+        releaseMachineStateLeaseIfPresent()
+    }
+
+    func installSidecarEventPump(for client: MacOSSidecarClient) {
+        let eventPump = SidecarEventPump()
+        let eventPumpTask = Task { [weak self] in
+            guard let self else { return }
+            for await event in eventPump.stream {
+                await self.handleSidecarEvent(event)
+            }
+        }
+        client.setEventHandler { event in
+            eventPump.yield(event)
+        }
+        sidecarEventPump = eventPump
+        sidecarEventPumpTask = eventPumpTask
+    }
+
+    private func drainPendingSidecarExitEvents() async {
+        let deadline = Date().addingTimeInterval(Self.sidecarExitEventDrainTimeoutSeconds)
+        while sessions.contains(where: { sessionID, session in
+            isWorkloadSession(sessionID) && session.started && session.exitStatus == nil
+        }) {
+            guard Date() < deadline else {
+                let pending = sessions.compactMap { sessionID, session in
+                    isWorkloadSession(sessionID) && session.started && session.exitStatus == nil
+                        ? session.processID
+                        : nil
+                }.sorted()
+                writeContainerLog(
+                    Data(("sidecar exit event drain timed out pending=\(pending.joined(separator: ","))\n").utf8)
+                )
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func finishAndDrainSidecarEventPump() async {
+        let eventPump = sidecarEventPump
+        let eventPumpTask = sidecarEventPumpTask
         sidecarEventPump = nil
         sidecarEventPumpTask = nil
-        sidecarHandle = nil
-        releaseMachineStateLeaseIfPresent()
+        eventPump?.finish()
+        if let eventPumpTask {
+            await eventPumpTask.value
+        }
     }
 
     func initializeVirtualMachineViaSidecar(

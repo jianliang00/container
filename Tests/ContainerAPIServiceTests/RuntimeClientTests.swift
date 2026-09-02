@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationError
 import Foundation
 import Testing
 
@@ -66,5 +67,35 @@ struct RuntimeClientTests {
     @Test
     func killedInitWaitUsesBoundedTimeout() {
         #expect(ContainersService.killedInitExitWaitTimeout == .seconds(5))
+    }
+
+    @Test
+    func stopPreservesInterruptedTransportError() {
+        let transportError = ContainerizationError(
+            .interrupted,
+            message: "runtime exited before replying"
+        )
+
+        let mapped = RuntimeClient.mapStopError(transportError, id: "test-container")
+
+        #expect(mapped.code == .interrupted)
+        #expect(mapped.message == transportError.message)
+        #expect(mapped.cause == nil)
+    }
+
+    @Test
+    func stopWrapsNonInterruptedErrorWithContainerContext() throws {
+        let transportError = ContainerizationError(
+            .timeout,
+            message: "runtime did not reply"
+        )
+
+        let mapped = RuntimeClient.mapStopError(transportError, id: "test-container")
+
+        #expect(mapped.code == .internalError)
+        #expect(mapped.message == "failed to stop container test-container")
+        let cause = try #require(mapped.cause as? ContainerizationError)
+        #expect(cause.code == .timeout)
+        #expect(cause.message == transportError.message)
     }
 }

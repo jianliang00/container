@@ -473,12 +473,21 @@ extension RuntimeClient {
         do {
             try await self.client.send(request)
         } catch {
-            throw ContainerizationError(
-                .internalError,
-                message: "failed to stop container \(self.id)",
-                cause: error
-            )
+            throw Self.mapStopError(error, id: self.id)
         }
+    }
+
+    static func mapStopError(_ error: any Error, id: String) -> ContainerizationError {
+        // Exit monitoring can terminate the runtime service before its stop reply arrives.
+        // Preserve interruption so the API service can finish its idempotent exit cleanup.
+        if let error = error as? ContainerizationError, error.isCode(.interrupted) {
+            return error
+        }
+        return ContainerizationError(
+            .internalError,
+            message: "failed to stop container \(id)",
+            cause: error
+        )
     }
 
     public func kill(_ id: String, signal: String) async throws {

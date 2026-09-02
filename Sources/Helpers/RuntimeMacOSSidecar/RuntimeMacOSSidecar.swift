@@ -49,10 +49,51 @@ struct RuntimeMacOSSidecar: @preconcurrency ParsableCommand {
     @Option(name: .long, help: "Unix socket path for control RPC")
     var controlSocket: String
 
+    @Option(name: .customLong("lifecycle-barrier-protocol"), help: "Sidecar lifecycle barrier protocol")
+    var lifecycleBarrierProtocol: Int?
+
+    @Option(name: .customLong("lifecycle-barrier-nonce"), help: "Sidecar lifecycle boot nonce")
+    var lifecycleBarrierNonce: String?
+
+    @Option(name: .customLong("lifecycle-persistence-id"), help: "Machine-state persistence identity")
+    var lifecyclePersistenceID: String?
+
+    @Option(name: .customLong("lifecycle-storage-directory"), help: "Machine-state storage directory")
+    var lifecycleStorageDirectory: String?
+
     @MainActor
     mutating func run() throws {
         signal(SIGPIPE, SIG_IGN)
         let log = Self.setupLogger(debug: debug, metadata: ["uuid": "\(uuid)"])
+
+        let lifecycleArguments = [
+            lifecycleBarrierProtocol.map(String.init),
+            lifecycleBarrierNonce,
+            lifecyclePersistenceID,
+            lifecycleStorageDirectory,
+        ]
+        let suppliedLifecycleArgumentCount = lifecycleArguments.compactMap { $0 }.count
+        let lifecycleLock: MacOSSidecarLifecycleLock?
+        if suppliedLifecycleArgumentCount == 0 {
+            lifecycleLock = nil
+        } else {
+            guard suppliedLifecycleArgumentCount == lifecycleArguments.count,
+                let lifecycleBarrierProtocol,
+                let lifecycleBarrierNonce,
+                let lifecyclePersistenceID,
+                let lifecycleStorageDirectory
+            else {
+                throw ValidationError("sidecar lifecycle barrier arguments must be supplied together")
+            }
+            lifecycleLock = try MacOSSidecarLifecycleLock(
+                protocolVersion: lifecycleBarrierProtocol,
+                persistenceID: lifecyclePersistenceID,
+                sandboxID: uuid,
+                bootNonce: lifecycleBarrierNonce,
+                storageDirectory: lifecycleStorageDirectory
+            )
+        }
+        defer { withExtendedLifetime(lifecycleLock) {} }
 
         log.info("starting sidecar", metadata: ["root": "\(root)", "control_socket": "\(controlSocket)"])
         let app = NSApplication.shared

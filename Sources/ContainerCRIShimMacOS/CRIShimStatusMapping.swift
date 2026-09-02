@@ -388,7 +388,10 @@ extension CRIShimSandboxMetadata {
         case .stopping:
             observedState = .stopped
         case .stopped:
-            observedState = metadata.state == .ready ? nil : .stopped
+            let preservesIncompleteMachineStateAdmission =
+                metadata.state == .pending
+                && metadata.annotations[CRIShimMachineStateAnnotation.enabled] == "true"
+            observedState = metadata.state == .ready || preservesIncompleteMachineStateAdmission ? nil : .stopped
         case .unknown:
             observedState = nil
         }

@@ -340,7 +340,7 @@ private func decodeBlockDevices(
     }
 }
 
-private func requireSafeIdentifier(
+func requireSafeIdentifier(
     _ value: String?,
     annotation: String,
     maximumLength: Int
@@ -351,7 +351,7 @@ private func requireSafeIdentifier(
     return try requireSafeIdentifier(value, annotation: annotation, maximumLength: maximumLength)
 }
 
-private func requireSafeIdentifier(
+func requireSafeIdentifier(
     _ value: String,
     annotation: String,
     maximumLength: Int

@@ -19,6 +19,7 @@ import ContainerizationExtras
 import Foundation
 import GRPC
 import NIO
+import RuntimeMacOSSidecarShared
 import Testing
 
 @testable import ContainerCRI
@@ -36,7 +37,11 @@ import Darwin
 struct CRIShimRuntimeServerTests {
     @Test
     func runnerCreatesServerAndRunsItAfterValidation() async throws {
-        let config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        let stateDirectory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+
+        var config = try JSONDecoder().decode(CRIShimConfig.self, from: Data(validConfigJSON.utf8))
+        config.stateDirectory = stateDirectory.path
         let factory = RecordingServerFactory()
         let runner = CRIShimRunner(config: config, serverFactory: factory)
 
@@ -1568,6 +1573,210 @@ struct CRIShimRuntimeServerTests {
     }
 
     @Test
+    func legacyMachineStateCleanupAlwaysRetainsLeaseWithoutProcessAttestation() async throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("cri-ms-legacy-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(root.path, mode_t(0o700)) == 0)
+        let policy = MachineStateConfig(
+            enabled: true,
+            storageRoot: root.appendingPathComponent("states").path,
+            controlSocketRoot: root.appendingPathComponent("control").path,
+            runtimeOwnerUID: UInt32(geteuid()),
+            nbdSocketAllowedRoots: [root.appendingPathComponent("nbd").path],
+            leaseRoot: root.appendingPathComponent("leases").path
+        )
+        try CRIShimMachineStateDirectories.prepare(policy: policy)
+        let lease = CRIShimMachineStateLease(
+            schemaVersion: 1,
+            persistenceID: "legacy-workload",
+            podUID: "legacy-pod",
+            sandboxID: "legacy-sandbox",
+            restoreStateID: nil,
+            restoreStateGeneration: nil,
+            storageGeneration: 1,
+            admissionState: nil,
+            sidecarLifecycleBarrier: nil
+        )
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let cleaner = CRIShimMachineStateRuntimeCleaner(runtimeManager: runtimeManager)
+
+        await #expect(throws: CRIShimError.self) {
+            _ = try await cleaner.cleanupRuntime(binding: lease, policy: policy)
+        }
+        #expect(runtimeManager.stopAndQuitMachineStateSidecarCalls.isEmpty)
+        #expect(runtimeManager.removeSandboxCalls.isEmpty)
+
+        let socketPath = URL(fileURLWithPath: policy.normalizedControlSocketRoot, isDirectory: true)
+            .appendingPathComponent("legacy-workload.sock", isDirectory: false).path
+        let listener = try MachineStateLegacySocketFixture(path: socketPath)
+        defer { listener.closeAndRemove() }
+        runtimeManager.stopAndQuitMachineStateSidecarHook = { _ in
+            listener.closeAndRemove()
+        }
+        do {
+            _ = try await cleaner.cleanupRuntime(binding: lease, policy: policy)
+            Issue.record("legacy sidecar cleanup released without a trusted process attestation")
+        } catch let error as CRIShimError {
+            #expect(error.description.contains("no trusted process-exit proof"))
+        }
+        #expect(runtimeManager.stopAndQuitMachineStateSidecarCalls == [socketPath])
+        #expect(runtimeManager.removeSandboxCalls.last?.id == lease.sandboxID)
+        #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.last?.id == lease.sandboxID)
+    }
+
+    @Test
+    func machineStateOrphanLeaseIsRecoveredAcrossRestartAndPodRecreation() async throws {
+        let socketPath = "/tmp/cri-shim-machine-restart-\(UUID().uuidString.prefix(8)).sock"
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("cri-ms-restart-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(root.path, mode_t(0o700)) == 0)
+        let machineRoot = root.appendingPathComponent("machine", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: machineRoot,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(machineRoot.path, mode_t(0o700)) == 0)
+        let machineStatePolicy = MachineStateConfig(
+            enabled: true,
+            storageRoot: machineRoot.appendingPathComponent("states").path,
+            controlSocketRoot: machineRoot.appendingPathComponent("control").path,
+            runtimeOwnerUID: UInt32(geteuid()),
+            nbdSocketAllowedRoots: [machineRoot.appendingPathComponent("nbd").path],
+            leaseRoot: machineRoot.appendingPathComponent("leases").path
+        )
+        try CRIShimMachineStateDirectories.prepare(policy: machineStatePolicy)
+        let config = CRIShimConfig(
+            runtimeEndpoint: "/var/run/container-cri-macos.sock",
+            stateDirectory: root.appendingPathComponent("metadata").path,
+            streaming: StreamingConfig(address: "127.0.0.1", port: 0),
+            defaults: RuntimeProfile(
+                sandboxImage: "example.com/macos/sandbox:latest",
+                workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
+                network: "default",
+                networkBackend: "virtualizationNAT",
+                guiEnabled: false
+            ),
+            runtimeHandlers: [
+                "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
+            ],
+            networkPolicy: NetworkPolicyConfig(enabled: false),
+            kubeProxy: KubeProxyConfig(enabled: false),
+            machineState: machineStatePolicy
+        )
+        let metadataStore = try CRIShimMetadataStore(
+            rootURL: URL(fileURLWithPath: config.normalizedStateDirectory, isDirectory: true)
+        )
+        let crashedStorageDirectory = machineRoot.appendingPathComponent("states/workload-42", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: crashedStorageDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        #expect(chmod(crashedStorageDirectory.path, mode_t(0o700)) == 0)
+        let crashedReservation = try CRIShimMachineStateLeaseStore.acquire(
+            policy: machineStatePolicy,
+            machineState: .init(
+                persistenceID: "workload-42",
+                storageDirectory: crashedStorageDirectory.path,
+                controlSocketPath: machineRoot.appendingPathComponent("control/workload-42.sock").path,
+                storageGeneration: 1
+            ),
+            podUID: "pod-recreated",
+            proposedSandboxID: "sandbox-from-crashed-admission"
+        )
+        #expect(crashedReservation.created)
+        let crashedLease = try CRIShimMachineStateLeaseStore.markRuntimeCreationStarted(
+            policy: machineStatePolicy,
+            expected: crashedReservation.lease
+        )
+
+        let runtimeManager = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
+        )
+        let imageManager = RecordingImageManager(
+            images: [
+                CRIShimImageRecord(
+                    reference: "example.com/macos/sandbox:latest",
+                    digest: "sha256:sandbox",
+                    size: 16_384,
+                    annotations: ["org.apple.container.macos.image.role": "sandbox"]
+                )
+            ]
+        )
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            serviceProviders: [
+                CRIShimRuntimeServiceProvider(
+                    config: config,
+                    metadataStore: metadataStore,
+                    readinessChecker: StaticReadinessChecker(snapshot: readyReadinessSnapshot()),
+                    runtimeManager: runtimeManager,
+                    imageManager: imageManager,
+                    cniManager: RecordingCNIManager()
+                )
+            ],
+            eventLoopGroup: group,
+            startupTasks: [
+                CRIShimMetadataReconcileStartupTask(
+                    metadataStore: metadataStore,
+                    runtimeManager: runtimeManager,
+                    machineStatePolicy: machineStatePolicy
+                )
+            ]
+        )
+        let serverTask = Task { try await server.run() }
+        defer {
+            serverTask.cancel()
+            _ = try? FileManager.default.removeItem(atPath: socketPath)
+        }
+        try await waitForSocket(at: socketPath)
+
+        let channel = ClientConnection.insecure(group: group)
+            .withConnectedSocket(try connectedUnixSocket(path: socketPath))
+        let client = Runtime_V1_RuntimeServiceAsyncClient(channel: channel)
+        var request = Runtime_V1_RunPodSandboxRequest()
+        request.runtimeHandler = "macos-compat"
+        request.config.metadata.uid = "pod-recreated"
+        request.config.metadata.namespace = "default"
+        request.config.metadata.name = "machine-state"
+        request.config.annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "workload-42",
+            CRIShimMachineStateAnnotation.storageGeneration: "1",
+        ]
+
+        let recovered = try await client.runPodSandbox(request)
+        #expect(recovered.podSandboxID != crashedLease.sandboxID)
+        #expect(runtimeManager.createSandboxCalls.count == 1)
+        #expect(runtimeManager.removeSandboxRuntimeServiceCalls == [crashedLease.sandboxID])
+        #expect(runtimeManager.removeMachineStateSidecarCalls.first?.persistenceID == "workload-42")
+        let activeLease = try #require(try CRIShimMachineStateLeaseStore.list(policy: machineStatePolicy).first)
+        #expect(activeLease.sandboxID == recovered.podSandboxID)
+        #expect(activeLease.podUID == "pod-recreated")
+
+        try await channel.close().get()
+        await server.stop()
+        try await serverTask.value
+        await shutdown(group)
+    }
+
+    @Test
     func machineStateBindingLeaseMakesACKLossRetryIdempotentAndRefusesTakeover() async throws {
         let socketPath = "/tmp/cri-shim-machine-lease-\(UUID().uuidString.prefix(8)).sock"
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
@@ -1700,44 +1909,111 @@ struct CRIShimRuntimeServerTests {
         createContainer.config.metadata.name = "workload"
         createContainer.config.image.image = "example.com/macos/workload:latest"
         let createdContainer = try await client.createContainer(createContainer)
-        try CRIShimMachineStateLeaseStore.release(
-            policy: machineStatePolicy,
-            expected: .init(
-                persistenceID: "workload-42",
-                podUID: "pod-a",
-                sandboxID: first.podSandboxID,
-                restoreStateID: nil,
-                restoreStateGeneration: nil,
-                storageGeneration: 1
+        let firstLease = try #require(
+            try CRIShimMachineStateLeaseStore.load(
+                policy: machineStatePolicy,
+                persistenceID: "workload-42"
             )
         )
+        let configuredBarrier = try #require(
+            runtimeManager.createSandboxCalls.first?.macosGuest?.machineState?.sidecarLifecycleBarrier
+        )
+        #expect(configuredBarrier.bootNonce == firstLease.sidecarLifecycleBarrier?.bootNonce)
+        #expect(throws: CRIShimError.self) {
+            try CRIShimMachineStateLeaseStore.release(policy: machineStatePolicy, expected: firstLease)
+        }
         var startContainer = Runtime_V1_StartContainerRequest()
         startContainer.containerID = createdContainer.containerID
+        runtimeManager.startSandboxHook = {
+            throw CRIShimError.unavailable("injected failure at the sandbox start boundary")
+        }
         do {
             _ = try await client.startContainer(startContainer)
-            Issue.record("sandbox VM started without an active machine-state lease")
+            Issue.record("injected sandbox start boundary failure was ignored")
         } catch let status as GRPCStatus {
             #expect(status.code == .unavailable)
-            #expect((status.message ?? "").contains("no active lease"))
+            #expect((status.message ?? "").contains("injected failure"))
         }
-        #expect(runtimeManager.startSandboxCalls.isEmpty)
+        let launchStartedLease = try #require(
+            try CRIShimMachineStateLeaseStore.load(
+                policy: machineStatePolicy,
+                persistenceID: "workload-42"
+            )
+        )
+        #expect(launchStartedLease.sidecarLifecycleBarrier?.launchMayHaveStarted == true)
+        #expect(runtimeManager.startSandboxCalls.count == 1)
+
+        runtimeManager.startSandboxHook = nil
+        _ = try await client.startContainer(startContainer)
+        try writeTestSidecarLifecycleAttestation(
+            policy: machineStatePolicy,
+            lease: launchStartedLease,
+            state: .active
+        )
 
         var remove = Runtime_V1_RemovePodSandboxRequest()
         remove.podSandboxID = first.podSandboxID
+        runtimeManager.retainedMachineStateSidecars.insert("workload-42")
+        runtimeManager.removeMachineStateSidecarError = CRIShimError.unavailable(
+            "machine-state sidecar cleanup is blocked"
+        )
+        let confirmationsBeforeBlockedCleanup = runtimeManager.confirmSandboxRuntimeRemovedCalls.count
+        do {
+            _ = try await client.removePodSandbox(remove)
+            Issue.record("machine-state lease was released while its sidecar remained present")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .unavailable)
+            #expect((status.message ?? "").contains("sidecar cleanup is blocked"))
+        }
+        #expect(
+            try CRIShimMachineStateLeaseStore.load(
+                policy: machineStatePolicy,
+                persistenceID: "workload-42"
+            ) != nil
+        )
+        #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.count == confirmationsBeforeBlockedCleanup)
+        #expect(runtimeManager.removeMachineStateSidecarCalls.last?.persistenceID == "workload-42")
+
+        runtimeManager.removeMachineStateSidecarError = nil
+        runtimeManager.retainedMachineStateSidecars.remove("workload-42")
         _ = try await client.removePodSandbox(remove)
+        #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.last?.machineStatePersistenceID == "workload-42")
+        #expect(
+            try CRIShimMachineStateLeaseStore.load(
+                policy: machineStatePolicy,
+                persistenceID: "workload-42"
+            ) == nil
+        )
+
         let successor = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 2))
         #expect(successor.podSandboxID != first.podSandboxID)
         #expect(runtimeManager.createSandboxCalls.count == 2)
+        remove.podSandboxID = successor.podSandboxID
+        _ = try await client.removePodSandbox(remove)
 
-        try metadataStore.deleteSandbox(id: successor.podSandboxID)
+        let orphan = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 3))
+        #expect(orphan.podSandboxID != successor.podSandboxID)
+        #expect(runtimeManager.createSandboxCalls.count == 3)
+
+        try metadataStore.deleteSandbox(id: orphan.podSandboxID)
         do {
-            _ = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 2))
+            _ = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 3))
             Issue.record("lease without completed metadata was automatically taken over")
         } catch let status as GRPCStatus {
             #expect(status.code == .unavailable)
             #expect((status.message ?? "").contains("refusing automatic takeover"))
         }
-        #expect(runtimeManager.createSandboxCalls.count == 2)
+        #expect(runtimeManager.createSandboxCalls.count == 3)
+
+        try await runtimeManager.removeSandbox(id: orphan.podSandboxID, force: true)
+        do {
+            _ = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 3))
+            Issue.record("lease was automatically released after runtime creation could have started")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .unavailable)
+            #expect((status.message ?? "").contains("refusing automatic takeover"))
+        }
+        #expect(runtimeManager.createSandboxCalls.count == 3)
 
         try await channel.close().get()
         await server.stop()
@@ -5865,6 +6141,108 @@ private final class RecordingPortForwardCallGate: @unchecked Sendable {
     }
 }
 
+private func writeTestSidecarLifecycleAttestation(
+    policy: MachineStateConfig,
+    lease: CRIShimMachineStateLease,
+    state: MacOSSidecarLifecycleAttestationState
+) throws {
+    guard let barrier = lease.sidecarLifecycleBarrier else {
+        throw CRIShimError.internalError("test lease has no sidecar lifecycle barrier")
+    }
+    let directory = URL(
+        fileURLWithPath: policy.normalizedStorageRoot,
+        isDirectory: true
+    ).appendingPathComponent(lease.persistenceID, isDirectory: true)
+    let directoryFD = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    guard directoryFD >= 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { Darwin.close(directoryFD) }
+    let lockFD = openat(
+        directoryFD,
+        MacOSSidecarLifecycleBarrierProtocol.lockFileName,
+        O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+    )
+    guard lockFD >= 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { Darwin.close(lockFD) }
+    var value = stat()
+    guard fstat(lockFD, &value) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    try MacOSSidecarLifecycleLock.persistAttestation(
+        MacOSSidecarLifecycleAttestation(
+            protocolVersion: barrier.protocolVersion,
+            persistenceID: lease.persistenceID,
+            sandboxID: lease.sandboxID,
+            bootNonce: barrier.bootNonce,
+            processID: getpid(),
+            lockDevice: UInt64(value.st_dev),
+            lockInode: UInt64(value.st_ino),
+            state: state
+        ),
+        directoryFD: directoryFD,
+        ownerUID: geteuid()
+    )
+}
+
+private final class MachineStateLegacySocketFixture: @unchecked Sendable {
+    private let stateLock = NSLock()
+    private var descriptor: Int32
+    private let path: String
+
+    init(path: String) throws {
+        self.path = path
+        descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
+            Darwin.close(descriptor)
+            descriptor = -1
+            throw POSIXError(.ENAMETOOLONG)
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            buffer.initializeMemory(as: UInt8.self, repeating: 0)
+            for (index, byte) in bytes.enumerated() {
+                buffer[index] = byte
+            }
+        }
+        let length = socklen_t(MemoryLayout<sa_family_t>.size + bytes.count + 1)
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(descriptor, $0, length)
+            }
+        }
+        guard bindResult == 0, listen(descriptor, 1) == 0, chmod(path, mode_t(0o600)) == 0 else {
+            let code = errno
+            Darwin.close(descriptor)
+            descriptor = -1
+            _ = unlink(path)
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+    }
+
+    deinit {
+        closeAndRemove()
+    }
+
+    func closeAndRemove() {
+        stateLock.withLock {
+            if descriptor >= 0 {
+                Darwin.close(descriptor)
+                descriptor = -1
+            }
+            _ = unlink(path)
+        }
+    }
+}
+
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
     var execSyncResult: ExecSyncResult
     private let logRootURL: URL
@@ -5889,6 +6267,10 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var startSandboxCalls: [(id: String, presentGUI: Bool)] = []
     private(set) var stopSandboxCalls: [(id: String, options: ContainerStopOptions)] = []
     private(set) var removeSandboxCalls: [(id: String, force: Bool)] = []
+    private(set) var removeSandboxRuntimeServiceCalls: [String] = []
+    private(set) var removeMachineStateSidecarCalls: [(sandboxID: String, persistenceID: String, effectiveUserID: UInt32)] = []
+    private(set) var stopAndQuitMachineStateSidecarCalls: [String] = []
+    private(set) var confirmSandboxRuntimeRemovedCalls: [(id: String, machineStatePersistenceID: String?, machineStateOwnerUID: UInt32?)] = []
     private(set) var removeSandboxPolicyCalls: [String] = []
     private(set) var inspectSandboxCalls: [String] = []
     private(set) var createWorkloadCalls: [RecordingCreateWorkloadCall] = []
@@ -5914,6 +6296,12 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var streamExecWaitsForStartPermission = false
     var streamExecRejectsResizeBeforeStart = false
     var createSandboxHook: (@Sendable () throws -> Void)?
+    var startSandboxHook: (@Sendable () throws -> Void)?
+    var stopAndQuitMachineStateSidecarHook: (@Sendable (String) throws -> Void)?
+    var removeSandboxRuntimeServiceError: (any Error)?
+    var removeMachineStateSidecarError: (any Error)?
+    var stopAndQuitMachineStateSidecarError: (any Error)?
+    var retainedMachineStateSidecars: Set<String> = []
 
     var portForwardConnections: [UInt32: RecordingPortForwardConnection] {
         portForwardStateLock.withLock { recordedPortForwardConnections }
@@ -6016,6 +6404,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             sandboxSnapshots[id] = snapshot
         }
         startSandboxCalls.append((id: id, presentGUI: presentGUI))
+        try startSandboxHook?()
     }
 
     func stopSandbox(
@@ -6051,6 +6440,53 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     ) async throws {
         sandboxSnapshots.removeValue(forKey: id)
         removeSandboxCalls.append((id: id, force: force))
+    }
+
+    func removeSandboxRuntimeService(
+        id: String
+    ) async throws {
+        removeSandboxRuntimeServiceCalls.append(id)
+        if let removeSandboxRuntimeServiceError {
+            throw removeSandboxRuntimeServiceError
+        }
+    }
+
+    func removeMachineStateSidecar(
+        sandboxID: String,
+        persistenceID: String,
+        effectiveUserID: UInt32
+    ) async throws {
+        removeMachineStateSidecarCalls.append((sandboxID, persistenceID, effectiveUserID))
+        if let removeMachineStateSidecarError {
+            throw removeMachineStateSidecarError
+        }
+        retainedMachineStateSidecars.remove(persistenceID)
+    }
+
+    func stopAndQuitMachineStateSidecar(
+        controlSocketPath: String
+    ) async throws {
+        stopAndQuitMachineStateSidecarCalls.append(controlSocketPath)
+        try stopAndQuitMachineStateSidecarHook?(controlSocketPath)
+        if let stopAndQuitMachineStateSidecarError {
+            throw stopAndQuitMachineStateSidecarError
+        }
+    }
+
+    func confirmSandboxRuntimeRemoved(
+        id: String,
+        machineStatePersistenceID: String?,
+        machineStateOwnerUID: UInt32?
+    ) async throws {
+        confirmSandboxRuntimeRemovedCalls.append((id, machineStatePersistenceID, machineStateOwnerUID))
+        guard sandboxSnapshots[id] == nil else {
+            throw CRIShimError.unavailable("sandbox runtime remains present after deletion")
+        }
+        if let machineStatePersistenceID,
+            retainedMachineStateSidecars.contains(machineStatePersistenceID)
+        {
+            throw CRIShimError.unavailable("machine-state sidecar remains present after deletion")
+        }
     }
 
     func removeSandboxPolicy(

@@ -14,14 +14,431 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerKit
 import ContainerResource
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 import Testing
 
 @testable import ContainerCRIShimMacOS
 
 struct CRIShimMachineStateLeaseTests {
+    @Test(arguments: [false, true])
+    func reservedLeaseRecoversCrashBeforeLifecycleBarrierPublication(removeLock: Bool) throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let acquisition = try acquireLease(
+            fixture: fixture,
+            persistenceID: "workload-incomplete-barrier",
+            sandboxID: "sandbox-incomplete-barrier",
+            podUID: "pod-incomplete-barrier",
+            storageGeneration: 2
+        )
+        let storage = URL(
+            fileURLWithPath: fixture.policy.normalizedStorageRoot,
+            isDirectory: true
+        ).appendingPathComponent(acquisition.lease.persistenceID, isDirectory: true)
+        try FileManager.default.removeItem(
+            at: storage.appendingPathComponent(MacOSSidecarLifecycleBarrierProtocol.attestationFileName)
+        )
+        if removeLock {
+            try FileManager.default.removeItem(
+                at: storage.appendingPathComponent(MacOSSidecarLifecycleBarrierProtocol.lockFileName)
+            )
+        }
+
+        try CRIShimMachineStateLeaseStore.release(
+            policy: fixture.policy,
+            expected: acquisition.lease
+        )
+
+        #expect(
+            try CRIShimMachineStateLeaseStore.load(
+                policy: fixture.policy,
+                persistenceID: acquisition.lease.persistenceID
+            ) == nil
+        )
+        #expect(
+            try readLifecycleAttestation(
+                policy: fixture.policy,
+                persistenceID: acquisition.lease.persistenceID
+            ).state == .retired
+        )
+    }
+
+    @Test
+    func lifecycleBarrierRequiresChildProcessExitAndRetiresDelayedStartNonce() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let acquisition = try acquireLease(
+            fixture: fixture,
+            persistenceID: "workload-child",
+            sandboxID: "sandbox-child",
+            podUID: "pod-child",
+            storageGeneration: 8
+        )
+        let started = try CRIShimMachineStateLeaseStore.markRuntimeCreationStarted(
+            policy: fixture.policy,
+            expected: acquisition.lease
+        )
+        let launchStarted = try CRIShimMachineStateLeaseStore.markSidecarLaunchMayHaveStarted(
+            policy: fixture.policy,
+            expected: started
+        )
+        let barrier = try #require(launchStarted.sidecarLifecycleBarrier)
+        let lockPath = URL(
+            fileURLWithPath: fixture.policy.normalizedStorageRoot,
+            isDirectory: true
+        ).appendingPathComponent("workload-child/\(MacOSSidecarLifecycleBarrierProtocol.lockFileName)").path
+
+        let readyPath = fixture.root.appendingPathComponent("child-lock-ready").path
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        child.arguments = [
+            "-c",
+            "import fcntl, os, sys, time; f = open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); open(sys.argv[2], 'w').close(); time.sleep(300)",
+            lockPath,
+            readyPath,
+        ]
+        try child.run()
+        defer {
+            if child.isRunning {
+                child.terminate()
+                child.waitUntilExit()
+            }
+        }
+        for _ in 0..<500 where !FileManager.default.fileExists(atPath: readyPath) {
+            usleep(10_000)
+        }
+        guard FileManager.default.fileExists(atPath: readyPath), child.isRunning else {
+            Issue.record("child process failed to acquire the lifecycle lock")
+            return
+        }
+
+        try writeLifecycleAttestation(
+            policy: fixture.policy,
+            lease: launchStarted,
+            processID: child.processIdentifier,
+            state: .active
+        )
+        let cleanupLock = try CRIShimMachineStateSidecarLifecycleLock(
+            binding: launchStarted,
+            barrier: barrier,
+            policy: fixture.policy,
+            expectedOwnerUID: geteuid()
+        )
+        #expect(throws: CRIShimError.self) {
+            try cleanupLock.retireAndAcquireExitProof()
+        }
+
+        child.terminate()
+        child.waitUntilExit()
+        #expect(throws: (any Error).self) {
+            _ = try MacOSSidecarLifecycleLock(
+                protocolVersion: barrier.protocolVersion,
+                persistenceID: launchStarted.persistenceID,
+                sandboxID: launchStarted.sandboxID,
+                bootNonce: barrier.bootNonce,
+                storageDirectory: URL(
+                    fileURLWithPath: fixture.policy.normalizedStorageRoot,
+                    isDirectory: true
+                ).appendingPathComponent(launchStarted.persistenceID, isDirectory: true).path
+            )
+        }
+        #expect(
+            try readLifecycleAttestation(policy: fixture.policy, persistenceID: "workload-child").processID
+                == child.processIdentifier
+        )
+        try cleanupLock.retireAndAcquireExitProof()
+        #expect(try readLifecycleAttestation(policy: fixture.policy, persistenceID: "workload-child").state == .retired)
+
+        #expect(throws: (any Error).self) {
+            _ = try MacOSSidecarLifecycleLock(
+                protocolVersion: barrier.protocolVersion,
+                persistenceID: launchStarted.persistenceID,
+                sandboxID: launchStarted.sandboxID,
+                bootNonce: barrier.bootNonce,
+                storageDirectory: URL(
+                    fileURLWithPath: fixture.policy.normalizedStorageRoot,
+                    isDirectory: true
+                ).appendingPathComponent(launchStarted.persistenceID, isDirectory: true).path
+            )
+        }
+
+        var wrongNonce = barrier
+        wrongNonce.bootNonce = UUID().uuidString.lowercased()
+        #expect(throws: CRIShimError.self) {
+            _ = try CRIShimMachineStateSidecarLifecycleLock(
+                binding: launchStarted,
+                barrier: wrongNonce,
+                policy: fixture.policy,
+                expectedOwnerUID: geteuid()
+            )
+        }
+        withExtendedLifetime(cleanupLock) {}
+    }
+
+    @Test
+    func legacyLeaseSchemaRemainsReadableWithoutLifecycleAttestation() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let legacy = CRIShimMachineStateLease(
+            schemaVersion: 1,
+            persistenceID: "legacy-workload",
+            podUID: "legacy-pod",
+            sandboxID: "legacy-sandbox",
+            restoreStateID: nil,
+            restoreStateGeneration: nil,
+            storageGeneration: 1,
+            admissionState: nil,
+            sidecarLifecycleBarrier: nil
+        )
+        let leaseURL = URL(fileURLWithPath: fixture.policy.normalizedLeaseRoot, isDirectory: true)
+            .appendingPathComponent("legacy-workload.json", isDirectory: false)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(legacy).write(to: leaseURL)
+        #expect(chmod(leaseURL.path, mode_t(0o600)) == 0)
+
+        #expect(
+            try CRIShimMachineStateLeaseStore.load(
+                policy: fixture.policy,
+                persistenceID: legacy.persistenceID
+            ) == legacy
+        )
+    }
+
+    @Test
+    func admissionLockSerializesReconciliationAcrossServiceProcesses() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        do {
+            let first = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                policy: fixture.policy,
+                persistenceID: "workload-locked"
+            )
+            do {
+                _ = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                    policy: fixture.policy,
+                    persistenceID: "workload-locked"
+                )
+                Issue.record("concurrent machine-state admission unexpectedly acquired the lock")
+            } catch let error as CRIShimError {
+                #expect(error.description.contains("another admission in progress"))
+            }
+            withExtendedLifetime(first) {}
+        }
+
+        let successor = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+            policy: fixture.policy,
+            persistenceID: "workload-locked"
+        )
+        withExtendedLifetime(successor) {}
+    }
+
+    @Test
+    func reconciliationReleasesOnlyLeasesWithNoMetadataOrRuntimeEvidence() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let metadataStore = try CRIShimMetadataStore(
+            rootURL: fixture.root.appendingPathComponent("metadata", isDirectory: true)
+        )
+        let orphan = try acquireLease(
+            fixture: fixture,
+            persistenceID: ".workload-orphan",
+            sandboxID: "sandbox-orphan",
+            podUID: "pod-orphan",
+            storageGeneration: 8
+        )
+        let runtimeBacked = try acquireLease(
+            fixture: fixture,
+            persistenceID: "workload-runtime",
+            sandboxID: "sandbox-runtime",
+            podUID: "pod-runtime",
+            storageGeneration: 9
+        )
+        let metadataBacked = try acquireLease(
+            fixture: fixture,
+            persistenceID: "workload-metadata",
+            sandboxID: "sandbox-metadata",
+            podUID: "pod-metadata",
+            storageGeneration: 10
+        )
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: metadataBacked.lease.sandboxID,
+                podUID: metadataBacked.lease.podUID,
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                state: .ready,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+        )
+
+        let result = try CRIShimMachineStateLeaseReconciler().reconcile(
+            policy: fixture.policy,
+            metadataStore: metadataStore,
+            runtimeSnapshots: [try makeRuntimeSandboxSnapshot(id: runtimeBacked.lease.sandboxID)]
+        )
+
+        #expect(result.released == [orphan.lease])
+        #expect(result.retainedForRuntime == [runtimeBacked.lease])
+        #expect(result.retainedForMetadata == [metadataBacked.lease])
+        #expect(result.retainedForUncertainRuntime.isEmpty)
+        #expect(
+            try CRIShimMachineStateLeaseStore.list(policy: fixture.policy)
+                == [metadataBacked.lease, runtimeBacked.lease]
+        )
+    }
+
+    @Test
+    func reconciliationRetainsLeaseWhenRuntimeInventoryContainsUnidentifiedEntry() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let metadataStore = try CRIShimMetadataStore(
+            rootURL: fixture.root.appendingPathComponent("metadata", isDirectory: true)
+        )
+        let lease = try acquireLease(
+            fixture: fixture,
+            persistenceID: "workload-uncertain",
+            sandboxID: "sandbox-uncertain",
+            podUID: "pod-uncertain",
+            storageGeneration: 8
+        )
+        let unidentified = SandboxSnapshot(
+            configuration: nil,
+            status: .unknown,
+            networks: [],
+            containers: [],
+            workloads: []
+        )
+
+        let result = try CRIShimMachineStateLeaseReconciler().reconcile(
+            policy: fixture.policy,
+            metadataStore: metadataStore,
+            runtimeSnapshots: [unidentified]
+        )
+
+        #expect(result.released.isEmpty)
+        #expect(result.retainedForUncertainRuntime == [lease.lease])
+        try CRIShimMachineStateLeaseStore.requireActive(policy: fixture.policy, expected: lease.lease)
+    }
+
+    @Test
+    func reconciliationNeverReleasesLeaseAfterRuntimeCreationCouldHaveStarted() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let metadataStore = try CRIShimMetadataStore(
+            rootURL: fixture.root.appendingPathComponent("metadata", isDirectory: true)
+        )
+        let acquisition = try acquireLease(
+            fixture: fixture,
+            persistenceID: "workload-started",
+            sandboxID: "sandbox-started",
+            podUID: "pod-started",
+            storageGeneration: 8
+        )
+        #expect(acquisition.lease.admissionState == .reserved)
+        let started = try CRIShimMachineStateLeaseStore.markRuntimeCreationStarted(
+            policy: fixture.policy,
+            expected: acquisition.lease
+        )
+        #expect(started.admissionState == .runtimeCreationStarted)
+
+        let result = try CRIShimMachineStateLeaseReconciler().reconcile(
+            policy: fixture.policy,
+            metadataStore: metadataStore,
+            runtimeSnapshots: []
+        )
+
+        #expect(result.released.isEmpty)
+        #expect(result.retainedForUncertainRuntime == [started])
+        #expect(try CRIShimMachineStateLeaseStore.list(policy: fixture.policy) == [started])
+        #expect(throws: CRIShimError.self) {
+            try CRIShimMachineStateLeaseStore.release(
+                policy: fixture.policy,
+                expected: acquisition.lease
+            )
+        }
+    }
+
+    @Test
+    func reconciliationReleasesOnlyAfterRuntimeDeletionIsDurablyConfirmed() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let metadataStore = try CRIShimMetadataStore(
+            rootURL: fixture.root.appendingPathComponent("metadata", isDirectory: true)
+        )
+        let acquisition = try acquireLease(
+            fixture: fixture,
+            persistenceID: "workload-deleted",
+            sandboxID: "sandbox-deleted",
+            podUID: "pod-deleted",
+            storageGeneration: 8
+        )
+        let started = try CRIShimMachineStateLeaseStore.markRuntimeCreationStarted(
+            policy: fixture.policy,
+            expected: acquisition.lease
+        )
+        let barrier = try #require(started.sidecarLifecycleBarrier)
+        let lifecycleLock = try CRIShimMachineStateSidecarLifecycleLock(
+            binding: started,
+            barrier: barrier,
+            policy: fixture.policy,
+            expectedOwnerUID: geteuid()
+        )
+        try lifecycleLock.retireAndAcquireExitProof()
+        let deleted = try CRIShimMachineStateLeaseStore.markRuntimeDeletionConfirmed(
+            policy: fixture.policy,
+            expected: started
+        )
+
+        let result = try CRIShimMachineStateLeaseReconciler().reconcile(
+            policy: fixture.policy,
+            metadataStore: metadataStore,
+            runtimeSnapshots: []
+        )
+
+        #expect(result.released == [deleted])
+        #expect(try CRIShimMachineStateLeaseStore.list(policy: fixture.policy).isEmpty)
+        withExtendedLifetime(lifecycleLock) {}
+    }
+
+    @Test
+    func leaseCoverageRejectsMachineStateMetadataWithoutLease() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let metadataStore = try CRIShimMetadataStore(
+            rootURL: fixture.root.appendingPathComponent("metadata", isDirectory: true)
+        )
+        try metadataStore.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-unleased",
+                podUID: "pod-unleased",
+                runtimeHandler: "macos",
+                sandboxImage: "example.com/macos/sandbox:latest",
+                annotations: [
+                    CRIShimMachineStateAnnotation.enabled: "true",
+                    CRIShimMachineStateAnnotation.persistenceID: "workload-unleased",
+                    CRIShimMachineStateAnnotation.storageGeneration: "8",
+                ],
+                state: .ready,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+        )
+
+        #expect(throws: CRIShimError.self) {
+            try validateMachineStateLeaseCoverage(
+                metadataStore: metadataStore,
+                runtimeSnapshots: [],
+                leases: []
+            )
+        }
+    }
+
     @Test
     func concurrentSameOwnerAcquisitionIsAtomicAndIdempotent() async throws {
         let fixture = try makeFixture()
@@ -172,19 +589,155 @@ struct CRIShimMachineStateLeaseTests {
             leaseRoot: root.appendingPathComponent("leases").path
         )
         try CRIShimMachineStateDirectories.prepare(policy: policy)
+        try prepareStorageDirectory(policy: policy, persistenceID: "workload-42")
         return (root, policy)
     }
 
     private func makeMachineState(
-        storageGeneration: UInt64
+        storageGeneration: UInt64,
+        persistenceID: String = "workload-42"
     ) -> ContainerConfiguration.MacOSGuestOptions.MachineState {
         .init(
-            persistenceID: "workload-42",
-            storageDirectory: "/state/workload-42",
-            controlSocketPath: "/private/control/workload-42.sock",
+            persistenceID: persistenceID,
+            storageDirectory: "/state/\(persistenceID)",
+            controlSocketPath: "/private/control/\(persistenceID).sock",
             restoreStateID: "snapshot-7",
             restoreStateGeneration: 7,
             storageGeneration: storageGeneration
+        )
+    }
+
+    private func acquireLease(
+        fixture: (root: URL, policy: MachineStateConfig),
+        persistenceID: String,
+        sandboxID: String,
+        podUID: String,
+        storageGeneration: UInt64
+    ) throws -> CRIShimMachineStateLeaseAcquisition {
+        try prepareStorageDirectory(policy: fixture.policy, persistenceID: persistenceID)
+        return try CRIShimMachineStateLeaseStore.acquire(
+            policy: fixture.policy,
+            machineState: makeMachineState(
+                storageGeneration: storageGeneration,
+                persistenceID: persistenceID
+            ),
+            podUID: podUID,
+            proposedSandboxID: sandboxID
+        )
+    }
+
+    private func prepareStorageDirectory(
+        policy: MachineStateConfig,
+        persistenceID: String
+    ) throws {
+        let directory = URL(
+            fileURLWithPath: policy.normalizedStorageRoot,
+            isDirectory: true
+        ).appendingPathComponent(persistenceID, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: NSNumber(value: 0o700)]
+            )
+        }
+        guard chmod(directory.path, mode_t(0o700)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private func writeLifecycleAttestation(
+        policy: MachineStateConfig,
+        lease: CRIShimMachineStateLease,
+        processID: Int32,
+        state: MacOSSidecarLifecycleAttestationState
+    ) throws {
+        let barrier = try #require(lease.sidecarLifecycleBarrier)
+        let directory = URL(
+            fileURLWithPath: policy.normalizedStorageRoot,
+            isDirectory: true
+        ).appendingPathComponent(lease.persistenceID, isDirectory: true)
+        let directoryFD = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directoryFD >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { Darwin.close(directoryFD) }
+        let lockFD = openat(
+            directoryFD,
+            MacOSSidecarLifecycleBarrierProtocol.lockFileName,
+            O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard lockFD >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { Darwin.close(lockFD) }
+        var value = stat()
+        guard fstat(lockFD, &value) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        try MacOSSidecarLifecycleLock.persistAttestation(
+            MacOSSidecarLifecycleAttestation(
+                protocolVersion: barrier.protocolVersion,
+                persistenceID: lease.persistenceID,
+                sandboxID: lease.sandboxID,
+                bootNonce: barrier.bootNonce,
+                processID: processID,
+                lockDevice: UInt64(value.st_dev),
+                lockInode: UInt64(value.st_ino),
+                state: state
+            ),
+            directoryFD: directoryFD,
+            ownerUID: geteuid()
+        )
+    }
+
+    private func readLifecycleAttestation(
+        policy: MachineStateConfig,
+        persistenceID: String
+    ) throws -> MacOSSidecarLifecycleAttestation {
+        let directory = URL(
+            fileURLWithPath: policy.normalizedStorageRoot,
+            isDirectory: true
+        ).appendingPathComponent(persistenceID, isDirectory: true)
+        let directoryFD = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directoryFD >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { Darwin.close(directoryFD) }
+        return try MacOSSidecarLifecycleLock.readAttestation(
+            directoryFD: directoryFD,
+            expectedOwnerUID: geteuid()
+        )
+    }
+
+    private func makeRuntimeSandboxSnapshot(id: String) throws -> SandboxSnapshot {
+        let imageJSON = """
+            {
+              "reference": "example.com/macos/sandbox:latest",
+              "descriptor": {
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "digest": "sha256:sandbox",
+                "size": 1
+              }
+            }
+            """
+        let image = try JSONDecoder().decode(ImageDescription.self, from: Data(imageJSON.utf8))
+        let process = ProcessConfiguration(
+            executable: "/usr/bin/true",
+            arguments: [],
+            environment: [],
+            workingDirectory: "/",
+            terminal: false,
+            user: .id(uid: 0, gid: 0)
+        )
+        var configuration = ContainerConfiguration(id: id, image: image, process: process)
+        configuration.runtimeHandler = "container-runtime-macos"
+        return SandboxSnapshot(
+            configuration: SandboxConfiguration(containerConfiguration: configuration),
+            status: .stopped,
+            networks: [],
+            containers: [],
+            workloads: []
         )
     }
 }

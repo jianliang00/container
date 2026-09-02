@@ -296,6 +296,49 @@ struct CRIShimReconcileTests {
     }
 
     @Test
+    func executorPreservesPendingAdmissionRecoveredFromRuntimeConfiguration() throws {
+        let storeURL = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = try CRIShimMetadataStore(rootURL: storeURL)
+        let now = Date(timeIntervalSince1970: 1_700_000_040)
+        let pending = CRIShimSandboxMetadata(
+            id: "sandbox-pending",
+            podUID: "pod-pending",
+            runtimeHandler: "macos",
+            sandboxImage: "example.com/macos/sandbox:latest",
+            annotations: [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "workload-pending",
+                CRIShimMachineStateAnnotation.storageGeneration: "8",
+            ],
+            state: .pending,
+            createdAt: now,
+            updatedAt: now
+        )
+        let sandboxSnapshot = SandboxSnapshot(
+            configuration: try makeSandboxConfiguration(
+                id: pending.id,
+                labels: [CRIShimCoreLabel.sandboxMetadata: try makeCRIShimCoreMetadataLabel(pending)]
+            ),
+            status: .stopped,
+            networks: [],
+            containers: [],
+            workloads: []
+        )
+
+        _ = try CRIShimReconcileExecutor().execute(
+            metadataStore: store,
+            runtimeSnapshots: CRIShimRuntimeSnapshotInventory(sandboxes: [sandboxSnapshot]),
+            now: now
+        )
+
+        let recovered = try #require(try store.sandbox(id: pending.id))
+        #expect(recovered.podUID == pending.podUID)
+        #expect(recovered.annotations == pending.annotations)
+        #expect(recovered.state == .pending)
+    }
+
+    @Test
     func executorPreservesActiveMetadataMissingFromSingleRuntimeInventory() throws {
         let storeURL = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: storeURL) }
@@ -421,7 +464,10 @@ private func containsStep(
     }
 }
 
-private func makeSandboxConfiguration(id: String) throws -> SandboxConfiguration {
+private func makeSandboxConfiguration(
+    id: String,
+    labels: [String: String] = [:]
+) throws -> SandboxConfiguration {
     let imageJSON = """
         {
           "reference": "example.com/macos/sandbox:latest",
@@ -443,6 +489,7 @@ private func makeSandboxConfiguration(id: String) throws -> SandboxConfiguration
     )
     var configuration = ContainerConfiguration(id: id, image: image, process: process)
     configuration.runtimeHandler = "container-runtime-macos"
+    configuration.labels = labels
     return SandboxConfiguration(containerConfiguration: configuration)
 }
 

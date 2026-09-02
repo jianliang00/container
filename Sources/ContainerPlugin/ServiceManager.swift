@@ -125,6 +125,7 @@ public struct ServiceManager {
 
         let output = result.combinedOutput
         if result.status == 3 && output.contains("No such process") {
+            try waitForServiceToDisappear(fullServiceLabel: label)
             return
         }
 
@@ -191,6 +192,20 @@ public struct ServiceManager {
         return result.status == 0
     }
 
+    /// Check launchd registration without treating an arbitrary command failure as absence.
+    /// Use this before releasing ownership or fencing state that depends on the service being gone.
+    public static func isRegisteredStrict(fullServiceLabel label: String) throws -> Bool {
+        let label = try fullServiceLabel(label)
+        let result = try runLaunchctlCommand(args: ["print", label], captureOutput: true)
+        if result.status == 0 {
+            return true
+        }
+        if result.status == 113 && result.combinedOutput.contains("Could not find service") {
+            return false
+        }
+        try throwLaunchctlCommandFailure(args: ["print", label], result: result)
+    }
+
     private static func getLaunchdSessionType() throws -> String {
         let launchctl = Foundation.Process()
         launchctl.executableURL = URL(fileURLWithPath: "/bin/launchctl")
@@ -250,7 +265,7 @@ public struct ServiceManager {
         let deadline = Date().addingTimeInterval(Self.bootoutTimeoutSeconds)
 
         while Date() < deadline {
-            if try !Self.isRegistered(fullServiceLabel: label) {
+            if try !Self.isRegisteredStrict(fullServiceLabel: label) {
                 return
             }
             Thread.sleep(forTimeInterval: Self.bootoutPollIntervalSeconds)

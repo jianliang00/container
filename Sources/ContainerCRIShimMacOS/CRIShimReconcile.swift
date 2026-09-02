@@ -335,23 +335,109 @@ public struct CRIShimMetadataReconcileStartupTask: CRIShimServerStartupTask {
     private let metadataStore: CRIShimMetadataStore
     private let runtimeManager: any CRIShimRuntimeManaging
     private let executor: CRIShimReconcileExecutor
+    private let machineStatePolicy: MachineStateConfig?
+    private let machineStateLeaseReconciler: CRIShimMachineStateLeaseReconciler
 
     public init(
         metadataStore: CRIShimMetadataStore,
         runtimeManager: any CRIShimRuntimeManaging,
-        executor: CRIShimReconcileExecutor = CRIShimReconcileExecutor()
+        executor: CRIShimReconcileExecutor = CRIShimReconcileExecutor(),
+        machineStatePolicy: MachineStateConfig? = nil
     ) {
         self.metadataStore = metadataStore
         self.runtimeManager = runtimeManager
         self.executor = executor
+        self.machineStatePolicy = machineStatePolicy
+        self.machineStateLeaseReconciler = CRIShimMachineStateLeaseReconciler()
     }
 
     public func run() async throws {
-        let snapshots = try await runtimeManager.listSandboxSnapshots()
+        var machineStateLeases: [CRIShimMachineStateLease] = []
+        var admissionLocks: [CRIShimMachineStateAdmissionLock] = []
+        var lockedPersistenceIDs: Set<String> = []
+        if let machineStatePolicy, machineStatePolicy.enabled {
+            machineStateLeases = try CRIShimMachineStateLeaseStore.list(policy: machineStatePolicy)
+            admissionLocks = try machineStateLeases.map {
+                try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                    policy: machineStatePolicy,
+                    persistenceID: $0.persistenceID
+                )
+            }
+            lockedPersistenceIDs = Set(machineStateLeases.map(\.persistenceID))
+            machineStateLeases = try CRIShimMachineStateLeaseStore.list(policy: machineStatePolicy)
+                .filter { lockedPersistenceIDs.contains($0.persistenceID) }
+        }
+        var snapshots = try await runtimeManager.listSandboxSnapshots()
+        if let machineStatePolicy, machineStatePolicy.enabled {
+            let recoveredIncompleteAdmission = try await recoverIncompleteMachineStateAdmissions(
+                policy: machineStatePolicy,
+                leases: machineStateLeases
+            )
+            if recoveredIncompleteAdmission {
+                machineStateLeases = try CRIShimMachineStateLeaseStore.list(policy: machineStatePolicy)
+                    .filter { lockedPersistenceIDs.contains($0.persistenceID) }
+                snapshots = try await runtimeManager.listSandboxSnapshots()
+            }
+            try validateMachineStateLeaseCoverage(
+                metadataStore: metadataStore,
+                runtimeSnapshots: snapshots,
+                leases: machineStateLeases
+            )
+            try machineStateLeaseReconciler.reconcile(
+                policy: machineStatePolicy,
+                metadataStore: metadataStore,
+                runtimeSnapshots: snapshots,
+                leases: machineStateLeases
+            )
+        }
         try executor.execute(
             metadataStore: metadataStore,
             runtimeSnapshots: CRIShimRuntimeSnapshotInventory(sandboxes: snapshots)
         )
+        withExtendedLifetime(admissionLocks) {}
+    }
+
+    private func recoverIncompleteMachineStateAdmissions(
+        policy: MachineStateConfig,
+        leases: [CRIShimMachineStateLease]
+    ) async throws -> Bool {
+        let metadataByID = Dictionary(
+            uniqueKeysWithValues: try metadataStore.listSandboxes().map { ($0.id, $0) }
+        )
+        var recovered = false
+        for lease in leases.sorted(by: { $0.persistenceID < $1.persistenceID }) {
+            let metadata = metadataByID[lease.sandboxID]
+            let shouldRecover: Bool
+            switch lease.admissionState {
+            case .runtimeDeletionConfirmed:
+                shouldRecover = true
+            case .runtimeCreationStarted, nil:
+                shouldRecover = metadata == nil || metadata?.state == .pending || metadata?.state == .released
+            case .reserved:
+                shouldRecover = false
+            }
+            guard shouldRecover else {
+                continue
+            }
+
+            let cleanupConfirmation = try await CRIShimMachineStateRuntimeCleaner(
+                runtimeManager: runtimeManager
+            ).cleanup(lease: lease, policy: policy)
+            for container in try metadataStore.listContainers().filter({ $0.sandboxID == lease.sandboxID }) {
+                try metadataStore.deleteContainer(id: container.id)
+            }
+            if try metadataStore.sandbox(id: lease.sandboxID) != nil {
+                try metadataStore.deleteSandbox(id: lease.sandboxID)
+            }
+            try metadataStore.synchronizeEntityDirectories()
+            try CRIShimMachineStateLeaseStore.release(
+                policy: policy,
+                expected: cleanupConfirmation.lease
+            )
+            withExtendedLifetime(cleanupConfirmation) {}
+            recovered = true
+        }
+        return recovered
     }
 }
 
@@ -526,7 +612,7 @@ private struct CRIShimReconcileExecutionContext {
 }
 
 extension SandboxSnapshot {
-    fileprivate var criShimSandboxID: String? {
+    var criShimSandboxID: String? {
         configuration?.id.trimmed.nonEmpty
             ?? containers.first?.id.trimmed.nonEmpty
     }

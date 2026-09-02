@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #if os(macOS)
+import ContainerResource
 import Foundation
 import Logging
 import Testing
@@ -22,6 +23,55 @@ import Testing
 @testable import container_runtime_macos
 
 struct MacOSSandboxServiceSidecarTests {
+    @Test
+    func machineStateLaunchPlistCarriesExactLifecycleBarrierArguments() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sidecar-plist-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let service = MacOSSandboxService(
+            root: root,
+            connection: nil,
+            log: Logger(label: "MacOSSandboxServiceSidecarTests")
+        )
+        let plistURL = root.appendingPathComponent("sidecar.plist")
+        let nonce = UUID().uuidString.lowercased()
+        let machineState = ContainerConfiguration.MacOSGuestOptions.MachineState(
+            persistenceID: "workload-42",
+            storageDirectory: "/private/tmp/machine-state/workload-42",
+            controlSocketPath: "/private/tmp/machine-state-control/workload-42.sock",
+            storageGeneration: 1,
+            sidecarLifecycleBarrier: .init(protocolVersion: 1, bootNonce: nonce)
+        )
+        try await service.writeSidecarLaunchAgentPlist(
+            plistURL: plistURL,
+            launchLabel: "test.sidecar",
+            sandboxID: "sandbox-42",
+            binaryURL: URL(fileURLWithPath: "/bin/true"),
+            socketURL: URL(fileURLWithPath: machineState.controlSocketPath),
+            stdoutURL: root.appendingPathComponent("stdout.log"),
+            stderrURL: root.appendingPathComponent("stderr.log"),
+            machineState: machineState
+        )
+        let plist = try #require(
+            PropertyListSerialization.propertyList(
+                from: Data(contentsOf: plistURL),
+                format: nil
+            ) as? [String: Any]
+        )
+        let arguments = try #require(plist["ProgramArguments"] as? [String])
+        func value(after flag: String) -> String? {
+            guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else {
+                return nil
+            }
+            return arguments[index + 1]
+        }
+        #expect(value(after: "--lifecycle-barrier-protocol") == "1")
+        #expect(value(after: "--lifecycle-barrier-nonce") == nonce)
+        #expect(value(after: "--lifecycle-persistence-id") == "workload-42")
+        #expect(value(after: "--lifecycle-storage-directory") == "/private/tmp/machine-state/workload-42")
+    }
+
     @Test
     func sidecarLaunchdDomainUsesRootBootstrapDomainForRoot() {
         let service = MacOSSandboxService(

@@ -17,9 +17,11 @@
 import ContainerAPIClient
 import ContainerCRI
 import ContainerKit
+import ContainerPlugin
 import ContainerResource
 import ContainerizationOS
 import Foundation
+import RuntimeMacOSSidecarShared
 
 #if os(Linux)
 import Glibc
@@ -45,6 +47,26 @@ public protocol CRIShimRuntimeManaging: Sendable {
     func removeSandbox(
         id: String,
         force: Bool
+    ) async throws
+
+    func removeSandboxRuntimeService(
+        id: String
+    ) async throws
+
+    func removeMachineStateSidecar(
+        sandboxID: String,
+        persistenceID: String,
+        effectiveUserID: UInt32
+    ) async throws
+
+    func stopAndQuitMachineStateSidecar(
+        controlSocketPath: String
+    ) async throws
+
+    func confirmSandboxRuntimeRemoved(
+        id: String,
+        machineStatePersistenceID: String?,
+        machineStateOwnerUID: UInt32?
     ) async throws
 
     func removeSandboxPolicy(
@@ -189,6 +211,80 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         try await kit.removeSandbox(id: id, force: force)
     }
 
+    public func removeSandboxRuntimeService(
+        id: String
+    ) async throws {
+        let domain = try ServiceManager.getDomainString()
+        let label = "\(domain)/com.apple.container.container-runtime-macos.\(id)"
+        try ServiceManager.deregister(fullServiceLabel: label)
+    }
+
+    public func removeMachineStateSidecar(
+        sandboxID: String,
+        persistenceID: String,
+        effectiveUserID: UInt32
+    ) async throws {
+        _ = try requireSafeIdentifier(
+            persistenceID,
+            annotation: CRIShimMachineStateAnnotation.persistenceID,
+            maximumLength: 64
+        )
+        guard effectiveUserID != UInt32.max else {
+            throw CRIShimError.invalidArgument("machine-state runtime owner uid is invalid")
+        }
+        let sidecarLabel = MacOSSidecarLaunchIdentity.fullLaunchLabel(
+            sandboxID: sandboxID,
+            persistenceID: persistenceID,
+            effectiveUserID: effectiveUserID
+        )
+        try ServiceManager.deregister(fullServiceLabel: sidecarLabel)
+    }
+
+    public func stopAndQuitMachineStateSidecar(
+        controlSocketPath: String
+    ) async throws {
+        let descriptor: Int32
+        do {
+            descriptor = try MacOSSidecarSocketIO.connectUnixSocket(path: controlSocketPath)
+        } catch {
+            throw CRIShimError.unavailable("machine-state sidecar control socket is unavailable")
+        }
+        defer { Darwin.close(descriptor) }
+
+        try sendMachineStateSidecarShutdownRequest(method: .vmStop, descriptor: descriptor)
+        try sendMachineStateSidecarShutdownRequest(method: .sidecarQuit, descriptor: descriptor)
+    }
+
+    public func confirmSandboxRuntimeRemoved(
+        id: String,
+        machineStatePersistenceID: String?,
+        machineStateOwnerUID: UInt32?
+    ) async throws {
+        let domain = try ServiceManager.getDomainString()
+        let label = "\(domain)/com.apple.container.container-runtime-macos.\(id)"
+        guard try !ServiceManager.isRegisteredStrict(fullServiceLabel: label) else {
+            throw CRIShimError.unavailable(
+                "sandbox runtime service remains registered after deletion"
+            )
+        }
+        if let machineStatePersistenceID, let machineStateOwnerUID {
+            let sidecarLabel = MacOSSidecarLaunchIdentity.fullLaunchLabel(
+                sandboxID: id,
+                persistenceID: machineStatePersistenceID,
+                effectiveUserID: machineStateOwnerUID
+            )
+            guard try !ServiceManager.isRegisteredStrict(fullServiceLabel: sidecarLabel) else {
+                throw CRIShimError.unavailable(
+                    "machine-state sidecar service remains registered after deletion"
+                )
+            }
+        } else if machineStatePersistenceID != nil || machineStateOwnerUID != nil {
+            throw CRIShimError.internalError(
+                "machine-state runtime confirmation requires both persistence id and owner uid"
+            )
+        }
+    }
+
     public func removeSandboxPolicy(
         sandboxID: String
     ) async throws {
@@ -281,6 +377,40 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         port: UInt32
     ) async throws -> FileHandle {
         try await kit.streamPortForward(id: sandboxID, port: port)
+    }
+}
+
+private func sendMachineStateSidecarShutdownRequest(
+    method: MacOSSidecarMethod,
+    descriptor: Int32
+) throws {
+    let request = MacOSSidecarRequest(method: method)
+    do {
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(request),
+            fd: descriptor,
+            timeoutMilliseconds: 60_000
+        )
+        let envelope = try MacOSSidecarSocketIO.readJSONFrame(
+            MacOSSidecarEnvelope.self,
+            fd: descriptor,
+            timeoutMilliseconds: 60_000
+        )
+        guard envelope.kind == .response,
+            let response = envelope.response,
+            response.requestID == request.requestID,
+            response.ok
+        else {
+            throw CRIShimError.unavailable(
+                "machine-state sidecar did not acknowledge \(method.rawValue)"
+            )
+        }
+    } catch let error as CRIShimError {
+        throw error
+    } catch {
+        throw CRIShimError.unavailable(
+            "machine-state sidecar did not acknowledge \(method.rawValue)"
+        )
     }
 }
 

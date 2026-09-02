@@ -19,6 +19,7 @@ import ContainerKit
 import ContainerResource
 import ContainerVersion
 import ContainerizationError
+import Darwin
 import Foundation
 import GRPC
 
@@ -276,105 +277,240 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 annotations: request.config.annotations,
                 nodeConfig: config.machineState
             )
-            let leaseAcquisition: CRIShimMachineStateLeaseAcquisition?
-            if let resolved = machineState.machineState {
-                guard let policy = config.machineState else {
-                    throw CRIShimError.internalError("machine-state policy disappeared during admission")
-                }
-                leaseAcquisition = try CRIShimMachineStateLeaseStore.acquire(
-                    policy: policy,
-                    machineState: resolved,
-                    podUID: request.config.metadata.uid,
-                    proposedSandboxID: proposedSandboxID
-                )
-            } else {
-                leaseAcquisition = nil
-            }
-            let sandboxID = leaseAcquisition?.lease.sandboxID ?? proposedSandboxID
-            if let leaseAcquisition, !leaseAcquisition.created {
-                guard let existing = try metadataStore.sandbox(id: sandboxID),
-                    existing.podUID == leaseAcquisition.lease.podUID,
-                    existing.state != .pending,
-                    existing.state != .released
-                else {
-                    throw CRIShimError.unavailable(
-                        "machine-state persistence id \(leaseAcquisition.lease.persistenceID) has a lease without a completed sandbox; refusing automatic takeover"
-                    )
-                }
-                var response = Runtime_V1_RunPodSandboxResponse()
-                response.podSandboxID = sandboxID
-                return response
-            }
-            var sandboxCreated = false
-            var metadataPersisted = false
-            var networkAttachAttempted = false
-
-            do {
-                var metadata = try makeCRIShimSandboxMetadata(
-                    id: sandboxID,
-                    request: request,
-                    handler: handler
-                )
-                let sandboxConfiguration = try makeCRIShimSandboxConfiguration(
-                    id: sandboxID,
+            let provision = {
+                try await self.provisionPodSandbox(
                     request: request,
                     handler: handler,
                     sandboxImage: sandboxImage,
-                    metadata: metadata,
                     networkMTUOverride: networkMTUOverride,
-                    vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled,
-                    vmnetRecoveryStatePath: vmnetRecoveryController.statePath,
-                    vmnetRecoveryRequestPath: vmnetRecoveryController.requestPath,
-                    vmnetRecoveryBootSessionID: vmnetRecoveryController.bootSessionID,
-                    machineStateConfig: config.machineState
+                    machineState: machineState,
+                    proposedSandboxID: proposedSandboxID,
+                    admissionAttemptID: admissionAttemptID
                 )
+            }
+            guard let resolved = machineState.machineState else {
+                return try await provision()
+            }
+            guard let policy = config.machineState else {
+                throw CRIShimError.internalError("machine-state policy disappeared during admission")
+            }
+            return try await withLifecycleLock(key: "machine-state:\(resolved.persistenceID)") {
+                let admissionLock = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                    policy: policy,
+                    persistenceID: resolved.persistenceID
+                )
+                defer { withExtendedLifetime(admissionLock) {} }
+                return try await provision()
+            }
+        }
+    }
+
+    private func provisionPodSandbox(
+        request: Runtime_V1_RunPodSandboxRequest,
+        handler: ResolvedRuntimeHandler,
+        sandboxImage: CRIShimImageRecord,
+        networkMTUOverride: UInt32?,
+        machineState: CRIShimMachineStateMapping,
+        proposedSandboxID: String,
+        admissionAttemptID: UUID
+    ) async throws -> Runtime_V1_RunPodSandboxResponse {
+        var leaseAcquisition: CRIShimMachineStateLeaseAcquisition?
+        if let resolved = machineState.machineState {
+            guard let policy = config.machineState else {
+                throw CRIShimError.internalError("machine-state policy disappeared during admission")
+            }
+            if try CRIShimMachineStateLeaseStore.load(
+                policy: policy,
+                persistenceID: resolved.persistenceID
+            ) == nil {
+                try await validateFreshMachineStateAdmission(resolved, policy: policy)
+            }
+            var acquisition = try CRIShimMachineStateLeaseStore.acquire(
+                policy: policy,
+                machineState: resolved,
+                podUID: request.config.metadata.uid,
+                proposedSandboxID: proposedSandboxID
+            )
+            if !acquisition.created, try metadataStore.sandbox(id: acquisition.lease.sandboxID) == nil {
+                let runtimeSnapshots = try await runtimeManager.listSandboxSnapshots()
+                let reconciliation = try CRIShimMachineStateLeaseReconciler().reconcile(
+                    policy: policy,
+                    metadataStore: metadataStore,
+                    runtimeSnapshots: runtimeSnapshots,
+                    leases: [acquisition.lease]
+                )
+                if reconciliation.released == [acquisition.lease] {
+                    acquisition = try CRIShimMachineStateLeaseStore.acquire(
+                        policy: policy,
+                        machineState: resolved,
+                        podUID: request.config.metadata.uid,
+                        proposedSandboxID: proposedSandboxID
+                    )
+                    guard acquisition.created else {
+                        throw CRIShimError.unavailable(
+                            "machine-state persistence id \(resolved.persistenceID) changed while reconciling an orphan lease"
+                        )
+                    }
+                }
+            }
+            leaseAcquisition = acquisition
+        }
+
+        let sandboxID = leaseAcquisition?.lease.sandboxID ?? proposedSandboxID
+        if let leaseAcquisition, !leaseAcquisition.created {
+            guard let existing = try metadataStore.sandbox(id: sandboxID),
+                existing.podUID == leaseAcquisition.lease.podUID,
+                existing.state != .pending,
+                existing.state != .released
+            else {
+                throw CRIShimError.unavailable(
+                    "machine-state persistence id \(leaseAcquisition.lease.persistenceID) has a lease without a completed sandbox; refusing automatic takeover"
+                )
+            }
+            var response = Runtime_V1_RunPodSandboxResponse()
+            response.podSandboxID = sandboxID
+            return response
+        }
+        var sandboxCreated = false
+        var metadataPersisted = false
+        var networkAttachAttempted = false
+
+        do {
+            var metadata = try makeCRIShimSandboxMetadata(
+                id: sandboxID,
+                request: request,
+                handler: handler
+            )
+            var sandboxConfiguration = try makeCRIShimSandboxConfiguration(
+                id: sandboxID,
+                request: request,
+                handler: handler,
+                sandboxImage: sandboxImage,
+                metadata: metadata,
+                networkMTUOverride: networkMTUOverride,
+                vmnetDisconnectRecovery: config.podNetwork?.vmnetDisconnectRecovery ?? .disabled,
+                vmnetRecoveryStatePath: vmnetRecoveryController.statePath,
+                vmnetRecoveryRequestPath: vmnetRecoveryController.requestPath,
+                vmnetRecoveryBootSessionID: vmnetRecoveryController.bootSessionID,
+                machineStateConfig: config.machineState
+            )
+            if let barrier = leaseAcquisition?.lease.sidecarLifecycleBarrier {
+                guard sandboxConfiguration.macosGuest?.machineState != nil else {
+                    throw CRIShimError.internalError("machine-state lifecycle barrier has no runtime configuration")
+                }
+                sandboxConfiguration.macosGuest?.machineState?.sidecarLifecycleBarrier = .init(
+                    protocolVersion: barrier.protocolVersion,
+                    bootNonce: barrier.bootNonce
+                )
+            }
+            try vmnetRecoveryController.requireAdmission(
+                gate: .beforeSandboxCreate,
+                attemptID: admissionAttemptID
+            )
+            if var acquisition = leaseAcquisition, acquisition.created {
+                guard let policy = config.machineState else {
+                    throw CRIShimError.internalError("machine-state policy disappeared before runtime creation")
+                }
+                acquisition.lease = try CRIShimMachineStateLeaseStore.markRuntimeCreationStarted(
+                    policy: policy,
+                    expected: acquisition.lease
+                )
+                leaseAcquisition = acquisition
+            }
+            try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
+            sandboxCreated = true
+            try metadataStore.upsertSandbox(metadata)
+            metadataPersisted = true
+            if handler.usesPodNetworking {
                 try vmnetRecoveryController.requireAdmission(
-                    gate: .beforeSandboxCreate,
+                    gate: .beforeNetworkAttach,
                     attemptID: admissionAttemptID
                 )
-                try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
-                sandboxCreated = true
-                try metadataStore.upsertSandbox(metadata)
-                metadataPersisted = true
-                if handler.usesPodNetworking {
-                    try vmnetRecoveryController.requireAdmission(
-                        gate: .beforeNetworkAttach,
-                        attemptID: admissionAttemptID
+                networkAttachAttempted = true
+                let network = try await cniManager.add(
+                    sandboxID: sandboxID,
+                    networkName: handler.network,
+                    config: config
+                )
+                metadata.networkLeaseID = network.sandboxURI
+                metadata.networkAttachments = [network.networkName]
+            }
+            metadata.state = .ready
+            metadata.updatedAt = Date()
+            try metadataStore.upsertSandbox(metadata)
+        } catch {
+            let admissionError = error
+            if networkAttachAttempted {
+                try? await cniManager.delete(sandboxID: sandboxID, networkName: handler.network, config: config)
+            }
+            if let leaseAcquisition, leaseAcquisition.created, let policy = config.machineState {
+                switch leaseAcquisition.lease.admissionState {
+                case .runtimeCreationStarted, nil:
+                    let cleanupConfirmation = try await CRIShimMachineStateRuntimeCleaner(
+                        runtimeManager: runtimeManager
+                    ).cleanup(lease: leaseAcquisition.lease, policy: policy)
+                    if metadataPersisted {
+                        try metadataStore.deleteSandbox(id: sandboxID)
+                    }
+                    try CRIShimMachineStateLeaseStore.release(
+                        policy: policy,
+                        expected: cleanupConfirmation.lease
                     )
-                    networkAttachAttempted = true
-                    let network = try await cniManager.add(
-                        sandboxID: sandboxID,
-                        networkName: handler.network,
-                        config: config
+                    withExtendedLifetime(cleanupConfirmation) {}
+                case .runtimeDeletionConfirmed:
+                    if metadataPersisted {
+                        try metadataStore.deleteSandbox(id: sandboxID)
+                    }
+                    try CRIShimMachineStateLeaseStore.release(
+                        policy: policy,
+                        expected: leaseAcquisition.lease
                     )
-                    metadata.networkLeaseID = network.sandboxURI
-                    metadata.networkAttachments = [network.networkName]
+                case .reserved:
+                    try CRIShimMachineStateLeaseStore.release(
+                        policy: policy,
+                        expected: leaseAcquisition.lease
+                    )
                 }
-                metadata.state = .ready
-                metadata.updatedAt = Date()
-                try metadataStore.upsertSandbox(metadata)
-            } catch {
-                if networkAttachAttempted {
-                    try? await cniManager.delete(sandboxID: sandboxID, networkName: handler.network, config: config)
-                }
+            } else {
                 if sandboxCreated {
                     try? await runtimeManager.removeSandbox(id: sandboxID, force: true)
                 }
                 if metadataPersisted {
                     try? metadataStore.deleteSandbox(id: sandboxID)
                 }
-                if let leaseAcquisition, leaseAcquisition.created, let policy = config.machineState {
-                    try? CRIShimMachineStateLeaseStore.release(
-                        policy: policy,
-                        expected: leaseAcquisition.lease
-                    )
-                }
-                throw error
             }
+            throw admissionError
+        }
 
-            var response = Runtime_V1_RunPodSandboxResponse()
-            response.podSandboxID = sandboxID
-            return response
+        var response = Runtime_V1_RunPodSandboxResponse()
+        response.podSandboxID = sandboxID
+        return response
+    }
+
+    private func validateFreshMachineStateAdmission(
+        _ machineState: ContainerConfiguration.MacOSGuestOptions.MachineState,
+        policy: MachineStateConfig
+    ) async throws {
+        let snapshots = try await runtimeManager.listSandboxSnapshots()
+        try validateMachineStateLeaseCoverage(
+            metadataStore: metadataStore,
+            runtimeSnapshots: snapshots,
+            leases: try CRIShimMachineStateLeaseStore.list(policy: policy)
+        )
+        try requireControlSocketAbsent(machineState.controlSocketPath)
+    }
+
+    private func requireControlSocketAbsent(_ path: String) throws {
+        var value = stat()
+        if lstat(path, &value) == 0 {
+            throw CRIShimError.unavailable(
+                "machine-state control socket is still present"
+            )
+        }
+        guard errno == ENOENT else {
+            throw CRIShimError.internalError(
+                "failed to verify the machine-state control socket before lease creation"
+            )
         }
     }
 
@@ -398,16 +534,52 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StopPodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.stopPodSandbox.rawValue) {
-            try await withSandboxLifecycleLock(id: request.podSandboxID) {
-                var metadata = try sandboxMetadata(
-                    id: request.podSandboxID,
-                    operation: "StopPodSandbox"
-                )
-                if metadata.state != .released {
-                    try await stopSandboxResources(metadata: &metadata)
-                }
-                return Runtime_V1_StopPodSandboxResponse()
+            let initialMetadata = try sandboxMetadata(
+                id: request.podSandboxID,
+                operation: "StopPodSandbox"
+            )
+            guard let lease = try machineStateLease(for: initialMetadata),
+                let policy = config.machineState
+            else {
+                return try await stopPodSandboxWithLifecycleLock(id: request.podSandboxID)
             }
+            return try await withLifecycleLock(key: "machine-state:\(lease.persistenceID)") {
+                let admissionLock = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                    policy: policy,
+                    persistenceID: lease.persistenceID
+                )
+                defer { withExtendedLifetime(admissionLock) {} }
+                _ = try CRIShimMachineStateLeaseStore.hasActiveBinding(policy: policy, expected: lease)
+                return try await stopPodSandboxWithLifecycleLock(
+                    id: request.podSandboxID,
+                    expectedLease: lease
+                )
+            }
+        }
+    }
+
+    private func stopPodSandboxWithLifecycleLock(
+        id: String,
+        expectedLease: CRIShimMachineStateLease? = nil
+    ) async throws -> Runtime_V1_StopPodSandboxResponse {
+        try await withSandboxLifecycleLock(id: id) {
+            var metadata = try sandboxMetadata(
+                id: id,
+                operation: "StopPodSandbox"
+            )
+            if let expectedLease {
+                guard let currentLease = try machineStateLease(for: metadata),
+                    currentLease.hasSameBinding(as: expectedLease)
+                else {
+                    throw CRIShimError.unavailable(
+                        "machine-state lease identity changed while stopping the sandbox"
+                    )
+                }
+            }
+            if metadata.state != .released {
+                try await stopSandboxResources(metadata: &metadata)
+            }
+            return Runtime_V1_StopPodSandboxResponse()
         }
     }
 
@@ -416,36 +588,122 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemovePodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.removePodSandbox.rawValue) {
-            try await withSandboxLifecycleLock(id: request.podSandboxID) {
-                var metadata = try sandboxMetadata(
-                    id: request.podSandboxID,
-                    operation: "RemovePodSandbox"
+            let initialMetadata = try sandboxMetadata(
+                id: request.podSandboxID,
+                operation: "RemovePodSandbox"
+            )
+            guard let lease = try machineStateLease(for: initialMetadata),
+                let policy = config.machineState
+            else {
+                return try await withSandboxLifecycleLock(id: request.podSandboxID) {
+                    let metadata = try sandboxMetadata(
+                        id: request.podSandboxID,
+                        operation: "RemovePodSandbox"
+                    )
+                    return try await removePodSandboxResources(metadata: metadata)
+                }
+            }
+
+            return try await withLifecycleLock(key: "machine-state:\(lease.persistenceID)") {
+                let admissionLock = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                    policy: policy,
+                    persistenceID: lease.persistenceID
                 )
-                if metadata.state != .released {
-                    try await stopSandboxResources(metadata: &metadata)
+                defer { withExtendedLifetime(admissionLock) {} }
+                return try await withSandboxLifecycleLock(id: request.podSandboxID) {
+                    let metadata = try sandboxMetadata(
+                        id: request.podSandboxID,
+                        operation: "RemovePodSandbox"
+                    )
+                    guard let currentLease = try machineStateLease(for: metadata),
+                        currentLease.hasSameBinding(as: lease)
+                    else {
+                        throw CRIShimError.unavailable(
+                            "machine-state lease identity changed while removing the sandbox"
+                        )
+                    }
+                    let persistedLease = try CRIShimMachineStateLeaseStore.load(
+                        policy: policy,
+                        persistenceID: currentLease.persistenceID
+                    )
+                    if let persistedLease, !persistedLease.hasSameBinding(as: currentLease) {
+                        throw CRIShimError.unavailable(
+                            "machine-state lease identity changed while removing the sandbox"
+                        )
+                    }
+                    return try await removePodSandboxResources(
+                        metadata: metadata,
+                        lease: persistedLease ?? currentLease,
+                        policy: policy,
+                        leaseIsActive: persistedLease != nil
+                    )
                 }
-
-                do {
-                    try await runtimeManager.removeSandbox(id: metadata.id, force: true)
-                } catch {
-                    try throwUnlessNotFound(error)
-                }
-
-                let containers = try metadataStore.listContainers()
-                    .filter { $0.sandboxID == metadata.id }
-                for container in containers {
-                    await logManager.stop(containerID: container.id, removeState: true)
-                    try metadataStore.deleteContainer(id: container.id)
-                }
-                if let lease = try machineStateLease(for: metadata),
-                    let policy = config.machineState
-                {
-                    try CRIShimMachineStateLeaseStore.release(policy: policy, expected: lease)
-                }
-                try metadataStore.deleteSandbox(id: metadata.id)
-                return Runtime_V1_RemovePodSandboxResponse()
             }
         }
+    }
+
+    private func removePodSandboxResources(
+        metadata initialMetadata: CRIShimSandboxMetadata,
+        lease: CRIShimMachineStateLease? = nil,
+        policy: MachineStateConfig? = nil,
+        leaseIsActive: Bool = false
+    ) async throws -> Runtime_V1_RemovePodSandboxResponse {
+        var metadata = initialMetadata
+        let cleaner = CRIShimMachineStateRuntimeCleaner(runtimeManager: runtimeManager)
+        let cleanupPreparation: CRIShimMachineStateRuntimeCleanupPreparation?
+        if let lease, let policy {
+            cleanupPreparation = try await cleaner.prepare(binding: lease, policy: policy)
+        } else {
+            cleanupPreparation = nil
+        }
+        if metadata.state != .released {
+            try await stopSandboxResources(metadata: &metadata)
+        }
+
+        let leaseToRelease: CRIShimMachineStateLease?
+        var cleanupConfirmation: CRIShimMachineStateRuntimeCleanupConfirmation?
+        var runtimeCleanupProof: CRIShimMachineStateSidecarExitProof?
+        if let lease, let policy {
+            if leaseIsActive {
+                let confirmation = try await cleaner.cleanup(
+                    lease: lease,
+                    policy: policy,
+                    preparation: cleanupPreparation
+                )
+                cleanupConfirmation = confirmation
+                leaseToRelease = confirmation.lease
+            } else {
+                runtimeCleanupProof = try await cleaner.cleanupRuntime(
+                    binding: lease,
+                    policy: policy,
+                    preparation: cleanupPreparation
+                )
+                leaseToRelease = nil
+            }
+        } else {
+            do {
+                try await runtimeManager.removeSandbox(id: metadata.id, force: true)
+            } catch {
+                try throwUnlessNotFound(error)
+            }
+            leaseToRelease = nil
+        }
+
+        let containers = try metadataStore.listContainers()
+            .filter { $0.sandboxID == metadata.id }
+        for container in containers {
+            await logManager.stop(containerID: container.id, removeState: true)
+            try metadataStore.deleteContainer(id: container.id)
+        }
+        try metadataStore.deleteSandbox(id: metadata.id)
+        if let leaseToRelease, let policy {
+            try metadataStore.synchronizeEntityDirectories()
+            try CRIShimMachineStateLeaseStore.release(policy: policy, expected: leaseToRelease)
+        }
+        withExtendedLifetime(cleanupPreparation) {}
+        withExtendedLifetime(cleanupConfirmation) {}
+        withExtendedLifetime(runtimeCleanupProof) {}
+        return Runtime_V1_RemovePodSandboxResponse()
     }
 
     public func execSync(
@@ -717,84 +975,145 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StartContainerResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.startContainer.rawValue) {
-            try await withContainerLifecycleLock(id: request.containerID) {
-                let initialMetadata = try containerMetadata(
+            let initialContainer = try containerMetadata(
+                id: request.containerID,
+                operation: "StartContainer"
+            )
+            let initialSandbox = try sandboxMetadata(
+                id: initialContainer.sandboxID,
+                operation: "StartContainer"
+            )
+            guard let lease = try machineStateLease(for: initialSandbox),
+                let policy = config.machineState
+            else {
+                return try await startContainerWithLifecycleLocks(request: request)
+            }
+            return try await withLifecycleLock(key: "machine-state:\(lease.persistenceID)") {
+                let admissionLock = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                    policy: policy,
+                    persistenceID: lease.persistenceID
+                )
+                defer { withExtendedLifetime(admissionLock) {} }
+                guard
+                    let persistedLease = try CRIShimMachineStateLeaseStore.load(
+                        policy: policy,
+                        persistenceID: lease.persistenceID
+                    ), persistedLease.hasSameBinding(as: lease)
+                else {
+                    throw CRIShimError.unavailable(
+                        "machine-state persistence id \(lease.persistenceID) has no matching active lease; refusing VM start"
+                    )
+                }
+                return try await startContainerWithLifecycleLocks(
+                    request: request,
+                    expectedLease: persistedLease
+                )
+            }
+        }
+    }
+
+    private func startContainerWithLifecycleLocks(
+        request: Runtime_V1_StartContainerRequest,
+        expectedLease: CRIShimMachineStateLease? = nil
+    ) async throws -> Runtime_V1_StartContainerResponse {
+        try await withContainerLifecycleLock(id: request.containerID) {
+            let initialMetadata = try containerMetadata(
+                id: request.containerID,
+                operation: "StartContainer"
+            )
+            return try await withSandboxLifecycleLock(id: initialMetadata.sandboxID) {
+                let metadata = try containerMetadata(
                     id: request.containerID,
                     operation: "StartContainer"
                 )
-                return try await withSandboxLifecycleLock(id: initialMetadata.sandboxID) {
-                    let metadata = try containerMetadata(
-                        id: request.containerID,
-                        operation: "StartContainer"
+                guard metadata.state == .created else {
+                    throw CRIShimError.invalidArgument(
+                        "StartContainer requires a created container, got \(metadata.state.rawValue)"
                     )
-                    guard metadata.state == .created else {
-                        throw CRIShimError.invalidArgument(
-                            "StartContainer requires a created container, got \(metadata.state.rawValue)"
+                }
+                let sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "StartContainer")
+                guard sandbox.state.allowsContainerCreation else {
+                    throw CRIShimError.invalidArgument(
+                        "StartContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
+                    )
+                }
+                if let expectedLease {
+                    guard let currentLease = try machineStateLease(for: sandbox),
+                        currentLease.hasSameBinding(as: expectedLease),
+                        let policy = config.machineState
+                    else {
+                        throw CRIShimError.unavailable(
+                            "machine-state lease identity changed while starting the sandbox"
                         )
                     }
-                    let sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "StartContainer")
-                    guard sandbox.state.allowsContainerCreation else {
-                        throw CRIShimError.invalidArgument(
-                            "StartContainer requires a ready or running sandbox, got \(sandbox.state.rawValue)"
+                    guard
+                        let persistedLease = try CRIShimMachineStateLeaseStore.load(
+                            policy: policy,
+                            persistenceID: currentLease.persistenceID
+                        ), persistedLease == expectedLease
+                    else {
+                        throw CRIShimError.unavailable(
+                            "machine-state lease changed while starting the sandbox"
                         )
                     }
-                    if sandbox.state == .ready {
-                        if let lease = try machineStateLease(for: sandbox),
-                            let policy = config.machineState
-                        {
-                            try CRIShimMachineStateLeaseStore.requireActive(policy: policy, expected: lease)
-                        }
-                        let runtimeHandler = sandbox.runtimeHandler.trimmed.isEmpty ? nil : sandbox.runtimeHandler
-                        let handler = try config.resolveRuntimeHandler(runtimeHandler)
-                        try await runtimeManager.startSandbox(id: sandbox.id, presentGUI: handler.guiEnabled)
-                        _ = try metadataStore.updateSandbox(id: sandbox.id) { current in
-                            if current.state == .ready {
-                                current.state = .running
-                                current.updatedAt = Date()
-                            }
+                }
+                if sandbox.state == .ready {
+                    let runtimeHandler = sandbox.runtimeHandler.trimmed.isEmpty ? nil : sandbox.runtimeHandler
+                    let handler = try config.resolveRuntimeHandler(runtimeHandler)
+                    if let expectedLease, let policy = config.machineState {
+                        _ = try CRIShimMachineStateLeaseStore.markSidecarLaunchMayHaveStarted(
+                            policy: policy,
+                            expected: expectedLease
+                        )
+                    }
+                    try await runtimeManager.startSandbox(id: sandbox.id, presentGUI: handler.guiEnabled)
+                    _ = try metadataStore.updateSandbox(id: sandbox.id) { current in
+                        if current.state == .ready {
+                            current.state = .running
+                            current.updatedAt = Date()
                         }
                     }
+                }
 
-                    let workloadSnapshot = try await runtimeManager.inspectWorkload(
+                let workloadSnapshot = try await runtimeManager.inspectWorkload(
+                    sandboxID: metadata.sandboxID,
+                    workloadID: metadata.id
+                )
+                try await logManager.start(
+                    container: metadata,
+                    workloadSnapshot: workloadSnapshot
+                )
+
+                do {
+                    try await runtimeManager.startWorkload(
                         sandboxID: metadata.sandboxID,
                         workloadID: metadata.id
                     )
-                    try await logManager.start(
-                        container: metadata,
-                        workloadSnapshot: workloadSnapshot
-                    )
-
-                    do {
-                        try await runtimeManager.startWorkload(
-                            sandboxID: metadata.sandboxID,
-                            workloadID: metadata.id
-                        )
-                    } catch {
-                        await logManager.stop(containerID: metadata.id, removeState: false)
-                        throw error
-                    }
-
-                    let startedAt = Date()
-                    guard
-                        let updated = try metadataStore.updateContainer(
-                            id: metadata.id,
-                            expectedLifecycleVersion: metadata.lifecycleVersion,
-                            { current in
-                                guard current.state == .created else {
-                                    return
-                                }
-                                current.state = .running
-                                current.startedAt = startedAt
-                                current.exitedAt = nil
-                            })
-                    else {
-                        throw CRIShimMetadataStoreError.notFound(kind: .container, id: metadata.id)
-                    }
-                    guard updated.state == .running else {
-                        throw CRIShimError.internalError("container lifecycle changed while StartContainer was in progress")
-                    }
-                    return Runtime_V1_StartContainerResponse()
+                } catch {
+                    await logManager.stop(containerID: metadata.id, removeState: false)
+                    throw error
                 }
+
+                let startedAt = Date()
+                guard
+                    let updated = try metadataStore.updateContainer(
+                        id: metadata.id,
+                        expectedLifecycleVersion: metadata.lifecycleVersion,
+                        { current in
+                            guard current.state == .created else {
+                                return
+                            }
+                            current.state = .running
+                            current.startedAt = startedAt
+                            current.exitedAt = nil
+                        })
+                else {
+                    throw CRIShimMetadataStoreError.notFound(kind: .container, id: metadata.id)
+                }
+                guard updated.state == .running else {
+                    throw CRIShimError.internalError("container lifecycle changed while StartContainer was in progress")
+                }
+                return Runtime_V1_StartContainerResponse()
             }
         }
     }

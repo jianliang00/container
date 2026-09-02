@@ -43,6 +43,12 @@ public struct CRIShimRunner<Factory: CRIShimServerFactory>: Sendable {
 
     public func run() async throws {
         try config.validate()
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: config.normalizedStateDirectory, isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let processLock = try CRIShimProcessLock.acquire(stateDirectory: config.normalizedStateDirectory)
+        defer { withExtendedLifetime(processLock) {} }
         let server = try serverFactory.makeServer(config: config)
         try await server.run()
     }
@@ -100,7 +106,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
             CRIShimMachineStateDirectoryStartupTask(policy: config.machineState),
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
-                runtimeManager: runtimeManager
+                runtimeManager: runtimeManager,
+                machineStatePolicy: config.machineState
             ),
             CRIShimLogReconcileStartupTask(
                 metadataStore: metadataStore,
@@ -151,7 +158,8 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
             CRIShimMachineStateDirectoryStartupTask(policy: config.machineState),
             CRIShimMetadataReconcileStartupTask(
                 metadataStore: metadataStore,
-                runtimeManager: runtimeManager
+                runtimeManager: runtimeManager,
+                machineStatePolicy: config.machineState
             ),
             CRIShimLogReconcileStartupTask(
                 metadataStore: metadataStore,

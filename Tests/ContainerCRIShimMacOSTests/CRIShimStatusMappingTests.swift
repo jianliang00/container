@@ -46,6 +46,33 @@ struct CRIShimStatusMappingTests {
         #expect(metadata.applying(sandboxSnapshot: snapshot).state == .ready)
     }
 
+    @Test
+    func ordinaryStoppedSnapshotPreservesIncompleteMachineStateAdmission() {
+        var metadata = readyMetadata()
+        metadata.state = .pending
+        metadata.annotations[CRIShimMachineStateAnnotation.enabled] = "true"
+        let snapshot = SandboxSnapshot(
+            status: .stopped,
+            networks: [],
+            containers: []
+        )
+
+        #expect(metadata.applying(sandboxSnapshot: snapshot).state == .pending)
+    }
+
+    @Test
+    func ordinaryStoppedSnapshotClosesIncompleteStandardAdmission() {
+        var metadata = readyMetadata()
+        metadata.state = .pending
+        let snapshot = SandboxSnapshot(
+            status: .stopped,
+            networks: [],
+            containers: []
+        )
+
+        #expect(metadata.applying(sandboxSnapshot: snapshot).state == .stopped)
+    }
+
     @Test(arguments: [CRIShimSandboxMetadata.State.stopped, .released])
     func staleRunningSnapshotCannotRegressTerminalSandboxState(
         state: CRIShimSandboxMetadata.State

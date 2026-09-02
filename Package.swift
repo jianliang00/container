@@ -226,8 +226,10 @@ let package = Package(
                 "ContainerCRI",
                 "ContainerKit",
                 "ContainerK8sNetworkPolicyMacOS",
+                "ContainerPlugin",
                 "ContainerResource",
                 "ContainerVersion",
+                "RuntimeMacOSSidecarShared",
             ]
         ),
         .executableTarget(
@@ -263,6 +265,7 @@ let package = Package(
                 "ContainerCRIShimMacOS",
                 "ContainerKit",
                 "ContainerK8sNetworkPolicyMacOS",
+                "RuntimeMacOSSidecarShared",
             ]
         ),
         .testTarget(
@@ -709,6 +712,7 @@ let package = Package(
                 "ContainerImagesServiceClient",
                 "ContainerNetworkClient",
                 "ContainerLog",
+                "ContainerPlugin",
                 "ContainerResource",
                 "ContainerRuntimeClient",
                 "RuntimeMacOSSidecarShared",

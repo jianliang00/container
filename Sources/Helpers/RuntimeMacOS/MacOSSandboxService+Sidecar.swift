@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerPlugin
 import ContainerResource
 import ContainerizationError
 import Darwin
@@ -61,17 +62,14 @@ extension MacOSSandboxService {
     }
 
     func sidecarLaunchLabel(config: ContainerConfiguration) -> String {
-        if let persistenceID = config.macosGuest?.machineState?.persistenceID {
-            return "com.apple.container.runtime.container-runtime-macos-sidecar.state.\(persistenceID)"
-        }
-        return "com.apple.container.runtime.container-runtime-macos-sidecar.\(config.id)"
+        MacOSSidecarLaunchIdentity.launchLabel(
+            sandboxID: config.id,
+            persistenceID: config.macosGuest?.machineState?.persistenceID
+        )
     }
 
     nonisolated func sidecarLaunchdDomain(uid: uid_t) -> String {
-        if uid == 0 {
-            return "user/0"
-        }
-        return "gui/\(uid)"
+        MacOSSidecarLaunchIdentity.launchdDomain(effectiveUserID: UInt32(uid))
     }
 
     func sidecarGUIDomain() -> String {
@@ -152,7 +150,8 @@ extension MacOSSandboxService {
             binaryURL: binaryURL,
             socketURL: socketURL,
             stdoutURL: stdoutURL,
-            stderrURL: stderrURL
+            stderrURL: stderrURL,
+            machineState: config.macosGuest?.machineState
         )
 
         // A stable launch label lets a recreated sandbox clean up an orphaned
@@ -215,13 +214,12 @@ extension MacOSSandboxService {
             throw error
         } catch {
             writeContainerLog(Data(("sidecar vm bootstrap failed [label=\(launchLabel)] error=\(String(describing: error))\n").utf8))
-            client.setEventHandler(nil)
-            client.setDisconnectHandler(nil)
-            await finishAndDrainSidecarEventPump()
-            try? client.quit()
-            try? bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
-            sidecarHandle = nil
-            releaseMachineStateLeaseIfPresent()
+            sidecarHandle = SidecarHandle(
+                launchLabel: launchLabel,
+                client: client
+            )
+            retainedLease = true
+            try await stopAndQuitSidecarIfPresent()
             throw error
         }
     }
@@ -235,8 +233,30 @@ extension MacOSSandboxService {
         try handle.client.showGUI()
     }
 
-    func stopAndQuitSidecarIfPresent() async {
+    func stopAndQuitSidecarIfPresent() async throws {
+        let config = configuration
+        let requiresVerifiedCleanup = config?.macosGuest?.machineState != nil || machineStateLeaseFD >= 0
         guard let handle = sidecarHandle else {
+            guard let config else {
+                if requiresVerifiedCleanup {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "cannot release the machine-state runtime lease without its sandbox configuration"
+                    )
+                }
+                return
+            }
+            do {
+                try bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
+                try removeStaleSidecarSocket(sidecarSocketPath(config: config))
+            } catch {
+                writeContainerLog(
+                    Data(("sidecar cleanup verification failed [label=\(sidecarLaunchLabel(config: config))] error=\(String(describing: error))\n").utf8)
+                )
+                if requiresVerifiedCleanup {
+                    throw error
+                }
+            }
             releaseMachineStateLeaseIfPresent()
             return
         }
@@ -255,13 +275,25 @@ extension MacOSSandboxService {
         await drainPendingSidecarExitEvents()
         handle.client.setEventHandler(nil)
         await finishAndDrainSidecarEventPump()
-        sidecarHandle = nil
-        handle.client.closeControlConnection()
         do {
-            try bootoutLaunchAgent(fullLabel: "\(sidecarGUIDomain())/\(handle.launchLabel)")
+            let fullLabel: String
+            if let config {
+                fullLabel = sidecarFullLaunchLabel(config: config)
+            } else {
+                fullLabel = "\(sidecarGUIDomain())/\(handle.launchLabel)"
+            }
+            try bootoutLaunchAgent(fullLabel: fullLabel)
+            if let config {
+                try removeStaleSidecarSocket(sidecarSocketPath(config: config))
+            }
         } catch {
             writeContainerLog(Data(("sidecar bootout failed [label=\(handle.launchLabel)] error=\(String(describing: error))\n").utf8))
+            if requiresVerifiedCleanup {
+                throw error
+            }
         }
+        sidecarHandle = nil
+        handle.client.closeControlConnection()
         releaseMachineStateLeaseIfPresent()
     }
 
@@ -545,6 +577,16 @@ extension MacOSSandboxService {
                 )
             }
         }
+        if let barrier = machineState.sidecarLifecycleBarrier {
+            guard barrier.protocolVersion == MacOSSidecarLifecycleBarrierProtocol.current,
+                UUID(uuidString: barrier.bootNonce)?.uuidString.lowercased() == barrier.bootNonce
+            else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "machine-state sidecar lifecycle barrier is invalid"
+                )
+            }
+        }
         try validateManagedMachineStateDirectory(machineState.storageDirectory)
         let expectedSocket = URL(fileURLWithPath: machineState.controlSocketPath).standardizedFileURL
         let socketAddress = sockaddr_un()
@@ -572,7 +614,7 @@ extension MacOSSandboxService {
         guard let storageDirectory = config.macosGuest?.machineState?.storageDirectory else { return }
         if machineStateLeaseFD >= 0 { return }
         let leasePath = URL(fileURLWithPath: storageDirectory).appendingPathComponent("runtime.lock").path
-        let fd = open(leasePath, O_RDWR | O_CREAT | O_NOFOLLOW, mode_t(S_IRUSR | S_IWUSR))
+        let fd = open(leasePath, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, mode_t(S_IRUSR | S_IWUSR))
         guard fd >= 0 else {
             throw ContainerizationError(
                 .internalError,
@@ -772,14 +814,23 @@ extension MacOSSandboxService {
         binaryURL: URL,
         socketURL: URL,
         stdoutURL: URL,
-        stderrURL: URL
+        stderrURL: URL,
+        machineState: ContainerConfiguration.MacOSGuestOptions.MachineState? = nil
     ) throws {
-        let args = [
+        var args = [
             binaryURL.path,
             "--uuid", sandboxID,
             "--root", root.path,
             "--control-socket", socketURL.path,
         ]
+        if let machineState, let barrier = machineState.sidecarLifecycleBarrier {
+            args.append(contentsOf: [
+                "--lifecycle-barrier-protocol", "\(barrier.protocolVersion)",
+                "--lifecycle-barrier-nonce", barrier.bootNonce,
+                "--lifecycle-persistence-id", machineState.persistenceID,
+                "--lifecycle-storage-directory", machineState.storageDirectory,
+            ])
+        }
 
         let sessionOptions = sidecarLaunchAgentSessionOptions(uid: getuid())
         var plist: [String: Any] = [
@@ -804,15 +855,7 @@ extension MacOSSandboxService {
     }
 
     func bootoutLaunchAgent(fullLabel: String) throws {
-        do {
-            try runLaunchctlChecked(args: ["bootout", fullLabel])
-        } catch {
-            let text = String(describing: error)
-            if text.contains("No such process") || text.contains("status 3") {
-                return
-            }
-            throw error
-        }
+        try ServiceManager.deregister(fullServiceLabel: fullLabel)
     }
 
     func runLaunchctlChecked(args: [String]) throws {

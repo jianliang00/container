@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Darwin
 import Foundation
 
 public struct CRIShimMetadataSnapshot: Codable, Equatable, Sendable {
@@ -780,6 +781,13 @@ public final class CRIShimMetadataStore {
         }
     }
 
+    func synchronizeEntityDirectories() throws {
+        try withLock {
+            try sandboxStore.synchronize()
+            try containerStore.synchronize()
+        }
+    }
+
     func updateSandbox(
         id: String,
         _ update: (inout CRIShimSandboxMetadata) -> Void
@@ -886,6 +894,22 @@ private struct CRIShimEntityStore<T: Codable & Identifiable<String> & Sendable> 
             throw CRIShimMetadataStoreError.notFound(kind: kind, id: id)
         }
         try fileManager.removeItem(at: entityURL)
+        try synchronize()
+    }
+
+    func synchronize() throws {
+        let descriptor = open(rootURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            throw CRIShimMetadataStoreError.internalError(
+                "failed to open the \(kind.rawValue) metadata directory for synchronization"
+            )
+        }
+        defer { Darwin.close(descriptor) }
+        guard fsync(descriptor) == 0 else {
+            throw CRIShimMetadataStoreError.internalError(
+                "failed to synchronize the \(kind.rawValue) metadata directory"
+            )
+        }
     }
 
     private func entityURL(id: String) -> URL {

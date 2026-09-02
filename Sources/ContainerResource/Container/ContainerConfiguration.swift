@@ -235,6 +235,20 @@ public struct ContainerConfiguration: Sendable, Codable {
         /// Callers must derive these paths from a trusted runtime policy rather
         /// than accepting arbitrary workload-provided paths.
         public struct MachineState: Sendable, Codable, Equatable {
+            /// A per-sidecar boot identity used to prove that the process which
+            /// owned a persistent VM has exited before its admission lease is
+            /// released. This is optional so configurations written by older
+            /// runtimes remain decodable.
+            public struct SidecarLifecycleBarrier: Sendable, Codable, Equatable {
+                public var protocolVersion: Int
+                public var bootNonce: String
+
+                public init(protocolVersion: Int, bootNonce: String) {
+                    self.protocolVersion = protocolVersion
+                    self.bootNonce = bootNonce
+                }
+            }
+
             public var protocolVersion: Int
             public var persistenceID: String
             public var storageDirectory: String
@@ -247,6 +261,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             /// storage. On restore, it must be newer than
             /// `restoreStateGeneration`.
             public var storageGeneration: UInt64?
+            public var sidecarLifecycleBarrier: SidecarLifecycleBarrier?
 
             public init(
                 protocolVersion: Int = 2,
@@ -255,7 +270,8 @@ public struct ContainerConfiguration: Sendable, Codable {
                 controlSocketPath: String,
                 restoreStateID: String? = nil,
                 restoreStateGeneration: UInt64? = nil,
-                storageGeneration: UInt64? = nil
+                storageGeneration: UInt64? = nil,
+                sidecarLifecycleBarrier: SidecarLifecycleBarrier? = nil
             ) {
                 self.protocolVersion = protocolVersion
                 self.persistenceID = persistenceID
@@ -264,6 +280,7 @@ public struct ContainerConfiguration: Sendable, Codable {
                 self.restoreStateID = restoreStateID
                 self.restoreStateGeneration = restoreStateGeneration
                 self.storageGeneration = storageGeneration
+                self.sidecarLifecycleBarrier = sidecarLifecycleBarrier
             }
         }
 

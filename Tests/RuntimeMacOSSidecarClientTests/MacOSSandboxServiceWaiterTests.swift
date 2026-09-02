@@ -825,7 +825,7 @@ struct MacOSSandboxServiceWaiterTests {
         server.start()
         await service.testingInstallSidecarClient(socketPath: socketPath)
 
-        await service.stopAndQuitSidecarIfPresent()
+        try await service.stopAndQuitSidecarIfPresent()
         await service.testingCloseAllSessions()
 
         let recoveredService = makeSandboxService(root: tempRoot)

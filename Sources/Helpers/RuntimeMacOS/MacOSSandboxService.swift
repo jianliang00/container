@@ -632,7 +632,7 @@ extension MacOSSandboxService {
 
         #if arch(arm64)
         writeContainerLog(Data(("stop: sidecar shutdown start\n").utf8))
-        await stopAndQuitSidecarIfPresent()
+        try await stopAndQuitSidecarIfPresent()
         writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
         #endif
 
@@ -676,7 +676,7 @@ extension MacOSSandboxService {
         case .created, .stopping, .stopped(_):
             await stopSocketForwarders()
             #if arch(arm64)
-            await stopAndQuitSidecarIfPresent()
+            try await stopAndQuitSidecarIfPresent()
             #endif
             await releaseSandboxNetworkStateIfNeeded()
             closeAllSessions()
@@ -1031,7 +1031,7 @@ extension MacOSSandboxService {
         } catch {
             await stopSocketForwarders()
             #if arch(arm64)
-            await stopAndQuitSidecarIfPresent()
+            try await stopAndQuitSidecarIfPresent()
             #endif
             if let guestAgentLogCaptureProcessID,
                 let session = sessions.removeValue(forKey: guestAgentLogCaptureProcessID)

@@ -1965,7 +1965,7 @@ public actor ContainersService {
         }
 
         // Did the exit container handler win?
-        if self.containers[id] == nil {
+        guard let state = self.containers[id] else {
             return
         }
 
@@ -1974,11 +1974,22 @@ public actor ContainersService {
         // the OCI runtime.
         await self.exitMonitor.stopTracking(id: id)
         let path = self.containerRoot.appendingPathComponent(id)
+        let bundle = ContainerResource.Bundle(path: path)
+
+        if state.snapshot.configuration.macosGuest?.machineState != nil {
+            let label = Self.fullLaunchdServiceLabel(
+                runtimeName: state.snapshot.configuration.runtimeHandler,
+                instanceId: id
+            )
+            try ServiceManager.deregister(fullServiceLabel: label)
+            try bundle.delete()
+            self.containers.removeValue(forKey: id)
+            return
+        }
 
         // Try to get config for service deregistration
         // Don't fail if bundle is incomplete
         var config: ContainerConfiguration?
-        let bundle = ContainerResource.Bundle(path: path)
         do {
             config = try bundle.configuration
         } catch {

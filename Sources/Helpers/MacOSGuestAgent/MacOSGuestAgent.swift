@@ -30,7 +30,15 @@ struct MacOSGuestAgent: ParsableCommand {
     @Option(name: .long, help: "vsock listen port")
     var port: UInt32 = 27000
 
+    @Flag(name: .customLong("print-capabilities"), help: "Print advertised protocol capabilities as JSON and exit")
+    var printCapabilities = false
+
     mutating func run() throws {
+        if printCapabilities {
+            FileHandle.standardOutput.write(try MacOSGuestAgentCapabilities.encodedJSON())
+            FileHandle.standardOutput.write(Data([0x0a]))
+            return
+        }
         configureGuestAgentSignals()
         logAgentInfo("starting guest agent on vsock port \(port)")
         logAgentStartupContext()
@@ -59,6 +67,20 @@ struct MacOSGuestAgent: ParsableCommand {
         mutating func run() throws {
             runExecHelper(payloadFD: payloadFD, statusFD: statusFD)
         }
+    }
+}
+
+enum MacOSGuestAgentCapabilities {
+    static let advertised = [
+        "tcpConnectV1",
+        MacOSGuestProcessProtocol.durableProcessV1,
+        MacOSGuestProcessProtocol.durableProcessV2,
+        MacOSGuestProcessProtocol.durableProcessV3,
+        MacOSGuestProcessProtocol.durableProcessV4,
+    ]
+
+    static func encodedJSON() throws -> Data {
+        try JSONEncoder().encode(advertised)
     }
 }
 
@@ -144,8 +166,6 @@ private final class VsockListener {
 }
 
 final class AgentConnection: @unchecked Sendable {
-    private static let tcpConnectCapability = "tcpConnectV1"
-
     private enum FrameAction {
         case continueReading
         case close
@@ -189,13 +209,7 @@ final class AgentConnection: @unchecked Sendable {
         logAgentInfo("connection fd=\(fd): sending ready frame")
         try send(
             frame: .ready(
-                capabilities: [
-                    Self.tcpConnectCapability,
-                    MacOSGuestProcessProtocol.durableProcessV1,
-                    MacOSGuestProcessProtocol.durableProcessV2,
-                    MacOSGuestProcessProtocol.durableProcessV3,
-                    MacOSGuestProcessProtocol.durableProcessV4,
-                ]
+                capabilities: MacOSGuestAgentCapabilities.advertised
             )
         )
         logAgentInfo("connection fd=\(fd): ready frame sent")

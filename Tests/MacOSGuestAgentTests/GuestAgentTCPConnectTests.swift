@@ -25,6 +25,19 @@ import Testing
 @Suite(.serialized)
 struct GuestAgentTCPConnectTests {
     @Test
+    func releaseCapabilitiesAreStableAndSerializable() throws {
+        let expected = [
+            "tcpConnectV1",
+            MacOSGuestProcessProtocol.durableProcessV1,
+            MacOSGuestProcessProtocol.durableProcessV2,
+            MacOSGuestProcessProtocol.durableProcessV3,
+            MacOSGuestProcessProtocol.durableProcessV4,
+        ]
+        #expect(MacOSGuestAgentCapabilities.advertised == expected)
+        #expect(try JSONDecoder().decode([String].self, from: MacOSGuestAgentCapabilities.encodedJSON()) == expected)
+    }
+
+    @Test
     func relaysServerFirstResponseOverIPv6Loopback() throws {
         signal(SIGPIPE, SIG_IGN)
         let server = try LoopbackTCPServer(family: AF_INET6)

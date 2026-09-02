@@ -744,12 +744,14 @@ jobs:
             fi
             echo "::warning::Package guest-agent ${package_guest_agent_sha256} is not paired with the current sandbox ${SANDBOX_GUEST_AGENT_SHA256}; creating a package-only draft"
           fi
-          while IFS= read -r capability; do
-            if ! grep -a -F -q "${capability}" "${guest_agent_path}"; then
-              echo "package guest agent does not contain required capability ${capability}" >&2
-              exit 1
-            fi
-          done < <(jq -r '.guestAgent.requiredCapabilities[]' "${RELEASE_POLICY_PATH}")
+          package_capabilities="$("${guest_agent_path}" --print-capabilities)"
+          if ! jq -e \
+            --argjson package_capabilities "${package_capabilities}" \
+            '.guestAgent.requiredCapabilities == $package_capabilities' \
+            "${RELEASE_POLICY_PATH}" >/dev/null; then
+            echo "package guest-agent capabilities do not match the public release policy" >&2
+            exit 1
+          fi
           echo "PACKAGE_GUEST_AGENT_SHA256=${package_guest_agent_sha256}" >> "$GITHUB_ENV"
 
           kubelet_path="${work_dir}/pkg/Payload/usr/local/bin/kubelet"

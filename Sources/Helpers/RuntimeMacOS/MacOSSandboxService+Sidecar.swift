@@ -668,10 +668,17 @@ extension MacOSSandboxService {
         for component in url.standardizedFileURL.pathComponents.dropFirst() {
             current.appendPathComponent(component)
             var value = stat()
-            guard lstat(current.path, &value) == 0 else {
+            if lstat(current.path, &value) != 0 {
+                let code = errno
+                let message: String
+                if code == ENOENT {
+                    message = "machine-state managed path does not exist: \(current.path)"
+                } else {
+                    message = "failed to inspect machine-state managed path \(current.path): \(String(cString: strerror(code)))"
+                }
                 throw ContainerizationError(
                     .invalidArgument,
-                    message: "machine-state managed path does not exist: \(current.path)"
+                    message: message
                 )
             }
             if (value.st_mode & S_IFMT) == S_IFLNK, !allowedSystemLinks.contains(current.path) {

@@ -289,7 +289,8 @@ commands = {
     "forced": (
         "echo lifecycle-forced-ready; sleep "
         + os.environ["COMPLETION_DELAY_VALUE"]
-        + "; kill -9 $$"
+        # Kubelet collapses each $$ escape pair before passing CRI arguments.
+        + "; kill -9 $$$$"
     ),
 }
 if group not in commands:
@@ -369,7 +370,7 @@ for path in root.glob("*.json"):
     if path.stem == "natural":
         assert "; exit 0" in container["args"][0]
     if path.stem == "forced":
-        assert "kill -9 $$" in container["args"][0]
+        assert "kill -9 $$$$" in container["args"][0]
     seen.add(path.stem)
 assert seen == expected
 PY
@@ -467,6 +468,7 @@ POD_CASE_LABEL="-"
 CRI_STATE="-"
 CRI_EXIT_CODE="-"
 CRI_FINISHED_AT="-"
+CRI_FINISHED_AT_VALID="false"
 CASE_TOKEN=""
 CASE_SELECTOR=""
 CASE_DIR=""
@@ -588,25 +590,55 @@ read_cri_state() {
     local snapshot=$1
     local state
     state="$("${PYTHON_BIN}" - "${snapshot}" <<'PY'
+from datetime import datetime
 import json
+import re
 import sys
 
 document = json.load(open(sys.argv[1], encoding="utf-8"))
 status = document.get("status") or document
+finished_at = status.get("finishedAt")
+
+
+def valid_finished_at(value):
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, int):
+        return value > 0
+    text = str(value)
+    if text.isdecimal():
+        return int(text) > 0
+    match = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})",
+        text,
+    )
+    if match is None:
+        return False
+    fraction_digits = (match.group(2) or "")[1:]
+    fraction = f".{fraction_digits[:6].ljust(6, '0')}" if fraction_digits else ""
+    timezone = "+00:00" if match.group(3) == "Z" else match.group(3)
+    try:
+        timestamp = datetime.fromisoformat(match.group(1) + fraction + timezone)
+        return timestamp.timestamp() > 0
+    except (OverflowError, ValueError):
+        return False
+
+
 print("\t".join([
     str(status.get("state") or "-"),
     str(status.get("exitCode", "-")),
-    str(status.get("finishedAt", "-")),
+    str(finished_at if finished_at is not None else "-"),
+    "true" if valid_finished_at(finished_at) else "false",
 ]))
 PY
 )"
-    IFS=$'\t' read -r CRI_STATE CRI_EXIT_CODE CRI_FINISHED_AT <<<"${state}"
+    IFS=$'\t' read -r CRI_STATE CRI_EXIT_CODE CRI_FINISHED_AT CRI_FINISHED_AT_VALID <<<"${state}"
 }
 
 validate_cri_terminal_history() {
     case "${CRI_STATE}" in
         CONTAINER_EXITED | exited)
-            if [[ ! "${CRI_FINISHED_AT}" =~ ^[1-9][0-9]*$ ]]; then
+            if [[ "${CRI_FINISHED_AT_VALID}" != "true" ]]; then
                 fail "CRI reported an exited container without a valid finishedAt"
             fi
             if [[ "${CASE_SAW_137}" == "1" && "${CRI_EXIT_CODE}" == "0" ]]; then

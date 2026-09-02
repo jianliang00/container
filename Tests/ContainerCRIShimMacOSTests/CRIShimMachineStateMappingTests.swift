@@ -100,6 +100,36 @@ struct CRIShimMachineStateMappingTests {
     }
 
     @Test
+    func missingIntermediateDirectoriesArePrivateAndOwnedByRuntimeUser() throws {
+        let roots = try MachineStateTestRoots()
+        defer { roots.remove() }
+        let storageNamespace = roots.root.appendingPathComponent("storage-namespace", isDirectory: true)
+        let controlNamespace = roots.root.appendingPathComponent("control-namespace", isDirectory: true)
+        let storageRoot = storageNamespace.appendingPathComponent("v1", isDirectory: true)
+        let controlRoot = controlNamespace.appendingPathComponent("v1", isDirectory: true)
+        let config = MachineStateConfig(
+            enabled: true,
+            storageRoot: storageRoot.path,
+            controlSocketRoot: controlRoot.path,
+            runtimeOwnerUID: UInt32(geteuid())
+        )
+
+        _ = try makeCRIShimMachineStateMapping(
+            annotations: [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "pod-a",
+                CRIShimMachineStateAnnotation.storageGeneration: "1",
+            ],
+            nodeConfig: config
+        )
+
+        for directory in [storageNamespace, storageRoot, controlNamespace, controlRoot] {
+            #expect(try permissions(directory) == 0o700)
+            #expect(try owner(directory) == geteuid())
+        }
+    }
+
+    @Test
     func rejectsInvalidEnablementAndMapsRestoreGenerations() throws {
         let roots = try MachineStateTestRoots()
         defer { roots.remove() }

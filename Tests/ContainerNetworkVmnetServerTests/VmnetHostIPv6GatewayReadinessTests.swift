@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationError
 import ContainerizationExtras
 import Darwin
 import Foundation
@@ -162,6 +163,45 @@ struct VmnetHostIPv6GatewayReadinessTests {
             )
         }
         #expect(checker.attempts == 3)
+    }
+
+    @Test func deadlineDistinguishesMissingBridgeFromPendingIPv6Gateway() async throws {
+        for (results, observation) in [
+            ([SequencedReadinessChecker.Result.bridgePending], "bridgeMissing"),
+            ([.readiness(.pending)], "ipv6GatewayPending"),
+            ([.bridgePending, .readiness(.pending)], "ipv6GatewayPending"),
+            ([.readiness(.pending), .bridgePending], "bridgeMissing"),
+        ] {
+            let checker = SequencedReadinessChecker(results)
+            let waiter = VmnetHostIPv6GatewayWaiter(checker: checker, maxAttempts: 2, retryInterval: .zero, sleep: { _ in })
+            do {
+                try await waiter.wait(
+                    ipv4Gateway: IPv4Address("10.250.34.1"),
+                    ipv6Gateway: IPv6Address("fd42:10:244:22::1"), prefixLength: 64
+                )
+                Issue.record("unready network was accepted")
+            } catch let error as ContainerizationError {
+                #expect(error.code == .invalidState)
+                #expect(error.message.contains("lastObservation=\(observation)"))
+                #expect(error.message.contains("ipv4Gateway=10.250.34.1"))
+                #expect(error.message.contains("attempts=2"))
+            }
+            #expect(checker.attempts == 2)
+        }
+    }
+
+    @Test func waiterPreservesCancellation() async throws {
+        let checker = SequencedReadinessChecker([.bridgePending])
+        let waiter = VmnetHostIPv6GatewayWaiter(
+            checker: checker, maxAttempts: 2, sleep: { _ in throw CancellationError() }
+        )
+        await #expect(throws: CancellationError.self) {
+            try await waiter.wait(
+                ipv4Gateway: IPv4Address("10.250.34.1"),
+                ipv6Gateway: IPv6Address("fd42:10:244:22::1"), prefixLength: 64
+            )
+        }
+        #expect(checker.attempts == 1)
     }
 }
 

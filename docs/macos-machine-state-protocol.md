@@ -161,6 +161,25 @@ These annotations select host persistence and writable node storage and therefor
 
 ## Compatibility description
 
+### Active VM identity
+
+The runtime root is the per-sandbox host directory. When machine-state persistence is configured, the binding also has a private `Identity` directory below its managed storage root. One identity provider selects the files used by VZ configuration, compatibility fingerprints, checkpoint capture, and restore:
+
+| File | Persistent binding | Legacy binding |
+| --- | --- | --- |
+| `HardwareModel.bin` | Runtime root | Runtime root |
+| `MachineIdentifier.bin` | Persistent `Identity` | Runtime root |
+| `AuxiliaryStorage` | Persistent `Identity` | Runtime root |
+| `macos-guest-network-lease.json` | Runtime root | Runtime root |
+
+A new persistent binding inherits an existing valid runtime-root machine identifier and auxiliary storage together. Templates without a machine identifier receive a new unique identifier and a private auxiliary-storage copy. Once a persistent identifier exists, a changed runtime-root identifier does not replace it. An invalid persistent identifier, or auxiliary storage left without its identifier outside an explicit restore, is rejected instead of regenerating identity.
+
+Each checkpoint contains an immutable identity bundle. Its hardware-model and machine-identifier digests must match the saved compatibility description. Restore validates the selected request, host and configuration before publishing identity files, and rejects mismatched existing hardware or machine identifiers. Auxiliary storage is restored from the verified checkpoint after those checks. All destination files are checked before any replacement, then staged on their destination filesystems and synchronized. A retry can complete an interrupted materialization before a VM is constructed; a failed restore never enters cold boot.
+
+Identity directories require trusted ownership and reject arbitrary symbolic links. Identity files must be regular, singly linked, owned by the runtime user, and not writable by other users. Published identity files use mode `0600`. Bundle integrity alone does not establish warm-restore success: the VM and workload adoption checks remain required.
+
+### Saved compatibility fields
+
 The compatibility schema contains:
 
 - compatibility schema and runtime protocol versions;
@@ -203,6 +222,11 @@ Stable machine-state error codes include:
 - `machineStateStorageGenerationMismatch`
 - `unsafeMachineStatePath`
 - `machineStateIncompatible`
+- `machineStateRestoreRequired`
+- `identityBundleMismatch`
+- `activeIdentityMismatch`
+- `activeIdentityInvalid`
+- `unsafeIdentityBundlePath`
 - `unsupportedHostArchitecture`
 - `unsupportedVMConfiguration`
 - `invalidStorageConfiguration`

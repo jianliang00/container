@@ -564,8 +564,15 @@ actor MacOSSidecarService {
     private let rootURL: URL
     private let log: Logging.Logger
 
+    private struct PreparedConfiguration {
+        let configuration: VZVirtualMachineConfiguration
+        let identity: MacOSActiveMachineIdentity
+        let restoredStateID: String?
+    }
+
     private var vm: VZVirtualMachine?
-    private var vmConfiguration: VZVirtualMachineConfiguration?
+    private var preparedConfiguration: PreparedConfiguration?
+    private var configurationPreparationInProgress = false
     private var vmDelegate: VMDelegate?
     private var vmWindow: UnsafeSendableBox<NSWindow>?
     private var vmWindowView: UnsafeSendableBox<VZVirtualMachineView>?
@@ -612,13 +619,10 @@ actor MacOSSidecarService {
             ])
 
         do {
-            let vmConfiguration: VZVirtualMachineConfiguration
-            if let prepared = self.vmConfiguration {
-                vmConfiguration = prepared
-            } else {
-                vmConfiguration = try await makeVirtualMachineConfiguration(containerConfig: config)
+            guard config.macosGuest?.machineState?.restoreStateID == nil else {
+                throw SidecarRPCError(code: "machineStateRestoreRequired", message: "configured machine state must be restored, not cold started")
             }
-            self.vmConfiguration = vmConfiguration
+            let vmConfiguration = try await ensurePreparedConfiguration(containerConfig: config)
             log.info("bootstrapStart: creating VZVirtualMachine")
             let created = try await createVirtualMachineOnMain(configuration: vmConfiguration)
             let vm = created.vm
@@ -807,7 +811,7 @@ actor MacOSSidecarService {
         try lifecycle.ensureNoOperationInProgress()
         do {
             let stored = try store.load(stateID: stateID)
-            try MacOSMachineIdentityBundleStore.verify(in: stored.directoryURL)
+            try MacOSMachineIdentityBundleStore.verify(in: stored.directoryURL, compatibility: stored.compatibility)
             let current = try await currentCompatibilityDescription()
             let reasons = MacOSMachineStateCompatibility.compare(saved: stored.compatibility, current: current)
             guard reasons.isEmpty else {
@@ -869,9 +873,12 @@ actor MacOSSidecarService {
             throw error
         }
         do {
-            try MacOSMachineIdentityBundleStore.capture(from: rootURL, into: reservation.directoryURL)
+            guard let preparedIdentity = preparedConfiguration?.identity else {
+                throw SidecarRPCError(code: "activeIdentityUnavailable", message: "VM identity selection is unavailable")
+            }
+            try MacOSMachineIdentityBundleStore.capture(from: preparedIdentity, into: reservation.directoryURL, compatibility: compatibility)
             try await saveVirtualMachine(vm, to: reservation.stateURL)
-            try MacOSMachineIdentityBundleStore.verify(in: reservation.directoryURL)
+            try MacOSMachineIdentityBundleStore.verify(in: reservation.directoryURL, compatibility: compatibility)
             let receipt: MacOSMachineStateReceipt?
             if let adoption, let pair {
                 receipt = try store.commit(
@@ -917,26 +924,8 @@ actor MacOSSidecarService {
         }
         let store = try machineStateStore(containerConfig: config)
         let stored = try store.load(stateID: stateID)
-        if let requested = config.macosGuest?.machineState,
-            requested.protocolVersion >= MacOSSidecarProtocolVersion.durableCheckpointAdoption
-        {
-            guard let receipt = stored.receipt,
-                requested.pairID == receipt.pair.pairID,
-                requested.adoptionManifestDigest == receipt.pair.adoptionManifestDigest,
-                requested.persistenceID == receipt.pair.persistenceID,
-                requested.restoreStateGeneration == receipt.pair.stateGeneration
-            else {
-                throw SidecarRPCError(
-                    code: "durablePairMismatch",
-                    message: "configured restore contract does not match the committed durable pair"
-                )
-            }
-        }
-        try MacOSMachineStateStorageGeneration.validateRestore(
-            saved: stored.compatibility,
-            selectedSavedGeneration: config.macosGuest?.machineState?.restoreStateGeneration
-        )
-        let configuration = try await ensurePreparedConfiguration()
+        try validateRestoreRequest(config, stored: stored)
+        let configuration = try await ensurePreparedConfiguration(containerConfig: config, restoring: stored)
         try configuration.validateSaveRestoreSupport()
         let current = try await currentCompatibilityDescription()
         let reasons = MacOSMachineStateCompatibility.compare(saved: stored.compatibility, current: current)
@@ -1018,18 +1007,102 @@ actor MacOSSidecarService {
         return currentCompatibility
     }
 
-    private func ensurePreparedConfiguration() async throws -> VZVirtualMachineConfiguration {
-        if let vmConfiguration { return vmConfiguration }
-        let containerConfig = try loadContainerConfiguration()
+    private func ensurePreparedConfiguration(
+        containerConfig: ContainerConfiguration? = nil,
+        restoring: MacOSMachineStateStore.StoredState? = nil
+    ) async throws -> VZVirtualMachineConfiguration {
+        if let preparedConfiguration {
+            if restoring == nil || preparedConfiguration.restoredStateID == restoring?.directoryURL.lastPathComponent {
+                return preparedConfiguration.configuration
+            }
+            // Discovery may prepare a legacy cold-boot configuration before a
+            // restore request supplies its state id. No VZ instance may still
+            // hold that configuration while its identity is materialized.
+            guard vm == nil else {
+                throw SidecarRPCError(code: "invalidLifecycleState", message: "stop the current VM before selecting a different saved identity")
+            }
+            discardPreparedNetworkResources()
+            self.preparedConfiguration = nil
+            currentCompatibility = nil
+        }
+        guard !configurationPreparationInProgress else {
+            throw SidecarRPCError(code: "operationInProgress", message: "VM configuration preparation is in progress")
+        }
+        configurationPreparationInProgress = true
+        defer { configurationPreparationInProgress = false }
+        let initialState = state
+        let containerConfig = try containerConfig ?? loadContainerConfiguration()
+        var stored = restoring
         if let machineState = containerConfig.macosGuest?.machineState,
             let stateID = machineState.restoreStateID
         {
-            let stored = try machineStateStore(containerConfig: containerConfig).load(stateID: stateID)
-            try MacOSMachineIdentityBundleStore.materialize(from: stored.directoryURL, into: rootURL)
+            stored = try stored ?? machineStateStore(containerConfig: containerConfig).load(stateID: stateID)
         }
-        let configuration = try await makeVirtualMachineConfiguration(containerConfig: containerConfig)
-        vmConfiguration = configuration
+        let identity: MacOSActiveMachineIdentity
+        if let stored {
+            identity = try prepareRestoredIdentity(containerConfig: containerConfig, stored: stored)
+        } else {
+            identity = try activeMachineIdentity(containerConfig: containerConfig)
+        }
+        let configuration = try await makeVirtualMachineConfiguration(containerConfig: containerConfig, identity: identity, restoring: stored != nil)
+        guard state == initialState else {
+            discardPreparedNetworkResources()
+            currentCompatibility = nil
+            throw SidecarRPCError(code: "operationInProgress", message: "VM lifecycle changed during configuration preparation")
+        }
+        preparedConfiguration = .init(configuration: configuration, identity: identity, restoredStateID: stored?.directoryURL.lastPathComponent)
         return configuration
+    }
+
+    func activeMachineIdentity(containerConfig: ContainerConfiguration) throws -> MacOSActiveMachineIdentity {
+        try MacOSActiveMachineIdentity(runtimeRootURL: rootURL, persistentIdentityURL: persistentIdentityDirectory(containerConfig: containerConfig))
+    }
+
+    func prepareRestoredIdentity(
+        containerConfig: ContainerConfiguration,
+        stored: MacOSMachineStateStore.StoredState
+    ) throws -> MacOSActiveMachineIdentity {
+        try validateRestoreRequest(containerConfig, stored: stored)
+        try MacOSMachineIdentityBundleStore.verify(in: stored.directoryURL, compatibility: stored.compatibility)
+        let bundle = try MacOSActiveMachineIdentity(
+            runtimeRootURL: stored.directoryURL.appendingPathComponent(MacOSMachineIdentityBundleStore.bundleDirectoryName)
+        )
+        // Check host and requested configuration before changing any active
+        // identity files. Network MACs are restored from the saved lease and
+        // checked again against the actual VZ devices after preparation.
+        let candidate = try MacOSCompatibilityDescriptionBuilder.make(
+            containerConfig: containerConfig,
+            hardwareModelData: bundle.hardwareModelData(),
+            machineIdentifierData: bundle.loadOrCreateMachineIdentifier(allowCreation: false).dataRepresentation,
+            networkDeviceMACAddresses: stored.compatibility.configuration.networkDeviceMACAddresses ?? [],
+            storageDescriptions: stored.compatibility.configuration.storageDevices
+        )
+        let reasons = MacOSMachineStateCompatibility.compare(saved: stored.compatibility, current: candidate)
+        guard reasons.isEmpty else { throw compatibilityMismatchError(reasons) }
+        let identity = try activeMachineIdentity(containerConfig: containerConfig)
+        try MacOSMachineIdentityBundleStore.materialize(from: stored.directoryURL, into: identity, compatibility: stored.compatibility)
+        return identity
+    }
+
+    private func validateRestoreRequest(_ config: ContainerConfiguration, stored: MacOSMachineStateStore.StoredState) throws {
+        if let requested = config.macosGuest?.machineState {
+            guard requested.restoreStateID == stored.directoryURL.lastPathComponent, requested.restoreStateGeneration != nil else {
+                throw SidecarRPCError(code: "machineStateRequestMismatch", message: "restore request does not match the configured machine state")
+            }
+            if requested.protocolVersion >= MacOSSidecarProtocolVersion.durableCheckpointAdoption {
+                guard let receipt = stored.receipt,
+                    requested.pairID == receipt.pair.pairID,
+                    requested.adoptionManifestDigest == receipt.pair.adoptionManifestDigest,
+                    requested.persistenceID == receipt.pair.persistenceID,
+                    requested.restoreStateGeneration == receipt.pair.stateGeneration
+                else {
+                    throw SidecarRPCError(code: "durablePairMismatch", message: "configured restore contract does not match the committed durable pair")
+                }
+            }
+        }
+        try MacOSMachineStateStorageGeneration.validateRestore(
+            saved: stored.compatibility, selectedSavedGeneration: config.macosGuest?.machineState?.restoreStateGeneration
+        )
     }
 
     func machineStateStore(
@@ -1082,7 +1155,7 @@ actor MacOSSidecarService {
     private func discardVirtualMachineResources() async {
         await closeGUIWindowOnMain()
         vm = nil
-        vmConfiguration = nil
+        preparedConfiguration = nil
         vmDelegate = nil
         currentCompatibility = nil
         nbdObservers = []
@@ -1280,42 +1353,6 @@ actor MacOSSidecarService {
     }
 
     private func configPath() -> URL { rootURL.appendingPathComponent("config.json") }
-    private func auxiliaryStoragePath(containerConfig: ContainerConfiguration) throws -> URL {
-        guard let identityDirectory = try persistentIdentityDirectory(containerConfig: containerConfig) else {
-            return rootURL.appendingPathComponent("AuxiliaryStorage")
-        }
-        let target = identityDirectory.appendingPathComponent("AuxiliaryStorage")
-        if !FileManager.default.fileExists(atPath: target.path) {
-            let source = rootURL.appendingPathComponent("AuxiliaryStorage")
-            var sourceValue = stat()
-            guard lstat(source.path, &sourceValue) == 0, (sourceValue.st_mode & S_IFMT) == S_IFREG else {
-                throw SidecarRPCError(
-                    code: "unsafeMachineStatePath",
-                    message: "sandbox auxiliary storage must be a regular file"
-                )
-            }
-            let temporary = identityDirectory.appendingPathComponent(".AuxiliaryStorage.\(UUID().uuidString).tmp")
-            do {
-                try FileManager.default.copyItem(at: source, to: temporary)
-                guard chmod(temporary.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
-                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                }
-                try FileManager.default.moveItem(at: temporary, to: target)
-            } catch {
-                try? FileManager.default.removeItem(at: temporary)
-                throw error
-            }
-        }
-        try requirePrivateRegularIdentityFile(target)
-        return target
-    }
-    private func hardwareModelPath() -> URL { rootURL.appendingPathComponent("HardwareModel.bin") }
-    private func machineIdentifierPath(containerConfig: ContainerConfiguration) throws -> URL {
-        guard let identityDirectory = try persistentIdentityDirectory(containerConfig: containerConfig) else {
-            return rootURL.appendingPathComponent("MachineIdentifier.bin")
-        }
-        return identityDirectory.appendingPathComponent("MachineIdentifier.bin")
-    }
 
     func persistentIdentityDirectory(containerConfig: ContainerConfiguration) throws -> URL? {
         guard let storage = try persistentMachineStateRoot(containerConfig: containerConfig) else { return nil }
@@ -1324,33 +1361,27 @@ actor MacOSSidecarService {
         return identity
     }
 
-    private func requirePrivateRegularIdentityFile(_ url: URL) throws {
-        var value = stat()
-        guard lstat(url.path, &value) == 0, (value.st_mode & S_IFMT) == S_IFREG else {
-            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "persistent identity file is not regular")
-        }
-        guard chmod(url.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-    }
-
     private func loadContainerConfiguration() throws -> ContainerConfiguration {
         let data = try Data(contentsOf: configPath())
         return try JSONDecoder().decode(ContainerConfiguration.self, from: data)
     }
 
-    private func makeVirtualMachineConfiguration(containerConfig: ContainerConfiguration) async throws -> VZVirtualMachineConfiguration {
+    private func makeVirtualMachineConfiguration(
+        containerConfig: ContainerConfiguration,
+        identity: MacOSActiveMachineIdentity,
+        restoring: Bool
+    ) async throws -> VZVirtualMachineConfiguration {
         let storage = try MacOSBlockDeviceBuilder.build(rootURL: rootURL, options: containerConfig.macosGuest, log: log)
-        let hardwareData = try Data(contentsOf: hardwareModelPath())
+        let hardwareData = try identity.hardwareModelData()
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareData) else {
             throw ContainerizationError(.invalidState, message: "invalid hardware model data")
         }
-        let machineIdentifier = try loadOrCreateMachineIdentifier(at: machineIdentifierPath(containerConfig: containerConfig))
+        let machineIdentifier = try identity.loadOrCreateMachineIdentifier(allowCreation: !restoring)
 
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = hardwareModel
         platform.machineIdentifier = machineIdentifier
-        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: try auxiliaryStoragePath(containerConfig: containerConfig))
+        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: try identity.prepareAuxiliaryStorage(allowCreation: !restoring))
 
         let vmConfiguration = VZVirtualMachineConfiguration()
         vmConfiguration.bootLoader = VZMacOSBootLoader()
@@ -1591,20 +1622,6 @@ actor MacOSSidecarService {
                 _ = previousFrontmostApp.value.activate(options: [])
             }
         }
-    }
-
-    private func loadOrCreateMachineIdentifier(at path: URL) throws -> VZMacMachineIdentifier {
-        if FileManager.default.fileExists(atPath: path.path) {
-            try requirePrivateRegularIdentityFile(path)
-            let data = try Data(contentsOf: path)
-            if let value = VZMacMachineIdentifier(dataRepresentation: data) {
-                return value
-            }
-        }
-        let value = VZMacMachineIdentifier()
-        try value.dataRepresentation.write(to: path, options: .atomic)
-        try requirePrivateRegularIdentityFile(path)
-        return value
     }
 
     private func startVirtualMachine(_ vm: VZVirtualMachine) async throws {

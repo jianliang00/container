@@ -447,10 +447,10 @@ struct MacOSMachineStateStore: Sendable {
     /// ancestor. The CRI integration owns and protects the parent directory;
     /// the sidecar only owns its binding-specific child.
     static func preparePersistentRoot(at rootURL: URL, effectiveUserID: uid_t = geteuid()) throws {
-        let root = lexicalDirectoryURL(rootURL)
-        guard root.isFileURL, root.path.hasPrefix("/"), root.path != "/" else {
-            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state root must be absolute")
+        guard rootURL.isFileURL, let path = MacOSManagedPath.canonicalPath(rootURL.path), path != "/" else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state root must be an absolute canonical file path")
         }
+        let root = URL(fileURLWithPath: path, isDirectory: true)
         let parent = root.deletingLastPathComponent()
         try requirePersistentDirectory(parent, effectiveUserID: effectiveUserID, requirePrivateMode: true)
         try rejectAllSymbolicLinkComponents(through: parent)

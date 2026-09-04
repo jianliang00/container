@@ -1572,8 +1572,8 @@ struct CRIShimRuntimeServerTests {
         #expect(beforeNetwork.removeSandboxCount == 1)
     }
 
-    @Test
-    func preparedLaunchMarkerWithoutSidecarCanBeCleanedAndRetired() async throws {
+    @Test(arguments: [false, true])
+    func preparedOrActiveLaunchWithMissingRuntimeRequiresExitProofBeforeRetirement(active: Bool) async throws {
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("cri-ms-prepared-cleanup-\(UUID().uuidString.prefix(8))", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1629,12 +1629,77 @@ struct CRIShimRuntimeServerTests {
         let runtimeManager = RecordingRuntimeManager(
             execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
         )
+        let barrier = try #require(launchMarked.sidecarLifecycleBarrier)
+        let storageFD = open(storageDirectory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        #expect(storageFD >= 0)
+        defer { Darwin.close(storageFD) }
+        func attestation() throws -> MacOSSidecarLifecycleAttestation {
+            try MacOSSidecarLifecycleLock.readAttestation(directoryFD: storageFD, expectedOwnerUID: geteuid())
+        }
+        let linkedParent = root.appendingPathComponent("linked-states")
+        try FileManager.default.createSymbolicLink(at: linkedParent, withDestinationURL: storageDirectory.deletingLastPathComponent())
+        #expect(throws: POSIXError.self) {
+            _ = try MacOSSidecarLifecycleLock(
+                protocolVersion: barrier.protocolVersion,
+                persistenceID: persistenceID,
+                sandboxID: launchMarked.effectiveRuntimeSandboxID,
+                bootNonce: barrier.bootNonce,
+                storageDirectory: linkedParent.appendingPathComponent(persistenceID).path
+            )
+        }
+        #expect(try attestation().state == .prepared)
+        var sidecarLock: MacOSSidecarLifecycleLock?
+        if active {
+            sidecarLock = try MacOSSidecarLifecycleLock(
+                protocolVersion: barrier.protocolVersion,
+                persistenceID: persistenceID,
+                sandboxID: launchMarked.effectiveRuntimeSandboxID,
+                bootNonce: barrier.bootNonce,
+                storageDirectory: String(storageDirectory.path.dropFirst("/private".count))
+            )
+        }
+        runtimeManager.removeSandboxError = ContainerizationError(
+            .internalError, message: "failed to delete container",
+            cause: ContainerizationError(.notFound, message: "container is absent")
+        )
+        let cleaner = CRIShimMachineStateRuntimeCleaner(runtimeManager: runtimeManager)
+        if active {
+            do {
+                _ = try await cleaner.cleanup(lease: launchMarked, policy: policy)
+                Issue.record("active sidecar lock did not fence cleanup")
+            } catch {
+                #expect(CRIShimErrorMapper.disposition(for: error).kind == .unavailable)
+            }
+            #expect(try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID)?.admissionState == .runtimeCreationStarted)
+            #expect(try attestation().state == .active)
+            withExtendedLifetime(sidecarLock) {}
+            sidecarLock = nil
+        }
+        let missingRuntimeError = runtimeManager.removeSandboxError
+        let failures: [any Error] = [
+            POSIXError(.EACCES), POSIXError(.ECONNREFUSED), POSIXError(.ENOENT),
+            ContainerizationError(.internalError, message: "untyped notFound: diagnostic"),
+        ]
+        for failure in failures {
+            runtimeManager.removeSandboxError = failure
+            do {
+                _ = try await cleaner.cleanup(lease: launchMarked, policy: policy)
+                Issue.record("uncertain runtime removal released the lease")
+            } catch {
+                #expect(!criRuntimeObjectIsNotFound(error))
+            }
+            #expect(try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID)?.admissionState == .runtimeCreationStarted)
+            #expect(try attestation().state == (active ? .active : .prepared))
+        }
+        runtimeManager.removeSandboxError = missingRuntimeError
         let confirmation = try await CRIShimMachineStateRuntimeCleaner(runtimeManager: runtimeManager).cleanup(
             lease: launchMarked,
             policy: policy
         )
 
         #expect(confirmation.lease.admissionState == .runtimeDeletionConfirmed)
+        #expect(try attestation().state == .retired)
+        #expect(try attestation().bootNonce == barrier.bootNonce)
         #expect(runtimeManager.removeSandboxCalls.last?.id == launchMarked.effectiveRuntimeSandboxID)
         #expect(runtimeManager.removeSandboxRuntimeServiceCalls.last == launchMarked.effectiveRuntimeSandboxID)
         #expect(runtimeManager.removeMachineStateSidecarCalls.last?.persistenceID == persistenceID)
@@ -1644,7 +1709,6 @@ struct CRIShimRuntimeServerTests {
             try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID) == nil
         )
 
-        let barrier = try #require(launchMarked.sidecarLifecycleBarrier)
         #expect(throws: (any Error).self) {
             _ = try MacOSSidecarLifecycleLock(
                 protocolVersion: barrier.protocolVersion,
@@ -1860,8 +1924,8 @@ struct CRIShimRuntimeServerTests {
         await shutdown(group)
     }
 
-    @Test
-    func machineStateBindingLeaseMakesACKLossRetryIdempotentAndRefusesTakeover() async throws {
+    @Test(arguments: [false, true])
+    func machineStateBindingLeaseMakesACKLossRetryIdempotentAndRefusesTakeover(bootstrapFails: Bool) async throws {
         let socketPath = "/tmp/cri-shim-machine-lease-\(UUID().uuidString.prefix(8)).sock"
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("cri-ms-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -2028,12 +2092,26 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.startSandboxCalls.count == 1)
 
         runtimeManager.startSandboxHook = nil
-        _ = try await client.startContainer(startContainer)
+        if !bootstrapFails {
+            _ = try await client.startContainer(startContainer)
+        }
         try writeTestSidecarLifecycleAttestation(
             policy: machineStatePolicy,
             lease: launchStartedLease,
             state: .active
         )
+        if bootstrapFails {
+            try await runtimeManager.removeSandbox(id: firstLease.effectiveRuntimeSandboxID, force: true)
+            runtimeManager.stopSandboxChangesState = false
+            runtimeManager.stopSandboxError = ContainerizationError(
+                .internalError, message: "failed to stop container",
+                cause: ContainerizationError(.notFound, message: "container is absent")
+            )
+            runtimeManager.removeSandboxError = ContainerizationError(
+                .internalError, message: "failed to delete container",
+                cause: ContainerizationError(.notFound, message: "container is absent")
+            )
+        }
 
         var remove = Runtime_V1_RemovePodSandboxRequest()
         remove.podSandboxID = first.podSandboxID
@@ -2069,6 +2147,20 @@ struct CRIShimRuntimeServerTests {
             ) == nil
         )
 
+        let removalsAfterRetirement = runtimeManager.removeSandboxCalls.count
+        var stop = Runtime_V1_StopPodSandboxRequest()
+        stop.podSandboxID = first.podSandboxID
+        for _ in 0..<3 {
+            _ = try await client.stopPodSandbox(stop)
+            _ = try await client.removePodSandbox(remove)
+        }
+        #expect(runtimeManager.removeSandboxCalls.count == removalsAfterRetirement)
+        #expect(try metadataStore.sandbox(id: first.podSandboxID) == nil)
+        #expect(try metadataStore.listContainers().filter { $0.sandboxID == first.podSandboxID }.isEmpty)
+        runtimeManager.stopSandboxError = nil
+        runtimeManager.stopSandboxChangesState = true
+        runtimeManager.removeSandboxError = nil
+
         let successor = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 2))
         #expect(successor.podSandboxID != first.podSandboxID)
         #expect(runtimeManager.createSandboxCalls.count == 2)
@@ -2080,6 +2172,13 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.createSandboxCalls.count == 3)
 
         try metadataStore.deleteSandbox(id: orphan.podSandboxID)
+        remove.podSandboxID = orphan.podSandboxID
+        do {
+            _ = try await client.removePodSandbox(remove)
+            Issue.record("missing metadata hid an unreleased durable lease")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .unavailable)
+        }
         do {
             _ = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 3))
             Issue.record("lease without completed metadata was automatically taken over")
@@ -6365,6 +6464,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var streamExecCalls: [RecordingStreamExecCall] = []
     var stopSandboxChangesState = true
     var stopSandboxError: (any Error)?
+    var removeSandboxError: (any Error)?
     var stopSandboxWorkloadExitCode: Int32?
     var stopSandboxWorkloadExitedAt: Date?
     var stopWorkloadChangesState = true
@@ -6524,6 +6624,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     ) async throws {
         sandboxSnapshots.removeValue(forKey: id)
         removeSandboxCalls.append((id: id, force: force))
+        if let removeSandboxError { throw removeSandboxError }
     }
 
     func removeSandboxRuntimeService(

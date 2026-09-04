@@ -17,6 +17,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 
 /// Persists the host-independent VM identity needed to pair a disk snapshot
 /// with either a same-host machine-state restore or a cross-host cold boot.
@@ -48,7 +49,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
     /// Captures an immutable identity bundle. `stateDirectoryURL` must be a
     /// newly reserved, private machine-state directory.
     static func capture(from runtimeRootURL: URL, into stateDirectoryURL: URL) throws {
-        let runtimeRoot = canonicalRuntimeRoot(runtimeRootURL)
+        let runtimeRoot = lexicalDirectoryURL(runtimeRootURL)
         let stateDirectory = lexicalDirectoryURL(stateDirectoryURL)
         try requireManagedDirectory(runtimeRoot, role: "runtime root", requirePrivateMode: false)
         try requireManagedDirectory(stateDirectory, role: "machine-state directory", requirePrivateMode: true)
@@ -100,7 +101,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
     /// retry after a crash is safe: all target files are staged again and then
     /// atomically replaced one at a time before VM configuration is created.
     static func materialize(from stateDirectoryURL: URL, into runtimeRootURL: URL) throws {
-        let runtimeRoot = canonicalRuntimeRoot(runtimeRootURL)
+        let runtimeRoot = lexicalDirectoryURL(runtimeRootURL)
         let stateDirectory = lexicalDirectoryURL(stateDirectoryURL)
         try requireManagedDirectory(runtimeRoot, role: "runtime root", requirePrivateMode: false)
         let bundleURL = stateDirectory.appendingPathComponent(bundleDirectoryName, isDirectory: true)
@@ -241,19 +242,10 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         try rejectSymbolicLinkComponents(in: url)
     }
 
-    /// Darwin exposes `/var` and `/tmp` as fixed system aliases into
-    /// `/private`. Normalize only those two aliases; arbitrary symlinked roots
+    /// Canonicalize only verified system aliases; arbitrary symbolic links
     /// remain rejected by `requireManagedDirectory`.
-    private static func canonicalRuntimeRoot(_ url: URL) -> URL {
-        let path = macOSLexicallyNormalizedAbsolutePath(url.path) ?? url.path
-        if path == "/var" || path.hasPrefix("/var/") || path == "/tmp" || path.hasPrefix("/tmp/") {
-            return URL(fileURLWithPath: "/private\(path)", isDirectory: true)
-        }
-        return lexicalDirectoryURL(url)
-    }
-
     private static func lexicalDirectoryURL(_ url: URL) -> URL {
-        let path = macOSLexicallyNormalizedAbsolutePath(url.path) ?? url.path
+        let path = MacOSManagedPath.canonicalPath(url.path) ?? url.path
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 

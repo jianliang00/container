@@ -95,6 +95,12 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
 
     public func prepare(_ plan: MacvmnetOperationPlan) async throws -> CNIResult {
         let identity = try requireAttachmentIdentity(plan)
+        let ledger = makeAttachmentLedger(plan)
+        let operationLock = try ledger.acquireOperationLock(
+            identity: identity,
+            networkName: plan.networkName
+        )
+        defer { operationLock.unlock() }
         let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
         do {
             let existingState = try await client.inspectSandboxNetwork()
@@ -102,7 +108,8 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
                 return try persistResult(
                     attachment: attachment,
                     identity: identity,
-                    plan: plan
+                    plan: plan,
+                    ledger: ledger
                 )
             }
         } catch let error as CNIError {
@@ -116,22 +123,29 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
         return try persistResult(
             attachment: attachment,
             identity: identity,
-            plan: plan
+            plan: plan,
+            ledger: ledger
         )
     }
 
     private func persistResult(
         attachment: Attachment,
         identity: MacvmnetAttachmentIdentity,
-        plan: MacvmnetOperationPlan
+        plan: MacvmnetOperationPlan,
+        ledger: any MacvmnetAttachmentLedger
     ) throws -> CNIResult {
         let result = CNIResult(
             attachment: attachment,
             interfaceName: identity.ifName,
             sandbox: plan.sandbox
         )
-        try makeAttachmentLedger(plan).upsert(
-            MacvmnetAttachmentRecord(identity: identity, networkName: plan.networkName, result: result)
+        try ledger.upsert(
+            MacvmnetAttachmentRecord(
+                identity: identity,
+                owner: plan.attachmentOwner,
+                networkName: plan.networkName,
+                result: result
+            )
         )
         return result
     }
@@ -141,6 +155,11 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
         guard let previousResult = plan.previousResult else {
             throw CNIError.invalidConfiguration("CHECK requires prevResult")
         }
+        let operationLock = try makeAttachmentLedger(plan).acquireOperationLock(
+            identity: identity,
+            networkName: plan.networkName
+        )
+        defer { operationLock.unlock() }
         let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
         let state = try await client.inspectSandboxNetwork()
         let attachment = try attachment(from: state, for: plan)
@@ -160,6 +179,17 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
     public func release(_ plan: MacvmnetOperationPlan) async throws {
         let identity = try requireAttachmentIdentity(plan)
         let ledger = makeAttachmentLedger(plan)
+        let operationLock = try ledger.acquireOperationLock(
+            identity: identity,
+            networkName: plan.networkName
+        )
+        defer { operationLock.unlock() }
+        guard let record = try ledger.record(identity: identity, networkName: plan.networkName) else {
+            return
+        }
+        guard record.owner == plan.attachmentOwner else {
+            return
+        }
         do {
             let client = try await makeSandboxClient(identity.containerID, plan.runtimeName)
             try await client.releaseSandboxNetwork()
@@ -168,7 +198,17 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
                 throw error
             }
         }
-        try ledger.remove(identity: identity, networkName: plan.networkName)
+        guard
+            try ledger.remove(
+                identity: identity,
+                networkName: plan.networkName,
+                owner: plan.attachmentOwner
+            )
+        else {
+            throw CNIError.backendUnavailable(
+                "attachment owner changed while releasing sandbox \(identity.containerID)"
+            )
+        }
     }
 
     public func garbageCollect(_ plan: MacvmnetOperationPlan) async throws {
@@ -178,14 +218,28 @@ public struct MacvmnetLiveBackend: MacvmnetBackend {
 
         for record in staleRecords {
             do {
-                let client = try await makeSandboxClient(record.identity.containerID, plan.runtimeName)
-                try await client.releaseSandboxNetwork()
-            } catch {
-                guard Self.isAlreadyGone(error) else {
-                    throw error
+                let operationLock = try ledger.acquireOperationLock(
+                    identity: record.identity,
+                    networkName: record.networkName
+                )
+                defer { operationLock.unlock() }
+                guard try ledger.record(identity: record.identity, networkName: record.networkName) == record else {
+                    continue
                 }
+                do {
+                    let client = try await makeSandboxClient(record.identity.containerID, plan.runtimeName)
+                    try await client.releaseSandboxNetwork()
+                } catch {
+                    guard Self.isAlreadyGone(error) else {
+                        throw error
+                    }
+                }
+                _ = try ledger.remove(
+                    identity: record.identity,
+                    networkName: record.networkName,
+                    owner: record.owner
+                )
             }
-            try ledger.remove(identity: record.identity, networkName: record.networkName)
         }
     }
 

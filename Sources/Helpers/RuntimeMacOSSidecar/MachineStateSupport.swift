@@ -211,6 +211,7 @@ struct MacOSMachineStateStore: Sendable {
         let directoryURL: URL
         let stateURL: URL
         let compatibility: MacOSMachineStateCompatibilityDescription
+        let receipt: MacOSMachineStateReceipt?
     }
 
     private let rootURL: URL
@@ -264,6 +265,69 @@ struct MacOSMachineStateStore: Sendable {
         guard chmod(manifestURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
+    }
+
+    func commit(
+        _ reservation: Reservation,
+        compatibility: MacOSMachineStateCompatibilityDescription,
+        adoption: MacOSMachineStateAdoptionManifest,
+        pair: MacOSMachineStateDurablePair
+    ) throws -> MacOSMachineStateReceipt {
+        try requireDirectory(statesURL)
+        try requireDirectory(reservation.directoryURL)
+        try requireRegularFile(reservation.stateURL)
+        guard chmod(reservation.stateURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let compatibilityData = try encoder.encode(compatibility)
+        let adoptionData = try encoder.encode(adoption)
+        let adoptionDigest = Self.sha256Hex(adoptionData)
+        guard adoptionDigest == pair.adoptionManifestDigest else {
+            throw SidecarRPCError(
+                code: "durablePairMismatch",
+                message: "adoption manifest digest does not match the durable pair"
+            )
+        }
+        let expectedPairID = Self.durablePairID(
+            persistenceID: pair.persistenceID,
+            stateID: pair.stateID,
+            diskSnapshotRef: pair.diskSnapshot.snapshotRef,
+            sourceStorageGeneration: pair.stateGeneration,
+            compatibilityClass: pair.compatibilityClass,
+            adoptionManifestDigest: adoptionDigest
+        )
+        guard expectedPairID == pair.pairID else {
+            throw SidecarRPCError(
+                code: "durablePairMismatch",
+                message: "durable pair id does not match its canonical fields"
+            )
+        }
+
+        let compatibilityURL = reservation.directoryURL.appendingPathComponent("compatibility.json")
+        let adoptionURL = reservation.directoryURL.appendingPathComponent("adoption.json")
+        try Self.writePayload(compatibilityData, to: compatibilityURL)
+        try Self.writePayload(adoptionData, to: adoptionURL)
+        try Self.fsyncFile(reservation.stateURL)
+        try Self.fsyncDirectory(reservation.directoryURL)
+
+        let stateAttributes = try FileManager.default.attributesOfItem(atPath: reservation.stateURL.path)
+        let stateSizeBytes = (stateAttributes[.size] as? NSNumber)?.uint64Value ?? 0
+        guard stateSizeBytes > 0 else {
+            throw SidecarRPCError(code: "machineStateIncomplete", message: "saved machine state is empty")
+        }
+        let receipt = MacOSMachineStateReceipt(
+            pair: pair,
+            adoption: adoption,
+            stateSizeBytes: stateSizeBytes,
+            committedAt: Date()
+        )
+        let manifestURL = reservation.directoryURL.appendingPathComponent("manifest.json")
+        try Self.writePayload(try encoder.encode(receipt), to: manifestURL)
+        try Self.fsyncDirectory(reservation.directoryURL)
+        return receipt
     }
 
     func abort(_ reservation: Reservation) {
@@ -320,7 +384,86 @@ struct MacOSMachineStateStore: Sendable {
             MacOSMachineStateCompatibilityDescription.self,
             from: Data(contentsOf: manifestURL, options: .uncached)
         )
-        return StoredState(directoryURL: directoryURL, stateURL: stateURL, compatibility: compatibility)
+        let receiptURL = directoryURL.appendingPathComponent("manifest.json")
+        let receipt: MacOSMachineStateReceipt?
+        if FileManager.default.fileExists(atPath: receiptURL.path) {
+            let adoptionURL = directoryURL.appendingPathComponent("adoption.json")
+            try requireRegularFile(adoptionURL)
+            try requireRegularFile(receiptURL)
+            let adoptionData = try Data(contentsOf: adoptionURL, options: .uncached)
+            let decoded = try JSONDecoder().decode(
+                MacOSMachineStateReceipt.self,
+                from: Data(contentsOf: receiptURL, options: .uncached)
+            )
+            let adoption = try JSONDecoder().decode(
+                MacOSMachineStateAdoptionManifest.self,
+                from: adoptionData
+            )
+            guard decoded.committed,
+                decoded.pair.stateID == stateID,
+                decoded.adoption == adoption,
+                decoded.pair.adoptionManifestDigest == Self.sha256Hex(adoptionData),
+                decoded.pair.pairID
+                    == Self.durablePairID(
+                        persistenceID: decoded.pair.persistenceID,
+                        stateID: decoded.pair.stateID,
+                        diskSnapshotRef: decoded.pair.diskSnapshot.snapshotRef,
+                        sourceStorageGeneration: decoded.pair.stateGeneration,
+                        compatibilityClass: decoded.pair.compatibilityClass,
+                        adoptionManifestDigest: decoded.pair.adoptionManifestDigest
+                    )
+            else {
+                throw SidecarRPCError(
+                    code: "machineStateIncomplete",
+                    message: "machine state \(stateID) has an invalid durable-pair manifest"
+                )
+            }
+            receipt = decoded
+        } else {
+            receipt = nil
+        }
+        return StoredState(
+            directoryURL: directoryURL,
+            stateURL: stateURL,
+            compatibility: compatibility,
+            receipt: receipt
+        )
+    }
+
+    func receipt(stateID: String) throws -> MacOSMachineStateReceipt {
+        guard let receipt = try load(stateID: stateID).receipt else {
+            throw SidecarRPCError(
+                code: "machineStateIncomplete",
+                message: "machine state \(stateID) has no durable-pair manifest"
+            )
+        }
+        return receipt
+    }
+
+    static func durablePairID(
+        persistenceID: String,
+        stateID: String,
+        diskSnapshotRef: String,
+        sourceStorageGeneration: UInt64,
+        compatibilityClass: String,
+        adoptionManifestDigest: String
+    ) -> String {
+        var data = Data()
+        for value in [
+            "kross.macos.durable-pair.v1",
+            persistenceID,
+            stateID,
+            diskSnapshotRef,
+            String(sourceStorageGeneration),
+            compatibilityClass,
+            adoptionManifestDigest,
+        ] {
+            let bytes = Data(value.utf8)
+            var length = UInt32(bytes.count).bigEndian
+            withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+            data.append(bytes)
+        }
+        return sha256Hex(data)
     }
 
     /// Creates the per-binding persistent root without creating any missing
@@ -380,6 +523,40 @@ struct MacOSMachineStateStore: Sendable {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         }
         guard chmod(url.path, mode_t(S_IRWXU)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func writePayload(_ data: Data, to url: URL) throws {
+        try data.write(to: url, options: .atomic)
+        guard chmod(url.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        try fsyncFile(url)
+    }
+
+    private static func fsyncFile(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private static func fsyncDirectory(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
@@ -677,19 +854,29 @@ enum MacOSCompatibilityDescriptionBuilder {
 
 final class MacOSNBDConnectionObserver: NSObject, VZNetworkBlockDeviceStorageDeviceAttachmentDelegate, @unchecked Sendable {
     private let identifier: String
+    private let readOnly: Bool
+    private let synchronizationMode: String
     private let log: Logger
     private let lock = NSLock()
     private var connectionCount = 0
     private var terminalError: String?
 
-    init(identifier: String, log: Logger) {
+    init(
+        identifier: String,
+        readOnly: Bool = false,
+        synchronizationMode: String = "full",
+        log: Logger
+    ) {
         self.identifier = identifier
+        self.readOnly = readOnly
+        self.synchronizationMode = synchronizationMode
         self.log = log
     }
 
     func attachmentWasConnected(_ attachment: VZNetworkBlockDeviceStorageDeviceAttachment) {
         lock.lock()
         connectionCount += 1
+        terminalError = nil
         let count = connectionCount
         lock.unlock()
         log.info(
@@ -709,6 +896,17 @@ final class MacOSNBDConnectionObserver: NSObject, VZNetworkBlockDeviceStorageDev
         lock.lock()
         defer { lock.unlock() }
         return (connectionCount, terminalError)
+    }
+
+    func status() -> MacOSStorageAttachmentStatus {
+        let snapshot = snapshot()
+        return .init(
+            identifier: identifier,
+            readOnly: readOnly,
+            synchronizationMode: synchronizationMode,
+            connectionCount: snapshot.connectionCount,
+            terminalError: snapshot.terminalError
+        )
     }
 }
 
@@ -778,7 +976,12 @@ enum MacOSBlockDeviceBuilder {
                     isForcedReadOnly: device.readOnly,
                     synchronizationMode: synchronizationMode
                 )
-                let observer = MacOSNBDConnectionObserver(identifier: device.identifier, log: log)
+                let observer = MacOSNBDConnectionObserver(
+                    identifier: device.identifier,
+                    readOnly: device.readOnly,
+                    synchronizationMode: device.synchronizationMode.rawValue,
+                    log: log
+                )
                 attachment.delegate = observer
                 observers.append(observer)
                 devices.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))

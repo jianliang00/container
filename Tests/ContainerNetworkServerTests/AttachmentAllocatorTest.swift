@@ -37,6 +37,35 @@ struct AttachmentAllocatorTest {
         #expect(address1 == address2)
     }
 
+    @Test func testReservePreferredAddress() async throws {
+        let allocator = try AttachmentAllocator(lower: 100, size: 10)
+
+        let address = try await allocator.allocate(hostname: "restored-host", preferredAddress: 107)
+
+        #expect(address == 107)
+        #expect(try await allocator.lookup(hostname: "restored-host") == 107)
+    }
+
+    @Test func testRejectPreferredAddressOwnedByAnotherHostname() async throws {
+        let allocator = try AttachmentAllocator(lower: 100, size: 10)
+        _ = try await allocator.allocate(hostname: "current-owner", preferredAddress: 107)
+
+        await #expect(throws: (any Error).self) {
+            try await allocator.allocate(hostname: "stale-owner", preferredAddress: 107)
+        }
+        #expect(try await allocator.lookup(hostname: "stale-owner") == nil)
+    }
+
+    @Test func testRejectPreferredAddressChangeForExistingHostname() async throws {
+        let allocator = try AttachmentAllocator(lower: 100, size: 10)
+        _ = try await allocator.allocate(hostname: "restored-host", preferredAddress: 107)
+
+        await #expect(throws: (any Error).self) {
+            try await allocator.allocate(hostname: "restored-host", preferredAddress: 108)
+        }
+        #expect(try await allocator.lookup(hostname: "restored-host") == 107)
+    }
+
     @Test func testAllocateMultipleHostnames() async throws {
         let allocator = try AttachmentAllocator(lower: 100, size: 10)
 

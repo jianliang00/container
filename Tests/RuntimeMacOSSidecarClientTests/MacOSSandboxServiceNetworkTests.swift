@@ -337,12 +337,13 @@ struct MacOSSandboxServiceNetworkTests {
         let recoveredAttachment = try #require(recovered.attachments.first)
 
         #expect(initialAttachment.ipv4Address.address.description == "192.168.64.2")
-        #expect(recoveredAttachment.ipv4Address.address.description == "192.168.64.3")
+        #expect(recoveredAttachment.ipv4Address.address == initialAttachment.ipv4Address.address)
         #expect(recoveredAttachment.macAddress == initialAttachment.macAddress)
         #expect(try MacOSGuestNetworkLeaseStore.load(from: root)?.attachments == recovered.attachments)
         #expect(await recorder.allocateCalls() == [key, key])
         #expect(await recorder.lookupCalls() == [key, key])
         #expect(await recorder.requestedMACAddresses() == [nil, initialAttachment.macAddress])
+        #expect(await recorder.requestedIPv4Addresses() == [nil, initialAttachment.ipv4Address.address])
 
         try await recoveredService.releaseSandboxNetworkState(containerConfig: config)
         #expect(await recorder.deallocateCalls() == [key])
@@ -656,6 +657,7 @@ private actor RecordingSandboxNetworkControl {
     private var nextAddressOctet: UInt8
     private var allocateHistory: [Key] = []
     private var requestedMACAddressHistory: [MACAddress?] = []
+    private var requestedIPv4AddressHistory: [IPv4Address?] = []
     private var lookupHistory: [Key] = []
     private var deallocateHistory: [Key] = []
 
@@ -667,20 +669,31 @@ private actor RecordingSandboxNetworkControl {
         self.nextAddressOctet = nextAddressOctet
     }
 
-    func allocate(network: String, hostname: String, macAddress: MACAddress?) async throws -> NetworkAttachment {
+    func allocate(
+        network: String,
+        hostname: String,
+        macAddress: MACAddress?,
+        preferredIPv4Address: IPv4Address?
+    ) async throws -> NetworkAttachment {
         let key = Key(network: network, hostname: hostname)
         allocateHistory.append(key)
         requestedMACAddressHistory.append(macAddress)
+        requestedIPv4AddressHistory.append(preferredIPv4Address)
         if let existing = seededAttachments[key] {
             return existing
         }
 
-        let suffix = nextAddressOctet
-        nextAddressOctet += 1
+        let address: String
+        if let preferredIPv4Address {
+            address = preferredIPv4Address.description
+        } else {
+            address = "192.168.64.\(nextAddressOctet)"
+            nextAddressOctet += 1
+        }
         let attachment = try makeAttachment(
             network: network,
             hostname: hostname,
-            address: "192.168.64.\(suffix)",
+            address: address,
             gateway: "192.168.64.1",
             macAddress: macAddress
         )
@@ -716,6 +729,10 @@ private actor RecordingSandboxNetworkControl {
         requestedMACAddressHistory
     }
 
+    func requestedIPv4Addresses() -> [IPv4Address?] {
+        requestedIPv4AddressHistory
+    }
+
     func deallocateCalls() -> [Key] {
         deallocateHistory
     }
@@ -727,11 +744,12 @@ private func makeService(root: URL, recorder: RecordingSandboxNetworkControl) ->
         connection: nil,
         log: Logger(label: "MacOSSandboxServiceNetworkTests"),
         networkControl: .init(
-            allocate: { network, hostname, macAddress in
+            allocate: { network, hostname, macAddress, preferredIPv4Address in
                 try await recorder.allocate(
                     network: network,
                     hostname: hostname,
-                    macAddress: macAddress
+                    macAddress: macAddress,
+                    preferredIPv4Address: preferredIPv4Address
                 )
             },
             lookup: { network, hostname in
@@ -826,7 +844,7 @@ private func makeAttachment(
         hostname: hostname,
         ipv4Address: try CIDRv4(
             IPv4Address(address),
-            prefix: Prefix(length: 24)!
+            prefix: #require(Prefix(length: 24))
         ),
         ipv4Gateway: try IPv4Address(gateway),
         ipv6Address: nil,

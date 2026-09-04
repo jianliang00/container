@@ -40,7 +40,11 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
     case vmCapabilities
     case vmPause
     case vmResume
+    case vmPrepareCheckpoint
     case vmSaveMachineState
+    case vmMachineStateReceipt
+    case vmAbortCheckpoint
+    case vmStorageAttachments
     case vmRestoreMachineState
     case vmDeleteMachineState
     case vmCompatibilityDescription
@@ -72,7 +76,11 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         case .vmCapabilities: "vm.capabilities"
         case .vmPause: "vm.pause"
         case .vmResume: "vm.resume"
+        case .vmPrepareCheckpoint: "vm.prepareCheckpoint"
         case .vmSaveMachineState: "vm.saveMachineState"
+        case .vmMachineStateReceipt: "vm.machineStateReceipt"
+        case .vmAbortCheckpoint: "vm.abortCheckpoint"
+        case .vmStorageAttachments: "vm.storageAttachments"
         case .vmRestoreMachineState: "vm.restoreMachineState"
         case .vmDeleteMachineState: "vm.deleteMachineState"
         case .vmCompatibilityDescription: "vm.compatibilityDescription"
@@ -120,7 +128,11 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         Self.vmCapabilities.rawValue: .vmCapabilities,
         Self.vmPause.rawValue: .vmPause,
         Self.vmResume.rawValue: .vmResume,
+        Self.vmPrepareCheckpoint.rawValue: .vmPrepareCheckpoint,
         Self.vmSaveMachineState.rawValue: .vmSaveMachineState,
+        Self.vmMachineStateReceipt.rawValue: .vmMachineStateReceipt,
+        Self.vmAbortCheckpoint.rawValue: .vmAbortCheckpoint,
+        Self.vmStorageAttachments.rawValue: .vmStorageAttachments,
         Self.vmRestoreMachineState.rawValue: .vmRestoreMachineState,
         Self.vmDeleteMachineState.rawValue: .vmDeleteMachineState,
         Self.vmCompatibilityDescription.rawValue: .vmCompatibilityDescription,

@@ -542,7 +542,10 @@ extension MacOSSandboxService {
 
     func validateMachineStateRuntimeConfiguration(_ config: ContainerConfiguration) throws {
         guard let machineState = config.macosGuest?.machineState else { return }
-        guard machineState.protocolVersion == 2 else {
+        guard
+            machineState.protocolVersion == MacOSSidecarProtocolVersion.machineState
+                || machineState.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption
+        else {
             throw ContainerizationError(
                 .unsupported,
                 message: "unsupported machine-state runtime protocol version \(machineState.protocolVersion)"
@@ -554,6 +557,26 @@ extension MacOSSandboxService {
                 .invalidArgument,
                 message: "machine-state restore id and restore generation must be configured together"
             )
+        }
+        let pairFields = [
+            machineState.pairID,
+            machineState.adoptionManifestDigest,
+            machineState.restoreRequestID,
+        ]
+        if machineState.restoreStateID == nil {
+            guard pairFields.allSatisfy({ $0 == nil }) else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "machine-state durable pair fields require a restore state"
+                )
+            }
+        } else if machineState.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption {
+            guard pairFields.allSatisfy({ $0?.isEmpty == false }) else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "protocol v6 restore requires pair, adoption manifest, and request identities"
+                )
+            }
         }
         if let storageGeneration = machineState.storageGeneration, storageGeneration == 0 {
             throw ContainerizationError(.invalidArgument, message: "machine-state storage generation must be positive")

@@ -41,10 +41,14 @@ public actor NetworkHarness: Sendable {
         let macAddress =
             try message.string(key: NetworkKeys.macAddress.rawValue)
             .map { try MACAddress($0) }
+        let preferredIPv4Address =
+            try message.string(key: NetworkKeys.preferredIPv4Address.rawValue)
+            .map { try IPv4Address($0) }
 
         let (attachment:attachment, additionalData:additionalData) = try await service.allocate(
             hostname: hostname,
             macAddress: macAddress,
+            preferredIPv4Address: preferredIPv4Address,
             session: session
         )
 

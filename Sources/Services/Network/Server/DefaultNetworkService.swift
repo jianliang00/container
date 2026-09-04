@@ -75,6 +75,7 @@ public actor DefaultNetworkService: NetworkService {
     public func allocate(
         hostname: String,
         macAddress: MACAddress?,
+        preferredIPv4Address: IPv4Address? = nil,
         session: XPCServerSession
     ) async throws -> (attachment: Attachment, additionalData: XPCMessage?) {
         log.debug("enter", metadata: ["func": "\(#function)"])
@@ -86,7 +87,10 @@ public actor DefaultNetworkService: NetworkService {
         try validateIPv6Status(status)
 
         let previousIndex = try await allocator.lookup(hostname: hostname)
-        let index = try await allocateIndex(hostname: hostname)
+        let index = try await allocateIndex(
+            hostname: hostname,
+            preferredIPv4Address: preferredIPv4Address
+        )
         let macAddress =
             macAddresses[index]
             ?? macAddress
@@ -255,11 +259,17 @@ public actor DefaultNetworkService: NetworkService {
         }
     }
 
-    private func allocateIndex(hostname: String) async throws -> UInt32 {
+    private func allocateIndex(
+        hostname: String,
+        preferredIPv4Address: IPv4Address?
+    ) async throws -> UInt32 {
         while true {
             await waitForRelease(hostname: hostname)
             do {
-                let index = try await allocator.allocate(hostname: hostname)
+                let index = try await allocator.allocate(
+                    hostname: hostname,
+                    preferredAddress: preferredIPv4Address?.value
+                )
                 if releaseWaitersByHostname[hostname] == nil {
                     return index
                 }

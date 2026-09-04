@@ -16,6 +16,7 @@
 
 import ContainerResource
 import Foundation
+import RuntimeMacOSSidecarShared
 
 #if os(Linux)
 import Glibc
@@ -49,6 +50,9 @@ public enum CRIShimMachineStateAnnotation {
     public static let persistenceID = prefix + "persistence-id"
     public static let restoreStateID = prefix + "restore-state-id"
     public static let restoreStateGeneration = prefix + "restore-state-generation"
+    public static let restorePairID = prefix + "restore-pair-id"
+    public static let restoreManifestDigest = prefix + "restore-manifest-digest"
+    public static let restoreRequestID = prefix + "restore-request-id"
     public static let storageGeneration = prefix + "storage-generation"
     public static let blockDevices = prefix + "block-devices"
 
@@ -56,6 +60,9 @@ public enum CRIShimMachineStateAnnotation {
         persistenceID,
         restoreStateID,
         restoreStateGeneration,
+        restorePairID,
+        restoreManifestDigest,
+        restoreRequestID,
         storageGeneration,
         blockDevices,
     ]
@@ -72,6 +79,9 @@ struct CRIShimMachineStateAnnotationValues: Equatable, Sendable {
     var persistenceID: String
     var restoreStateID: String?
     var restoreStateGeneration: UInt64?
+    var restorePairID: String?
+    var restoreManifestDigest: String?
+    var restoreRequestID: String?
     var storageGeneration: UInt64
 }
 
@@ -199,12 +209,19 @@ func makeCRIShimMachineStateMapping(
 
     return CRIShimMachineStateMapping(
         machineState: .init(
+            protocolVersion:
+                values.restoreStateID == nil
+                ? MacOSSidecarProtocolVersion.machineState
+                : MacOSSidecarProtocolVersion.durableCheckpointAdoption,
             persistenceID: values.persistenceID,
             storageDirectory: storageDirectory.path,
             controlSocketPath: controlSocket.path,
             restoreStateID: values.restoreStateID,
             restoreStateGeneration: values.restoreStateGeneration,
-            storageGeneration: values.storageGeneration
+            storageGeneration: values.storageGeneration,
+            pairID: values.restorePairID,
+            adoptionManifestDigest: values.restoreManifestDigest,
+            restoreRequestID: values.restoreRequestID
         ),
         blockDevices: blockDevices
     )
@@ -224,14 +241,23 @@ func decodeEnabledMachineStateAnnotationValues(
     )
     let restoreStateID: String?
     let restoreStateGeneration: UInt64?
+    let restorePairID: String?
+    let restoreManifestDigest: String?
+    let restoreRequestID: String?
     switch (
         annotations[CRIShimMachineStateAnnotation.restoreStateID],
-        annotations[CRIShimMachineStateAnnotation.restoreStateGeneration]
+        annotations[CRIShimMachineStateAnnotation.restoreStateGeneration],
+        annotations[CRIShimMachineStateAnnotation.restorePairID],
+        annotations[CRIShimMachineStateAnnotation.restoreManifestDigest],
+        annotations[CRIShimMachineStateAnnotation.restoreRequestID]
     ) {
-    case (nil, nil):
+    case (nil, nil, nil, nil, nil):
         restoreStateID = nil
         restoreStateGeneration = nil
-    case (let rawStateID?, let rawGeneration?):
+        restorePairID = nil
+        restoreManifestDigest = nil
+        restoreRequestID = nil
+    case (let rawStateID?, let rawGeneration?, let rawPairID?, let rawManifestDigest?, let rawRequestID?):
         restoreStateID = try requireSafeIdentifier(
             rawStateID,
             annotation: CRIShimMachineStateAnnotation.restoreStateID,
@@ -247,21 +273,45 @@ func decodeEnabledMachineStateAnnotationValues(
             )
         }
         restoreStateGeneration = selectedGeneration
-    case (nil, _?):
-        throw CRIShimError.invalidArgument(
-            "\(CRIShimMachineStateAnnotation.restoreStateGeneration) requires \(CRIShimMachineStateAnnotation.restoreStateID)"
+        restorePairID = try requireCanonicalSHA256(
+            rawPairID,
+            annotation: CRIShimMachineStateAnnotation.restorePairID
         )
-    case (_?, nil):
+        restoreManifestDigest = try requireCanonicalSHA256(
+            rawManifestDigest,
+            annotation: CRIShimMachineStateAnnotation.restoreManifestDigest
+        )
+        restoreRequestID = try requireSafeIdentifier(
+            rawRequestID,
+            annotation: CRIShimMachineStateAnnotation.restoreRequestID,
+            maximumLength: 128
+        )
+    default:
         throw CRIShimError.invalidArgument(
-            "\(CRIShimMachineStateAnnotation.restoreStateID) requires \(CRIShimMachineStateAnnotation.restoreStateGeneration)"
+            "machine-state warm restore annotations must be supplied as one complete set"
         )
     }
     return CRIShimMachineStateAnnotationValues(
         persistenceID: persistenceID,
         restoreStateID: restoreStateID,
         restoreStateGeneration: restoreStateGeneration,
+        restorePairID: restorePairID,
+        restoreManifestDigest: restoreManifestDigest,
+        restoreRequestID: restoreRequestID,
         storageGeneration: storageGeneration
     )
+}
+
+private func requireCanonicalSHA256(
+    _ value: String,
+    annotation: String
+) throws -> String {
+    guard value.count == 64,
+        value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+    else {
+        throw CRIShimError.invalidArgument("\(annotation) must be a lowercase SHA-256 hex digest")
+    }
+    return value
 }
 
 private func requirePositiveGeneration(

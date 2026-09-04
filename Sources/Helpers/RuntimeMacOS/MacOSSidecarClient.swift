@@ -156,6 +156,73 @@ final class MacOSSidecarClient: @unchecked Sendable {
         return try decodeResponseData(MacOSMachineStateOperationResult.self, response: response, method: .vmSaveMachineState)
     }
 
+    func prepareCheckpoint(
+        _ payload: MacOSMachineStateRequestPayload,
+        timeoutSeconds: TimeInterval = 30
+    ) throws -> MacOSMachineStateCheckpointResult {
+        let response = try request(
+            method: .vmPrepareCheckpoint,
+            protocolVersion: MacOSSidecarProtocolVersion.durableCheckpointAdoption,
+            machineState: payload,
+            timeoutSeconds: timeoutSeconds
+        )
+        return try decodeResponseData(
+            MacOSMachineStateCheckpointResult.self,
+            response: response,
+            method: .vmPrepareCheckpoint
+        )
+    }
+
+    func saveDurableMachineState(
+        _ payload: MacOSMachineStateRequestPayload,
+        timeoutSeconds: TimeInterval = 300
+    ) throws -> MacOSMachineStateOperationResult {
+        let response = try request(
+            method: .vmSaveMachineState,
+            protocolVersion: MacOSSidecarProtocolVersion.durableCheckpointAdoption,
+            machineState: payload,
+            timeoutSeconds: timeoutSeconds
+        )
+        return try decodeResponseData(
+            MacOSMachineStateOperationResult.self,
+            response: response,
+            method: .vmSaveMachineState
+        )
+    }
+
+    func machineStateReceipt(stateID: String) throws -> MacOSMachineStateReceipt {
+        let response = try request(
+            method: .vmMachineStateReceipt,
+            protocolVersion: MacOSSidecarProtocolVersion.durableCheckpointAdoption,
+            machineState: .init(stateID: stateID)
+        )
+        return try decodeResponseData(
+            MacOSMachineStateReceipt.self,
+            response: response,
+            method: .vmMachineStateReceipt
+        )
+    }
+
+    func abortCheckpoint(checkpointID: String) throws {
+        _ = try request(
+            method: .vmAbortCheckpoint,
+            protocolVersion: MacOSSidecarProtocolVersion.durableCheckpointAdoption,
+            machineState: .init(checkpointID: checkpointID)
+        )
+    }
+
+    func storageAttachments() throws -> [MacOSStorageAttachmentStatus] {
+        let response = try request(
+            method: .vmStorageAttachments,
+            protocolVersion: MacOSSidecarProtocolVersion.durableCheckpointAdoption
+        )
+        return try decodeResponseData(
+            [MacOSStorageAttachmentStatus].self,
+            response: response,
+            method: .vmStorageAttachments
+        )
+    }
+
     func restoreMachineState(
         stateID: String,
         timeoutSeconds: TimeInterval = 300,
@@ -233,6 +300,27 @@ final class MacOSSidecarClient: @unchecked Sendable {
                 originalRequest: request
             )
         }
+    }
+
+    func processInspect(
+        port: UInt32,
+        processID: String,
+        request exec: MacOSSidecarExecRequestPayload
+    ) throws -> MacOSGuestProcessStatusPayload {
+        let response = try requestResponse(
+            MacOSSidecarRequest(
+                method: .processInspect,
+                port: port,
+                processID: processID,
+                exec: exec
+            ),
+            socketConnectRetries: 1
+        )
+        return try decodeResponseData(
+            MacOSGuestProcessStatusPayload.self,
+            response: response,
+            method: .processInspect
+        )
     }
 
     private func recoverDurableProcessStart(

@@ -23,7 +23,13 @@ import ContainerizationExtras
 import Foundation
 
 public struct SandboxNetworkControl: Sendable {
-    let allocate: @Sendable (_ network: String, _ hostname: String, _ macAddress: MACAddress?) async throws -> Attachment
+    let allocate:
+        @Sendable (
+            _ network: String,
+            _ hostname: String,
+            _ macAddress: MACAddress?,
+            _ preferredIPv4Address: IPv4Address?
+        ) async throws -> Attachment
     let lookup: @Sendable (_ network: String, _ hostname: String) async throws -> Attachment?
     let deallocate: @Sendable (_ network: String, _ hostname: String) async throws -> Void
 
@@ -36,8 +42,13 @@ public struct SandboxNetworkControl: Sendable {
     ) -> SandboxNetworkControl {
         let sessions = SandboxNetworkSessionStore(onInvalidation: onInvalidation)
         return SandboxNetworkControl(
-            allocate: { network, hostname, macAddress in
-                try await sessions.allocate(network: network, hostname: hostname, macAddress: macAddress)
+            allocate: { network, hostname, macAddress, preferredIPv4Address in
+                try await sessions.allocate(
+                    network: network,
+                    hostname: hostname,
+                    macAddress: macAddress,
+                    preferredIPv4Address: preferredIPv4Address
+                )
             },
             lookup: { network, hostname in
                 try await sessions.lookup(network: network, hostname: hostname)
@@ -87,10 +98,22 @@ private actor SandboxNetworkSessionStore {
         }
     }
 
-    func allocate(network: String, hostname: String, macAddress: MACAddress?) async throws -> Attachment {
+    func allocate(
+        network: String,
+        hostname: String,
+        macAddress: MACAddress?,
+        preferredIPv4Address: IPv4Address?
+    ) async throws -> Attachment {
         let key = Key(network: network, hostname: hostname)
         if let lease = leases[key] {
-            return try await resolveAllocation(lease, for: key)
+            let attachment = try await resolveAllocation(lease, for: key)
+            guard preferredIPv4Address == nil || attachment.ipv4Address.address == preferredIPv4Address else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "live network allocation does not match the persisted IPv4 reservation"
+                )
+            }
+            return attachment
         }
 
         let client = NetworkClient(id: network, plugin: Self.plugin)
@@ -100,6 +123,7 @@ private actor SandboxNetworkSessionStore {
             let (attachment, _) = try await client.allocate(
                 hostname: hostname,
                 macAddress: macAddress,
+                preferredIPv4Address: preferredIPv4Address,
                 on: session
             )
             return attachment
@@ -278,7 +302,8 @@ extension MacOSSandboxService {
                 let attachment = try await networkControl.allocate(
                     request.network,
                     request.hostname,
-                    request.macAddress ?? persistedAttachment?.macAddress
+                    request.macAddress ?? persistedAttachment?.macAddress,
+                    persistedAttachment?.ipv4Address.address
                 )
                 acquiredAttachments.append(attachment)
                 try containerConfig.macosGuest?.validateObservedVMNetInstance(

@@ -37,6 +37,7 @@ struct CRIShimMachineStateLease: Codable, Equatable, Sendable {
     var persistenceID: String
     var podUID: String
     var sandboxID: String
+    var runtimeSandboxID: String? = nil
     var restoreStateID: String?
     var restoreStateGeneration: UInt64?
     var storageGeneration: UInt64
@@ -52,13 +53,22 @@ struct CRIShimMachineStateLease: Codable, Equatable, Sendable {
     }
 
     func hasSameBinding(as candidate: Self) -> Bool {
-        hasSameOwner(as: candidate) && sandboxID == candidate.sandboxID
+        hasSameOwner(as: candidate)
+            && sandboxID == candidate.sandboxID
+            && effectiveRuntimeSandboxID == candidate.effectiveRuntimeSandboxID
     }
 
     func hasSameLifecycleIncarnation(as candidate: Self) -> Bool {
         hasSameBinding(as: candidate)
             && schemaVersion == candidate.schemaVersion
             && sidecarLifecycleBarrier == candidate.sidecarLifecycleBarrier
+    }
+
+    var effectiveRuntimeSandboxID: String {
+        guard let runtimeSandboxID = runtimeSandboxID?.trimmed, !runtimeSandboxID.isEmpty else {
+            return sandboxID
+        }
+        return runtimeSandboxID
     }
 }
 
@@ -107,6 +117,7 @@ enum CRIShimMachineStateLeaseStore {
             persistenceID: machineState.persistenceID,
             podUID: normalizedPodUID,
             sandboxID: sandboxID,
+            runtimeSandboxID: machineState.persistenceID,
             restoreStateID: machineState.restoreStateID,
             restoreStateGeneration: machineState.restoreStateGeneration,
             storageGeneration: storageGeneration,
@@ -552,6 +563,7 @@ enum CRIShimMachineStateLeaseStore {
             "\(lease.persistenceID).json" == name,
             !lease.podUID.trimmed.isEmpty,
             !lease.sandboxID.trimmed.isEmpty,
+            !lease.effectiveRuntimeSandboxID.trimmed.isEmpty,
             lease.storageGeneration > 0,
             (lease.restoreStateID == nil) == (lease.restoreStateGeneration == nil),
             lease.restoreStateGeneration.map({ $0 > 0 && lease.storageGeneration > $0 }) ?? true
@@ -604,7 +616,7 @@ enum CRIShimMachineStateLeaseStore {
             let prepared = MacOSSidecarLifecycleAttestation(
                 protocolVersion: barrier.protocolVersion,
                 persistenceID: lease.persistenceID,
-                sandboxID: lease.sandboxID,
+                sandboxID: lease.effectiveRuntimeSandboxID,
                 bootNonce: barrier.bootNonce,
                 processID: 0,
                 lockDevice: UInt64(lockValue.st_dev),
@@ -659,7 +671,7 @@ enum CRIShimMachineStateLeaseStore {
             if let existing {
                 guard existing.protocolVersion == barrier.protocolVersion,
                     existing.persistenceID == lease.persistenceID,
-                    existing.sandboxID == lease.sandboxID,
+                    existing.sandboxID == lease.effectiveRuntimeSandboxID,
                     existing.bootNonce == barrier.bootNonce,
                     existing.lockDevice == UInt64(lockValue.st_dev),
                     existing.lockInode == UInt64(lockValue.st_ino),
@@ -674,7 +686,7 @@ enum CRIShimMachineStateLeaseStore {
             let retired = MacOSSidecarLifecycleAttestation(
                 protocolVersion: barrier.protocolVersion,
                 persistenceID: lease.persistenceID,
-                sandboxID: lease.sandboxID,
+                sandboxID: lease.effectiveRuntimeSandboxID,
                 bootNonce: barrier.bootNonce,
                 processID: 0,
                 lockDevice: UInt64(lockValue.st_dev),
@@ -750,7 +762,7 @@ enum CRIShimMachineStateLeaseStore {
         }
         guard attestation.protocolVersion == barrier.protocolVersion,
             attestation.persistenceID == lease.persistenceID,
-            attestation.sandboxID == lease.sandboxID,
+            attestation.sandboxID == lease.effectiveRuntimeSandboxID,
             attestation.bootNonce == barrier.bootNonce,
             attestation.lockDevice == UInt64(lockValue.st_dev),
             attestation.lockInode == UInt64(lockValue.st_ino),

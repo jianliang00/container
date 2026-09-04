@@ -25,6 +25,49 @@ public enum WorkloadInjectionState: String, Sendable, Codable, Equatable {
     case injected
 }
 
+public struct WorkloadAdoptionReceipt: Sendable, Codable, Equatable, Hashable {
+    public var runtimeWorkloadID: String
+    public var executionID: String
+    public var trustedLaunchFingerprint: String
+    public var guestLaunchFingerprint: String
+    public var processIncarnation: String
+    public var sourceStorageGeneration: UInt64
+    public var storageGeneration: UInt64
+    public var processIdentifier: Int32
+    public var eventSequence: UInt64
+    public var oldestAvailableEventSequence: UInt64
+    public var replayTruncated: Bool
+    public var state: String
+
+    public init(
+        runtimeWorkloadID: String,
+        executionID: String,
+        trustedLaunchFingerprint: String,
+        guestLaunchFingerprint: String,
+        processIncarnation: String,
+        sourceStorageGeneration: UInt64,
+        storageGeneration: UInt64,
+        processIdentifier: Int32,
+        eventSequence: UInt64,
+        oldestAvailableEventSequence: UInt64,
+        replayTruncated: Bool,
+        state: String
+    ) {
+        self.runtimeWorkloadID = runtimeWorkloadID
+        self.executionID = executionID
+        self.trustedLaunchFingerprint = trustedLaunchFingerprint
+        self.guestLaunchFingerprint = guestLaunchFingerprint
+        self.processIncarnation = processIncarnation
+        self.sourceStorageGeneration = sourceStorageGeneration
+        self.storageGeneration = storageGeneration
+        self.processIdentifier = processIdentifier
+        self.eventSequence = eventSequence
+        self.oldestAvailableEventSequence = oldestAvailableEventSequence
+        self.replayTruncated = replayTruncated
+        self.state = state
+    }
+}
+
 /// Configuration for a workload that runs inside a sandbox.
 public struct WorkloadConfiguration: Sendable, Codable {
     public static let schemaVersion = 1
@@ -139,6 +182,8 @@ public struct WorkloadSnapshot: Sendable, Codable {
     public var stdoutLogPath: String?
     /// Host path to the workload stderr log, if available.
     public var stderrLogPath: String?
+    /// Proof returned by the guest after adopting a process from a restored VM.
+    public var adoptionReceipt: WorkloadAdoptionReceipt?
 
     public var id: String {
         configuration.id
@@ -151,7 +196,8 @@ public struct WorkloadSnapshot: Sendable, Codable {
         startedDate: Date? = nil,
         exitedAt: Date? = nil,
         stdoutLogPath: String? = nil,
-        stderrLogPath: String? = nil
+        stderrLogPath: String? = nil,
+        adoptionReceipt: WorkloadAdoptionReceipt? = nil
     ) {
         self.configuration = configuration
         self.status = status
@@ -160,5 +206,6 @@ public struct WorkloadSnapshot: Sendable, Codable {
         self.exitedAt = exitedAt
         self.stdoutLogPath = stdoutLogPath
         self.stderrLogPath = stderrLogPath
+        self.adoptionReceipt = adoptionReceipt
     }
 }

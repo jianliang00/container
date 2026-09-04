@@ -208,6 +208,146 @@ struct MacvmnetBackendTests {
         #expect(ledger.recordsByNetwork["default"]?.isEmpty == true)
     }
 
+    @Test func staleCRIDeleteDoesNotReleaseCurrentRuntimeAttachmentOwner() async throws {
+        let identity = MacvmnetAttachmentIdentity(containerID: "workload-42", ifName: "eth0")
+        let currentOwner = MacvmnetAttachmentOwner(
+            criSandboxID: "cri-new",
+            restoreRequestID: "resume-new",
+            podUID: "pod-new"
+        )
+        let staleOwner = MacvmnetAttachmentOwner(
+            criSandboxID: "cri-old",
+            restoreRequestID: "resume-old",
+            podUID: "pod-old"
+        )
+        let attachment = try makeAttachment(
+            network: "default",
+            hostname: identity.containerID,
+            ipv4Address: "192.168.64.42/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let sandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [attachment])
+        )
+        let ledger = FakeMacvmnetAttachmentLedger(
+            recordsByNetwork: [
+                "default": [
+                    MacvmnetAttachmentRecord(
+                        identity: identity,
+                        owner: currentOwner,
+                        networkName: "default",
+                        result: CNIResult(attachment: attachment, interfaceName: identity.ifName, sandbox: nil)
+                    )
+                ]
+            ])
+        let healthClient = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: { _, _ in sandboxClient },
+            makeAttachmentLedger: { _ in ledger }
+        )
+
+        try await backend.release(
+            try makePlan(
+                command: .delete,
+                sandbox: nil,
+                containerID: identity.containerID,
+                attachmentOwner: staleOwner
+            )
+        )
+        #expect(sandboxClient.releaseRequests == 0)
+        #expect(try ledger.record(identity: identity, networkName: "default")?.owner == currentOwner)
+
+        try await backend.release(
+            try makePlan(
+                command: .delete,
+                sandbox: nil,
+                containerID: identity.containerID,
+                attachmentOwner: currentOwner
+            )
+        )
+        #expect(sandboxClient.releaseRequests == 1)
+        #expect(try ledger.record(identity: identity, networkName: "default") == nil)
+    }
+
+    @Test func concurrentStaleDeleteCannotReleaseAReassignedRuntimeAttachment() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MacvmnetOwnerFence-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let identity = MacvmnetAttachmentIdentity(containerID: "workload-42", ifName: "eth0")
+        let staleOwner = MacvmnetAttachmentOwner(
+            criSandboxID: "cri-old",
+            restoreRequestID: "resume-old",
+            podUID: "pod-old"
+        )
+        let currentOwner = MacvmnetAttachmentOwner(
+            criSandboxID: "cri-new",
+            restoreRequestID: "resume-new",
+            podUID: "pod-new"
+        )
+        let attachment = try makeAttachment(
+            network: "default",
+            hostname: identity.containerID,
+            ipv4Address: "192.168.64.42/24",
+            ipv4Gateway: "192.168.64.1"
+        )
+        let oldResult = CNIResult(
+            attachment: attachment,
+            interfaceName: identity.ifName,
+            sandbox: nil
+        )
+        try FileMacvmnetAttachmentLedger(rootURL: rootURL).upsert(
+            MacvmnetAttachmentRecord(
+                identity: identity,
+                owner: staleOwner,
+                networkName: "default",
+                result: oldResult
+            )
+        )
+
+        let inspectStarted = MacvmnetTestGate()
+        let continueInspect = MacvmnetTestGate()
+        let sandboxClient = FakeMacvmnetSandboxNetworkClient(
+            state: SandboxNetworkState(attachments: [attachment]),
+            inspectStarted: inspectStarted,
+            continueInspect: continueInspect
+        )
+        let healthClient = FakeMacvmnetNetworkHealthClient(
+            stateResult: try makeNetworkState(id: "default")
+        )
+        let backend = MacvmnetLiveBackend(
+            makeNetworkClient: { _ in healthClient },
+            makeSandboxClient: { _, _ in sandboxClient },
+            makeAttachmentLedger: { _ in FileMacvmnetAttachmentLedger(rootURL: rootURL) }
+        )
+        let addPlan = try makePlan(
+            command: .add,
+            sandbox: "macvmnet://sandbox/workload-42",
+            containerID: identity.containerID,
+            attachmentOwner: currentOwner
+        )
+        let staleDeletePlan = try makePlan(
+            command: .delete,
+            sandbox: nil,
+            containerID: identity.containerID,
+            attachmentOwner: staleOwner
+        )
+
+        async let prepared = backend.prepare(addPlan)
+        await inspectStarted.wait()
+        async let staleDelete: Void = backend.release(staleDeletePlan)
+        try await Task.sleep(for: .milliseconds(50))
+        await continueInspect.open()
+        _ = try await prepared
+        try await staleDelete
+
+        #expect(sandboxClient.releaseRequests == 0)
+        let record = try FileMacvmnetAttachmentLedger(rootURL: rootURL)
+            .record(identity: identity, networkName: "default")
+        #expect(record?.owner == currentOwner)
+    }
+
     @Test func liveBackendStatusChecksNetworkState() async throws {
         let client = FakeMacvmnetNetworkHealthClient(stateResult: try makeNetworkState(id: "default"))
         let backend = MacvmnetLiveBackend { _ in client }
@@ -443,7 +583,7 @@ struct MacvmnetBackendTests {
         let reloaded = FileMacvmnetAttachmentLedger(rootURL: rootURL)
         #expect(try reloaded.records(networkName: "default") == [record])
 
-        try reloaded.remove(identity: identity, networkName: "default")
+        #expect(try reloaded.remove(identity: identity, networkName: "default", owner: nil))
         #expect(try reloaded.records(networkName: "default").isEmpty)
     }
 }
@@ -468,10 +608,18 @@ private final class FakeMacvmnetSandboxNetworkClient: MacvmnetSandboxNetworkClie
     var prepareRequests = 0
     var inspectRequests = 0
     var releaseRequests = 0
+    var inspectStarted: MacvmnetTestGate?
+    var continueInspect: MacvmnetTestGate?
 
-    init(state: SandboxNetworkState) {
+    init(
+        state: SandboxNetworkState,
+        inspectStarted: MacvmnetTestGate? = nil,
+        continueInspect: MacvmnetTestGate? = nil
+    ) {
         self.prepareState = state
         self.inspectState = state
+        self.inspectStarted = inspectStarted
+        self.continueInspect = continueInspect
     }
 
     init(prepareState: SandboxNetworkState, inspectState: SandboxNetworkState) {
@@ -487,6 +635,8 @@ private final class FakeMacvmnetSandboxNetworkClient: MacvmnetSandboxNetworkClie
 
     func inspectSandboxNetwork() async throws -> SandboxNetworkState {
         inspectRequests += 1
+        await inspectStarted?.open()
+        await continueInspect?.wait()
         return inspectState
     }
 
@@ -494,6 +644,32 @@ private final class FakeMacvmnetSandboxNetworkClient: MacvmnetSandboxNetworkClie
         releaseRequests += 1
         prepareState = SandboxNetworkState(attachments: [])
         inspectState = SandboxNetworkState(attachments: [])
+    }
+}
+
+private actor MacvmnetTestGate {
+    private var openState = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !openState else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !openState else {
+            return
+        }
+        openState = true
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
     }
 }
 
@@ -589,6 +765,13 @@ private final class FakeMacvmnetAttachmentLedger: MacvmnetAttachmentLedger, @unc
         self.recordsByNetwork = recordsByNetwork
     }
 
+    func acquireOperationLock(
+        identity _: MacvmnetAttachmentIdentity,
+        networkName _: String
+    ) throws -> any MacvmnetAttachmentOperationLock {
+        FakeMacvmnetAttachmentOperationLock()
+    }
+
     func upsert(_ record: MacvmnetAttachmentRecord) throws {
         var records = recordsByNetwork[record.networkName] ?? []
         records.removeAll { $0.identity == record.identity }
@@ -596,8 +779,25 @@ private final class FakeMacvmnetAttachmentLedger: MacvmnetAttachmentLedger, @unc
         recordsByNetwork[record.networkName] = records
     }
 
-    func remove(identity: MacvmnetAttachmentIdentity, networkName: String) throws {
+    func record(
+        identity: MacvmnetAttachmentIdentity,
+        networkName: String
+    ) throws -> MacvmnetAttachmentRecord? {
+        recordsByNetwork[networkName]?.first { $0.identity == identity }
+    }
+
+    func remove(
+        identity: MacvmnetAttachmentIdentity,
+        networkName: String,
+        owner: MacvmnetAttachmentOwner?
+    ) throws -> Bool {
+        guard let record = recordsByNetwork[networkName]?.first(where: { $0.identity == identity }),
+            record.owner == owner
+        else {
+            return false
+        }
         recordsByNetwork[networkName]?.removeAll { $0.identity == identity }
+        return true
     }
 
     func records(networkName: String) throws -> [MacvmnetAttachmentRecord] {
@@ -605,16 +805,32 @@ private final class FakeMacvmnetAttachmentLedger: MacvmnetAttachmentLedger, @unc
     }
 }
 
+private final class FakeMacvmnetAttachmentOperationLock:
+    MacvmnetAttachmentOperationLock,
+    @unchecked Sendable
+{
+    func unlock() {}
+}
+
 private func makePlan(
     command: CNICommand,
     sandbox: String?,
-    prevResult: CNIResult? = nil
+    prevResult: CNIResult? = nil,
+    containerID: String = "sandbox-1",
+    attachmentOwner: MacvmnetAttachmentOwner? = nil
 ) throws -> MacvmnetOperationPlan {
+    var arguments: [String: String] = [:]
+    if let attachmentOwner {
+        arguments["KROSS_CRI_SANDBOX_ID"] = attachmentOwner.criSandboxID
+        arguments["KROSS_RESTORE_REQUEST_ID"] = attachmentOwner.restoreRequestID ?? ""
+        arguments["K8S_POD_UID"] = attachmentOwner.podUID ?? ""
+    }
     let environment = CNIEnvironment(
         command: command,
-        containerID: "sandbox-1",
+        containerID: containerID,
         netns: sandbox,
-        ifName: command == .delete ? "eth0" : "eth0"
+        ifName: command == .delete ? "eth0" : "eth0",
+        arguments: arguments
     )
     let config = CNIPluginConfig(
         cniVersion: "1.1.0",

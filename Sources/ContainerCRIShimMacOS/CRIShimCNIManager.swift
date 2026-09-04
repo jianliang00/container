@@ -35,6 +35,25 @@ public struct CRIShimCNIResult: Equatable, Sendable {
     }
 }
 
+public struct CRIShimCNISandboxIdentity: Equatable, Sendable {
+    public var runtimeSandboxID: String
+    public var criSandboxID: String
+    public var restoreRequestID: String?
+    public var podUID: String?
+
+    public init(
+        runtimeSandboxID: String,
+        criSandboxID: String,
+        restoreRequestID: String? = nil,
+        podUID: String? = nil
+    ) {
+        self.runtimeSandboxID = runtimeSandboxID
+        self.criSandboxID = criSandboxID
+        self.restoreRequestID = restoreRequestID
+        self.podUID = podUID
+    }
+}
+
 public protocol CRIShimCNIManaging: Sendable {
     func add(
         sandboxID: String,
@@ -49,7 +68,21 @@ public protocol CRIShimCNIManaging: Sendable {
     ) async throws
 }
 
-public struct ProcessCRIShimCNIManager: CRIShimCNIManaging {
+public protocol CRIShimCNIIdentityManaging: CRIShimCNIManaging {
+    func add(
+        identity: CRIShimCNISandboxIdentity,
+        networkName: String,
+        config: CRIShimConfig
+    ) async throws -> CRIShimCNIResult
+
+    func delete(
+        identity: CRIShimCNISandboxIdentity,
+        networkName: String,
+        config: CRIShimConfig
+    ) async throws
+}
+
+public struct ProcessCRIShimCNIManager: CRIShimCNIManaging, CRIShimCNIIdentityManaging {
     public init() {}
 
     public func add(
@@ -57,9 +90,21 @@ public struct ProcessCRIShimCNIManager: CRIShimCNIManaging {
         networkName: String,
         config: CRIShimConfig
     ) async throws -> CRIShimCNIResult {
+        try await add(
+            identity: .init(runtimeSandboxID: sandboxID, criSandboxID: sandboxID),
+            networkName: networkName,
+            config: config
+        )
+    }
+
+    public func add(
+        identity: CRIShimCNISandboxIdentity,
+        networkName: String,
+        config: CRIShimConfig
+    ) async throws -> CRIShimCNIResult {
         let invocation = try makeInvocation(
             command: "ADD",
-            sandboxID: sandboxID,
+            identity: identity,
             networkName: networkName,
             config: config
         )
@@ -72,9 +117,21 @@ public struct ProcessCRIShimCNIManager: CRIShimCNIManaging {
         networkName: String,
         config: CRIShimConfig
     ) async throws {
+        try await delete(
+            identity: .init(runtimeSandboxID: sandboxID, criSandboxID: sandboxID),
+            networkName: networkName,
+            config: config
+        )
+    }
+
+    public func delete(
+        identity: CRIShimCNISandboxIdentity,
+        networkName: String,
+        config: CRIShimConfig
+    ) async throws {
         let invocation = try makeInvocation(
             command: "DEL",
-            sandboxID: sandboxID,
+            identity: identity,
             networkName: networkName,
             config: config
         )
@@ -83,7 +140,7 @@ public struct ProcessCRIShimCNIManager: CRIShimCNIManaging {
 
     private func makeInvocation(
         command: String,
-        sandboxID: String,
+        identity: CRIShimCNISandboxIdentity,
         networkName: String,
         config: CRIShimConfig
     ) throws -> CNIInvocation {
@@ -98,16 +155,30 @@ public struct ProcessCRIShimCNIManager: CRIShimCNIManaging {
             plugin: cni.plugin,
             networkName: networkName
         )
-        let sandboxURI = "macvmnet://sandbox/\(sandboxID)"
+        for value in [
+            identity.runtimeSandboxID,
+            identity.criSandboxID,
+            identity.restoreRequestID ?? "",
+            identity.podUID ?? "",
+        ] where value.contains(";") || value.contains("=") {
+            throw CRIShimError.invalidArgument("CNI identity contains an invalid delimiter")
+        }
+        let sandboxURI = "macvmnet://sandbox/\(identity.runtimeSandboxID)"
+        let cniArguments = [
+            "KROSS_CRI_SANDBOX_ID=\(identity.criSandboxID)",
+            "KROSS_RESTORE_REQUEST_ID=\(identity.restoreRequestID ?? "")",
+            "K8S_POD_UID=\(identity.podUID ?? "")",
+        ].joined(separator: ";")
         return CNIInvocation(
             executableURL: pluginURL,
             stdin: configData,
             environment: [
                 "CNI_COMMAND": command,
-                "CNI_CONTAINERID": sandboxID,
+                "CNI_CONTAINERID": identity.runtimeSandboxID,
                 "CNI_NETNS": sandboxURI,
                 "CNI_IFNAME": "eth0",
                 "CNI_PATH": cni.binDir,
+                "CNI_ARGS": cniArguments,
             ],
             networkName: networkName
         )

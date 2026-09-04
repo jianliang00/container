@@ -29,13 +29,24 @@ actor AttachmentAllocator {
     }
 
     /// Allocate a network address for a host.
-    func allocate(hostname: String) async throws -> UInt32 {
-        // Client is responsible for ensuring two containers don't use same hostname, so provide existing IP if hostname exists
+    func allocate(hostname: String, preferredAddress: UInt32? = nil) async throws -> UInt32 {
         if let index = hostnames[hostname] {
+            guard preferredAddress == nil || preferredAddress == index else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "hostname \(hostname) is already assigned address \(IPv4Address(index))"
+                )
+            }
             return index
         }
 
-        let index = try allocator.allocate()
+        let index: UInt32
+        if let preferredAddress {
+            try allocator.reserve(preferredAddress)
+            index = preferredAddress
+        } else {
+            index = try allocator.allocate()
+        }
         hostnames[hostname] = index
 
         return index

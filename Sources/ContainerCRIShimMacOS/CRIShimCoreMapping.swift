@@ -32,8 +32,19 @@ func makeCRIShimSandboxMetadata(
     }
 
     let config = request.config
+    let runtimeSandboxID: String
+    if config.annotations[CRIShimMachineStateAnnotation.enabled] == "true" {
+        runtimeSandboxID = try requireSafeIdentifier(
+            config.annotations[CRIShimMachineStateAnnotation.persistenceID],
+            annotation: CRIShimMachineStateAnnotation.persistenceID,
+            maximumLength: 64
+        )
+    } else {
+        runtimeSandboxID = sandboxID
+    }
     return CRIShimSandboxMetadata(
         id: sandboxID,
+        runtimeSandboxID: runtimeSandboxID,
         podUID: emptyStringAsNil(config.metadata.uid),
         namespace: emptyStringAsNil(config.metadata.namespace),
         name: emptyStringAsNil(config.metadata.name),
@@ -72,7 +83,7 @@ func makeCRIShimSandboxConfiguration(
     )
 
     var configuration = ContainerConfiguration(
-        id: sandboxID,
+        id: metadata?.runtimeSandboxID ?? sandboxID,
         image: try makeCRIShimImageDescription(sandboxImage, requestedReference: handler.sandboxImage),
         process: ProcessConfiguration(
             executable: "/bin/sh",
@@ -166,9 +177,15 @@ func makeCRIShimContainerMetadata(
 
     let config = request.config
     let image = try CRIShimImageReference.resolve(config.image)
+    let runtimeWorkloadID = try makeCRIShimRuntimeWorkloadID(
+        criContainerID: containerID,
+        request: request,
+        sandbox: sandbox
+    )
     return CRIShimContainerMetadata(
         id: containerID,
         sandboxID: sandbox.id,
+        runtimeWorkloadID: runtimeWorkloadID,
         name: containerName(from: config),
         attempt: config.metadata.attempt,
         image: image,
@@ -278,8 +295,11 @@ private func makeCRIShimWorkloadExecutionIdentity(
     // replacement Pod. This also preserves compatibility with identity records
     // written by the original schema for attempt-zero containers.
     let logicalAttempt: UInt32 = 0
-    let nameDigest = sha256Hex(Data("\(name)\u{0}\(logicalAttempt)".utf8))
-    let executionID = "\(machineState.persistenceID):container:\(nameDigest.prefix(24))"
+    let executionID = stableRuntimeWorkloadID(
+        persistenceID: machineState.persistenceID,
+        containerName: name,
+        logicalAttempt: logicalAttempt
+    )
     let digest = emptyStringAsNil(workloadImageDigest ?? "") ?? "unresolved"
     let fingerprintInput = CRIShimWorkloadLaunchFingerprintInput(
         schemaVersion: 1,
@@ -323,6 +343,31 @@ private func makeCRIShimWorkloadExecutionIdentity(
         incarnation: incarnation,
         restoreBinding: restoreBinding
     )
+}
+
+private func makeCRIShimRuntimeWorkloadID(
+    criContainerID: String,
+    request: Runtime_V1_CreateContainerRequest,
+    sandbox: CRIShimSandboxMetadata
+) throws -> String {
+    guard sandbox.annotations[CRIShimMachineStateAnnotation.enabled] == "true" else {
+        return criContainerID
+    }
+    let machineState = try decodeEnabledMachineStateAnnotationValues(sandbox.annotations)
+    return stableRuntimeWorkloadID(
+        persistenceID: machineState.persistenceID,
+        containerName: containerName(from: request.config),
+        logicalAttempt: 0
+    )
+}
+
+private func stableRuntimeWorkloadID(
+    persistenceID: String,
+    containerName: String,
+    logicalAttempt: UInt32
+) -> String {
+    let nameDigest = sha256Hex(Data("\(containerName)\u{0}\(logicalAttempt)".utf8))
+    return "\(persistenceID):container:\(nameDigest.prefix(24))"
 }
 
 private func sha256Hex(_ data: Data) -> String {

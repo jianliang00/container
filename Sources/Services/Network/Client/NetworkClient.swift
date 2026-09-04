@@ -70,12 +70,19 @@ extension NetworkClient {
     public func allocate(
         hostname: String,
         macAddress: MACAddress? = nil,
+        preferredIPv4Address: IPv4Address? = nil,
         on session: XPCClientSession
     ) async throws -> (attachment: Attachment, additionalData: XPCMessage?) {
         let request = XPCMessage(route: NetworkRoutes.allocate.rawValue)
         request.set(key: NetworkKeys.hostname.rawValue, value: hostname)
         if let macAddress = macAddress {
             request.set(key: NetworkKeys.macAddress.rawValue, value: macAddress.description)
+        }
+        if let preferredIPv4Address {
+            request.set(
+                key: NetworkKeys.preferredIPv4Address.rawValue,
+                value: preferredIPv4Address.description
+            )
         }
         let response = try await session.send(request)
         let attachment = try response.attachment()

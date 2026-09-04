@@ -42,6 +42,7 @@ struct CRIShimCoreMappingTests {
         )
 
         #expect(metadata.id == "sandbox-1")
+        #expect(metadata.runtimeSandboxID == "sandbox-1")
         #expect(metadata.podUID == "pod-uid")
         #expect(metadata.namespace == "default")
         #expect(metadata.name == "demo")
@@ -173,6 +174,11 @@ struct CRIShimCoreMappingTests {
             CRIShimMachineStateAnnotation.persistenceID: "pod-uid-a",
             CRIShimMachineStateAnnotation.storageGeneration: "1",
         ]
+        let metadata = try makeCRIShimSandboxMetadata(
+            id: "sandbox-1",
+            request: request,
+            handler: resolvedRuntimeHandler
+        )
 
         let configuration = try makeCRIShimSandboxConfiguration(
             id: "sandbox-1",
@@ -183,6 +189,7 @@ struct CRIShimCoreMappingTests {
                 digest: "sha256:sandbox",
                 size: 1
             ),
+            metadata: metadata,
             machineStateConfig: MachineStateConfig(
                 enabled: true,
                 storageRoot: storageRoot.path,
@@ -195,6 +202,8 @@ struct CRIShimCoreMappingTests {
         #expect(options.snapshotEnabled)
         #expect(options.machineState?.protocolVersion == 2)
         #expect(options.machineState?.persistenceID == "pod-uid-a")
+        #expect(metadata.runtimeSandboxID == "pod-uid-a")
+        #expect(configuration.id == "pod-uid-a")
         #expect(options.machineState?.storageDirectory == storageRoot.appendingPathComponent("pod-uid-a").path)
         #expect(options.machineState?.controlSocketPath == socketRoot.appendingPathComponent("pod-uid-a.sock").path)
         #expect(options.machineState?.storageGeneration == 1)
@@ -210,6 +219,9 @@ struct CRIShimCoreMappingTests {
             CRIShimMachineStateAnnotation.persistenceID: "workload-42",
             CRIShimMachineStateAnnotation.restoreStateID: "snapshot-7",
             CRIShimMachineStateAnnotation.restoreStateGeneration: "7",
+            CRIShimMachineStateAnnotation.restorePairID: String(repeating: "a", count: 64),
+            CRIShimMachineStateAnnotation.restoreManifestDigest: String(repeating: "b", count: 64),
+            CRIShimMachineStateAnnotation.restoreRequestID: "restore-7",
             CRIShimMachineStateAnnotation.storageGeneration: "8",
         ]
         var request = Runtime_V1_CreateContainerRequest()
@@ -219,8 +231,13 @@ struct CRIShimCoreMappingTests {
         request.config.command = ["/bin/sh"]
         request.config.args = ["-c", "echo ready"]
 
-        let workload = try makeCRIShimWorkloadConfiguration(
+        let metadata = try makeCRIShimContainerMetadata(
             id: "container-1",
+            request: request,
+            sandbox: sandbox
+        )
+        let workload = try makeCRIShimWorkloadConfiguration(
+            id: metadata.runtimeWorkloadID,
             request: request,
             workloadImageDigest: "sha256:workload",
             sandbox: sandbox
@@ -231,6 +248,9 @@ struct CRIShimCoreMappingTests {
         #expect(identity.restoreBinding?.executionID == identity.executionID)
         #expect(identity.restoreBinding?.generation == 7)
         #expect(identity.launchFingerprint.hasPrefix("sha256:"))
+        #expect(metadata.id == "container-1")
+        #expect(metadata.runtimeWorkloadID == identity.executionID)
+        #expect(workload.id == metadata.runtimeWorkloadID)
     }
 
     @Test
@@ -244,6 +264,9 @@ struct CRIShimCoreMappingTests {
         var restoredSandbox = initialSandbox
         restoredSandbox.annotations[CRIShimMachineStateAnnotation.restoreStateID] = "snapshot-7"
         restoredSandbox.annotations[CRIShimMachineStateAnnotation.restoreStateGeneration] = "7"
+        restoredSandbox.annotations[CRIShimMachineStateAnnotation.restorePairID] = String(repeating: "a", count: 64)
+        restoredSandbox.annotations[CRIShimMachineStateAnnotation.restoreManifestDigest] = String(repeating: "b", count: 64)
+        restoredSandbox.annotations[CRIShimMachineStateAnnotation.restoreRequestID] = "restore-7"
         restoredSandbox.annotations[CRIShimMachineStateAnnotation.storageGeneration] = "8"
 
         var request = Runtime_V1_CreateContainerRequest()

@@ -162,12 +162,18 @@ struct CRIShimMachineStateMappingTests {
                 CRIShimMachineStateAnnotation.persistenceID: "pod-a",
                 CRIShimMachineStateAnnotation.restoreStateID: "state-a",
                 CRIShimMachineStateAnnotation.restoreStateGeneration: "7",
+                CRIShimMachineStateAnnotation.restorePairID: String(repeating: "a", count: 64),
+                CRIShimMachineStateAnnotation.restoreManifestDigest: String(repeating: "b", count: 64),
+                CRIShimMachineStateAnnotation.restoreRequestID: "restore-a",
                 CRIShimMachineStateAnnotation.storageGeneration: "8",
             ],
             nodeConfig: roots.config
         )
         #expect(restored.machineState?.restoreStateID == "state-a")
         #expect(restored.machineState?.restoreStateGeneration == 7)
+        #expect(restored.machineState?.pairID == String(repeating: "a", count: 64))
+        #expect(restored.machineState?.adoptionManifestDigest == String(repeating: "b", count: 64))
+        #expect(restored.machineState?.restoreRequestID == "restore-a")
         #expect(restored.machineState?.storageGeneration == 8)
 
         #expect(throws: CRIShimError.self) {

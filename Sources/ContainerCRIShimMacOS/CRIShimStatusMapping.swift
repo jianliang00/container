@@ -18,6 +18,12 @@ import ContainerCRI
 import ContainerKit
 import ContainerResource
 import Foundation
+import RuntimeMacOSSidecarShared
+
+public enum CRIShimRestoreInfoKey {
+    public static let capabilities = "kross.macos.restore.capabilities.v3"
+    public static let receipt = "kross.macos.restore.receipt.v3"
+}
 
 func makeCRIPodSandbox(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandbox {
     var sandbox = Runtime_V1_PodSandbox()
@@ -235,7 +241,9 @@ func makeCRIStatusInfo<T: Encodable>(_ value: T) -> [String: String] {
 
 func makeCRIPodSandboxStatusInfo(
     _ metadata: CRIShimSandboxMetadata,
-    sandboxSnapshot: SandboxSnapshot?
+    sandboxSnapshot: SandboxSnapshot?,
+    containers: [CRIShimContainerMetadata] = [],
+    machineStateConfig: MachineStateConfig? = nil
 ) -> [String: String] {
     var info = makeCRIStatusInfo(metadata)
     if metadata.annotations[CRIShimMachineStateAnnotation.enabled] == "true",
@@ -255,7 +263,183 @@ func makeCRIPodSandboxStatusInfo(
     if let sandboxSnapshot {
         info["sandboxSnapshot"] = makeCRIStatusJSONString(sandboxSnapshot)
     }
+    if let receipt = makeCRIShimRestoreReceipt(
+        metadata,
+        containers: containers,
+        sandboxSnapshot: sandboxSnapshot,
+        machineStateConfig: machineStateConfig
+    ) {
+        info[CRIShimRestoreInfoKey.receipt] = makeCRIStatusJSONString(receipt)
+    }
     return info
+}
+
+struct CRIShimRestoreCapabilities: Encodable, Equatable, Sendable {
+    let schemaVersion = 1
+    let protocolVersion = 3
+    let durablePair = true
+    let stableRuntimeIDs = true
+    let workloadAdoption = true
+    let eventReplay = true
+}
+
+struct CRIShimRestoreReceiptInfo: Encodable, Equatable, Sendable {
+    struct RootStorage: Encodable, Equatable, Sendable {
+        let writable: Bool
+        let sourceGeneration: UInt64
+        let storageGeneration: UInt64
+    }
+
+    struct Network: Encodable, Equatable, Sendable {
+        let reservationID: String?
+        let attachments: [String]
+        let ready: Bool
+    }
+
+    let schemaVersion = 1
+    let protocolVersion = 3
+    let status: String
+    let restoreRequestID: String
+    let stateID: String
+    let pairID: String
+    let adoptionManifestDigest: String
+    let sourcePodUID: String?
+    let targetPodUID: String?
+    let criSandboxID: String
+    let runtimeSandboxID: String
+    let expectedWorkloadCount: Int
+    let adoptedWorkloadCount: Int
+    let rootStorage: RootStorage
+    let network: Network
+    let workloads: [WorkloadAdoptionReceipt]
+    let failureCode: String?
+    let failureMessage: String?
+}
+
+private func makeCRIShimRestoreReceipt(
+    _ metadata: CRIShimSandboxMetadata,
+    containers: [CRIShimContainerMetadata],
+    sandboxSnapshot: SandboxSnapshot?,
+    machineStateConfig: MachineStateConfig?
+) -> CRIShimRestoreReceiptInfo? {
+    guard metadata.annotations[CRIShimMachineStateAnnotation.enabled] == "true",
+        let stateID = metadata.annotations[CRIShimMachineStateAnnotation.restoreStateID],
+        let sourceGeneration = metadata.annotations[CRIShimMachineStateAnnotation.restoreStateGeneration]
+            .flatMap(UInt64.init),
+        let storageGeneration = metadata.annotations[CRIShimMachineStateAnnotation.storageGeneration]
+            .flatMap(UInt64.init),
+        let pairID = metadata.annotations[CRIShimMachineStateAnnotation.restorePairID],
+        let manifestDigest = metadata.annotations[CRIShimMachineStateAnnotation.restoreManifestDigest],
+        let restoreRequestID = metadata.annotations[CRIShimMachineStateAnnotation.restoreRequestID]
+    else {
+        return nil
+    }
+
+    let persistedReceipt = machineStateConfig.flatMap {
+        loadMachineStateReceipt(
+            config: $0,
+            persistenceID: metadata.annotations[CRIShimMachineStateAnnotation.persistenceID] ?? "",
+            stateID: stateID
+        )
+    }
+    let receiptMatches =
+        persistedReceipt?.committed == true
+        && persistedReceipt?.pair.pairID == pairID
+        && persistedReceipt?.pair.adoptionManifestDigest == manifestDigest
+        && persistedReceipt?.pair.stateID == stateID
+        && persistedReceipt?.pair.stateGeneration == sourceGeneration
+        && persistedReceipt?.pair.persistenceID
+            == metadata.annotations[CRIShimMachineStateAnnotation.persistenceID]
+
+    let expected = persistedReceipt?.adoption.workloads ?? []
+    let receipts = containers.compactMap(\.adoptionReceipt)
+        .sorted { $0.runtimeWorkloadID < $1.runtimeWorkloadID }
+    let receiptsByRuntimeID = Dictionary(
+        receipts.map { ($0.runtimeWorkloadID, $0) },
+        uniquingKeysWith: { _, new in new }
+    )
+    let adoptedCount = expected.reduce(into: 0) { count, workload in
+        guard let receipt = receiptsByRuntimeID[workload.runtimeWorkloadID],
+            receipt.executionID == workload.guestProcessID,
+            receipt.trustedLaunchFingerprint == workload.trustedLaunchFingerprint,
+            receipt.guestLaunchFingerprint == workload.guestLaunchFingerprint,
+            receipt.processIncarnation == workload.processIncarnation,
+            receipt.sourceStorageGeneration == sourceGeneration,
+            receipt.storageGeneration == storageGeneration,
+            receipt.processIdentifier == workload.processIdentifier,
+            receipt.eventSequence >= workload.lastPersistedEventSequence,
+            receipt.oldestAvailableEventSequence <= workload.lastPersistedEventSequence + 1,
+            !receipt.replayTruncated,
+            receipt.state == "running"
+        else {
+            return
+        }
+        count += 1
+    }
+    let networkReady =
+        metadata.network == nil
+        || (metadata.networkLeaseID != nil && !(sandboxSnapshot?.networks.isEmpty ?? true))
+    let rootStorageReady =
+        receiptMatches
+        && storageGeneration > sourceGeneration
+        && sandboxSnapshot?.status == .running
+    let adopted =
+        receiptMatches
+        && rootStorageReady
+        && networkReady
+        && !expected.isEmpty
+        && containers.count == expected.count
+        && receipts.count == expected.count
+        && adoptedCount == expected.count
+    let failureCode = receiptMatches ? nil : "DURABLE_PAIR_RECEIPT_MISMATCH"
+    let failureMessage = receiptMatches ? nil : "persisted machine-state receipt does not match the restore contract"
+    return CRIShimRestoreReceiptInfo(
+        status: adopted ? "adopted" : (failureCode == nil ? "restoring" : "failed"),
+        restoreRequestID: restoreRequestID,
+        stateID: stateID,
+        pairID: pairID,
+        adoptionManifestDigest: manifestDigest,
+        sourcePodUID: persistedReceipt?.adoption.sourcePodUID,
+        targetPodUID: metadata.podUID,
+        criSandboxID: metadata.id,
+        runtimeSandboxID: metadata.runtimeSandboxID,
+        expectedWorkloadCount: expected.count,
+        adoptedWorkloadCount: adoptedCount,
+        rootStorage: .init(
+            writable: rootStorageReady,
+            sourceGeneration: sourceGeneration,
+            storageGeneration: storageGeneration
+        ),
+        network: .init(
+            reservationID: metadata.networkLeaseID,
+            attachments: metadata.networkAttachments.sorted(),
+            ready: networkReady
+        ),
+        workloads: receipts,
+        failureCode: failureCode,
+        failureMessage: failureMessage
+    )
+}
+
+private func loadMachineStateReceipt(
+    config: MachineStateConfig,
+    persistenceID: String,
+    stateID: String
+) -> MacOSMachineStateReceipt? {
+    guard !persistenceID.isEmpty, !stateID.isEmpty else {
+        return nil
+    }
+    let url = URL(fileURLWithPath: config.normalizedStorageRoot, isDirectory: true)
+        .appendingPathComponent(persistenceID, isDirectory: true)
+        .appendingPathComponent("MachineStates", isDirectory: true)
+        .appendingPathComponent(stateID, isDirectory: true)
+        .appendingPathComponent("manifest.json", isDirectory: false)
+    guard let data = try? Data(contentsOf: url, options: .uncached),
+        data.count <= 1024 * 1024
+    else {
+        return nil
+    }
+    return try? JSONDecoder().decode(MacOSMachineStateReceipt.self, from: data)
 }
 
 private struct CRIShimMachineStateStatusInfo: Encodable {
@@ -448,6 +632,7 @@ extension CRIShimContainerMetadata {
         }
 
         metadata.startedAt = workloadSnapshot.startedDate ?? metadata.startedAt
+        metadata.adoptionReceipt = workloadSnapshot.adoptionReceipt ?? metadata.adoptionReceipt
         return metadata
     }
 }
@@ -477,7 +662,7 @@ private func containerSort(_ lhs: CRIShimContainerMetadata, _ rhs: CRIShimContai
     return lhs.createdAt < rhs.createdAt
 }
 
-private func makeCRIStatusJSONString<T: Encodable>(_ value: T) -> String {
+func makeCRIStatusJSONString<T: Encodable>(_ value: T) -> String {
     let encoder = JSONEncoder.criShimMetadataEncoder
     encoder.outputFormatting.insert(.sortedKeys)
     guard let data = try? encoder.encode(value) else {

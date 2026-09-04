@@ -288,10 +288,13 @@ struct CRIShimLogReconcileStartupTask: CRIShimServerStartupTask {
     let logManager: any CRIShimLogManaging
 
     func run() async throws {
+        let sandboxesByID = Dictionary(
+            uniqueKeysWithValues: try metadataStore.listSandboxes().map { ($0.id, $0) }
+        )
         for container in try metadataStore.listContainers() where container.state == .running {
             let snapshot = try? await runtimeManager.inspectWorkload(
-                sandboxID: container.sandboxID,
-                workloadID: container.id
+                sandboxID: sandboxesByID[container.sandboxID]?.runtimeSandboxID ?? container.sandboxID,
+                workloadID: container.runtimeWorkloadID
             )
             try? await logManager.start(container: container, workloadSnapshot: snapshot)
         }

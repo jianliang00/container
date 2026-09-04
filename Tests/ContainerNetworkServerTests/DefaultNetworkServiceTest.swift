@@ -47,6 +47,28 @@ struct DefaultNetworkServiceTest {
         #expect(try await service.lookup(hostname: "test-host") == nil)
     }
 
+    @Test func preferredIPv4ReservationIsExactAndExclusive() async throws {
+        let service = try await makeService()
+        let preferred = try IPv4Address("192.168.64.42")
+        let ownerSession = XPCServerSession()
+        let attachment = try await service.allocate(
+            hostname: "restored-host",
+            macAddress: try MACAddress("f2:00:00:00:00:01"),
+            preferredIPv4Address: preferred,
+            session: ownerSession
+        ).attachment
+
+        #expect(attachment.ipv4Address.address == preferred)
+        await #expect(throws: (any Error).self) {
+            try await service.allocate(
+                hostname: "stale-host",
+                macAddress: try MACAddress("f2:00:00:00:00:02"),
+                preferredIPv4Address: preferred,
+                session: XPCServerSession()
+            )
+        }
+    }
+
     @Test func testAllocationRemainsUntilLastOwningSessionDisconnects() async throws {
         let service = try await makeService()
         let oldSession = XPCServerSession()

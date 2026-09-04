@@ -222,7 +222,10 @@ public struct CRIShimRuntimeSnapshotInventory: Sendable {
         now: Date = Date()
     ) -> CRIShimRuntimeInventory {
         let storedSandboxes = Dictionary(uniqueKeysWithValues: store.sandboxes.map { ($0.id, $0) })
-        let storedContainers = Dictionary(uniqueKeysWithValues: store.containers.map { ($0.id, $0) })
+        let storedContainersByRuntimeID = Dictionary(
+            store.containers.map { ($0.runtimeWorkloadID, $0) },
+            uniquingKeysWith: { _, new in new }
+        )
         var sandboxInventory: [CRIShimRuntimeSandboxInventory] = []
         var containerInventory: [CRIShimRuntimeContainerInventory] = []
 
@@ -245,8 +248,9 @@ public struct CRIShimRuntimeSnapshotInventory: Sendable {
             )
 
             for workloadSnapshot in sandboxSnapshot.workloads {
+                let storedContainer = storedContainersByRuntimeID[workloadSnapshot.id]
                 let containerMetadata =
-                    storedContainers[workloadSnapshot.id]?.applying(
+                    storedContainer?.applying(
                         workloadSnapshot: workloadSnapshot,
                         observedAt: now
                     )
@@ -261,7 +265,7 @@ public struct CRIShimRuntimeSnapshotInventory: Sendable {
                 }
                 containerInventory.append(
                     CRIShimRuntimeContainerInventory(
-                        id: workloadSnapshot.id,
+                        id: containerMetadata.id,
                         state: .live,
                         fingerprint: containerMetadata.reconcileFingerprint
                     )
@@ -459,12 +463,17 @@ private struct CRIShimReconcileExecutionContext {
 
     private var workloadSnapshotsByID: [String: (sandboxID: String, snapshot: WorkloadSnapshot)] {
         var result: [String: (sandboxID: String, snapshot: WorkloadSnapshot)] = [:]
+        let storedByRuntimeID = Dictionary(
+            ((try? metadataStore.listContainers()) ?? []).map { ($0.runtimeWorkloadID, $0) },
+            uniquingKeysWith: { _, new in new }
+        )
         for sandboxSnapshot in runtimeSnapshots.sandboxes {
             guard let sandboxID = sandboxSnapshot.criShimSandboxID else {
                 continue
             }
             for workloadSnapshot in sandboxSnapshot.workloads {
-                result[workloadSnapshot.id] = (sandboxID: sandboxID, snapshot: workloadSnapshot)
+                let criContainerID = storedByRuntimeID[workloadSnapshot.id]?.id ?? workloadSnapshot.id
+                result[criContainerID] = (sandboxID: sandboxID, snapshot: workloadSnapshot)
             }
         }
         return result
@@ -671,6 +680,7 @@ private func makeCRIShimContainerMetadata(
     var metadata = CRIShimContainerMetadata(
         id: workloadSnapshot.id,
         sandboxID: sandboxID,
+        runtimeWorkloadID: workloadSnapshot.id,
         name: workloadSnapshot.id,
         image: image,
         runtimeHandler: sandboxMetadata.runtimeHandler,

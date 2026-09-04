@@ -22,6 +22,7 @@ public struct MacvmnetOperationPlan: Equatable {
     public var interfaceName: String?
     public var sandbox: CNISandboxURI?
     public var previousResult: CNIResult?
+    public var attachmentOwner: MacvmnetAttachmentOwner?
     public var validAttachments: Set<MacvmnetAttachmentIdentity>
     public var dataDirectory: String
 
@@ -33,6 +34,21 @@ public struct MacvmnetOperationPlan: Equatable {
         interfaceName = request.environment.ifName
         sandbox = request.sandbox
         previousResult = request.config.prevResult
+        if let criSandboxID = request.environment.arguments["KROSS_CRI_SANDBOX_ID"],
+            !criSandboxID.isEmpty
+        {
+            attachmentOwner = MacvmnetAttachmentOwner(
+                criSandboxID: criSandboxID,
+                restoreRequestID: request.environment.arguments["KROSS_RESTORE_REQUEST_ID"].flatMap {
+                    $0.isEmpty ? nil : $0
+                },
+                podUID: request.environment.arguments["K8S_POD_UID"].flatMap {
+                    $0.isEmpty ? nil : $0
+                }
+            )
+        } else {
+            attachmentOwner = nil
+        }
         validAttachments = request.validAttachments
         dataDirectory =
             request.config.stringValue(for: "stateDir")

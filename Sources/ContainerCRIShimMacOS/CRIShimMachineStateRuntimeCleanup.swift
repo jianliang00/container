@@ -102,17 +102,17 @@ struct CRIShimMachineStateRuntimeCleaner {
             preparation = try await prepare(binding: binding, policy: policy)
         }
         do {
-            try await runtimeManager.removeSandbox(id: binding.sandboxID, force: true)
+            try await runtimeManager.removeSandbox(id: binding.effectiveRuntimeSandboxID, force: true)
         } catch {
             guard CRIShimErrorMapper.disposition(for: error).kind == .notFound else {
                 throw error
             }
         }
-        try await runtimeManager.removeSandboxRuntimeService(id: binding.sandboxID)
+        try await runtimeManager.removeSandboxRuntimeService(id: binding.effectiveRuntimeSandboxID)
 
         let ownerUID = policy.runtimeOwnerUID ?? UInt32(geteuid())
         try await runtimeManager.removeMachineStateSidecar(
-            sandboxID: binding.sandboxID,
+            sandboxID: binding.effectiveRuntimeSandboxID,
             persistenceID: binding.persistenceID,
             effectiveUserID: ownerUID
         )
@@ -124,7 +124,7 @@ struct CRIShimMachineStateRuntimeCleaner {
             expectedOwnerUID: ownerUID
         )
         try await runtimeManager.confirmSandboxRuntimeRemoved(
-            id: binding.sandboxID,
+            id: binding.effectiveRuntimeSandboxID,
             machineStatePersistenceID: binding.persistenceID,
             machineStateOwnerUID: ownerUID
         )
@@ -390,7 +390,7 @@ final class CRIShimMachineStateSidecarLifecycleLock: @unchecked Sendable {
         }
         guard attestation.protocolVersion == barrier.protocolVersion,
             attestation.persistenceID == binding.persistenceID,
-            attestation.sandboxID == binding.sandboxID,
+            attestation.sandboxID == binding.effectiveRuntimeSandboxID,
             attestation.bootNonce == barrier.bootNonce,
             attestation.lockDevice == UInt64(lockValue.st_dev),
             attestation.lockInode == UInt64(lockValue.st_ino)
@@ -503,7 +503,7 @@ final class CRIShimMachineStateSidecarLifecycleLock: @unchecked Sendable {
     ) throws {
         guard attestation.protocolVersion == barrier.protocolVersion,
             attestation.persistenceID == binding.persistenceID,
-            attestation.sandboxID == binding.sandboxID,
+            attestation.sandboxID == binding.effectiveRuntimeSandboxID,
             attestation.bootNonce == barrier.bootNonce,
             attestation.lockDevice == lockDevice,
             attestation.lockInode == lockInode

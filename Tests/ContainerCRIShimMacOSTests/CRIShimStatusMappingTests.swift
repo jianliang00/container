@@ -15,7 +15,9 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationExtras
 import Foundation
+import RuntimeMacOSSidecarShared
 import Testing
 
 @testable import ContainerCRIShimMacOS
@@ -119,6 +121,194 @@ struct CRIShimStatusMappingTests {
         #expect(restore["status"] as? String == "requested")
         #expect(restore["stateID"] as? String == "snapshot-7")
         #expect(restore["stateGeneration"] as? Int == 7)
+    }
+
+    @Test
+    func durableRestoreReceiptRequiresExactWorkloadAdoption() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cri-restore-receipt-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let stateDirectory =
+            root
+            .appendingPathComponent("workload-42", isDirectory: true)
+            .appendingPathComponent("MachineStates", isDirectory: true)
+            .appendingPathComponent("snapshot-7", isDirectory: true)
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+
+        let runtimeWorkloadID = "workload-42:container:0123456789abcdef01234567"
+        let trustedFingerprint = "sha256:\(String(repeating: "c", count: 64))"
+        let guestFingerprint = String(repeating: "d", count: 64)
+        let processIncarnation = "sha256:\(String(repeating: "e", count: 64))"
+        let adoptionWorkload = MacOSMachineStateAdoptionWorkload(
+            runtimeWorkloadID: runtimeWorkloadID,
+            guestProcessID: runtimeWorkloadID,
+            trustedLaunchFingerprint: trustedFingerprint,
+            guestLaunchFingerprint: guestFingerprint,
+            processIncarnation: processIncarnation,
+            storageGeneration: 7,
+            processIdentifier: 42,
+            lastPersistedEventSequence: 9
+        )
+        let adoption = MacOSMachineStateAdoptionManifest(
+            checkpointID: "snapshot-7",
+            persistenceID: "workload-42",
+            sourcePodUID: "source-pod",
+            sourceStorageGeneration: 7,
+            workloads: [adoptionWorkload]
+        )
+        let receipt = MacOSMachineStateReceipt(
+            pair: MacOSMachineStateDurablePair(
+                pairID: String(repeating: "a", count: 64),
+                persistenceID: "workload-42",
+                stateID: "snapshot-7",
+                stateGeneration: 7,
+                diskSnapshot: .init(
+                    snapshotID: "snapshot-7",
+                    volumeID: "workload-42-g7",
+                    snapshotRef: "rbd/workload-42@snapshot-7",
+                    storageGeneration: 7,
+                    operationID: "suspend-42",
+                    operationSequence: 9,
+                    ownerEpoch: 2
+                ),
+                compatibilityClass: "mac-arm64",
+                adoptionManifestDigest: String(repeating: "b", count: 64)
+            ),
+            adoption: adoption,
+            stateSizeBytes: 1024,
+            committedAt: Date(timeIntervalSinceReferenceDate: 1)
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(receipt).write(to: stateDirectory.appendingPathComponent("manifest.json"))
+
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let metadata = CRIShimSandboxMetadata(
+            id: "cri-sandbox-1",
+            runtimeSandboxID: "workload-42",
+            podUID: "target-pod",
+            runtimeHandler: "macos",
+            sandboxImage: "example.com/macos/sandbox:latest",
+            network: "default",
+            annotations: [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "workload-42",
+                CRIShimMachineStateAnnotation.restoreStateID: "snapshot-7",
+                CRIShimMachineStateAnnotation.restoreStateGeneration: "7",
+                CRIShimMachineStateAnnotation.restorePairID: String(repeating: "a", count: 64),
+                CRIShimMachineStateAnnotation.restoreManifestDigest: String(repeating: "b", count: 64),
+                CRIShimMachineStateAnnotation.restoreRequestID: "resume-42",
+                CRIShimMachineStateAnnotation.storageGeneration: "8",
+            ],
+            networkLeaseID: "macvmnet://sandbox/workload-42",
+            networkAttachments: ["default"],
+            state: .ready,
+            createdAt: now,
+            updatedAt: now
+        )
+        let adoptionReceipt = WorkloadAdoptionReceipt(
+            runtimeWorkloadID: runtimeWorkloadID,
+            executionID: runtimeWorkloadID,
+            trustedLaunchFingerprint: trustedFingerprint,
+            guestLaunchFingerprint: guestFingerprint,
+            processIncarnation: processIncarnation,
+            sourceStorageGeneration: 7,
+            storageGeneration: 8,
+            processIdentifier: 42,
+            eventSequence: 10,
+            oldestAvailableEventSequence: 9,
+            replayTruncated: false,
+            state: "running"
+        )
+        let container = CRIShimContainerMetadata(
+            id: "cri-container-1",
+            sandboxID: metadata.id,
+            runtimeWorkloadID: runtimeWorkloadID,
+            name: "workload",
+            image: "example.com/macos/workload:latest",
+            runtimeHandler: "macos",
+            state: .running,
+            createdAt: now,
+            adoptionReceipt: adoptionReceipt
+        )
+        let snapshot = SandboxSnapshot(
+            status: .running,
+            networks: [
+                Attachment(
+                    network: "default",
+                    hostname: "workload-42",
+                    ipv4Address: try CIDRv4("192.168.64.42/24"),
+                    ipv4Gateway: try IPv4Address("192.168.64.1"),
+                    ipv6Address: nil,
+                    macAddress: nil
+                )
+            ],
+            containers: []
+        )
+        let config = MachineStateConfig(enabled: true, storageRoot: root.path)
+
+        let info = makeCRIPodSandboxStatusInfo(
+            metadata,
+            sandboxSnapshot: snapshot,
+            containers: [container],
+            machineStateConfig: config
+        )
+        let encoded = try #require(info[CRIShimRestoreInfoKey.receipt])
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any]
+        )
+        #expect(object["status"] as? String == "adopted")
+        #expect(object["runtimeSandboxID"] as? String == "workload-42")
+        #expect(object["expectedWorkloadCount"] as? Int == 1)
+        #expect(object["adoptedWorkloadCount"] as? Int == 1)
+
+        let missingWorkloadInfo = makeCRIPodSandboxStatusInfo(
+            metadata,
+            sandboxSnapshot: snapshot,
+            containers: [],
+            machineStateConfig: config
+        )
+        let missingWorkloadEncoded = try #require(
+            missingWorkloadInfo[CRIShimRestoreInfoKey.receipt]
+        )
+        let missingWorkloadObject = try #require(
+            JSONSerialization.jsonObject(with: Data(missingWorkloadEncoded.utf8)) as? [String: Any]
+        )
+        #expect(missingWorkloadObject["status"] as? String == "restoring")
+
+        var extraContainer = container
+        extraContainer.id = "cri-container-extra"
+        extraContainer.runtimeWorkloadID = "workload-42:container:extra"
+        extraContainer.adoptionReceipt = nil
+        let extraWorkloadInfo = makeCRIPodSandboxStatusInfo(
+            metadata,
+            sandboxSnapshot: snapshot,
+            containers: [container, extraContainer],
+            machineStateConfig: config
+        )
+        let extraWorkloadEncoded = try #require(
+            extraWorkloadInfo[CRIShimRestoreInfoKey.receipt]
+        )
+        let extraWorkloadObject = try #require(
+            JSONSerialization.jsonObject(with: Data(extraWorkloadEncoded.utf8)) as? [String: Any]
+        )
+        #expect(extraWorkloadObject["status"] as? String == "restoring")
+
+        var mismatchedContainer = container
+        mismatchedContainer.adoptionReceipt?.processIncarnation = "sha256:\(String(repeating: "f", count: 64))"
+        let mismatchedInfo = makeCRIPodSandboxStatusInfo(
+            metadata,
+            sandboxSnapshot: snapshot,
+            containers: [mismatchedContainer],
+            machineStateConfig: config
+        )
+        let mismatchedEncoded = try #require(mismatchedInfo[CRIShimRestoreInfoKey.receipt])
+        let mismatchedObject = try #require(
+            JSONSerialization.jsonObject(with: Data(mismatchedEncoded.utf8)) as? [String: Any]
+        )
+        #expect(mismatchedObject["status"] as? String == "restoring")
+        #expect(mismatchedObject["adoptedWorkloadCount"] as? Int == 0)
     }
 
     @Test

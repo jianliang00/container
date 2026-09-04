@@ -770,7 +770,10 @@ struct SidecarControlServerTests {
         let version = try responseFrame(fd: fd)
         #expect(version.requestID == "version")
         #expect(version.error?.code == "protocolVersionMismatch")
-        #expect(version.error?.metadata?["requiredVersion"] == "2")
+        #expect(
+            version.error?.metadata?["requiredVersion"]
+                == "\(MacOSSidecarProtocolVersion.machineState),\(MacOSSidecarProtocolVersion.durableCheckpointAdoption)"
+        )
 
         try MacOSSidecarSocketIO.writeJSONFrame(
             MacOSSidecarEnvelope.request(
@@ -807,6 +810,204 @@ struct SidecarControlServerTests {
         let legacyStop = try responseFrame(fd: fd)
         #expect(legacyStop.requestID == "legacy-stop")
         #expect(legacyStop.ok)
+    }
+
+    @Test
+    func durableCheckpointRejectsAnEmptyWorkloadManifest() throws {
+        let socketPath = "/tmp/runtime-macos-sidecar-empty-checkpoint-\(UUID().uuidString).sock"
+        let server = makeServer(socketPath: socketPath)
+        try server.start()
+        defer { server.stop() }
+
+        let clientFD = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        defer { closeIfValid(clientFD) }
+        let request = MacOSSidecarRequest(
+            requestID: "empty-checkpoint",
+            method: .vmPrepareCheckpoint,
+            protocolVersion: MacOSSidecarProtocolVersion.durableCheckpointAdoption,
+            machineState: .init(
+                checkpointID: "snapshot-42",
+                persistenceID: "workload-42",
+                sourcePodUID: "source-pod",
+                sourceStorageGeneration: 7
+            )
+        )
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(request),
+            fd: clientFD
+        )
+
+        let response = try responseFrame(fd: clientFD)
+        #expect(response.error?.code == "checkpointWorkloadUnavailable")
+    }
+
+    @Test
+    func durableCheckpointWaitsForInFlightProcessStartAndCapturesIt() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let processPair = try makeSocketPair()
+        let processFD = LockedValue<Int32?>(processPair.server)
+        let processStartEntered = DispatchSemaphore(value: 0)
+        let releaseProcessStart = DispatchSemaphore(value: 0)
+        let server = makeServer(processConnectionFactory: { _ in
+            guard
+                let fd = processFD.withLock({ current -> Int32? in
+                    let fd = current
+                    current = nil
+                    return fd
+                })
+            else {
+                throw POSIXError(.ENOTCONN)
+            }
+            processStartEntered.signal()
+            guard releaseProcessStart.wait(timeout: .now() + 2) == .success else {
+                closeIfValid(fd)
+                throw POSIXError(.ETIMEDOUT)
+            }
+            return fd
+        })
+        defer {
+            releaseProcessStart.signal()
+            server._testCloseAllProcessSessions()
+            closeIfValid(processFD.withLock { $0 })
+            closeIfValid(processPair.peer)
+        }
+
+        let executionID = "sandbox:container:checkpoint-admission"
+        let trustedFingerprint = "sha256:\(String(repeating: "a", count: 64))"
+        let incarnation = "sha256:\(String(repeating: "b", count: 64))"
+        let processRequest = MacOSSidecarExecRequestPayload(
+            executable: "/bin/sleep",
+            arguments: ["60"],
+            durableExecutionID: executionID,
+            durableLaunchFingerprint: trustedFingerprint,
+            durableIncarnation: incarnation,
+            storageGeneration: 7,
+            replayCursor: 0
+        )
+        let guestDone = DispatchSemaphore(value: 0)
+        let guestError = LockedValue<Error?>(nil)
+        Thread.detachNewThread {
+            defer { guestDone.signal() }
+            do {
+                try writeGuestReady(fd: processPair.peer)
+                let inspect = try MacOSSidecarSocketIO.readJSONFrame(
+                    SidecarGuestAgentFrame.self,
+                    fd: processPair.peer
+                )
+                #expect(inspect.type == .processInspect)
+                try MacOSSidecarSocketIO.writeJSONFrame(
+                    SidecarGuestAgentFrame(
+                        type: .error,
+                        id: executionID,
+                        message: "process not found",
+                        errorCode: ENOENT
+                    ),
+                    fd: processPair.peer
+                )
+                let exec = try MacOSSidecarSocketIO.readJSONFrame(
+                    SidecarGuestAgentFrame.self,
+                    fd: processPair.peer
+                )
+                #expect(exec.type == .exec)
+                try writeGuestStatusAck(
+                    makeGuestProcessStatus(
+                        executionID: executionID,
+                        launchFingerprint: "guest-launch-fingerprint",
+                        trustedLaunchFingerprint: trustedFingerprint,
+                        incarnation: incarnation,
+                        storageGeneration: 7,
+                        disposition: .created
+                    ),
+                    fd: processPair.peer
+                )
+            } catch {
+                guestError.withLock { $0 = error }
+            }
+        }
+
+        let processStartDone = DispatchSemaphore(value: 0)
+        let processStartError = LockedValue<Error?>(nil)
+        Thread.detachNewThread {
+            defer { processStartDone.signal() }
+            do {
+                try server._testStartProcessStream(
+                    processID: "runtime-workload-checkpoint-admission",
+                    exec: processRequest
+                )
+            } catch {
+                processStartError.withLock { $0 = error }
+            }
+        }
+        #expect(processStartEntered.wait(timeout: .now() + 2) == .success)
+
+        let checkpointDone = DispatchSemaphore(value: 0)
+        let checkpointResult = LockedValue<MacOSMachineStateCheckpointResult?>(nil)
+        let checkpointError = LockedValue<Error?>(nil)
+        Thread.detachNewThread {
+            defer { checkpointDone.signal() }
+            do {
+                let result = try server._testPrepareCheckpoint(
+                    .init(
+                        checkpointID: "snapshot-42",
+                        persistenceID: "workload-42",
+                        sourcePodUID: "source-pod",
+                        sourceStorageGeneration: 7
+                    )
+                )
+                checkpointResult.withLock { $0 = result }
+            } catch {
+                checkpointError.withLock { $0 = error }
+            }
+        }
+
+        #expect(checkpointDone.wait(timeout: .now() + 0.1) == .timedOut)
+        releaseProcessStart.signal()
+        #expect(processStartDone.wait(timeout: .now() + 2) == .success)
+        #expect(checkpointDone.wait(timeout: .now() + 2) == .success)
+        #expect(guestDone.wait(timeout: .now() + 2) == .success)
+        if let error = processStartError.withLock({ $0 }) {
+            throw error
+        }
+        if let error = checkpointError.withLock({ $0 }) {
+            throw error
+        }
+        if let error = guestError.withLock({ $0 }) {
+            throw error
+        }
+
+        let checkpoint = try #require(checkpointResult.withLock { $0 })
+        #expect(checkpoint.adoption.workloads.count == 1)
+        #expect(checkpoint.adoption.workloads.first?.runtimeWorkloadID == "runtime-workload-checkpoint-admission")
+        #expect(checkpoint.adoption.workloads.first?.guestProcessID == executionID)
+
+        server._testEmitEvent(
+            .init(
+                event: .processStdout,
+                processID: "runtime-workload-checkpoint-admission",
+                data: Data("after-prepare".utf8),
+                sequence: 1
+            )
+        )
+        #expect(server._testPendingEventCount() == 1)
+        let replay = try server._testPrepareCheckpoint(
+            .init(
+                checkpointID: "snapshot-42",
+                persistenceID: "workload-42",
+                sourcePodUID: "source-pod",
+                sourceStorageGeneration: 7
+            )
+        )
+        #expect(replay.adoptionManifestDigest == checkpoint.adoptionManifestDigest)
+
+        do {
+            try server._testStartProcessStream(
+                processID: "runtime-workload-after-checkpoint",
+                exec: .init(executable: "/bin/true")
+            )
+            Issue.record("process start was accepted after checkpoint preparation")
+        } catch let error as SidecarRPCError {
+            #expect(error.code == "checkpointInProgress")
+        }
     }
 
     @Test

@@ -721,7 +721,11 @@ actor MacOSSidecarService {
                 MacOSSidecarMethod.vmCapabilities.rawValue,
                 MacOSSidecarMethod.vmPause.rawValue,
                 MacOSSidecarMethod.vmResume.rawValue,
+                MacOSSidecarMethod.vmPrepareCheckpoint.rawValue,
                 MacOSSidecarMethod.vmSaveMachineState.rawValue,
+                MacOSSidecarMethod.vmMachineStateReceipt.rawValue,
+                MacOSSidecarMethod.vmAbortCheckpoint.rawValue,
+                MacOSSidecarMethod.vmStorageAttachments.rawValue,
                 MacOSSidecarMethod.vmRestoreMachineState.rawValue,
                 MacOSSidecarMethod.vmDeleteMachineState.rawValue,
                 MacOSSidecarMethod.vmCompatibilityDescription.rawValue,
@@ -785,10 +789,21 @@ actor MacOSSidecarService {
         }
     }
 
-    func saveMachineState(stateID: String, timeoutSeconds: Double?) async throws -> MacOSMachineStateOperationResult {
+    func saveMachineState(
+        stateID: String,
+        timeoutSeconds: Double?,
+        adoption: MacOSMachineStateAdoptionManifest? = nil,
+        pair: MacOSMachineStateDurablePair? = nil
+    ) async throws -> MacOSMachineStateOperationResult {
         try validateOperationTimeout(timeoutSeconds)
         let store = try machineStateStore()
         try MacOSMachineStateStore.validateStateID(stateID)
+        guard (adoption == nil) == (pair == nil) else {
+            throw SidecarRPCError(
+                code: "invalidArgument",
+                message: "durable-pair save requires both adoption manifest and pair"
+            )
+        }
         try lifecycle.ensureNoOperationInProgress()
         do {
             let stored = try store.load(stateID: stateID)
@@ -802,7 +817,20 @@ actor MacOSSidecarService {
                 saved: stored.compatibility,
                 current: current
             )
-            return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
+            if let pair {
+                guard stored.receipt?.pair == pair, stored.receipt?.adoption == adoption else {
+                    throw SidecarRPCError(
+                        code: "durablePairMismatch",
+                        message: "existing machine state belongs to a different durable pair"
+                    )
+                }
+            }
+            return .init(
+                lifecycleState: state,
+                stateID: stateID,
+                compatibility: stored.compatibility,
+                receipt: stored.receipt
+            )
         } catch let error as SidecarRPCError where error.code == "machineStateNotFound" {
             // A missing state is the expected first-save path.
         }
@@ -811,6 +839,19 @@ actor MacOSSidecarService {
         let configuration = try await ensurePreparedConfiguration()
         try configuration.validateSaveRestoreSupport()
         let compatibility = try await currentCompatibilityDescription()
+        if let adoption, let pair {
+            guard pair.stateID == stateID,
+                pair.persistenceID == adoption.persistenceID,
+                pair.stateGeneration == adoption.sourceStorageGeneration,
+                pair.diskSnapshot.storageGeneration == pair.stateGeneration,
+                compatibility.storageGeneration == pair.stateGeneration
+            else {
+                throw SidecarRPCError(
+                    code: "durablePairMismatch",
+                    message: "durable pair does not match the paused VM storage generation"
+                )
+            }
+        }
         let shouldSave = try lifecycle.begin(.save, stateID: stateID)
         guard shouldSave else {
             return .init(lifecycleState: state, stateID: stateID, compatibility: compatibility)
@@ -831,9 +872,25 @@ actor MacOSSidecarService {
             try MacOSMachineIdentityBundleStore.capture(from: rootURL, into: reservation.directoryURL)
             try await saveVirtualMachine(vm, to: reservation.stateURL)
             try MacOSMachineIdentityBundleStore.verify(in: reservation.directoryURL)
-            try store.commit(reservation, compatibility: compatibility)
+            let receipt: MacOSMachineStateReceipt?
+            if let adoption, let pair {
+                receipt = try store.commit(
+                    reservation,
+                    compatibility: compatibility,
+                    adoption: adoption,
+                    pair: pair
+                )
+            } else {
+                try store.commit(reservation, compatibility: compatibility)
+                receipt = nil
+            }
             lifecycle.complete(.save, succeeded: true)
-            return .init(lifecycleState: state, stateID: stateID, compatibility: compatibility)
+            return .init(
+                lifecycleState: state,
+                stateID: stateID,
+                compatibility: compatibility,
+                receipt: receipt
+            )
         } catch {
             store.abort(reservation)
             lifecycle.complete(.save, succeeded: false)
@@ -860,6 +917,21 @@ actor MacOSSidecarService {
         }
         let store = try machineStateStore(containerConfig: config)
         let stored = try store.load(stateID: stateID)
+        if let requested = config.macosGuest?.machineState,
+            requested.protocolVersion >= MacOSSidecarProtocolVersion.durableCheckpointAdoption
+        {
+            guard let receipt = stored.receipt,
+                requested.pairID == receipt.pair.pairID,
+                requested.adoptionManifestDigest == receipt.pair.adoptionManifestDigest,
+                requested.persistenceID == receipt.pair.persistenceID,
+                requested.restoreStateGeneration == receipt.pair.stateGeneration
+            else {
+                throw SidecarRPCError(
+                    code: "durablePairMismatch",
+                    message: "configured restore contract does not match the committed durable pair"
+                )
+            }
+        }
         try MacOSMachineStateStorageGeneration.validateRestore(
             saved: stored.compatibility,
             selectedSavedGeneration: config.macosGuest?.machineState?.restoreStateGeneration
@@ -874,7 +946,12 @@ actor MacOSSidecarService {
 
         let shouldRestore = try lifecycle.begin(.restore, stateID: stateID)
         guard shouldRestore else {
-            return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
+            return .init(
+                lifecycleState: state,
+                stateID: stateID,
+                compatibility: stored.compatibility,
+                receipt: stored.receipt
+            )
         }
         do {
             if vm == nil {
@@ -888,7 +965,12 @@ actor MacOSSidecarService {
             try await restoreVirtualMachine(vm, from: stored.stateURL)
             try await activatePreparedNetworks()
             lifecycle.complete(.restore, succeeded: true)
-            return .init(lifecycleState: state, stateID: stateID, compatibility: stored.compatibility)
+            return .init(
+                lifecycleState: state,
+                stateID: stateID,
+                compatibility: stored.compatibility,
+                receipt: stored.receipt
+            )
         } catch {
             if let vm, vm.state != .stopped {
                 try? await stopVirtualMachine(vm)
@@ -907,6 +989,15 @@ actor MacOSSidecarService {
         try lifecycle.ensureStateCanBeDeleted(stateID)
         let deleted = try machineStateStore().delete(stateID: stateID)
         return .init(stateID: stateID, deleted: deleted)
+    }
+
+    func machineStateReceipt(stateID: String) throws -> MacOSMachineStateReceipt {
+        try MacOSMachineStateStore.validateStateID(stateID)
+        return try machineStateStore().receipt(stateID: stateID)
+    }
+
+    func storageAttachments() -> [MacOSStorageAttachmentStatus] {
+        nbdObservers.map { $0.status() }
     }
 
     func compatibilityDescription(stateID: String? = nil) async throws -> MacOSMachineStateCompatibilityResult {
@@ -948,7 +1039,10 @@ actor MacOSSidecarService {
         guard let machineState = config.macosGuest?.machineState else {
             return MacOSMachineStateStore(runtimeRootURL: rootURL)
         }
-        guard machineState.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
+        guard
+            machineState.protocolVersion == MacOSSidecarProtocolVersion.machineState
+                || machineState.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption
+        else {
             throw SidecarRPCError(
                 code: "protocolVersionMismatch",
                 message: "configured machine-state protocol version is unsupported"
@@ -1727,6 +1821,11 @@ final class SidecarControlServer: @unchecked Sendable {
         let status: MacOSGuestProcessStatusPayload?
     }
 
+    private struct ActiveCheckpoint {
+        let result: MacOSMachineStateCheckpointResult
+        let sourcePodUID: String?
+    }
+
     private struct ProcessLaunchIdentity: Codable {
         let executable: String
         let arguments: [String]
@@ -1867,6 +1966,34 @@ final class SidecarControlServer: @unchecked Sendable {
             let result = lastDeliveredSequence
             stateLock.unlock()
             return result
+        }
+
+        func checkpointWorkload(
+            expectedStorageGeneration: UInt64
+        ) throws -> MacOSMachineStateAdoptionWorkload {
+            guard durable,
+                let launchFingerprint,
+                let trustedLaunchFingerprint,
+                let incarnation,
+                let storageGeneration,
+                let processIdentifier,
+                storageGeneration == expectedStorageGeneration
+            else {
+                throw SidecarRPCError(
+                    code: "checkpointWorkloadUnavailable",
+                    message: "process \(processID) does not expose a complete durable identity"
+                )
+            }
+            return .init(
+                runtimeWorkloadID: processID,
+                guestProcessID: guestProcessID,
+                trustedLaunchFingerprint: trustedLaunchFingerprint,
+                guestLaunchFingerprint: launchFingerprint,
+                processIncarnation: incarnation,
+                storageGeneration: storageGeneration,
+                processIdentifier: processIdentifier,
+                lastPersistedEventSequence: deliveredCursor()
+            )
         }
 
         func acknowledgeDeliveredEvent(sequence: UInt64?) throws {
@@ -2174,7 +2301,7 @@ final class SidecarControlServer: @unchecked Sendable {
     private let eventDelivery: SidecarEventDeliveryBuffer
     private let eventClientLock = NSLock()
     private let processLock = NSLock()
-    private let processStartLock = NSLock()
+    private let checkpointAdmissionLock = NSLock()
     private let processReconnectQueue = DispatchQueue(
         label: "container.runtime.macos.sidecar.process-reconnect",
         qos: .userInitiated,
@@ -2190,6 +2317,7 @@ final class SidecarControlServer: @unchecked Sendable {
     private var eventClientFD: Int32 = -1
     private var eventClientSubscriptionID: String?
     private var processSessions: [String: ProcessStreamSession] = [:]
+    private var activeCheckpoint: ActiveCheckpoint?
     private var fsSessions: [String: FSTransferSession] = [:]
     private var fsReadSessions: [String: FSReadSession] = [:]
 
@@ -3103,6 +3231,12 @@ final class SidecarControlServer: @unchecked Sendable {
         try startProcessStream(port: port, processID: processID, exec: exec)
     }
 
+    func _testPrepareCheckpoint(
+        _ payload: MacOSMachineStateRequestPayload
+    ) throws -> MacOSMachineStateCheckpointResult {
+        try prepareCheckpoint(payload)
+    }
+
     func _testInspectDurableProcess(
         port: UInt32 = 27_000,
         processID: String,
@@ -3194,6 +3328,10 @@ final class SidecarControlServer: @unchecked Sendable {
     }
 
     private func startFSTransfer(port: UInt32, clientFD: Int32, payload: MacOSSidecarFSBeginRequestPayload) throws {
+        checkpointAdmissionLock.lock()
+        defer { checkpointAdmissionLock.unlock() }
+        try ensureCheckpointAllowsNewSession()
+
         logFS(
             "begin",
             txID: payload.txID,
@@ -3288,6 +3426,10 @@ final class SidecarControlServer: @unchecked Sendable {
     // MARK: - Read direction operations
 
     private func startFSRead(port: UInt32, clientFD: Int32, payload: MacOSSidecarFSReadBeginRequestPayload) throws -> MacOSSidecarFSReadBeginResponsePayload {
+        checkpointAdmissionLock.lock()
+        defer { checkpointAdmissionLock.unlock() }
+        try ensureCheckpointAllowsNewSession()
+
         log.info(
             "filesystem read begin",
             metadata: [
@@ -3468,8 +3610,9 @@ final class SidecarControlServer: @unchecked Sendable {
     }
 
     private func startProcessStream(port: UInt32, processID: String, exec: MacOSSidecarExecRequestPayload) throws {
-        processStartLock.lock()
-        defer { processStartLock.unlock() }
+        checkpointAdmissionLock.lock()
+        defer { checkpointAdmissionLock.unlock() }
+        try ensureCheckpointAllowsNewSession()
 
         try validateDurableProcessRequest(exec)
         let requestFingerprint = try processRequestFingerprint(exec)
@@ -4569,6 +4712,178 @@ final class SidecarControlServer: @unchecked Sendable {
         return nil
     }
 
+    private func ensureCheckpointAllowsNewSession() throws {
+        processLock.lock()
+        let checkpointInProgress = activeCheckpoint != nil
+        processLock.unlock()
+        guard !checkpointInProgress else {
+            throw SidecarRPCError(
+                code: "checkpointInProgress",
+                message: "new sidecar sessions are blocked by checkpoint preparation"
+            )
+        }
+    }
+
+    private func replayPreparedCheckpoint(
+        checkpointID: String,
+        persistenceID: String,
+        storageGeneration: UInt64,
+        sourcePodUID: String?
+    ) throws -> MacOSMachineStateCheckpointResult? {
+        processLock.lock()
+        defer { processLock.unlock() }
+        guard let activeCheckpoint else {
+            return nil
+        }
+        guard activeCheckpoint.result.checkpointID == checkpointID,
+            activeCheckpoint.result.persistenceID == persistenceID,
+            activeCheckpoint.result.storageGeneration == storageGeneration,
+            activeCheckpoint.result.adoption.sourcePodUID == sourcePodUID
+        else {
+            throw SidecarRPCError(
+                code: "checkpointConflict",
+                message: "another checkpoint already owns the sidecar"
+            )
+        }
+        return activeCheckpoint.result
+    }
+
+    private func prepareCheckpoint(
+        _ payload: MacOSMachineStateRequestPayload
+    ) throws -> MacOSMachineStateCheckpointResult {
+        guard let checkpointID = payload.checkpointID, !checkpointID.isEmpty,
+            let persistenceID = payload.persistenceID, !persistenceID.isEmpty,
+            let storageGeneration = payload.sourceStorageGeneration, storageGeneration > 0
+        else {
+            throw SidecarRPCError(
+                code: "invalidArgument",
+                message: "checkpoint preparation requires checkpoint, persistence, and storage generation identities"
+            )
+        }
+
+        checkpointAdmissionLock.lock()
+        defer { checkpointAdmissionLock.unlock() }
+
+        if let replay = try replayPreparedCheckpoint(
+            checkpointID: checkpointID,
+            persistenceID: persistenceID,
+            storageGeneration: storageGeneration,
+            sourcePodUID: payload.sourcePodUID
+        ) {
+            return replay
+        }
+
+        guard eventDelivery.pendingCount() == 0 else {
+            throw SidecarRPCError(
+                code: "checkpointOutputPending",
+                message: "durable process output is still awaiting consumer acknowledgement"
+            )
+        }
+        fsLock.lock()
+        let hasFSSessions = !fsSessions.isEmpty
+        fsLock.unlock()
+        fsReadLock.lock()
+        let hasFSReadSessions = !fsReadSessions.isEmpty
+        fsReadLock.unlock()
+        guard !hasFSSessions, !hasFSReadSessions else {
+            throw SidecarRPCError(
+                code: "checkpointTransientSessionActive",
+                message: "filesystem transfer is active during checkpoint preparation"
+            )
+        }
+
+        processLock.lock()
+        defer { processLock.unlock() }
+        let workloads = try processSessions.values
+            .map { try $0.checkpointWorkload(expectedStorageGeneration: storageGeneration) }
+            .sorted { $0.runtimeWorkloadID < $1.runtimeWorkloadID }
+        guard !workloads.isEmpty else {
+            throw SidecarRPCError(
+                code: "checkpointWorkloadUnavailable",
+                message: "checkpoint preparation requires at least one durable workload"
+            )
+        }
+        let adoption = MacOSMachineStateAdoptionManifest(
+            checkpointID: checkpointID,
+            persistenceID: persistenceID,
+            sourcePodUID: payload.sourcePodUID,
+            sourceStorageGeneration: storageGeneration,
+            workloads: workloads
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let digest = SHA256.hash(data: try encoder.encode(adoption))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let result = MacOSMachineStateCheckpointResult(
+            checkpointID: checkpointID,
+            persistenceID: persistenceID,
+            storageGeneration: storageGeneration,
+            adoption: adoption,
+            adoptionManifestDigest: digest
+        )
+        activeCheckpoint = ActiveCheckpoint(result: result, sourcePodUID: payload.sourcePodUID)
+        return result
+    }
+
+    private func durablePairSaveInputs(
+        stateID: String,
+        payload: MacOSMachineStateRequestPayload
+    ) throws -> (
+        adoption: MacOSMachineStateAdoptionManifest,
+        pair: MacOSMachineStateDurablePair
+    ) {
+        processLock.lock()
+        defer { processLock.unlock() }
+        guard let checkpoint = activeCheckpoint?.result,
+            payload.checkpointID == checkpoint.checkpointID,
+            payload.persistenceID == checkpoint.persistenceID,
+            let diskSnapshot = payload.diskSnapshot,
+            diskSnapshot.snapshotID == stateID,
+            diskSnapshot.storageGeneration == checkpoint.storageGeneration,
+            let pairID = payload.pairID,
+            let compatibilityClass = payload.compatibilityClass,
+            payload.adoptionManifestDigest == checkpoint.adoptionManifestDigest
+        else {
+            throw SidecarRPCError(
+                code: "durablePairMismatch",
+                message: "machine-state save does not match the prepared checkpoint"
+            )
+        }
+        return (
+            checkpoint.adoption,
+            .init(
+                pairID: pairID,
+                persistenceID: checkpoint.persistenceID,
+                stateID: stateID,
+                stateGeneration: checkpoint.storageGeneration,
+                diskSnapshot: diskSnapshot,
+                compatibilityClass: compatibilityClass,
+                adoptionManifestDigest: checkpoint.adoptionManifestDigest
+            )
+        )
+    }
+
+    private func abortCheckpoint(_ payload: MacOSMachineStateRequestPayload) throws {
+        guard let checkpointID = payload.checkpointID, !checkpointID.isEmpty else {
+            throw SidecarRPCError(code: "invalidArgument", message: "checkpoint id is required")
+        }
+        checkpointAdmissionLock.lock()
+        defer { checkpointAdmissionLock.unlock() }
+        processLock.lock()
+        defer { processLock.unlock() }
+        guard let activeCheckpoint else {
+            return
+        }
+        guard activeCheckpoint.result.checkpointID == checkpointID else {
+            throw SidecarRPCError(
+                code: "checkpointConflict",
+                message: "checkpoint abort does not own the active checkpoint"
+            )
+        }
+        self.activeCheckpoint = nil
+    }
+
     private func perform(request: MacOSSidecarRequest, clientFD: Int32) throws -> MacOSSidecarResponse {
         let service = self.service
         let requestID = request.requestID
@@ -4895,7 +5210,52 @@ final class SidecarControlServer: @unchecked Sendable {
                     protocolVersion: MacOSSidecarProtocolVersion.current
                 )
             }
+        case .vmPrepareCheckpoint:
+            guard let payload = request.machineState else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "missing machineState checkpoint payload",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            do {
+                let result = try prepareCheckpoint(payload)
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
         case .vmSaveMachineState:
+            guard let payload = request.machineState, let stateID = payload.stateID else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "missing machineState.stateID",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            return try sync(requestID: requestID) {
+                let durableInputs =
+                    request.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption
+                    ? try self.durablePairSaveInputs(stateID: stateID, payload: payload)
+                    : nil
+                let result = try await service.saveMachineState(
+                    stateID: stateID,
+                    timeoutSeconds: payload.timeoutSeconds,
+                    adoption: durableInputs?.adoption,
+                    pair: durableInputs?.pair
+                )
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(result),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+        case .vmMachineStateReceipt:
             guard let stateID = request.machineState?.stateID else {
                 return .failure(
                     requestID: requestID,
@@ -4905,13 +5265,37 @@ final class SidecarControlServer: @unchecked Sendable {
                 )
             }
             return try sync(requestID: requestID) {
-                let result = try await service.saveMachineState(
-                    stateID: stateID,
-                    timeoutSeconds: request.machineState?.timeoutSeconds
-                )
+                let receipt = try await service.machineStateReceipt(stateID: stateID)
                 return .success(
                     requestID: requestID,
-                    data: try JSONEncoder().encode(result),
+                    data: try JSONEncoder().encode(receipt),
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+        case .vmAbortCheckpoint:
+            guard let payload = request.machineState else {
+                return .failure(
+                    requestID: requestID,
+                    code: "invalidArgument",
+                    message: "missing machineState checkpoint payload",
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            }
+            do {
+                try abortCheckpoint(payload)
+                return .success(
+                    requestID: requestID,
+                    protocolVersion: MacOSSidecarProtocolVersion.current
+                )
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .vmStorageAttachments:
+            return try sync(requestID: requestID) {
+                let attachments = await service.storageAttachments()
+                return .success(
+                    requestID: requestID,
+                    data: try JSONEncoder().encode(attachments),
                     protocolVersion: MacOSSidecarProtocolVersion.current
                 )
             }
@@ -5047,15 +5431,31 @@ final class SidecarControlServer: @unchecked Sendable {
                     ]
                 )
             }
-        case .vmPause, .vmResume, .vmSaveMachineState, .vmRestoreMachineState, .vmDeleteMachineState,
-            .vmCompatibilityDescription:
-            guard request.protocolVersion == MacOSSidecarProtocolVersion.machineState else {
+        case .vmPrepareCheckpoint, .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments:
+            guard request.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption else {
                 return SidecarRPCError(
                     code: "protocolVersionMismatch",
-                    message: "method \(request.method.rawValue) requires sidecar protocol version \(MacOSSidecarProtocolVersion.machineState)",
+                    message:
+                        "method \(request.method.rawValue) requires sidecar protocol version \(MacOSSidecarProtocolVersion.durableCheckpointAdoption)",
                     metadata: [
                         "requestedVersion": request.protocolVersion.map(String.init) ?? "legacy-unversioned",
-                        "requiredVersion": "\(MacOSSidecarProtocolVersion.machineState)",
+                        "requiredVersion": "\(MacOSSidecarProtocolVersion.durableCheckpointAdoption)",
+                    ]
+                )
+            }
+        case .vmPause, .vmResume, .vmSaveMachineState, .vmRestoreMachineState, .vmDeleteMachineState,
+            .vmCompatibilityDescription:
+            guard
+                request.protocolVersion == MacOSSidecarProtocolVersion.machineState
+                    || request.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption
+            else {
+                return SidecarRPCError(
+                    code: "protocolVersionMismatch",
+                    message: "method \(request.method.rawValue) requires sidecar protocol version 2 or 6",
+                    metadata: [
+                        "requestedVersion": request.protocolVersion.map(String.init) ?? "legacy-unversioned",
+                        "requiredVersion":
+                            "\(MacOSSidecarProtocolVersion.machineState),\(MacOSSidecarProtocolVersion.durableCheckpointAdoption)",
                     ]
                 )
             }
@@ -5117,7 +5517,8 @@ extension MacOSSidecarMethod {
             .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
             true
         case .eventsSubscribe, .eventsAcknowledge, .vmConnectVsock, .processInspect, .processDelete, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
-            .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmStop, .sidecarQuit, .unknown:
+            .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmPrepareCheckpoint,
+            .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .vmStop, .sidecarQuit, .unknown:
             false
         }
     }

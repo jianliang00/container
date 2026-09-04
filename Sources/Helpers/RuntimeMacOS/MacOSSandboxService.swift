@@ -231,6 +231,7 @@ public actor MacOSSandboxService {
         var lastAgentError: String?
         var lastStderr: String?
         var durableEventCursor: UInt64 = 0
+        var adoptionReceipt: WorkloadAdoptionReceipt?
     }
 
     struct WorkloadRecord {
@@ -3468,7 +3469,8 @@ extension MacOSSandboxService {
             startedDate: record.startedAt,
             exitedAt: record.exitStatus?.exitedAt,
             stdoutLogPath: record.stdoutLogPath,
-            stderrLogPath: record.stderrLogPath
+            stderrLogPath: record.stderrLogPath,
+            adoptionReceipt: record.sessionID.flatMap { sessions[$0]?.adoptionReceipt }
         )
     }
 
@@ -3727,6 +3729,51 @@ extension MacOSSandboxService {
 
         do {
             try await startProcessViaSidecarWithRetries(port: agentPort, processID: processID, request: request)
+            if let sourceStorageGeneration = request.previousStorageGeneration {
+                guard let client = sidecarHandle?.client,
+                    let executionID = request.durableExecutionID,
+                    let trustedLaunchFingerprint = request.durableLaunchFingerprint,
+                    let processIncarnation = request.durableIncarnation,
+                    let storageGeneration = request.storageGeneration
+                else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "restored durable process is missing its adoption identity"
+                    )
+                }
+                let status = try client.processInspect(
+                    port: agentPort,
+                    processID: processID,
+                    request: request
+                )
+                guard status.executionID == executionID,
+                    status.trustedLaunchFingerprint == trustedLaunchFingerprint,
+                    status.incarnation == processIncarnation,
+                    status.storageGeneration == storageGeneration,
+                    storageGeneration > sourceStorageGeneration,
+                    status.state == .running,
+                    !status.replayTruncated
+                else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "restored durable process did not return a complete adoption receipt"
+                    )
+                }
+                session.adoptionReceipt = WorkloadAdoptionReceipt(
+                    runtimeWorkloadID: processID,
+                    executionID: status.executionID,
+                    trustedLaunchFingerprint: trustedLaunchFingerprint,
+                    guestLaunchFingerprint: status.launchFingerprint,
+                    processIncarnation: processIncarnation,
+                    sourceStorageGeneration: sourceStorageGeneration,
+                    storageGeneration: storageGeneration,
+                    processIdentifier: status.processIdentifier,
+                    eventSequence: status.cursor,
+                    oldestAvailableEventSequence: status.oldestAvailableSequence,
+                    replayTruncated: status.replayTruncated,
+                    state: status.state.rawValue
+                )
+            }
             session.started = true
             session.startedAt = session.startedAt ?? Date()
             installControllerReadabilityHandler(processID: processID, session: &session)

@@ -16,6 +16,7 @@
 
 #if os(macOS)
 import ContainerResource
+import CryptoKit
 import Darwin
 import Foundation
 import Logging
@@ -153,6 +154,79 @@ struct MachineStateSupportTests {
                 selectedSavedGeneration: 8
             )
         }
+    }
+
+    @Test
+    func durablePairIDMatchesControlPlaneWireVector() {
+        let pairID = MacOSMachineStateStore.durablePairID(
+            persistenceID: "workload-42",
+            stateID: "snapshot-123",
+            diskSnapshotRef: "macos/kross-workload-42-g7@snapshot-123",
+            sourceStorageGeneration: 7,
+            compatibilityClass: "macos-arm64-v1",
+            adoptionManifestDigest: String(repeating: "a", count: 64)
+        )
+        #expect(pairID == "67d8972e0be4038fd3908cd0d4b3114c5a2fbdb6b4132ddfcc20bcdb0c881127")
+    }
+
+    @Test
+    func durableStoreCommitsAndReadsBackExactPair() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let store = MacOSMachineStateStore(runtimeRootURL: root)
+        let reservation = try store.reserve(stateID: "snapshot-123")
+        try Data("machine-state".utf8).write(to: reservation.stateURL)
+        let adoption = MacOSMachineStateAdoptionManifest(
+            checkpointID: "snapshot-123",
+            persistenceID: "workload-42",
+            sourcePodUID: "source-pod",
+            sourceStorageGeneration: 7,
+            workloads: []
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let adoptionDigest = SHA256.hash(data: try encoder.encode(adoption))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let snapshot = MacOSMachineStateDiskSnapshotReceipt(
+            snapshotID: "snapshot-123",
+            volumeID: "workload-42-g7",
+            snapshotRef: "macos/kross-workload-42-g7@snapshot-123",
+            storageGeneration: 7,
+            operationID: "suspend-42",
+            operationSequence: 9,
+            ownerEpoch: 2
+        )
+        let pair = MacOSMachineStateDurablePair(
+            pairID: MacOSMachineStateStore.durablePairID(
+                persistenceID: adoption.persistenceID,
+                stateID: adoption.checkpointID,
+                diskSnapshotRef: snapshot.snapshotRef,
+                sourceStorageGeneration: adoption.sourceStorageGeneration,
+                compatibilityClass: "macos-arm64-v1",
+                adoptionManifestDigest: adoptionDigest
+            ),
+            persistenceID: adoption.persistenceID,
+            stateID: adoption.checkpointID,
+            stateGeneration: adoption.sourceStorageGeneration,
+            diskSnapshot: snapshot,
+            compatibilityClass: "macos-arm64-v1",
+            adoptionManifestDigest: adoptionDigest
+        )
+
+        let receipt = try store.commit(
+            reservation,
+            compatibility: makeCompatibility(storageGeneration: 7),
+            adoption: adoption,
+            pair: pair
+        )
+        let stored = try store.load(stateID: "snapshot-123")
+
+        #expect(receipt.pair == pair)
+        #expect(stored.receipt?.pair == pair)
+        #expect(stored.receipt?.adoption == adoption)
+        #expect(stored.receipt?.committed == true)
     }
 
     @Test

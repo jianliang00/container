@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Darwin
 import Foundation
 
@@ -37,6 +38,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
     }
 
     public var id: String
+    public var runtimeSandboxID: String
     public var podUID: String?
     public var namespace: String?
     public var name: String?
@@ -54,6 +56,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
 
     public init(
         id: String,
+        runtimeSandboxID: String? = nil,
         podUID: String? = nil,
         namespace: String? = nil,
         name: String? = nil,
@@ -70,6 +73,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
         updatedAt: Date
     ) {
         self.id = id
+        self.runtimeSandboxID = runtimeSandboxID ?? id
         self.podUID = podUID
         self.namespace = namespace
         self.name = name
@@ -88,6 +92,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
 
     enum CodingKeys: String, CodingKey {
         case id
+        case runtimeSandboxID
         case podUID
         case namespace
         case name
@@ -106,8 +111,10 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(String.self, forKey: .id)
         self.init(
-            id: try container.decode(String.self, forKey: .id),
+            id: id,
+            runtimeSandboxID: try container.decodeIfPresent(String.self, forKey: .runtimeSandboxID) ?? id,
             podUID: try container.decodeIfPresent(String.self, forKey: .podUID),
             namespace: try container.decodeIfPresent(String.self, forKey: .namespace),
             name: try container.decodeIfPresent(String.self, forKey: .name),
@@ -128,6 +135,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
+        try container.encode(runtimeSandboxID, forKey: .runtimeSandboxID)
         try container.encodeIfPresent(podUID, forKey: .podUID)
         try container.encodeIfPresent(namespace, forKey: .namespace)
         try container.encodeIfPresent(name, forKey: .name)
@@ -151,6 +159,7 @@ public struct CRIShimSandboxMetadata: Codable, Equatable, Sendable, Identifiable
     private var fingerprintSegments: [String] {
         [
             id,
+            runtimeSandboxID,
             podUID ?? "",
             namespace ?? "",
             name ?? "",
@@ -218,6 +227,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
 
     public var id: String
     public var sandboxID: String
+    public var runtimeWorkloadID: String
     public var name: String
     public var attempt: UInt32
     public var image: String
@@ -238,10 +248,12 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
     public var exitStatusSource: ExitStatusSource?
     public var exitTimeSource: ExitTimeSource?
     public var lifecycleVersion: UInt64
+    public var adoptionReceipt: WorkloadAdoptionReceipt?
 
     public init(
         id: String,
         sandboxID: String,
+        runtimeWorkloadID: String? = nil,
         name: String,
         attempt: UInt32 = 0,
         image: String,
@@ -261,10 +273,12 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         message: String? = nil,
         exitStatusSource: ExitStatusSource? = nil,
         exitTimeSource: ExitTimeSource? = nil,
-        lifecycleVersion: UInt64 = 0
+        lifecycleVersion: UInt64 = 0,
+        adoptionReceipt: WorkloadAdoptionReceipt? = nil
     ) {
         self.id = id
         self.sandboxID = sandboxID
+        self.runtimeWorkloadID = runtimeWorkloadID ?? id
         self.name = name
         self.attempt = attempt
         self.image = image
@@ -285,11 +299,13 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         self.exitStatusSource = exitStatusSource
         self.exitTimeSource = exitTimeSource
         self.lifecycleVersion = lifecycleVersion
+        self.adoptionReceipt = adoptionReceipt
     }
 
     enum CodingKeys: String, CodingKey {
         case id
         case sandboxID
+        case runtimeWorkloadID
         case name
         case attempt
         case image
@@ -310,13 +326,16 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         case exitStatusSource
         case exitTimeSource
         case lifecycleVersion
+        case adoptionReceipt
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(String.self, forKey: .id)
         self.init(
-            id: try container.decode(String.self, forKey: .id),
+            id: id,
             sandboxID: try container.decode(String.self, forKey: .sandboxID),
+            runtimeWorkloadID: try container.decodeIfPresent(String.self, forKey: .runtimeWorkloadID) ?? id,
             name: try container.decode(String.self, forKey: .name),
             attempt: try container.decodeIfPresent(UInt32.self, forKey: .attempt) ?? 0,
             image: try container.decode(String.self, forKey: .image),
@@ -336,7 +355,8 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
             message: try container.decodeIfPresent(String.self, forKey: .message),
             exitStatusSource: try container.decodeIfPresent(ExitStatusSource.self, forKey: .exitStatusSource),
             exitTimeSource: try container.decodeIfPresent(ExitTimeSource.self, forKey: .exitTimeSource),
-            lifecycleVersion: try container.decodeIfPresent(UInt64.self, forKey: .lifecycleVersion) ?? 0
+            lifecycleVersion: try container.decodeIfPresent(UInt64.self, forKey: .lifecycleVersion) ?? 0,
+            adoptionReceipt: try container.decodeIfPresent(WorkloadAdoptionReceipt.self, forKey: .adoptionReceipt)
         )
         normalizeTerminalStatus(observedAt: exitedAt ?? startedAt ?? createdAt)
     }
@@ -345,6 +365,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(sandboxID, forKey: .sandboxID)
+        try container.encode(runtimeWorkloadID, forKey: .runtimeWorkloadID)
         try container.encode(name, forKey: .name)
         try container.encode(attempt, forKey: .attempt)
         try container.encode(image, forKey: .image)
@@ -365,6 +386,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         try container.encodeIfPresent(exitStatusSource, forKey: .exitStatusSource)
         try container.encodeIfPresent(exitTimeSource, forKey: .exitTimeSource)
         try container.encode(lifecycleVersion, forKey: .lifecycleVersion)
+        try container.encodeIfPresent(adoptionReceipt, forKey: .adoptionReceipt)
     }
 
     public var reconcileFingerprint: String {
@@ -375,6 +397,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
         [
             id,
             sandboxID,
+            runtimeWorkloadID,
             name,
             String(attempt),
             image,
@@ -393,6 +416,7 @@ public struct CRIShimContainerMetadata: Codable, Equatable, Sendable, Identifiab
             message ?? "",
             exitStatusSource?.rawValue ?? "",
             exitTimeSource?.rawValue ?? "",
+            adoptionReceipt.map(makeCRIStatusJSONString) ?? "",
         ]
     }
 

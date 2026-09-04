@@ -1635,10 +1635,10 @@ struct CRIShimRuntimeServerTests {
         )
 
         #expect(confirmation.lease.admissionState == .runtimeDeletionConfirmed)
-        #expect(runtimeManager.removeSandboxCalls.last?.id == launchMarked.sandboxID)
-        #expect(runtimeManager.removeSandboxRuntimeServiceCalls.last == launchMarked.sandboxID)
+        #expect(runtimeManager.removeSandboxCalls.last?.id == launchMarked.effectiveRuntimeSandboxID)
+        #expect(runtimeManager.removeSandboxRuntimeServiceCalls.last == launchMarked.effectiveRuntimeSandboxID)
         #expect(runtimeManager.removeMachineStateSidecarCalls.last?.persistenceID == persistenceID)
-        #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.last?.id == launchMarked.sandboxID)
+        #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.last?.id == launchMarked.effectiveRuntimeSandboxID)
         try CRIShimMachineStateLeaseStore.release(policy: policy, expected: confirmation.lease)
         #expect(
             try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID) == nil
@@ -1649,7 +1649,7 @@ struct CRIShimRuntimeServerTests {
             _ = try MacOSSidecarLifecycleLock(
                 protocolVersion: barrier.protocolVersion,
                 persistenceID: persistenceID,
-                sandboxID: launchMarked.sandboxID,
+                sandboxID: launchMarked.effectiveRuntimeSandboxID,
                 bootNonce: barrier.bootNonce,
                 storageDirectory: storageDirectory.path
             )
@@ -1848,7 +1848,7 @@ struct CRIShimRuntimeServerTests {
         let recovered = try await client.runPodSandbox(request)
         #expect(recovered.podSandboxID != crashedLease.sandboxID)
         #expect(runtimeManager.createSandboxCalls.count == 1)
-        #expect(runtimeManager.removeSandboxRuntimeServiceCalls == [crashedLease.sandboxID])
+        #expect(runtimeManager.removeSandboxRuntimeServiceCalls == [crashedLease.effectiveRuntimeSandboxID])
         #expect(runtimeManager.removeMachineStateSidecarCalls.first?.persistenceID == "workload-42")
         let activeLease = try #require(try CRIShimMachineStateLeaseStore.list(policy: machineStatePolicy).first)
         #expect(activeLease.sandboxID == recovered.podSandboxID)
@@ -6259,7 +6259,7 @@ private func writeTestSidecarLifecycleAttestation(
         MacOSSidecarLifecycleAttestation(
             protocolVersion: barrier.protocolVersion,
             persistenceID: lease.persistenceID,
-            sandboxID: lease.sandboxID,
+            sandboxID: lease.effectiveRuntimeSandboxID,
             bootNonce: barrier.bootNonce,
             processID: getpid(),
             lockDevice: UInt64(value.st_dev),

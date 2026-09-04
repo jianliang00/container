@@ -119,6 +119,7 @@ func validateMachineStateLeaseCoverage(
             persistenceID: values.persistenceID,
             podUID: podUID,
             sandboxID: metadata.id,
+            runtimeSandboxID: metadata.runtimeSandboxID,
             restoreStateID: values.restoreStateID,
             restoreStateGeneration: values.restoreStateGeneration,
             storageGeneration: values.storageGeneration

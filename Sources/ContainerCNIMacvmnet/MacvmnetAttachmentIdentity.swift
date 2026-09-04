@@ -23,3 +23,19 @@ public struct MacvmnetAttachmentIdentity: Hashable, Codable, Sendable {
         self.ifName = ifName
     }
 }
+
+public struct MacvmnetAttachmentOwner: Hashable, Codable, Sendable {
+    public var criSandboxID: String
+    public var restoreRequestID: String?
+    public var podUID: String?
+
+    public init(
+        criSandboxID: String,
+        restoreRequestID: String? = nil,
+        podUID: String? = nil
+    ) {
+        self.criSandboxID = criSandboxID
+        self.restoreRequestID = restoreRequestID
+        self.podUID = podUID
+    }
+}

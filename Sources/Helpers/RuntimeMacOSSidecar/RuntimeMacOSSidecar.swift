@@ -1032,13 +1032,16 @@ actor MacOSSidecarService {
         return configuration
     }
 
-    private func machineStateStore(
+    func machineStateStore(
         containerConfig: ContainerConfiguration? = nil
     ) throws -> MacOSMachineStateStore {
         let config = try containerConfig ?? loadContainerConfiguration()
-        guard let machineState = config.macosGuest?.machineState else {
-            return MacOSMachineStateStore(runtimeRootURL: rootURL)
-        }
+        let storeRoot = try persistentMachineStateRoot(containerConfig: config) ?? rootURL
+        return MacOSMachineStateStore(runtimeRootURL: storeRoot)
+    }
+
+    private func persistentMachineStateRoot(containerConfig: ContainerConfiguration) throws -> URL? {
+        guard let machineState = containerConfig.macosGuest?.machineState else { return nil }
         guard
             machineState.protocolVersion == MacOSSidecarProtocolVersion.machineState
                 || machineState.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption
@@ -1048,15 +1051,15 @@ actor MacOSSidecarService {
                 message: "configured machine-state protocol version is unsupported"
             )
         }
-        let storeRoot = URL(fileURLWithPath: machineState.storageDirectory, isDirectory: true).standardizedFileURL
-        guard storeRoot.path == machineState.storageDirectory, storeRoot.path.hasPrefix("/") else {
+        guard let path = MacOSManagedPath.canonicalPath(machineState.storageDirectory) else {
             throw SidecarRPCError(
                 code: "unsafeMachineStatePath",
                 message: "configured machine-state storage directory is not an absolute canonical path"
             )
         }
+        let storeRoot = URL(fileURLWithPath: path, isDirectory: true)
         try MacOSMachineStateStore.preparePersistentRoot(at: storeRoot)
-        return MacOSMachineStateStore(runtimeRootURL: storeRoot)
+        return storeRoot
     }
 
     private func compatibilityMismatchError(_ reasons: [MacOSMachineStateUnsupportedReason]) -> SidecarRPCError {
@@ -1314,26 +1317,10 @@ actor MacOSSidecarService {
         return identityDirectory.appendingPathComponent("MachineIdentifier.bin")
     }
 
-    private func persistentIdentityDirectory(containerConfig: ContainerConfiguration) throws -> URL? {
-        guard let machineState = containerConfig.macosGuest?.machineState else { return nil }
-        let storage = URL(fileURLWithPath: machineState.storageDirectory).standardizedFileURL
-        guard storage.path == machineState.storageDirectory, storage.path.hasPrefix("/") else {
-            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "invalid persistent identity root")
-        }
-        try MacOSMachineStateStore.rejectSymbolicLinks(below: storage, through: storage)
+    func persistentIdentityDirectory(containerConfig: ContainerConfiguration) throws -> URL? {
+        guard let storage = try persistentMachineStateRoot(containerConfig: containerConfig) else { return nil }
         let identity = storage.appendingPathComponent("Identity", isDirectory: true)
-        if FileManager.default.fileExists(atPath: identity.path) {
-            try MacOSMachineStateStore.rejectSymbolicLinks(below: storage, through: identity)
-            var value = stat()
-            guard lstat(identity.path, &value) == 0, (value.st_mode & S_IFMT) == S_IFDIR else {
-                throw SidecarRPCError(code: "unsafeMachineStatePath", message: "persistent identity path is not a directory")
-            }
-        } else {
-            try FileManager.default.createDirectory(at: identity, withIntermediateDirectories: false)
-        }
-        guard chmod(identity.path, mode_t(S_IRWXU)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
+        try MacOSMachineStateStore.preparePersistentRoot(at: identity)
         return identity
     }
 

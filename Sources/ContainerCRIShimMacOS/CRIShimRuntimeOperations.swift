@@ -53,6 +53,11 @@ public protocol CRIShimRuntimeManaging: Sendable {
         id: String
     ) async throws
 
+    func removeSandboxRuntimeService(
+        id: String,
+        machineStateOwnerUID: UInt32
+    ) async throws
+
     func removeMachineStateSidecar(
         sandboxID: String,
         persistenceID: String,
@@ -177,8 +182,15 @@ private struct ContainerKitCRIShimStreamingProcess: CRIShimStreamingProcess {
     }
 }
 
+struct CRIShimLaunchdOperations: Sendable {
+    var domainString: @Sendable () throws -> String = { try ServiceManager.getDomainString() }
+    var deregister: @Sendable (String) throws -> Void = { try ServiceManager.deregister(fullServiceLabel: $0) }
+    var isRegisteredStrict: @Sendable (String) throws -> Bool = { try ServiceManager.isRegisteredStrict(fullServiceLabel: $0) }
+}
+
 public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
     public var kit: ContainerKit
+    var launchd = CRIShimLaunchdOperations()
 
     public init(kit: ContainerKit = ContainerKit()) {
         self.kit = kit
@@ -214,9 +226,18 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
     public func removeSandboxRuntimeService(
         id: String
     ) async throws {
-        let domain = try ServiceManager.getDomainString()
+        let domain = try launchd.domainString()
         let label = "\(domain)/com.apple.container.container-runtime-macos.\(id)"
-        try ServiceManager.deregister(fullServiceLabel: label)
+        try launchd.deregister(label)
+    }
+
+    /// The owner comes from the validated machine-state binding, not the
+    /// cleanup caller's uid or inherited bootstrap session.
+    public func removeSandboxRuntimeService(
+        id: String,
+        machineStateOwnerUID: UInt32
+    ) async throws {
+        try launchd.deregister(machineStateRuntimeServiceLabel(id: id, ownerUID: machineStateOwnerUID))
     }
 
     public func removeMachineStateSidecar(
@@ -237,7 +258,7 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
             persistenceID: persistenceID,
             effectiveUserID: effectiveUserID
         )
-        try ServiceManager.deregister(fullServiceLabel: sidecarLabel)
+        try launchd.deregister(sidecarLabel)
     }
 
     public func stopAndQuitMachineStateSidecar(
@@ -260,29 +281,43 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         machineStatePersistenceID: String?,
         machineStateOwnerUID: UInt32?
     ) async throws {
-        let domain = try ServiceManager.getDomainString()
-        let label = "\(domain)/com.apple.container.container-runtime-macos.\(id)"
-        guard try !ServiceManager.isRegisteredStrict(fullServiceLabel: label) else {
+        let runtimeLabel: String
+        let sidecarLabel: String?
+        switch (machineStatePersistenceID, machineStateOwnerUID) {
+        case (nil, nil):
+            let domain = try launchd.domainString()
+            runtimeLabel = "\(domain)/com.apple.container.container-runtime-macos.\(id)"
+            sidecarLabel = nil
+        case (.some(let persistenceID), .some(let ownerUID)):
+            _ = try requireSafeIdentifier(persistenceID, annotation: CRIShimMachineStateAnnotation.persistenceID, maximumLength: 64)
+            runtimeLabel = try machineStateRuntimeServiceLabel(id: id, ownerUID: ownerUID)
+            sidecarLabel = MacOSSidecarLaunchIdentity.fullLaunchLabel(
+                sandboxID: id, persistenceID: persistenceID, effectiveUserID: ownerUID
+            )
+        default:
+            throw CRIShimError.invalidArgument("machine-state runtime confirmation requires both persistence id and owner uid")
+        }
+        guard try !launchd.isRegisteredStrict(runtimeLabel) else {
             throw CRIShimError.unavailable(
                 "sandbox runtime service remains registered after deletion"
             )
         }
-        if let machineStatePersistenceID, let machineStateOwnerUID {
-            let sidecarLabel = MacOSSidecarLaunchIdentity.fullLaunchLabel(
-                sandboxID: id,
-                persistenceID: machineStatePersistenceID,
-                effectiveUserID: machineStateOwnerUID
-            )
-            guard try !ServiceManager.isRegisteredStrict(fullServiceLabel: sidecarLabel) else {
+        if let sidecarLabel {
+            guard try !launchd.isRegisteredStrict(sidecarLabel) else {
                 throw CRIShimError.unavailable(
                     "machine-state sidecar service remains registered after deletion"
                 )
             }
-        } else if machineStatePersistenceID != nil || machineStateOwnerUID != nil {
-            throw CRIShimError.internalError(
-                "machine-state runtime confirmation requires both persistence id and owner uid"
-            )
         }
+    }
+
+    private func machineStateRuntimeServiceLabel(id: String, ownerUID: UInt32) throws -> String {
+        _ = try requireSafeIdentifier(id, annotation: "machine-state runtime sandbox id", maximumLength: 64)
+        guard ownerUID != UInt32.max else {
+            throw CRIShimError.invalidArgument("machine-state runtime owner uid is invalid")
+        }
+        let domain = MacOSSidecarLaunchIdentity.launchdDomain(effectiveUserID: ownerUID)
+        return "\(domain)/com.apple.container.container-runtime-macos.\(id)"
     }
 
     public func removeSandboxPolicy(

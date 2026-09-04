@@ -164,6 +164,7 @@ private final class SidecarApplicationDelegate: NSObject, NSApplicationDelegate 
 
 private final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     private let log: Logging.Logger
+    let networkHealth = MacOSNetworkAttachmentHealth()
 
     init(log: Logging.Logger) {
         self.log = log
@@ -175,6 +176,18 @@ private final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         log.error("vm stopped with error", metadata: ["error": "\(error)"])
+    }
+
+    func virtualMachine(
+        _ virtualMachine: VZVirtualMachine,
+        networkDevice: VZNetworkDevice,
+        attachmentWasDisconnectedWithError error: Error
+    ) {
+        let index = virtualMachine.networkDevices.firstIndex { $0 === networkDevice }
+        let failure = networkHealth.recordDisconnection(deviceIndex: index, error: error)
+        var metadata: Logger.Metadata = (failure.metadata ?? [:]).mapValues { .string($0) }
+        metadata["details"] = .string(failure.details ?? "")
+        log.error("VM network attachment disconnected", metadata: metadata)
     }
 }
 
@@ -657,15 +670,17 @@ actor MacOSSidecarService {
             try await waitForGuestAgentDuringBootstrap(port: agentPort)
             try await synchronizeGuestClock(agentPort: agentPort)
             try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
+            try await validateNetworkAttachments()
             lifecycle.complete(.start, succeeded: true)
             log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
         } catch {
+            let startupError = vmDelegate?.networkHealth.failureOr(error) ?? error
             if let vm, vm.state != .stopped {
                 try? await stopVirtualMachine(vm)
             }
             await discardVirtualMachineResources()
             lifecycle.complete(.start, succeeded: false)
-            throw error
+            throw startupError
         }
     }
 
@@ -968,12 +983,13 @@ actor MacOSSidecarService {
                 receipt: stored.receipt
             )
         } catch {
+            let restoreError = vmDelegate?.networkHealth.failureOr(error) ?? error
             if let vm, vm.state != .stopped {
                 try? await stopVirtualMachine(vm)
             }
             await discardVirtualMachineResources()
             lifecycle.complete(.restore, succeeded: false)
-            throw error
+            throw restoreError
         }
         #else
         throw SidecarRPCError(code: "unsupportedHostArchitecture", message: "machine-state restore requires an Apple silicon Mac")
@@ -1511,9 +1527,26 @@ actor MacOSSidecarService {
     }
 
     private func activatePreparedNetworks() async throws {
+        try await validateNetworkAttachments()
         for activation in networkActivations {
             log.info("activating macOS guest network data plane", metadata: ["network": "\(activation.network)"])
             try await activation.activate()
+        }
+        try await validateNetworkAttachments()
+    }
+
+    private func validateNetworkAttachments() async throws {
+        guard let vm, let vmDelegate, let preparedConfiguration else {
+            throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
+        }
+        let vmBox = UnsafeSendableBox(vm)
+        let health = vmDelegate.networkHealth
+        let expectedCount = preparedConfiguration.configuration.networkDevices.count
+        try await MainActor.run {
+            try health.validate(
+                connectedAttachments: vmBox.value.networkDevices.map { $0.attachment != nil },
+                expectedCount: expectedCount
+            )
         }
     }
 

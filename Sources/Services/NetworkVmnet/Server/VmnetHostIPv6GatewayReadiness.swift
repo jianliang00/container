@@ -65,6 +65,7 @@ struct VmnetHostIPv6GatewayWaiter: Sendable {
             throw ContainerizationError(.invalidArgument, message: "host IPv6 gateway wait requires at least one attempt")
         }
         for attempt in 1...maxAttempts {
+            let observation: String
             do {
                 switch try checker.readiness(
                     ipv4Gateway: ipv4Gateway,
@@ -74,16 +75,18 @@ struct VmnetHostIPv6GatewayWaiter: Sendable {
                 case .ready:
                     return
                 case .pending:
-                    break
+                    observation = "ipv6GatewayPending"
                 }
             } catch VmnetHostIPv6GatewayReadinessError.bridgeNotReady {
                 // A reserved network bridge appears only after its first VM
                 // interface starts. Flannel converges the gateway afterwards.
+                observation = "bridgeMissing"
             }
             guard attempt < maxAttempts else {
                 throw ContainerizationError(
                     .invalidState,
                     message: "vmnet host IPv6 gateway \(ipv6Gateway) did not become ready after VM attachment"
+                        + " (lastObservation=\(observation), ipv4Gateway=\(ipv4Gateway), attempts=\(maxAttempts))"
                 )
             }
             try await sleep(retryInterval)

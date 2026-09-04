@@ -38,6 +38,7 @@ struct CRIShimMachineStateRuntimeCleanupPreparation {
     }
 
     fileprivate let strategy: Strategy
+    fileprivate let runtimeOwnerUID: UInt32
 }
 
 struct CRIShimMachineStateRuntimeCleaner {
@@ -67,7 +68,7 @@ struct CRIShimMachineStateRuntimeCleaner {
         binding: CRIShimMachineStateLease,
         policy: MachineStateConfig
     ) async throws -> CRIShimMachineStateRuntimeCleanupPreparation {
-        let ownerUID = uid_t(policy.runtimeOwnerUID ?? UInt32(geteuid()))
+        let ownerUID = try requireRuntimeOwnerUID(policy: policy)
         if let barrier = binding.sidecarLifecycleBarrier {
             let lifecycleLock = try CRIShimMachineStateSidecarLifecycleLock(
                 binding: binding,
@@ -75,7 +76,7 @@ struct CRIShimMachineStateRuntimeCleaner {
                 policy: policy,
                 expectedOwnerUID: ownerUID
             )
-            return .init(strategy: .lifecycleLock(lifecycleLock))
+            return .init(strategy: .lifecycleLock(lifecycleLock), runtimeOwnerUID: ownerUID)
         }
 
         let controlSocket = controlSocketPath(policy: policy, persistenceID: binding.persistenceID)
@@ -83,10 +84,10 @@ struct CRIShimMachineStateRuntimeCleaner {
             controlSocket,
             policy: policy,
             persistenceID: binding.persistenceID,
-            expectedOwnerUID: UInt32(ownerUID)
+            expectedOwnerUID: ownerUID
         )
         try await runtimeManager.stopAndQuitMachineStateSidecar(controlSocketPath: controlSocket)
-        return .init(strategy: .legacyShutdownAcknowledgedWithoutExitProof)
+        return .init(strategy: .legacyShutdownAcknowledgedWithoutExitProof, runtimeOwnerUID: ownerUID)
     }
 
     @discardableResult
@@ -95,11 +96,15 @@ struct CRIShimMachineStateRuntimeCleaner {
         policy: MachineStateConfig,
         preparation requestedPreparation: CRIShimMachineStateRuntimeCleanupPreparation? = nil
     ) async throws -> CRIShimMachineStateSidecarExitProof {
+        let ownerUID = try requireRuntimeOwnerUID(policy: policy)
         let preparation: CRIShimMachineStateRuntimeCleanupPreparation
         if let requestedPreparation {
             preparation = requestedPreparation
         } else {
             preparation = try await prepare(binding: binding, policy: policy)
+        }
+        guard preparation.runtimeOwnerUID == ownerUID else {
+            throw CRIShimError.unavailable("machine-state runtime owner changed after cleanup preparation")
         }
         do {
             try await runtimeManager.removeSandbox(id: binding.effectiveRuntimeSandboxID, force: true)
@@ -108,9 +113,10 @@ struct CRIShimMachineStateRuntimeCleaner {
                 throw error
             }
         }
-        try await runtimeManager.removeSandboxRuntimeService(id: binding.effectiveRuntimeSandboxID)
-
-        let ownerUID = policy.runtimeOwnerUID ?? UInt32(geteuid())
+        try await runtimeManager.removeSandboxRuntimeService(
+            id: binding.effectiveRuntimeSandboxID,
+            machineStateOwnerUID: ownerUID
+        )
         try await runtimeManager.removeMachineStateSidecar(
             sandboxID: binding.effectiveRuntimeSandboxID,
             persistenceID: binding.persistenceID,
@@ -142,6 +148,13 @@ struct CRIShimMachineStateRuntimeCleaner {
                 "legacy machine-state sidecar has no trusted process-exit proof; lease retained for manual repair"
             )
         }
+    }
+
+    private func requireRuntimeOwnerUID(policy: MachineStateConfig) throws -> UInt32 {
+        guard let ownerUID = policy.runtimeOwnerUID, ownerUID != UInt32.max else {
+            throw CRIShimError.invalidArgument("machine-state cleanup requires an explicit valid runtimeOwnerUID")
+        }
+        return ownerUID
     }
 
     private func controlSocketPath(policy: MachineStateConfig, persistenceID: String) -> String {

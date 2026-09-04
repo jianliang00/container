@@ -1663,6 +1663,30 @@ struct CRIShimRuntimeServerTests {
             cause: ContainerizationError(.notFound, message: "container is absent")
         )
         let cleaner = CRIShimMachineStateRuntimeCleaner(runtimeManager: runtimeManager)
+        let invalidOwnerUIDs: [UInt32?] = [nil, .max, UInt32(geteuid()) &+ 1, geteuid() == 0 ? 501 : 0]
+        for ownerUID in invalidOwnerUIDs {
+            var invalidPolicy = policy
+            invalidPolicy.runtimeOwnerUID = ownerUID
+            do {
+                _ = try await cleaner.cleanup(lease: launchMarked, policy: invalidPolicy)
+                Issue.record("cleanup accepted an absent or mismatched runtime owner")
+            } catch {
+                #expect(!criRuntimeObjectIsNotFound(error))
+            }
+            #expect(runtimeManager.removeSandboxCalls.isEmpty)
+            #expect(runtimeManager.removeSandboxRuntimeServiceCalls.isEmpty)
+            #expect(runtimeManager.removeMachineStateSidecarCalls.isEmpty)
+            #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.isEmpty)
+            #expect(try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID)?.admissionState == .runtimeCreationStarted)
+            #expect(try attestation().state == (active ? .active : .prepared))
+        }
+        let trustedPreparation = try await cleaner.prepare(binding: launchMarked, policy: policy)
+        var changedPolicy = policy
+        changedPolicy.runtimeOwnerUID = UInt32(geteuid()) &+ 1
+        await #expect(throws: CRIShimError.unavailable("machine-state runtime owner changed after cleanup preparation")) {
+            _ = try await cleaner.cleanupRuntime(binding: launchMarked, policy: changedPolicy, preparation: trustedPreparation)
+        }
+        #expect(runtimeManager.removeSandboxCalls.isEmpty)
         if active {
             do {
                 _ = try await cleaner.cleanup(lease: launchMarked, policy: policy)
@@ -1692,6 +1716,21 @@ struct CRIShimRuntimeServerTests {
             #expect(try attestation().state == (active ? .active : .prepared))
         }
         runtimeManager.removeSandboxError = missingRuntimeError
+        let domainFailure = ContainerizationError(.internalError, message: "launchctl failed with status 125: Domain does not support specified action")
+        for failConfirmation in [false, true] {
+            runtimeManager.removeSandboxRuntimeServiceError = failConfirmation ? nil : domainFailure
+            runtimeManager.confirmSandboxRuntimeRemovedError = failConfirmation ? domainFailure : nil
+            do {
+                _ = try await cleaner.cleanup(lease: launchMarked, policy: policy)
+                Issue.record("launchd domain error allowed lease release")
+            } catch let error as ContainerizationError {
+                #expect(error == domainFailure)
+            }
+            #expect(try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID)?.admissionState == .runtimeCreationStarted)
+            #expect(try attestation().state == (active ? .active : .prepared))
+        }
+        runtimeManager.removeSandboxRuntimeServiceError = nil
+        runtimeManager.confirmSandboxRuntimeRemovedError = nil
         let confirmation = try await CRIShimMachineStateRuntimeCleaner(runtimeManager: runtimeManager).cleanup(
             lease: launchMarked,
             policy: policy
@@ -1702,8 +1741,10 @@ struct CRIShimRuntimeServerTests {
         #expect(try attestation().bootNonce == barrier.bootNonce)
         #expect(runtimeManager.removeSandboxCalls.last?.id == launchMarked.effectiveRuntimeSandboxID)
         #expect(runtimeManager.removeSandboxRuntimeServiceCalls.last == launchMarked.effectiveRuntimeSandboxID)
+        #expect(runtimeManager.removeSandboxRuntimeServiceOwnerUIDs.last == policy.runtimeOwnerUID)
         #expect(runtimeManager.removeMachineStateSidecarCalls.last?.persistenceID == persistenceID)
         #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.last?.id == launchMarked.effectiveRuntimeSandboxID)
+        #expect(runtimeManager.confirmSandboxRuntimeRemovedCalls.last?.machineStateOwnerUID == policy.runtimeOwnerUID)
         try CRIShimMachineStateLeaseStore.release(policy: policy, expected: confirmation.lease)
         #expect(
             try CRIShimMachineStateLeaseStore.load(policy: policy, persistenceID: persistenceID) == nil
@@ -6451,6 +6492,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     private(set) var stopSandboxCalls: [(id: String, options: ContainerStopOptions)] = []
     private(set) var removeSandboxCalls: [(id: String, force: Bool)] = []
     private(set) var removeSandboxRuntimeServiceCalls: [String] = []
+    private(set) var removeSandboxRuntimeServiceOwnerUIDs: [UInt32] = []
     private(set) var removeMachineStateSidecarCalls: [(sandboxID: String, persistenceID: String, effectiveUserID: UInt32)] = []
     private(set) var stopAndQuitMachineStateSidecarCalls: [String] = []
     private(set) var confirmSandboxRuntimeRemovedCalls: [(id: String, machineStatePersistenceID: String?, machineStateOwnerUID: UInt32?)] = []
@@ -6483,6 +6525,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var startSandboxHook: (@Sendable () throws -> Void)?
     var stopAndQuitMachineStateSidecarHook: (@Sendable (String) throws -> Void)?
     var removeSandboxRuntimeServiceError: (any Error)?
+    var confirmSandboxRuntimeRemovedError: (any Error)?
     var removeMachineStateSidecarError: (any Error)?
     var stopAndQuitMachineStateSidecarError: (any Error)?
     var retainedMachineStateSidecars: Set<String> = []
@@ -6636,6 +6679,11 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         }
     }
 
+    func removeSandboxRuntimeService(id: String, machineStateOwnerUID: UInt32) async throws {
+        removeSandboxRuntimeServiceOwnerUIDs.append(machineStateOwnerUID)
+        try await removeSandboxRuntimeService(id: id)
+    }
+
     func removeMachineStateSidecar(
         sandboxID: String,
         persistenceID: String,
@@ -6664,6 +6712,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         machineStateOwnerUID: UInt32?
     ) async throws {
         confirmSandboxRuntimeRemovedCalls.append((id, machineStatePersistenceID, machineStateOwnerUID))
+        if let confirmSandboxRuntimeRemovedError { throw confirmSandboxRuntimeRemovedError }
         guard sandboxSnapshots[id] == nil else {
             throw CRIShimError.unavailable("sandbox runtime remains present after deletion")
         }

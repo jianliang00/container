@@ -502,6 +502,9 @@ final class AgentConnection: @unchecked Sendable {
         case .networkConfigure:
             try configureNetwork(frame: frame)
             return .continueReading
+        case .clockSync:
+            try synchronizeClock(frame: frame)
+            return .continueReading
         case .fsBegin:
             try beginFileTransaction(frame: frame)
             return .continueReading
@@ -523,7 +526,7 @@ final class AgentConnection: @unchecked Sendable {
         case .fsListDir:
             try handleFsListDir(frame: frame)
             return .continueReading
-        case .stdout, .stderr, .exit, .error, .ready, .ack, .networkResult:
+        case .stdout, .stderr, .exit, .error, .ready, .ack, .networkResult, .clockResult:
             return .continueReading
         }
     }
@@ -697,6 +700,25 @@ final class AgentConnection: @unchecked Sendable {
             try send(frame: .networkResult(result))
         } catch {
             let message = "failed to configure guest network: \(describeError(error))"
+            logAgentError(message)
+            try send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
+        }
+    }
+
+    private func synchronizeClock(frame: GuestAgentFrame) throws {
+        guard let data = frame.data else {
+            throw POSIXError(.EINVAL)
+        }
+
+        let request = try JSONDecoder().decode(MacOSGuestClockSyncRequest.self, from: data)
+        do {
+            let result = try GuestClockSynchronizer().synchronize(request)
+            logAgentInfo(
+                "system clock synchronized to \(result.unixTimeSeconds).\(result.unixTimeNanoseconds)"
+            )
+            try send(frame: .clockResult(result))
+        } catch {
+            let message = "failed to synchronize system clock: \(describeError(error))"
             logAgentError(message)
             try send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
         }
@@ -2765,6 +2787,8 @@ struct GuestAgentFrame: Codable {
         case tcpConnect
         case networkConfigure
         case networkResult
+        case clockSync
+        case clockResult
         case fsBegin
         case fsChunk
         case fsEnd
@@ -2947,6 +2971,10 @@ struct GuestAgentFrame: Codable {
 
     static func networkResult(_ payload: MacOSGuestNetworkConfigurationResult) throws -> Self {
         .init(type: .networkResult, data: try JSONEncoder().encode(payload))
+    }
+
+    static func clockResult(_ payload: MacOSGuestClockSyncResult) throws -> Self {
+        .init(type: .clockResult, data: try JSONEncoder().encode(payload))
     }
 }
 

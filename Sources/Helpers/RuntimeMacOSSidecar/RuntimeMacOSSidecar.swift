@@ -228,6 +228,8 @@ struct SidecarGuestAgentFrame: Codable {
         case close
         case networkConfigure
         case networkResult
+        case clockSync
+        case clockResult
         case fsBegin
         case fsChunk
         case fsEnd
@@ -472,6 +474,10 @@ struct SidecarGuestAgentFrame: Codable {
         .init(type: .networkResult, data: try JSONEncoder().encode(payload))
     }
 
+    static func clockSync(_ payload: MacOSGuestClockSyncRequest) throws -> Self {
+        .init(type: .clockSync, data: try JSONEncoder().encode(payload))
+    }
+
     static func fsBegin(_ payload: MacOSSidecarFSBeginRequestPayload) -> Self {
         .init(
             type: .fsBegin,
@@ -645,6 +651,7 @@ actor MacOSSidecarService {
             try await activatePreparedNetworks()
             try await validateSocketDeviceAvailable(on: vm)
             try await waitForGuestAgentDuringBootstrap(port: agentPort)
+            try await synchronizeGuestClock(agentPort: agentPort)
             try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
             lifecycle.complete(.start, succeeded: true)
             log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
@@ -1135,7 +1142,8 @@ actor MacOSSidecarService {
                 case .exit:
                     throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
                 case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
-                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult,
+                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync,
+                    .clockResult,
                     .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
@@ -1255,8 +1263,60 @@ actor MacOSSidecarService {
                     message: "guest network configuration stream exited unexpectedly (code=\(frame.exitCode ?? 1))"
                 )
             case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
-                .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd,
+                .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd,
                 .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+                continue
+            }
+        }
+    }
+
+    private func synchronizeGuestClock(agentPort: UInt32) async throws {
+        let fd = try await connectVsock(port: agentPort)
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+
+        try waitForGuestAgentReadyWithTimeout(
+            fd: fd,
+            timeoutSeconds: Self.bootstrapGuestAgentReadyTimeoutSeconds
+        )
+        let hostBefore = try MacOSGuestClockBootstrap.sampleHostTime()
+        try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.clockSync(hostBefore), fd: fd)
+
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
+            switch frame.type {
+            case .clockResult:
+                guard let data = frame.data else {
+                    throw ContainerizationError(.internalError, message: "guest clock synchronization result is missing data")
+                }
+                let result = try JSONDecoder().decode(MacOSGuestClockSyncResult.self, from: data)
+                let hostAfter = try MacOSGuestClockBootstrap.sampleHostTime()
+                let offsetNanoseconds = try MacOSGuestClockBootstrap.validate(
+                    result: result,
+                    hostBefore: hostBefore,
+                    hostAfter: hostAfter
+                )
+                log.info(
+                    "guest clock synchronized",
+                    metadata: [
+                        "offset_milliseconds": "\(Double(offsetNanoseconds) / 1_000_000.0)"
+                    ])
+                return
+            case .error:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest clock synchronization failed: \(frame.message ?? "unknown error")"
+                )
+            case .exit:
+                throw ContainerizationError(
+                    .internalError,
+                    message: "guest agent exited during clock synchronization (code=\(frame.exitCode ?? 1))"
+                )
+            case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
+                .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .fsBegin,
+                .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
         }
@@ -1798,7 +1858,7 @@ actor MacOSSidecarService {
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
             case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete,
-                .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd,
+                .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd,
                 .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
@@ -4208,7 +4268,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 case .stdout, .stderr, .exit, .ready:
                     continue
                 case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
-                    .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
+                    .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
                     .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
@@ -4398,7 +4458,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 case .ready:
                     continue
                 case .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
-                    .resize, .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
+                    .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
                     .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
@@ -4522,7 +4582,7 @@ final class SidecarControlServer: @unchecked Sendable {
             case .ready:
                 continue
             case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
-                .close, .networkConfigure, .networkResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
+                .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
                 .fsReadEnd, .fsListDir:
                 continue
             }
@@ -4583,10 +4643,10 @@ final class SidecarControlServer: @unchecked Sendable {
                     .internalError,
                     message: "guest-agent filesystem stream exited for transaction \(expectedID) (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .stdout, .stderr, .networkResult:
+            case .ready, .stdout, .stderr, .networkResult, .clockResult:
                 continue
             case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
-                .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                .close, .networkConfigure, .clockSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
                 .fsListDir:
                 continue
             }
@@ -4617,10 +4677,10 @@ final class SidecarControlServer: @unchecked Sendable {
                     .internalError,
                     message: "guest-agent filesystem stream exited for transaction \(expectedID) (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .stdout, .stderr, .networkResult:
+            case .ready, .stdout, .stderr, .networkResult, .clockResult:
                 continue
             case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
-                .close, .networkConfigure, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                .close, .networkConfigure, .clockSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
                 .fsListDir:
                 continue
             }
@@ -4666,7 +4726,8 @@ final class SidecarControlServer: @unchecked Sendable {
                 case .exit:
                     throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
                 case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
-                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult,
+                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync,
+                    .clockResult,
                     .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }

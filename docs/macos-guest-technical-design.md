@@ -505,12 +505,20 @@ Simplified sequence:
 2. helper prepares the container root and image files
 3. helper starts the sidecar LaunchAgent
 4. helper sends `vm.bootstrapStart`
-5. API server calls `createProcess` for the init process
-6. API server calls `startProcess`
-7. helper sends sidecar `process.start`, with retries
-8. sidecar connects to guest-agent, waits for `ready`, and sends `exec`
-9. sidecar emits `process.stdout`, `process.stderr`, and `process.exit`
-10. helper writes to host stdio and resumes `wait` when `process.exit` arrives
+5. sidecar starts the VM and waits for the guest-agent `ready` frame
+6. sidecar sends the host realtime clock through `clockSync` and validates the returned `clockResult`
+7. sidecar configures guest networking and marks the VM running
+8. API server calls `createProcess` for the init process
+9. API server calls `startProcess`
+10. helper sends sidecar `process.start`, with retries
+11. sidecar connects to guest-agent, waits for `ready`, and sends `exec`
+12. sidecar emits `process.stdout`, `process.stderr`, and `process.exit`
+13. helper writes to host stdio and resumes `wait` when `process.exit` arrives
+
+Clock synchronization is fail-closed and completes before any workload starts. The guest-agent
+runs as a root LaunchDaemon and applies the host-provided seconds and nanoseconds with
+`clock_settime(CLOCK_REALTIME, ...)`. The sidecar accepts the result only when the reported
+guest time is within two seconds of the host request window.
 
 ### 11.2 Simplified `dial` Flow
 

@@ -28,20 +28,7 @@ import Darwin
 /// path standardization resolves Darwin's system aliases after a path exists,
 /// which is unsuitable for validating managed roots before they are created.
 func criLexicallyNormalizedAbsolutePath(_ path: String) -> String? {
-    guard path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
-    var components: [Substring] = []
-    for component in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
-        switch component {
-        case "", ".":
-            continue
-        case "..":
-            guard !components.isEmpty else { return nil }
-            components.removeLast()
-        default:
-            components.append(component)
-        }
-    }
-    return "/" + components.joined(separator: "/")
+    MacOSManagedPath.lexicallyNormalizedAbsolutePath(path)
 }
 
 public enum CRIShimMachineStateAnnotation {
@@ -179,8 +166,8 @@ func makeCRIShimMachineStateMapping(
         allowedRoots: nodeConfig.nbdSocketAllowedRoots
     )
 
-    let storageRoot = URL(fileURLWithPath: nodeConfig.normalizedStorageRoot, isDirectory: true)
-    let socketRoot = URL(fileURLWithPath: nodeConfig.normalizedControlSocketRoot, isDirectory: true)
+    let storageRoot = try managedPathURL(nodeConfig.normalizedStorageRoot)
+    let socketRoot = try managedPathURL(nodeConfig.normalizedControlSocketRoot)
     try preparePrivateDirectory(
         storageRoot,
         createIntermediates: true,
@@ -377,11 +364,11 @@ private func decodeBlockDevices(
                 throw CRIShimError.invalidArgument("NBD exportName must contain 1 to 255 bytes without NUL")
             }
         }
-        try validateAllowedUnixSocket(device.unixSocket, allowedRoots: allowedRoots)
+        let socketPath = try validateAllowedUnixSocket(device.unixSocket, allowedRoots: allowedRoots)
         return .init(
             identifier: identifier,
             kind: .nbdUnixSocket,
-            path: device.unixSocket,
+            path: socketPath,
             exportName: device.exportName,
             readOnly: device.readOnly,
             timeoutSeconds: device.timeoutSeconds,
@@ -452,7 +439,7 @@ private func preparePrivateDirectory(
 
 private func createPrivateDirectoryHierarchy(_ url: URL, ownerUID: UInt32?) throws {
     var current = URL(fileURLWithPath: "/", isDirectory: true)
-    for component in url.standardizedFileURL.pathComponents.dropFirst() {
+    for component in url.pathComponents.dropFirst() {
         current.appendPathComponent(component, isDirectory: true)
         var value = stat()
         if lstat(current.path, &value) == 0 {
@@ -471,7 +458,7 @@ private func createPrivateDirectoryHierarchy(_ url: URL, ownerUID: UInt32?) thro
 private func repairPrivateDirectoryAncestors(_ url: URL, ownerUID: UInt32?) throws {
     guard let ownerUID else { return }
     let requestedOwner = uid_t(ownerUID)
-    var child = url.standardizedFileURL
+    var child = url
     var current = child.deletingLastPathComponent()
 
     while current.path != "/" {
@@ -553,8 +540,8 @@ private func securePrivateDirectory(_ url: URL, ownerUID: UInt32?) throws {
 
 private func requireManagedDescendant(_ candidate: URL, below root: URL) throws {
     guard
-        let rootPath = criLexicallyNormalizedAbsolutePath(root.path),
-        let candidatePath = criLexicallyNormalizedAbsolutePath(candidate.path)
+        let rootPath = MacOSManagedPath.canonicalPath(root.path),
+        let candidatePath = MacOSManagedPath.canonicalPath(candidate.path)
     else {
         throw CRIShimError.invalidArgument("managed path must be absolute and lexically normalized")
     }
@@ -585,38 +572,41 @@ private func requireManagedDescendant(_ candidate: URL, below root: URL) throws 
     }
 }
 
-private func rejectSymbolicLinksInAbsolutePath(_ url: URL) throws {
-    let standardized = url.standardizedFileURL
-    guard standardized.path.hasPrefix("/") else {
-        throw CRIShimError.invalidArgument("managed path must be absolute")
+private func managedPathURL(_ path: String) throws -> URL {
+    guard let physicalPath = MacOSManagedPath.canonicalPath(path) else {
+        throw CRIShimError.invalidArgument("managed path must be absolute and canonical with only trusted system aliases")
     }
-    let allowedSystemLinks: Set<String> = ["/etc", "/tmp", "/var"]
+    return URL(fileURLWithPath: physicalPath)
+}
+
+private func rejectSymbolicLinksInAbsolutePath(_ url: URL) throws {
+    let physicalURL = try managedPathURL(url.path)
     var current = URL(fileURLWithPath: "/", isDirectory: true)
-    for component in standardized.pathComponents.dropFirst() {
+    for component in physicalURL.pathComponents.dropFirst() {
         current.appendPathComponent(component)
         var value = stat()
         if lstat(current.path, &value) != 0 {
             if errno == ENOENT { return }
             throw CRIShimError.internalError("failed to inspect managed path \(current.path): \(posixMessage())")
         }
-        if (value.st_mode & S_IFMT) == S_IFLNK, !allowedSystemLinks.contains(current.path) {
+        if (value.st_mode & S_IFMT) == S_IFLNK {
             throw CRIShimError.invalidArgument("symbolic links are not allowed in managed paths: \(current.path)")
         }
     }
 }
 
-private func validateAllowedUnixSocket(_ path: String, allowedRoots: [String]) throws {
-    guard path.hasPrefix("/"), URL(fileURLWithPath: path).standardizedFileURL.path == path else {
+private func validateAllowedUnixSocket(_ path: String, allowedRoots: [String]) throws -> String {
+    guard let physicalPath = MacOSManagedPath.canonicalPath(path) else {
         throw CRIShimError.invalidArgument("NBD Unix socket must be an absolute canonical local path")
     }
     guard !allowedRoots.isEmpty else {
         throw CRIShimError.unsupported("NBD Unix sockets are disabled by the node runtime configuration")
     }
 
-    let candidate = URL(fileURLWithPath: path).standardizedFileURL
+    let candidate = URL(fileURLWithPath: physicalPath)
     var matchedRoot: URL?
     for configuredRoot in allowedRoots {
-        let root = URL(fileURLWithPath: configuredRoot).standardizedFileURL
+        let root = try managedPathURL(configuredRoot)
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         if candidate.path.hasPrefix(prefix) {
             matchedRoot = root
@@ -629,13 +619,14 @@ private func validateAllowedUnixSocket(_ path: String, allowedRoots: [String]) t
     try requireManagedDescendant(candidate, below: matchedRoot)
 
     var value = stat()
-    guard lstat(path, &value) == 0 else {
+    guard lstat(physicalPath, &value) == 0 else {
         throw CRIShimError.unavailable("NBD Unix socket does not exist: \(path)")
     }
     guard (value.st_mode & S_IFMT) == S_IFSOCK else {
         throw CRIShimError.invalidArgument("NBD path is not a Unix socket: \(path)")
     }
-    try probeUnixSocket(path)
+    try probeUnixSocket(physicalPath)
+    return physicalPath
 }
 
 private func probeUnixSocket(_ path: String) throws {

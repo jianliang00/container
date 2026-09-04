@@ -16,6 +16,22 @@
 
 import ContainerizationError
 
+/// Runtime deletion may cross multiple XPC boundaries. Only typed notFound
+/// through internal-error wrappers means the object is absent; a missing file,
+/// transport failure or diagnostic text is not proof of runtime absence.
+func criRuntimeObjectIsNotFound(_ error: any Error) -> Bool {
+    var current: any Error = error
+    for _ in 0..<16 {
+        guard let runtimeError = current as? ContainerizationError else {
+            return (current as? CRIShimError)?.disposition.kind == .notFound
+        }
+        if runtimeError.code == .notFound { return true }
+        guard runtimeError.code == .internalError, let cause = runtimeError.cause else { return false }
+        current = cause
+    }
+    return false
+}
+
 public enum CRIShimErrorKind: String, Sendable, Codable, Equatable {
     case unsupported
     case invalidArgument

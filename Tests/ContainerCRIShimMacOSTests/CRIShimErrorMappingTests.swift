@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationError
 import Foundation
 import GRPC
 import Testing
@@ -21,6 +22,26 @@ import Testing
 @testable import ContainerCRIShimMacOS
 
 struct CRIShimErrorMappingTests {
+    @Test
+    func runtimeAbsenceRequiresStructuredCauseAndPreservesOtherFailures() {
+        let missing = ContainerizationError(.notFound, message: "sandbox is absent")
+        let wrapped = ContainerizationError(.internalError, message: "failed to delete container", cause: missing)
+        #expect(criRuntimeObjectIsNotFound(missing))
+        #expect(criRuntimeObjectIsNotFound(wrapped))
+        #expect(criRuntimeObjectIsNotFound(ContainerizationError(.internalError, message: "request failed", cause: wrapped)))
+        let failures: [any Error] = [
+            POSIXError(.ENOENT), POSIXError(.EACCES), POSIXError(.ECONNREFUSED),
+            ContainerizationError(.timeout, message: "transport timed out", cause: missing),
+            ContainerizationError(.internalError, message: "notFound: text is not a typed cause"),
+            ContainerizationError(.internalError, message: "permission denied", cause: POSIXError(.EACCES)),
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES), userInfo: [NSUnderlyingErrorKey: missing]),
+        ]
+        for error in failures { #expect(!criRuntimeObjectIsNotFound(error)) }
+        // The generic status mapper remains unchanged; only cleanup uses the
+        // causal runtime-absence classifier.
+        #expect(CRIShimErrorMapper.disposition(for: wrapped).kind == .internalError)
+    }
+
     @Test
     func mapsUnsupportedInvalidArgumentNotFoundAndInternalErrors() {
         #expect(CRIShimErrorMapper.disposition(for: CRIShimError.unsupported("unsupported")).kind == .unsupported)

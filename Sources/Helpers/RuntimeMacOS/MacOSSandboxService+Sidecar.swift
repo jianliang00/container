@@ -611,17 +611,16 @@ extension MacOSSandboxService {
             }
         }
         try validateManagedMachineStateDirectory(machineState.storageDirectory)
-        let expectedSocket = URL(fileURLWithPath: machineState.controlSocketPath).standardizedFileURL
         let socketAddress = sockaddr_un()
-        guard expectedSocket.path == machineState.controlSocketPath,
-            expectedSocket.path.hasPrefix("/"),
-            expectedSocket.path.utf8.count < MemoryLayout.size(ofValue: socketAddress.sun_path)
+        guard let socketPath = MacOSManagedPath.canonicalPath(machineState.controlSocketPath),
+            socketPath.utf8.count < MemoryLayout.size(ofValue: socketAddress.sun_path)
         else {
             throw ContainerizationError(
                 .invalidArgument,
                 message: "machine-state control socket must be an absolute canonical local path"
             )
         }
+        let expectedSocket = URL(fileURLWithPath: socketPath)
         var parentValue = stat()
         let parent = expectedSocket.deletingLastPathComponent()
         try validateMachineStatePathHasNoSymbolicLinks(parent)
@@ -668,13 +667,13 @@ extension MacOSSandboxService {
     }
 
     private func validateManagedMachineStateDirectory(_ path: String) throws {
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        guard path.hasPrefix("/"), url.path == path else {
+        guard let physicalPath = MacOSManagedPath.canonicalPath(path) else {
             throw ContainerizationError(
                 .invalidArgument,
                 message: "machine-state storage directory must be an absolute canonical path"
             )
         }
+        let url = URL(fileURLWithPath: physicalPath)
         try validateMachineStatePathHasNoSymbolicLinks(url)
         var value = stat()
         guard lstat(path, &value) == 0, (value.st_mode & S_IFMT) == S_IFDIR else {
@@ -686,9 +685,11 @@ extension MacOSSandboxService {
     }
 
     private func validateMachineStatePathHasNoSymbolicLinks(_ url: URL) throws {
-        let allowedSystemLinks: Set<String> = ["/etc", "/tmp", "/var"]
+        guard let path = MacOSManagedPath.canonicalPath(url.path) else {
+            throw ContainerizationError(.invalidArgument, message: "machine-state managed path is not canonical")
+        }
         var current = URL(fileURLWithPath: "/", isDirectory: true)
-        for component in url.standardizedFileURL.pathComponents.dropFirst() {
+        for component in URL(fileURLWithPath: path).pathComponents.dropFirst() {
             current.appendPathComponent(component)
             var value = stat()
             if lstat(current.path, &value) != 0 {
@@ -704,7 +705,7 @@ extension MacOSSandboxService {
                     message: message
                 )
             }
-            if (value.st_mode & S_IFMT) == S_IFLNK, !allowedSystemLinks.contains(current.path) {
+            if (value.st_mode & S_IFMT) == S_IFLNK {
                 throw ContainerizationError(
                     .invalidArgument,
                     message: "symbolic links are not allowed in machine-state managed paths"

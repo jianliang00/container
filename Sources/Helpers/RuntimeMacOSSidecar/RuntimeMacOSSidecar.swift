@@ -2540,40 +2540,10 @@ final class SidecarControlServer: @unchecked Sendable {
             throw makePOSIXLikeError(message: "control socket path must not contain relative components")
         }
 
-        guard let standardized = macOSLexicallyNormalizedAbsolutePath(socketPath) else {
-            throw makePOSIXLikeError(message: "control socket path must be normalized")
+        guard let physicalPath = MacOSManagedPath.canonicalPath(socketPath) else {
+            throw makePOSIXLikeError(message: "control socket path must be normalized with only trusted system aliases")
         }
-        guard standardized == socketPath else {
-            throw makePOSIXLikeError(message: "control socket path must be normalized")
-        }
-        guard standardized == "/tmp" || standardized.hasPrefix("/tmp/") else {
-            return standardized
-        }
-
-        var temporaryDirectoryValue = stat()
-        guard lstat("/tmp", &temporaryDirectoryValue) == 0 else {
-            throw makePOSIXError(errno)
-        }
-        let temporaryDirectoryType = temporaryDirectoryValue.st_mode & S_IFMT
-        if temporaryDirectoryType == S_IFDIR {
-            return standardized
-        }
-        guard temporaryDirectoryType == S_IFLNK, temporaryDirectoryValue.st_uid == 0 else {
-            throw makePOSIXLikeError(message: "system temporary directory alias is not trusted")
-        }
-
-        var resolvedPath = [CChar](repeating: 0, count: Int(PATH_MAX))
-        guard realpath("/tmp", &resolvedPath) != nil else {
-            throw makePOSIXError(errno)
-        }
-        let resolvedTemporaryDirectory = String(
-            decoding: resolvedPath.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
-            as: UTF8.self
-        )
-        guard resolvedTemporaryDirectory == "/private/tmp" else {
-            throw makePOSIXLikeError(message: "system temporary directory alias has an unexpected target")
-        }
-        return resolvedTemporaryDirectory + standardized.dropFirst("/tmp".count)
+        return physicalPath
     }
 
     private func ensureSecureSocketParent(for validatedSocketPath: String) throws {
@@ -2619,16 +2589,12 @@ final class SidecarControlServer: @unchecked Sendable {
             }
             return
         }
-        if path == "/private/tmp" || path == "/tmp" {
-            guard value.st_uid == 0, permissions == mode_t(0o1777) else {
-                throw makePOSIXLikeError(message: "system temporary directory has unsafe owner or permissions")
-            }
-            return
-        }
-
         let permittedOwner = value.st_uid == 0 || value.st_uid == geteuid()
-        let writableByOthers = permissions & mode_t(S_IWGRP | S_IWOTH) != 0
-        guard permittedOwner, !writableByOthers else {
+        guard permittedOwner,
+            MacOSManagedPath.hasTrustedParentWritePermissions(
+                path: path, ownerID: value.st_uid, groupID: value.st_gid, mode: value.st_mode
+            )
+        else {
             throw makePOSIXLikeError(message: "control socket parent has unsafe owner or permissions")
         }
     }

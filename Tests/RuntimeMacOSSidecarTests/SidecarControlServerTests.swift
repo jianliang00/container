@@ -106,9 +106,9 @@ struct SidecarControlServerTests {
         #expect(eventEnvelope.event?.processID == "legacy-process")
     }
 
-    @Test
-    func cleanupCreatesSecureParentsAndSupportsSystemTemporaryDirectoryAlias() throws {
-        let root = URL(fileURLWithPath: "/tmp/runtime-macos-sidecar-security-\(UUID().uuidString)")
+    @Test(arguments: ["/tmp", "/private/tmp", NSTemporaryDirectory()])
+    func cleanupCreatesSecureParentsAndSupportsSystemTemporaryDirectoryAlias(base: String) throws {
+        let root = URL(fileURLWithPath: base).appendingPathComponent("s-\(UUID().uuidString.prefix(8))")
         defer { try? FileManager.default.removeItem(at: root) }
         let parent = root.appendingPathComponent("nested")
         let socketPath = parent.appendingPathComponent("control.sock").path

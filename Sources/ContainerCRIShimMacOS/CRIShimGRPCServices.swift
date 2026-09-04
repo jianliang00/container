@@ -568,10 +568,12 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_StopPodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.stopPodSandbox.rawValue) {
-            let initialMetadata = try sandboxMetadata(
-                id: request.podSandboxID,
-                operation: "StopPodSandbox"
-            )
+            guard
+                let initialMetadata = try sandboxMetadataForCleanup(
+                    id: request.podSandboxID,
+                    operation: "StopPodSandbox"
+                )
+            else { return Runtime_V1_StopPodSandboxResponse() }
             guard let lease = try machineStateLease(for: initialMetadata),
                 let policy = config.machineState
             else {
@@ -597,10 +599,12 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         expectedLease: CRIShimMachineStateLease? = nil
     ) async throws -> Runtime_V1_StopPodSandboxResponse {
         try await withSandboxLifecycleLock(id: id) {
-            var metadata = try sandboxMetadata(
-                id: id,
-                operation: "StopPodSandbox"
-            )
+            guard
+                var metadata = try sandboxMetadataForCleanup(
+                    id: id,
+                    operation: "StopPodSandbox"
+                )
+            else { return Runtime_V1_StopPodSandboxResponse() }
             if let expectedLease {
                 guard let currentLease = try machineStateLease(for: metadata),
                     currentLease.hasSameBinding(as: expectedLease)
@@ -622,18 +626,22 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         context: GRPCAsyncServerCallContext
     ) async throws -> Runtime_V1_RemovePodSandboxResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.removePodSandbox.rawValue) {
-            let initialMetadata = try sandboxMetadata(
-                id: request.podSandboxID,
-                operation: "RemovePodSandbox"
-            )
+            guard
+                let initialMetadata = try sandboxMetadataForCleanup(
+                    id: request.podSandboxID,
+                    operation: "RemovePodSandbox"
+                )
+            else { return Runtime_V1_RemovePodSandboxResponse() }
             guard let lease = try machineStateLease(for: initialMetadata),
                 let policy = config.machineState
             else {
                 return try await withSandboxLifecycleLock(id: request.podSandboxID) {
-                    let metadata = try sandboxMetadata(
-                        id: request.podSandboxID,
-                        operation: "RemovePodSandbox"
-                    )
+                    guard
+                        let metadata = try sandboxMetadataForCleanup(
+                            id: request.podSandboxID,
+                            operation: "RemovePodSandbox"
+                        )
+                    else { return Runtime_V1_RemovePodSandboxResponse() }
                     return try await removePodSandboxResources(metadata: metadata)
                 }
             }
@@ -645,10 +653,12 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 )
                 defer { withExtendedLifetime(admissionLock) {} }
                 return try await withSandboxLifecycleLock(id: request.podSandboxID) {
-                    let metadata = try sandboxMetadata(
-                        id: request.podSandboxID,
-                        operation: "RemovePodSandbox"
-                    )
+                    guard
+                        let metadata = try sandboxMetadataForCleanup(
+                            id: request.podSandboxID,
+                            operation: "RemovePodSandbox"
+                        )
+                    else { return Runtime_V1_RemovePodSandboxResponse() }
                     guard let currentLease = try machineStateLease(for: metadata),
                         currentLease.hasSameBinding(as: lease)
                     else {
@@ -1639,7 +1649,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     return true
                 }
             } catch {
-                if isNotFound(error) {
+                if sandboxRuntimeIsNotFound(error, metadata: metadata) {
                     consecutiveMissingObservations += 1
                     if consecutiveMissingObservations >= criShimLifecycleConfirmationAttempts {
                         return true
@@ -1704,7 +1714,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 }
                 inconclusiveSnapshot = snapshot
             } catch {
-                guard isNotFound(error) else {
+                guard sandboxRuntimeIsNotFound(error, metadata: metadata) else {
                     throw error
                 }
             }
@@ -1745,6 +1755,30 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             await lifecycleCoordinator.release(key)
             throw error
         }
+    }
+
+    private func sandboxRuntimeIsNotFound(_ error: any Error, metadata: CRIShimSandboxMetadata) -> Bool {
+        if metadata.annotations[CRIShimMachineStateAnnotation.enabled] == "true" {
+            return criRuntimeObjectIsNotFound(error)
+        }
+        return isNotFound(error)
+    }
+
+    /// An absent CRI record is idempotent only when no durable binding remains.
+    /// In particular, a crash between metadata deletion and lease release must
+    /// not hide an orphaned lease from kubelet or bypass exit-proof recovery.
+    private func sandboxMetadataForCleanup(id rawID: String, operation: String) throws -> CRIShimSandboxMetadata? {
+        let sandboxID = rawID.trimmed
+        guard !sandboxID.isEmpty else {
+            throw CRIShimError.invalidArgument("\(operation) sandbox id is required")
+        }
+        if let metadata = try metadataStore.sandbox(id: sandboxID) { return metadata }
+        if let policy = config.machineState, policy.enabled == true,
+            try CRIShimMachineStateLeaseStore.list(policy: policy).contains(where: { $0.sandboxID == sandboxID })
+        {
+            throw CRIShimError.unavailable("sandbox metadata is absent but its machine-state lease still requires exit-proof recovery")
+        }
+        return nil
     }
 
     private func sandboxMetadata(id rawID: String, operation: String) throws -> CRIShimSandboxMetadata {

@@ -104,7 +104,7 @@ struct CRIShimMachineStateRuntimeCleaner {
         do {
             try await runtimeManager.removeSandbox(id: binding.effectiveRuntimeSandboxID, force: true)
         } catch {
-            guard CRIShimErrorMapper.disposition(for: error).kind == .notFound else {
+            guard criRuntimeObjectIsNotFound(error) else {
                 throw error
             }
         }

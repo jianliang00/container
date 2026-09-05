@@ -309,12 +309,43 @@ private func request(service: String, method: String, seed: String? = nil) throw
     return (connection, response, result)
 }
 
+// Main-queue state, separated from VZ so timeout/callback ordering can be tested
+// without creating a native network or booting a VM.
+private struct VMProbeLifecycle {
+    private(set) var startPending = true
+    private(set) var finishRequested = false
+    private(set) var cleanupStarted = false
+    private var failure: [String: Any]?
+    var hasFailed: Bool { failure != nil }
+
+    mutating func fail(_ fields: [String: Any]) { failure = failure ?? fields }
+
+    mutating func startCompleted() { startPending = false }
+
+    mutating func requestFinish() -> Bool {
+        finishRequested = true
+        guard !startPending, !cleanupStarted else { return false }
+        cleanupStarted = true
+        return true
+    }
+
+    func result(cleanupConfirmed: Bool, cleanupError: Error? = nil) -> [String: Any] {
+        var result = failure ?? [:]
+        result["passed"] = failure == nil && cleanupConfirmed && cleanupError == nil
+        result["cleanupConfirmed"] = cleanupConfirmed
+        if let cleanupError { result["cleanupError"] = errorFields(cleanupError) }
+        return result
+    }
+}
+
 @available(macOS 26, *)
 private final class VMProbe: NSObject, VZVirtualMachineDelegate {
-    private var failure: [String: Any]?
+    private var lifecycle = VMProbeLifecycle()
     private var vm: VZVirtualMachine?
     private var reference: NetworkReference?
-    private var finishing = false
+    // Keep uncertain or still-starting native resources alive until confirmed
+    // cleanup or process exit; returning a timeout must not release them early.
+    private var cleanupLifetime: VMProbe?
     private let completed = Completion<[String: Any]>()
 
     func run(reference: NetworkReference, seed: String, identity: Data) -> [String: Any] {
@@ -348,24 +379,34 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
                 emit(["stage": "vz.validate", "passed": true])
                 let machine = VZVirtualMachine(configuration: config)
                 vm = machine
+                cleanupLifetime = self
                 machine.delegate = self
                 machine.start { [self] result in
+                    lifecycle.startCompleted()
                     switch result {
                     case .failure(let error):
-                        failure = failure ?? errorFields(error)
+                        lifecycle.fail(errorFields(error))
                         finish()
                     case .success:
                         emit(["stage": "vz.start", "passed": true])
+                        if lifecycle.finishRequested {
+                            // A timeout cannot cancel VZ start. Keep the VM and
+                            // network alive until this callback permits stop.
+                            finish()
+                            return
+                        }
                         // Start success alone is not interface success. Observe delayed callbacks.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in finish() }
                     }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [self] in
-                    guard !finishing else { return }
-                    failure = failure ?? ["error": "vzStartTimedOut"]
+                    guard lifecycle.startPending else { return }
+                    lifecycle.fail(["error": "vzStartTimedOut"])
+                    emit(["stage": "vz.startTimeout", "passed": false, "cleanupConfirmed": false])
                     finish()
                 }
             } catch {
+                self.reference = nil
                 completed.complete(errorFields(error).merging(["passed": false, "cleanupConfirmed": true]) { _, new in new })
             }
         }
@@ -373,34 +414,43 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
     }
 
     private func finish() {
-        guard !finishing, let vm else { return }
-        finishing = true
+        guard lifecycle.requestFinish(), let vm else { return }
         let connected = vm.networkDevices.count == 1 && vm.networkDevices[0].attachment != nil
-        emit(["stage": "vz.attachment", "connected": connected, "passed": connected && failure == nil])
-        if !connected { failure = failure ?? ["error": "networkAttachmentMissing"] }
-        let result = failure ?? [:]
+        if !connected { lifecycle.fail(["error": "networkAttachmentMissing"]) }
+        emit(["stage": "vz.attachment", "connected": connected, "passed": connected && !lifecycle.hasFailed])
         let finishStop: (Error?) -> Void = { [self] error in
-            emit(["stage": "vz.stop", "cleanupConfirmed": error == nil])
-            self.vm = nil
-            self.reference = nil
-            completed.complete(result.merging(["passed": result.isEmpty && error == nil, "cleanupConfirmed": error == nil]) { _, new in new })
+            let cleaned = error == nil && self.vm?.state == .stopped
+            // Delegate callbacks may report a disconnect while stop is pending.
+            // Read the sticky failure only when producing the final receipt.
+            let result = lifecycle.result(cleanupConfirmed: cleaned, cleanupError: error)
+            emit(result.merging(["stage": "vz.stop"]) { _, new in new })
+            if cleaned {
+                self.vm = nil
+                self.reference = nil
+                self.cleanupLifetime = nil
+            }
+            completed.complete(result)
         }
-        if vm.state == .stopped { finishStop(nil) } else { vm.stop(completionHandler: finishStop) }
+        switch vm.state {
+        case .stopped: finishStop(nil)
+        case .running, .paused: vm.stop(completionHandler: finishStop)
+        default: finishStop(ProbeError(code: "vzCleanupStateUnsupported"))
+        }
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, networkDevice: VZNetworkDevice, attachmentWasDisconnectedWithError error: Error) {
         let fields = errorFields(error)
-        failure = failure ?? fields
+        lifecycle.fail(fields)
         emit(fields.merging(["stage": "vz.networkDisconnected", "passed": false]) { _, new in new })
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-        failure = failure ?? errorFields(error)
+        lifecycle.fail(errorFields(error))
         finish()
     }
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-        failure = failure ?? ["error": "guestStoppedBeforeObservation"]
+        if !lifecycle.cleanupStarted { lifecycle.fail(["error": "guestStoppedBeforeObservation"]) }
         finish()
     }
 }
@@ -440,7 +490,27 @@ private func offlineSelfTest() throws {
     } catch let error as ProbeError {
         guard error.code == "unsafeDisposableSeed" else { throw error }
     }
-    emit(["stage": "offline.selfTest", "passed": true, "checks": 5, "nativeNetworkingExecuted": false])
+    var normal = VMProbeLifecycle()
+    normal.startCompleted()
+    guard normal.requestFinish(), !normal.requestFinish(), normal.result(cleanupConfirmed: true)["passed"] as? Bool == true else {
+        throw ProbeError(code: "cleanupNotIdempotent")
+    }
+    var timedOut = VMProbeLifecycle()
+    timedOut.fail(["error": "vzStartTimedOut"])
+    guard !timedOut.requestFinish(), timedOut.startPending, timedOut.finishRequested else { throw ProbeError(code: "stoppedPendingStart") }
+    timedOut.startCompleted()
+    guard timedOut.requestFinish(), !timedOut.requestFinish(), timedOut.result(cleanupConfirmed: true)["passed"] as? Bool == false else {
+        throw ProbeError(code: "lateStartMissedCleanup")
+    }
+    normal.fail(["error": "lateDisconnect"])
+    normal.fail(["error": "laterFailure"])
+    let failed = normal.result(cleanupConfirmed: true)
+    guard failed["passed"] as? Bool == false, failed["error"] as? String == "lateDisconnect" else { throw ProbeError(code: "lostLateFailure") }
+    let cleanupFailure = normal.result(cleanupConfirmed: false, cleanupError: nested)
+    guard cleanupFailure["cleanupConfirmed"] as? Bool == false,
+        (cleanupFailure["cleanupError"] as? [String: Any])?["errorCode"] as? Int == 17
+    else { throw ProbeError(code: "lostCleanupError") }
+    emit(["stage": "offline.selfTest", "passed": true, "checks": 10, "nativeNetworkingExecuted": false])
 }
 
 private func main() throws -> Int32? {

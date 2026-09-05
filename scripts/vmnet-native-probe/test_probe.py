@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -86,7 +88,10 @@ class ProbeTests(unittest.TestCase):
                 run.make_job(invalid, Path("/test/probe"), Path("/test/evidence"), "10.0.0.0/24", "fdab::/64")
 
     def cases(self, matrix="all"):
-        return [{"case": case, "passed": True, "cleanupConfirmed": True} for case in run.MATRICES[matrix]]
+        return [
+            {"case": case, "passed": True, "cleanupConfirmed": True, **({"nativeRealizationStatus": "hostBridgeObserved"} if case.endswith("-vz") else {})}
+            for case in run.MATRICES[matrix]
+        ]
 
     def test_complete_matrix_pass_is_not_connectivity_pass(self):
         result = run.checked_summary(self.cases(), {"passed": True}, configured=True)
@@ -246,7 +251,7 @@ class ProbeTests(unittest.TestCase):
         for forbidden in ("VZNATNetworkDeviceAttachment", "VMNET_SHARED_MODE", "xpc_copy_description", "kubernetes-pod", "flannel"):
             self.assertNotIn(forbidden, source)
 
-    def simulate(self, fault=None, matrix="all"):
+    def simulate(self, fault=None, matrix="all", diagnostic_default="baseline"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             evidence = root / "evidence"
@@ -257,7 +262,7 @@ class ProbeTests(unittest.TestCase):
             seed.mkdir()
             for name in run.SEED_FILES:
                 (seed / name).write_bytes(b"stopped-fixture")
-            args = SimpleNamespace(binary=binary, seed=seed, ipv4="192.168.247.0/24", ipv6="fdab::/64", bootstrap_domain="system" if os.geteuid() == 0 else f"gui/{os.geteuid()}", matrix=matrix, dry_run=False, confirm_unused_subnets=True, confirm_stopped_seed=True)
+            args = SimpleNamespace(binary=binary, seed=seed, ipv4="192.168.247.0/24", ipv6="fdab::/64", bootstrap_domain="system" if os.geteuid() == 0 else f"gui/{os.geteuid()}", matrix=matrix, diagnostic_default=diagnostic_default, dry_run=False, confirm_unused_subnets=True, confirm_stopped_seed=True)
             calls = []
             booted_seeds = []
             class FakeCommands:
@@ -271,7 +276,13 @@ class ProbeTests(unittest.TestCase):
                         shutil.copyfile(argv[-2], argv[-1])
                     if name == "owner-ready":
                         self.service = argv[2]
-                        result = {"stage": "case.result", "ownerPID": 123, "network": {"ipv4Address": "192.168.247.1", "ipv4Mask": "255.255.255.0", "ipv6Prefix": "fdab::", "ipv6PrefixLength": 64}}
+                        result = {"stage": "case.result", "ownerPID": 123, "diagnosticDefault": diagnostic_default, "configurationReadBack": False, "network": {"ipv4Address": "192.168.247.1", "ipv4Mask": "255.255.255.0", "ipv6Prefix": "fdab::", "ipv6PrefixLength": 64}}
+                        if fault == "owner-receipt-missing":
+                            result.pop("diagnosticDefault")
+                        if fault == "owner-receipt-mismatch":
+                            result["diagnosticDefault"] = "unexpected-default"
+                        if fault == "owner-receipt-readback":
+                            result["configurationReadBack"] = True
                         return 0, json.dumps(result)
                     if name.startswith("case-"):
                         index = int(name.split("-", 2)[1])
@@ -282,6 +293,19 @@ class ProbeTests(unittest.TestCase):
                             (disposable / "Disk.img").write_bytes(b"booted-fixture")
                             booted_seeds.append(str(disposable))
                         result = {"stage": "case.result", "ownerPID": 123, "passed": True, "cleanupConfirmed": True}
+                        if argv[3].endswith("-vz"):
+                            result["nativeRealizationStatus"] = "hostBridgeObserved"
+                            if fault == "vz-no-receipt-baseline" and index == 1:
+                                result.pop("nativeRealizationStatus")
+                            if fault == "vz-no-receipt-import" and index == 3:
+                                result.pop("nativeRealizationStatus")
+                            if fault == "vz-empty-receipt-import" and index == 3:
+                                result["nativeRealizationStatus"] = ""
+                            if fault == "vz-error-and-no-receipt-import" and index == 3:
+                                result.pop("nativeRealizationStatus")
+                                result["error"] = "originalNativeFailure"
+                                result["errorDomain"] = "probe.native"
+                                result["errorCode"] = 17
                         if index == 3:
                             if fault == "cleanup":
                                 result["cleanupConfirmed"] = False
@@ -304,7 +328,12 @@ class ProbeTests(unittest.TestCase):
             old_umask = os.umask(0o077)
             try:
                 with patch.object(run, "Commands", FakeCommands), patch.object(run.tempfile, "mkdtemp", return_value=str(evidence)), patch.object(run.platform, "system", return_value="Darwin"), patch.object(run.platform, "mac_ver", return_value=("26.5.1", (), "arm64")), patch.object(run.signal, "signal"), patch("builtins.print"):
-                    code = run.execute(args)
+                    if fault and fault.startswith("owner-receipt-"):
+                        with self.assertRaisesRegex(ValueError, "owner diagnostic configuration receipt differs"):
+                            run.execute(args)
+                        code = 1
+                    else:
+                        code = run.execute(args)
             finally:
                 os.umask(old_umask)
             result = json.loads((evidence / "summary.json").read_text())
@@ -313,7 +342,7 @@ class ProbeTests(unittest.TestCase):
             for name in run.SEED_FILES:
                 self.assertEqual((seed / name).read_bytes(), b"stopped-fixture")
             clone_retained = any(evidence.glob("seed-*/Disk.img"))
-            self.last_run = {"plan": json.loads((evidence / "plan.json").read_text()), "calls": calls, "bootedSeeds": booted_seeds}
+            self.last_run = {"plan": json.loads((evidence / "plan.json").read_text()), "job": plistlib.loads((evidence / "owner.plist").read_bytes()), "calls": calls, "bootedSeeds": booted_seeds}
             return code, result, clone_retained
 
     def test_complete_mock_run_cleans_only_clones(self):
@@ -394,6 +423,120 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("documented defaults", defaults["basis"])
         for feature in ("nat44", "nat66", "dnsProxy", "routerAdvertisements"):
             self.assertTrue(defaults[feature])
+
+    def test_diagnostic_override_changes_one_requested_default_and_one_owner_argument(self):
+        baseline = run.requested_native_configuration("baseline")
+        for option, changed in (("disable-nat66", "nat66"), ("disable-router-advertisement", "routerAdvertisements")):
+            with self.subTest(option=option):
+                code, _, _ = self.simulate(matrix="native", diagnostic_default=option)
+                self.assertEqual(code, 0)
+                requested = self.last_run["plan"]["requestedNativeConfiguration"]
+                self.assertEqual({key for key in baseline if baseline[key] != requested[key]}, {"diagnosticDefault", changed})
+                self.assertFalse(requested[changed])
+                self.assertFalse(requested["readBack"])
+                self.assertNotIn(changed, self.last_run["plan"]["unchangedNativeDefaults"])
+                self.assertEqual(self.last_run["job"]["ProgramArguments"][-1], option)
+                self.assertEqual(len(self.last_run["job"]["ProgramArguments"]), 6)
+        self.simulate(matrix="native")
+        self.assertEqual(len(self.last_run["job"]["ProgramArguments"]), 5)
+
+    def test_diagnostic_override_rejects_invalid_combinations_before_mutation(self):
+        for matrix in ("all", "vz"):
+            for option in run.DIAGNOSTIC_DEFAULTS[1:]:
+                with self.subTest(matrix=matrix, option=option):
+                    args = SimpleNamespace(matrix=matrix, diagnostic_default=option)
+                    with patch.object(run.tempfile, "mkdtemp") as evidence, patch.object(run, "Commands") as commands:
+                        with self.assertRaisesRegex(ValueError, "require --matrix native"):
+                            run.execute(args)
+                        evidence.assert_not_called()
+                        commands.assert_not_called()
+        service = run.SERVICE_PREFIX + str(uuid.uuid4())
+        with self.assertRaisesRegex(ValueError, "unknown diagnostic default"):
+            run.make_job(service, Path("/test/probe"), Path("/test/evidence"), "10.0.0.0/24", "fdab::/64", diagnostic_default="disable-both")
+
+    def test_repeated_diagnostic_selection_fails_before_execute(self):
+        argv = ["run.py", "--binary", "/test/probe", "--seed", "/test/seed", "--ipv4", "192.168.247.0/24", "--ipv6", "fdab::/64", "--bootstrap-domain", "system", "--matrix", "native", "--dry-run"]
+        for first, second in (("baseline", "baseline"), ("disable-nat66", "disable-nat66"), ("baseline", "disable-nat66"), ("disable-router-advertisement", "disable-nat66")):
+            with self.subTest(first=first, second=second):
+                repeated = [*argv, "--diagnostic-default", first, "--diagnostic-default", second]
+                with patch.object(sys, "argv", repeated), patch.object(run, "execute") as execute, patch("sys.stderr", new=io.StringIO()) as error:
+                    with self.assertRaises(SystemExit) as raised:
+                        run.main()
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn("--diagnostic-default may be supplied only once", error.getvalue())
+                    execute.assert_not_called()
+
+    def test_diagnostic_override_dry_run_reports_request_without_owner_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            binary = root / "probe"
+            binary.write_bytes(b"probe")
+            seed = root / "seed"
+            seed.mkdir()
+            for name in run.SEED_FILES:
+                (seed / name).write_bytes(b"seed")
+            argv = ["run.py", "--binary", str(binary), "--seed", str(seed), "--ipv4", "192.168.247.0/24", "--ipv6", "fdab::/64", "--bootstrap-domain", "system" if os.geteuid() == 0 else f"gui/{os.geteuid()}", "--matrix", "native", "--diagnostic-default", "disable-nat66", "--dry-run"]
+            with patch.object(sys, "argv", argv), patch.object(run.tempfile, "mkdtemp") as evidence, patch.object(run, "Commands") as commands, patch.object(run.signal, "signal"), patch("builtins.print") as output:
+                self.assertEqual(run.main(), 0)
+                plan = json.loads(output.call_args.args[0])
+                self.assertFalse(plan["requestedNativeConfiguration"]["nat66"])
+                self.assertFalse(plan["requestedNativeConfiguration"]["readBack"])
+                self.assertEqual(plan["matrix"], "native")
+                evidence.assert_not_called()
+                commands.assert_not_called()
+
+    def test_owner_configuration_receipt_must_match_before_first_case(self):
+        for fault in ("owner-receipt-missing", "owner-receipt-mismatch", "owner-receipt-readback"):
+            with self.subTest(fault=fault):
+                code, result, _ = self.simulate(fault, matrix="native", diagnostic_default="disable-nat66")
+                self.assertEqual(code, 1)
+                self.assertEqual(result["cases"], [])
+                self.assertFalse(result["fullDualStackConfigured"])
+                self.assertEqual(result["stopReason"]["code"], "ownerConfigurationReceiptMismatch")
+                self.assertFalse(any(name.startswith("case-") for name in self.last_run["calls"]))
+
+    def test_each_diagnostic_invocation_uses_one_fresh_owner(self):
+        services = []
+        for option in ("baseline", "disable-nat66"):
+            self.simulate(matrix="native", diagnostic_default=option)
+            services.append(self.last_run["plan"]["service"])
+            self.assertEqual(self.last_run["calls"].count("bootstrap"), 1)
+            self.assertEqual(self.last_run["calls"].count("owner-ready"), 1)
+        self.assertNotEqual(services[0], services[1])
+
+    def test_vz_missing_or_empty_native_realization_receipt_stops_immediately(self):
+        for fault, count in (("vz-no-receipt-baseline", 1), ("vz-no-receipt-import", 3), ("vz-empty-receipt-import", 3)):
+            with self.subTest(fault=fault):
+                code, result, retained = self.simulate(fault, matrix="vz")
+                self.assertEqual(code, 1)
+                self.assertEqual(len(result["cases"]), count)
+                self.assertEqual(result["cases"][-1]["error"], "nativeRealizationUnobserved")
+                self.assertFalse(result["cases"][-1]["passed"])
+                self.assertFalse(result["comparisonValid"])
+                self.assertEqual(result["stopReason"]["evidence"], "nativeRealizationUnobserved")
+                self.assertTrue(retained)
+
+    def test_summary_rejects_vz_legacy_or_unobserved_receipts_even_if_payload_passes(self):
+        for status in (None, "", "bridgeMissing", "hostBridgeObservedUnexpected"):
+            with self.subTest(status=status):
+                cases = self.cases("vz")
+                if status is None:
+                    cases[2].pop("nativeRealizationStatus")
+                else:
+                    cases[2]["nativeRealizationStatus"] = status
+                result = run.checked_summary(cases, {"passed": True}, configured=True, matrix="vz")
+                self.assertTrue(result["complete"])
+                self.assertFalse(result["comparisonValid"])
+                self.assertFalse(result["passed"])
+
+    def test_missing_realization_does_not_overwrite_original_native_error(self):
+        code, result, _ = self.simulate("vz-error-and-no-receipt-import", matrix="vz")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(result["cases"]), 3)
+        self.assertEqual(result["cases"][-1]["error"], "originalNativeFailure")
+        self.assertEqual(result["cases"][-1]["errorDomain"], "probe.native")
+        self.assertEqual(result["cases"][-1]["errorCode"], 17)
+        self.assertEqual(result["stopReason"]["evidence"], "nativeRealizationUnobserved")
 
     def test_owner_cleanup_cannot_attest_cancelled_client_native_cleanup(self):
         code, result, retained = self.simulate("cancelled")

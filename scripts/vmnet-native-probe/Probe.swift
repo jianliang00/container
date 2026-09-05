@@ -82,8 +82,35 @@ private final class NetworkReference {
     deinit { Unmanaged<AnyObject>.fromOpaque(UnsafeMutableRawPointer(value)).release() }
 }
 
+private enum DiagnosticDefault: String, CaseIterable {
+    case baseline
+    case disableNAT66 = "disable-nat66"
+    case disableRouterAdvertisement = "disable-router-advertisement"
+
+    var requestedConfiguration: [String: Any] {
+        [
+            "diagnosticDefault": rawValue, "readBack": false,
+            "basis": "requested settings and documented defaults",
+            "nat44": true, "nat66": self != .disableNAT66, "dhcp": false,
+            "dnsProxy": true, "routerAdvertisements": self != .disableRouterAdvertisement,
+        ]
+    }
+
+    func apply(disableNAT66: () -> Void, disableRouterAdvertisement: () -> Void) {
+        switch self {
+        case .baseline: break
+        case .disableNAT66: disableNAT66()
+        case .disableRouterAdvertisement: disableRouterAdvertisement()
+        }
+    }
+
+    func permits(_ method: String) -> Bool {
+        self == .baseline || ["status", "shutdown", "direct", "same-import", "export-native"].contains(method)
+    }
+}
+
 @available(macOS 26, *)
-private func configuration(ipv4: String, ipv6: String) throws -> NetworkReference {
+private func configuration(ipv4: String, ipv6: String, diagnosticDefault: DiagnosticDefault) throws -> NetworkReference {
     var status = vmnet_return_t.VMNET_SUCCESS
     guard let raw = vmnet_network_configuration_create(.VMNET_HOST_MODE, &status) else {
         emit(["stage": "configuration.create", "status": status.rawValue, "passed": false])
@@ -93,6 +120,10 @@ private func configuration(ipv4: String, ipv6: String) throws -> NetworkReferenc
     emit(["stage": "configuration.create", "status": status.rawValue, "passed": status == .VMNET_SUCCESS])
     guard status == .VMNET_SUCCESS else { throw ProbeError(code: "configurationCreateFailed") }
     vmnet_network_configuration_disable_dhcp(raw)
+    diagnosticDefault.apply(
+        disableNAT66: { vmnet_network_configuration_disable_nat66(raw) },
+        disableRouterAdvertisement: { vmnet_network_configuration_disable_router_advertisement(raw) })
+    emit(["stage": "configuration.requested", "requestedNativeConfiguration": diagnosticDefault.requestedConfiguration])
     var gateway = in_addr()
     var mask = in_addr()
     var prefix = in6_addr()
@@ -147,6 +178,17 @@ private func summary(_ reference: NetworkReference) -> [String: Any] {
 
 private func matchingBridges(gatewayInterfaces: Set<String>, bridgeInterfaces: Set<String>) -> [String] {
     gatewayInterfaces.intersection(bridgeInterfaces).sorted()
+}
+
+private func nativeRealizationStatus(_ observation: [String: Any]?) -> String {
+    guard let observation else { return "unobserved" }
+    guard observation["error"] == nil else { return "inspectionFailed" }
+    guard observation["uniqueBridgeObserved"] as? Bool == true,
+        let interfaces = observation["matchingBridgeInterfaces"] as? [String],
+        interfaces.count == 1, !interfaces[0].isEmpty
+    else { return "unobserved" }
+    // This establishes host network existence, not attachment of a specific VM.
+    return "hostBridgeObserved"
 }
 
 // Read-only host evidence, limited to the exact requested IPv4 gateway. A host
@@ -253,14 +295,16 @@ private func reply(_ request: xpc_object_t, on connection: xpc_connection_t, res
 @available(macOS 26, *)
 private final class Owner {
     private let identity = VZMacMachineIdentifier().dataRepresentation
+    private let diagnosticDefault: DiagnosticDefault
     private var network: NetworkReference?
     private var cleanupUncertain = false
     private let queue = DispatchQueue(label: "container.vmnet-probe.owner")
     private let listener: xpc_connection_t
     private var signals: [DispatchSourceSignal] = []
 
-    init(service: String, ipv4: String, ipv6: String) throws {
-        let config = try configuration(ipv4: ipv4, ipv6: ipv6)
+    init(service: String, ipv4: String, ipv6: String, diagnosticDefault: DiagnosticDefault) throws {
+        self.diagnosticDefault = diagnosticDefault
+        let config = try configuration(ipv4: ipv4, ipv6: ipv6, diagnosticDefault: diagnosticDefault)
         var status = vmnet_return_t.VMNET_SUCCESS
         guard let raw = vmnet_network_create(config.value, &status) else {
             emit(["stage": "reservation.create", "status": status.rawValue, "passed": false])
@@ -320,9 +364,16 @@ private final class Owner {
             return
         }
         do {
+            guard diagnosticDefault.permits(method) else { throw ProbeError(code: "diagnosticDefaultRequiresNativeConsumer") }
             switch method {
             case "status":
-                reply(request, on: peer, result: ["passed": true, "network": summary(network), "ownerPID": getpid()])
+                reply(
+                    request, on: peer,
+                    result: [
+                        "passed": true, "network": summary(network), "ownerPID": getpid(),
+                        "diagnosticDefault": diagnosticDefault.rawValue, "configurationReadBack": false,
+                        "requestedNativeConfiguration": diagnosticDefault.requestedConfiguration,
+                    ])
             case "direct", "same-import", "direct-vz", "same-import-vz":
                 let reference = method.hasPrefix("same-import") ? try imported(serialized(network)) : network
                 var result: [String: Any]
@@ -335,13 +386,13 @@ private final class Owner {
                 result["ownerPID"] = getpid()
                 cleanupUncertain = result["cleanupConfirmed"] as? Bool != true
                 reply(request, on: peer, result: result)
-            case "export":
+            case "export", "export-native", "export-vz":
                 reply(request, on: peer, result: ["passed": true, "network": summary(network), "ownerPID": getpid()], network: try serialized(network), identity: identity)
             default:
                 reply(request, on: peer, result: ["passed": false, "error": "unknownMethod"])
             }
         } catch {
-            reply(request, on: peer, result: errorFields(error).merging(["passed": false, "cleanupConfirmed": true]) { _, new in new })
+            reply(request, on: peer, result: errorFields(error).merging(["passed": false, "cleanupConfirmed": true, "ownerPID": getpid()]) { _, new in new })
         }
     }
 }
@@ -481,7 +532,13 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
         let connected = vm.networkDevices.count == 1 && vm.networkDevices[0].attachment != nil
         if !connected { lifecycle.fail(["error": "networkAttachmentMissing"]) }
         observeBridge(phase: "beforeStop")
-        emit(["stage": "vz.attachment", "connected": connected, "passed": connected && !lifecycle.hasFailed])
+        let attachmentObserved = connected && !lifecycle.hasFailed
+        let realization = nativeRealizationStatus(bridgeObservations.last)
+        if realization != "hostBridgeObserved" { lifecycle.fail(["error": "nativeRealizationUnobserved"]) }
+        emit([
+            "stage": "vz.attachment", "connected": connected, "attachmentObservationPassed": attachmentObserved, "nativeRealizationStatus": realization,
+            "passed": !lifecycle.hasFailed,
+        ])
         let finishStop: (Error?) -> Void = { [self] error in
             let cleaned = error == nil && self.vm?.state == .stopped
             // Delegate callbacks may report a disconnect while stop is pending.
@@ -489,7 +546,8 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
             observeBridge(phase: "afterStopAttempt")
             let result = lifecycle.result(cleanupConfirmed: cleaned, cleanupError: error).merging([
                 "evidenceScope": "vz-control-plane-observation", "dataPlaneValidated": false,
-                "hostBridgeObservations": bridgeObservations,
+                "hostBridgeObservations": bridgeObservations, "nativeRealizationStatus": realization,
+                "attachmentObservationPassed": attachmentObserved,
             ]) { _, new in new }
             emit(result.merging(["stage": "vz.stop"]) { _, new in new })
             if cleaned {
@@ -650,13 +708,45 @@ private func offlineSelfTest() throws {
     guard gatewayAddress(subnet: 0xc0a8_f700, mask: 0xffff_ff00) == "192.168.247.1",
         gatewayAddress(subnet: 0xc0a8_f701, mask: 0xffff_ff00) == "192.168.247.1"
     else { throw ProbeError(code: "incorrectGatewayDerivation") }
-    emit(["stage": "offline.selfTest", "passed": true, "checks": 12 + seedChecks, "nativeNetworkingExecuted": false])
+    for option in DiagnosticDefault.allCases {
+        var nat66Calls = 0
+        var advertisementCalls = 0
+        option.apply(disableNAT66: { nat66Calls += 1 }, disableRouterAdvertisement: { advertisementCalls += 1 })
+        guard nat66Calls == (option == .disableNAT66 ? 1 : 0),
+            advertisementCalls == (option == .disableRouterAdvertisement ? 1 : 0),
+            option.requestedConfiguration["readBack"] as? Bool == false,
+            option.permits("export-native"), option.permits("export-vz") == (option == .baseline),
+            option.permits("direct-vz") == (option == .baseline), option.permits("export") == (option == .baseline)
+        else { throw ProbeError(code: "diagnosticDefaultNotIsolated") }
+    }
+    guard DiagnosticDefault(rawValue: "disable-both") == nil else { throw ProbeError(code: "invalidDiagnosticDefaultAccepted") }
+    guard nativeRealizationStatus(nil) == "unobserved",
+        nativeRealizationStatus(["matchingBridgeInterfaces": [], "uniqueBridgeObserved": false]) == "unobserved",
+        nativeRealizationStatus(["error": "hostInterfaceInspectionFailed"]) == "inspectionFailed",
+        nativeRealizationStatus(["matchingBridgeInterfaces": ["bridge100", "bridge101"], "uniqueBridgeObserved": false]) == "unobserved",
+        nativeRealizationStatus(["matchingBridgeInterfaces": ["bridge100"], "uniqueBridgeObserved": false]) == "unobserved"
+    else { throw ProbeError(code: "missingNativeEvidenceAccepted") }
+    guard nativeRealizationStatus(["matchingBridgeInterfaces": ["bridge100"], "uniqueBridgeObserved": true]) == "hostBridgeObserved" else {
+        throw ProbeError(code: "hostBridgeEvidenceLost")
+    }
+    var unobserved = VMProbeLifecycle()
+    unobserved.startCompleted()
+    guard unobserved.requestFinish() else { throw ProbeError(code: "cleanupNotStarted") }
+    unobserved.fail(["error": "nativeRealizationUnobserved"])
+    let unobservedResult = unobserved.result(cleanupConfirmed: true, cleanupError: nested)
+    guard unobservedResult["passed"] as? Bool == false,
+        unobservedResult["error"] as? String == "nativeRealizationUnobserved",
+        (unobservedResult["cleanupError"] as? [String: Any])?["errorCode"] as? Int == 17
+    else { throw ProbeError(code: "nativeEvidenceFailureOverwrittenByCleanup") }
+    emit(["stage": "offline.selfTest", "passed": true, "checks": 19 + seedChecks, "nativeNetworkingExecuted": false])
 }
 
 private func main() throws -> Int32? {
     let args = Array(CommandLine.arguments.dropFirst())
     if args == ["version"] {
-        emit(["probeVersion": 1, "supportedOS": ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26])
+        emit([
+            "probeVersion": 2, "diagnosticDefaults": DiagnosticDefault.allCases.map(\.rawValue), "supportedOS": ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26,
+        ])
         return 0
     }
     if args == ["self-test"] {
@@ -669,15 +759,17 @@ private func main() throws -> Int32? {
     else { throw ProbeError(code: "invalidTemporaryService") }
     switch args[0] {
     case "owner":
-        guard args.count == 4 else { throw ProbeError(code: "invalidOwnerArguments") }
-        let owner = try Owner(service: args[1], ipv4: args[2], ipv6: args[3])
+        guard args.count == 4 || args.count == 5 else { throw ProbeError(code: "invalidOwnerArguments") }
+        guard let diagnosticDefault = DiagnosticDefault(rawValue: args.count == 5 ? args[4] : "baseline") else { throw ProbeError(code: "invalidDiagnosticDefault") }
+        let owner = try Owner(service: args[1], ipv4: args[2], ipv6: args[3], diagnosticDefault: diagnosticDefault)
         owner.run()
         return nil
     case "case":
         guard args.count == 3 || args.count == 4 else { throw ProbeError(code: "invalidCaseArguments") }
         let method = args[2]
         let crossing = method == "cross-native" || method == "cross-vz"
-        let (connection, response, result) = try request(service: args[1], method: crossing ? "export" : method, seed: args.count == 4 ? args[3] : nil)
+        let exportMethod = method == "cross-native" ? "export-native" : "export-vz"
+        let (connection, response, result) = try request(service: args[1], method: crossing ? exportMethod : method, seed: args.count == 4 ? args[3] : nil)
         defer { xpc_connection_cancel(connection) }
         var outcome = result
         if crossing, result["passed"] as? Bool == true {

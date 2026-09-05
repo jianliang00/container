@@ -85,8 +85,8 @@ class ProbeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run.make_job(invalid, Path("/test/probe"), Path("/test/evidence"), "10.0.0.0/24", "fdab::/64")
 
-    def cases(self):
-        return [{"case": case, "passed": True, "cleanupConfirmed": True} for case in run.CASES]
+    def cases(self, matrix="all"):
+        return [{"case": case, "passed": True, "cleanupConfirmed": True} for case in run.MATRICES[matrix]]
 
     def test_complete_matrix_pass_is_not_connectivity_pass(self):
         result = run.checked_summary(self.cases(), {"passed": True}, configured=True)
@@ -96,6 +96,24 @@ class ProbeTests(unittest.TestCase):
         unconfigured = run.checked_summary(self.cases(), {"passed": True}, configured=False)
         self.assertFalse(unconfigured["passed"])
         self.assertFalse(unconfigured["fullDualStackConfigured"])
+        self.assertFalse(unconfigured["comparisonValid"])
+
+    def test_family_summary_requires_matching_plan_and_limits_vz_evidence(self):
+        for matrix in ("all", "native", "vz"):
+            with self.subTest(matrix=matrix):
+                result = run.checked_summary(self.cases(matrix), {"passed": True}, configured=True, matrix=matrix, planned_cases=run.MATRICES[matrix])
+                self.assertTrue(result["passed"])
+                self.assertTrue(result["comparisonValid"])
+                self.assertEqual(result["plannedCases"], list(run.MATRICES[matrix]))
+                self.assertFalse(result["nativeDataplaneValidated"])
+                self.assertFalse(result["guestConnectivityValidated"])
+                if matrix == "vz":
+                    self.assertEqual(result["scope"], "vz-control-plane-observation")
+        for matrix, planned in (("unknown", ()), ("vz", run.CASES), ("native", run.MATRICES["native"][:-1])):
+            result = run.checked_summary(self.cases(), {"passed": True}, configured=True, matrix=matrix, planned_cases=planned)
+            self.assertFalse(result["planValid"])
+            self.assertFalse(result["complete"])
+            self.assertFalse(result["passed"])
 
     def test_incomplete_failed_reordered_or_unclean_matrix_fails(self):
         cases = self.cases()
@@ -228,7 +246,7 @@ class ProbeTests(unittest.TestCase):
         for forbidden in ("VZNATNetworkDeviceAttachment", "VMNET_SHARED_MODE", "xpc_copy_description", "kubernetes-pod", "flannel"):
             self.assertNotIn(forbidden, source)
 
-    def simulate(self, fault=None):
+    def simulate(self, fault=None, matrix="all"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             evidence = root / "evidence"
@@ -239,8 +257,9 @@ class ProbeTests(unittest.TestCase):
             seed.mkdir()
             for name in run.SEED_FILES:
                 (seed / name).write_bytes(b"stopped-fixture")
-            args = SimpleNamespace(binary=binary, seed=seed, ipv4="192.168.247.0/24", ipv6="fdab::/64", bootstrap_domain="system" if os.geteuid() == 0 else f"gui/{os.geteuid()}", dry_run=False, confirm_unused_subnets=True, confirm_stopped_seed=True)
+            args = SimpleNamespace(binary=binary, seed=seed, ipv4="192.168.247.0/24", ipv6="fdab::/64", bootstrap_domain="system" if os.geteuid() == 0 else f"gui/{os.geteuid()}", matrix=matrix, dry_run=False, confirm_unused_subnets=True, confirm_stopped_seed=True)
             calls = []
+            booted_seeds = []
             class FakeCommands:
                 def __init__(self, _evidence):
                     self.service = ""
@@ -255,16 +274,25 @@ class ProbeTests(unittest.TestCase):
                         result = {"stage": "case.result", "ownerPID": 123, "network": {"ipv4Address": "192.168.247.1", "ipv4Mask": "255.255.255.0", "ipv6Prefix": "fdab::", "ipv6PrefixLength": 64}}
                         return 0, json.dumps(result)
                     if name.startswith("case-"):
+                        index = int(name.split("-", 2)[1])
+                        if argv[3].endswith("-vz"):
+                            disposable = Path(argv[4])
+                            if (disposable / "Disk.img").read_bytes() != b"stopped-fixture":
+                                raise AssertionError("a VZ case reused an already booted disk")
+                            (disposable / "Disk.img").write_bytes(b"booted-fixture")
+                            booted_seeds.append(str(disposable))
                         result = {"stage": "case.result", "ownerPID": 123, "passed": True, "cleanupConfirmed": True}
-                        if name == "case-3-same-import":
+                        if index == 3:
                             if fault == "cleanup":
                                 result["cleanupConfirmed"] = False
                             if fault == "owner":
                                 result["ownerPID"] = 456
-                            if fault == "rejection":
+                            if fault in ("rejection", "rejection-then-baseline"):
                                 result["passed"] = False
                             if fault == "cancelled":
                                 self.cancellations.append({"processExited": True, "nativeCleanupConfirmed": False})
+                        if (fault == "first-baseline" and index == 1) or (fault == "rejection-then-baseline" and index == 4):
+                            result["passed"] = False
                         return 0, json.dumps(result)
                     if name == "shutdown":
                         return 0, json.dumps({"stage": "case.result", "cleanupConfirmed": True, "referenceReleased": True})
@@ -284,7 +312,8 @@ class ProbeTests(unittest.TestCase):
             self.assertIn("job-after", calls)
             for name in run.SEED_FILES:
                 self.assertEqual((seed / name).read_bytes(), b"stopped-fixture")
-            clone_retained = (evidence / "seed-cross-vz/Disk.img").exists()
+            clone_retained = any(evidence.glob("seed-*/Disk.img"))
+            self.last_run = {"plan": json.loads((evidence / "plan.json").read_text()), "calls": calls, "bootedSeeds": booted_seeds}
             return code, result, clone_retained
 
     def test_complete_mock_run_cleans_only_clones(self):
@@ -310,8 +339,61 @@ class ProbeTests(unittest.TestCase):
         code, result, retained = self.simulate("rejection")
         self.assertEqual(code, 1)
         self.assertTrue(result["complete"])
+        self.assertTrue(result["comparisonValid"])
         self.assertFalse(result["passed"])
         self.assertTrue(retained)
+
+    def test_default_matrix_preserves_original_twelve_case_order(self):
+        code, result, _ = self.simulate()
+        self.assertEqual(code, 0)
+        self.assertEqual(result["matrix"], "all")
+        self.assertEqual([case["case"] for case in result["cases"]], list(run.CASES))
+        self.assertEqual(len(result["cases"]), 12)
+
+    def test_independent_native_family_does_not_boot_vz_or_clone_disks(self):
+        code, result, retained = self.simulate(matrix="native")
+        self.assertEqual(code, 0)
+        self.assertEqual([case["case"] for case in result["cases"]], list(run.MATRICES["native"]))
+        self.assertEqual(self.last_run["bootedSeeds"], [])
+        self.assertFalse(any(name.startswith("clone-") for name in self.last_run["calls"]))
+        self.assertFalse(retained)
+
+    def test_vz_family_gives_each_repeated_baseline_a_fresh_clone(self):
+        code, result, retained = self.simulate(matrix="vz")
+        self.assertEqual(code, 0)
+        self.assertEqual([case["case"] for case in result["cases"]], list(run.MATRICES["vz"]))
+        self.assertEqual(len(self.last_run["bootedSeeds"]), 6)
+        self.assertEqual(len(set(self.last_run["bootedSeeds"])), 6)
+        self.assertFalse(retained)
+        self.assertEqual(result["scope"], "vz-control-plane-observation")
+
+    def test_failed_first_baseline_stops_each_family_despite_confirmed_cleanup(self):
+        for matrix in ("all", "native", "vz"):
+            with self.subTest(matrix=matrix):
+                code, result, _ = self.simulate("first-baseline", matrix=matrix)
+                self.assertEqual(code, 1)
+                self.assertEqual(len(result["cases"]), 1)
+                self.assertTrue(result["cases"][0]["cleanupConfirmed"])
+                self.assertEqual(result["stopReason"], {"code": "baselineFailed", "case": run.MATRICES[matrix][0], "index": 1})
+                self.assertFalse(result["comparisonValid"])
+
+    def test_clean_import_rejection_requires_successful_following_baseline(self):
+        for matrix in ("native", "vz"):
+            with self.subTest(matrix=matrix):
+                code, result, _ = self.simulate("rejection-then-baseline", matrix=matrix)
+                self.assertEqual(code, 1)
+                self.assertEqual(len(result["cases"]), 4)
+                self.assertEqual(result["stopReason"]["code"], "baselineFailed")
+                self.assertFalse(result["comparisonValid"])
+                self.assertFalse(result["complete"])
+
+    def test_native_defaults_are_explicitly_not_live_readback(self):
+        self.simulate(matrix="native")
+        defaults = self.last_run["plan"]["unchangedNativeDefaults"]
+        self.assertFalse(defaults["readBack"])
+        self.assertIn("documented defaults", defaults["basis"])
+        for feature in ("nat44", "nat66", "dnsProxy", "routerAdvertisements"):
+            self.assertTrue(defaults[feature])
 
     def test_owner_cleanup_cannot_attest_cancelled_client_native_cleanup(self):
         code, result, retained = self.simulate("cancelled")

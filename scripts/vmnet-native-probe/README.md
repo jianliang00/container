@@ -9,7 +9,7 @@ change an existing network, configure Flannel, log in remotely, or restart a hos
 service. No NAT or IPv4-only fallback is provided.
 
 Both an unused RFC1918 IPv4 `/24` and an unused locally assigned ULA IPv6 `/64`
-are required. DHCP is disabled, matching the reserved host-only backend. Other
+are required. DHCP is disabled, matching the reserved host-only backend. By default, other
 documented native defaults (NAT44, NAT66, DNS proxy and router advertisement)
 remain unchanged. The plan identifies these as SDK defaults, not daemon
 readback. The explicit prefix replaces the configuration's default random ULA;
@@ -99,6 +99,48 @@ sets `stopReason.code` to `baselineFailed` and `comparisonValid` to false; later
 topologies are not executed. An import rejection with confirmed cleanup can be
 compared only if the following direct recheck succeeds.
 
+## Single-variable native diagnostics
+
+`--diagnostic-default` selects at most one changed default for the temporary
+reservation. Only `--matrix native` accepts a non-baseline value. Unknown,
+repeated or incompatible selections fail before creating a job or reservation.
+The operating mode, explicit IPv4 subnet, explicit IPv6 prefix, DHCP setting
+and native interface settings remain unchanged by this option.
+
+| Value | Configuration change | Allowed matrix |
+| --- | --- | --- |
+| `baseline` (default) | None | `all`, `native`, `vz` |
+| `disable-nat66` | Call `vmnet_network_configuration_disable_nat66` | `native` |
+| `disable-router-advertisement` | Call `vmnet_network_configuration_disable_router_advertisement` | `native` |
+
+For example, using the explicit variables and isolation checks above:
+
+```sh
+python3 scripts/vmnet-native-probe/run.py \
+  --binary "$probe_binary" --seed "$probe_seed" \
+  --ipv4 "$probe_ipv4" --ipv6 "$probe_ipv6" \
+  --bootstrap-domain "$probe_domain" --matrix native \
+  --diagnostic-default disable-nat66 --dry-run
+```
+
+Choose `baseline` or `disable-router-advertisement` for a separate group. Each
+invocation creates one fresh owner and reservation, executes each planned case
+once, and stops on a failed baseline without retrying. Inspect cleanup before
+another invocation and recheck the chosen prefixes; any necessary change to
+other inputs must remain visible in the plans and limits causal comparison.
+No option disables IPv6, changes the running container service or constitutes
+a production recommendation. A changed result is diagnostic evidence, not
+proof that NAT66 or router advertisement caused an existing failure.
+
+`requestedNativeConfiguration` in the plan records requested settings plus
+documented defaults, with `readBack: false`. Public setters for these flags
+return no status and expose no corresponding getter. The owner identifies its
+selected `diagnosticDefault` with `configurationReadBack: false`; the runner
+requires that receipt before the first case, separately from actual public
+IPv4/IPv6 prefix readback. Use the matching version-2 probe binary and runner;
+a missing or mismatched receipt stops execution. Native-only variants reject
+VZ consumers, including VZ-oriented export; native export remains available.
+
 ## Interpret the evidence
 
 | Stage | What success establishes | What it does not establish |
@@ -106,7 +148,7 @@ compared only if the following direct recheck succeeds.
 | Configuration setters | Native APIs accepted both requested prefixes | A daemon reservation or interface exists |
 | Reservation create/query | A native handle was returned with the requested dual-stack configuration | The daemon can still find the reservation during interface creation |
 | Native interface cases | The native start callback succeeded and the returned handle was stopped | A guest can exchange packets |
-| VZ cases | Configuration validated, VM started, its runtime attachment remained present for five seconds without a reported disconnect, and stop succeeded | A native vmnet interface is operational or a guest can exchange packets |
+| VZ cases | Configuration validated, VM started, its runtime attachment remained present for five seconds without a reported disconnect, a unique matching host bridge was observed before stop, and stop succeeded | The host bridge proves attachment of this VM or a guest can exchange packets |
 | Direct / same-import / cross-import controls | The selected observation succeeded in the owner, after same-process import, or after same-UID XPC import, respectively | Production topology, guest readiness, IPv6 routing, Services or warm restore work |
 
 If a direct check initially passes but fails after the last interface is
@@ -125,8 +167,16 @@ completion receipt. Read-only host snapshots identify bridge interfaces owning
 the exact requested IPv4 gateway before start, during observation and after the
 stop attempt. `uniqueBridgeObserved` reports existence only: a bridge can serve
 another interface, and neither its presence nor VZ's attachment property proves
-VM traffic works. Snapshot errors or missing bridges leave native realization
-unverified. VZ case results use `evidenceScope: vz-control-plane-observation`;
+VM traffic works. `attachmentObservationPassed` records the VZ-property
+observation independently. `nativeRealizationStatus` is `hostBridgeObserved`
+only for an unambiguous matching bridge before stop; absent or ambiguous
+evidence is `unobserved`, and inspection failure is `inspectionFailed`.
+Unobserved or failed inspection makes the case fail and stops the whole group,
+including after an import case. The runner also rejects missing legacy
+receipts; a successful VZ property observation or cleanup cannot override this
+gate. The five-second observation window is unchanged. A pre-existing matching
+bridge establishes only host-network existence, not attachment of the new VM.
+VZ case results use `evidenceScope: vz-control-plane-observation`;
 all summaries retain `nativeDataplaneValidated: false` and
 `guestConnectivityValidated: false`. The native API allocates a MAC and uses
 explicit offload settings, while VZ uses the configured fixed MAC and its own

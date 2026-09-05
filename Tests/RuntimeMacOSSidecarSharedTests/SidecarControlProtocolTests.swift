@@ -53,7 +53,7 @@ struct SidecarControlProtocolTests {
         #expect(decoded.protocolVersion == 3)
         #expect(decoded.eventAcknowledgement == acknowledgement)
         #expect(MacOSSidecarMethod(rawValue: "events.acknowledge") == .eventsAcknowledge)
-        #expect(MacOSSidecarProtocolVersion.supported == [1, 2, 3, 4, 5])
+        #expect(MacOSSidecarProtocolVersion.supported == [1, 2, 3, 4, 5, 6])
     }
 
     @Test

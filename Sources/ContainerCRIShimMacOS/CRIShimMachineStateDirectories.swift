@@ -16,6 +16,7 @@
 
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 
 struct CRIShimMachineStateDirectoryStartupTask: CRIShimServerStartupTask {
     let policy: MachineStateConfig?
@@ -245,16 +246,7 @@ func criHasTrustedMachineStateParentWritePermissions(
     groupID: gid_t,
     mode: mode_t
 ) -> Bool {
-    if mode & mode_t(0o002) != 0 {
-        return path == "/private/tmp"
-            && ownerID == 0
-            && groupID == 0
-            && mode & mode_t(S_ISVTX) != 0
-    }
-    if mode & mode_t(0o020) != 0 {
-        return path == "/private/var/run" && ownerID == 0 && groupID == 1
-    }
-    return true
+    MacOSManagedPath.hasTrustedParentWritePermissions(path: path, ownerID: ownerID, groupID: groupID, mode: mode)
 }
 
 /// Converts Darwin's fixed top-level filesystem aliases to their physical
@@ -262,15 +254,5 @@ func criHasTrustedMachineStateParentWritePermissions(
 /// system alias is translated; symbolic links anywhere below it remain
 /// subject to the normal component-by-component rejection.
 func criCanonicalizedManagedDirectoryPath(_ path: String) -> String? {
-    guard let normalized = criLexicallyNormalizedAbsolutePath(path), normalized == path else {
-        return nil
-    }
-    #if os(macOS)
-    for alias in ["/etc", "/tmp", "/var"] {
-        if normalized == alias || normalized.hasPrefix(alias + "/") {
-            return "/private" + normalized
-        }
-    }
-    #endif
-    return normalized
+    MacOSManagedPath.canonicalPath(path)
 }

@@ -123,15 +123,61 @@ def sha256(path):
 class Commands:
     def __init__(self, evidence):
         self.evidence = evidence
+        self.cancellations = []
+
+    def stop_child(self, name, process, reason):
+        receipt = {
+            "command": name, "pid": process.pid, "reason": reason,
+            "terminateRequested": False, "killRequested": False,
+            "processExited": False, "nativeCleanupConfirmed": False,
+        }
+        # A second ordinary signal must not leave a client holding a native VM
+        # while the runner proceeds to remove only the reservation owner.
+        handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            for number in handlers:
+                signal.signal(number, signal.SIG_IGN)
+            if process.poll() is None:
+                receipt["terminateRequested"] = True
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    receipt["killRequested"] = True
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=3)
+            receipt["processExited"] = process.poll() is not None
+        except BaseException as error:
+            # Preserve the original interruption or timeout; this receipt makes
+            # the bounded cleanup failure independently visible.
+            receipt["cleanupError"] = type(error).__name__
+        finally:
+            for number, handler in handlers.items():
+                signal.signal(number, handler)
+            self.cancellations.append(receipt)
+            try:
+                (self.evidence / f"{name}.cleanup.json").write_text(json.dumps(receipt, indent=2) + "\n")
+            except OSError:
+                receipt["evidenceWriteFailed"] = True
 
     def run(self, name, args, timeout=50):
         # Only explicit, local argv. Preserve diagnostics even when a command fails.
         with (self.evidence / f"{name}.stdout").open("wb") as output, (self.evidence / f"{name}.stderr").open("wb") as error:
+            process = subprocess.Popen(args, stdout=output, stderr=error)
             try:
-                process = subprocess.run(args, stdout=output, stderr=error, timeout=timeout, check=False)
-                code = process.returncode
+                code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
+                self.stop_child(name, process, "timeout")
                 code = 124
+            except BaseException:
+                self.stop_child(name, process, "interrupted")
+                raise
         return code, (self.evidence / f"{name}.stdout").read_text(errors="replace")
 
     def stderr(self, name):
@@ -231,6 +277,9 @@ def execute(args):
             result["index"] = index
             if code != 0:
                 result["passed"] = False
+            if getattr(commands, "cancellations", []):
+                result["cleanupConfirmed"] = False
+                result.setdefault("error", "clientTerminationInterruptedCleanup")
             cases.append(result)
             if result.get("ownerPID") != owner_pid:
                 result["passed"] = False
@@ -244,6 +293,11 @@ def execute(args):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         cleanup = cleanup_owner(commands, binary, service, domain)
+        cleanup["cancelledCommands"] = getattr(commands, "cancellations", [])
+        # Process exit establishes that no client remains, but cannot attest to
+        # native stop callbacks interrupted by termination or forced killing.
+        if cleanup["cancelledCommands"]:
+            cleanup["passed"] = False
         summary = checked_summary(cases, cleanup, configured=configured)
         (evidence / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         # Retain all evidence and disposable files on failure, but no live test job.

@@ -41,8 +41,18 @@ MATRICES = {
     "vz": ("direct-vz", "direct-vz", "same-import-vz", "direct-vz", "cross-vz", "direct-vz"),
 }
 BASELINES = frozenset(("direct", "direct-vz"))
+DIAGNOSTIC_DEFAULTS = ("baseline", "disable-nat66", "disable-router-advertisement")
 SERVICE_PREFIX = "com.apple.container.vmnet-probe."
 SEED_FILES = ("HardwareModel.bin", "AuxiliaryStorage", "Disk.img")
+
+
+class SingleUseArgument(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        marker = f"_{self.dest}_specified"
+        if getattr(namespace, marker, False):
+            parser.error(f"{option_string} may be supplied only once")
+        setattr(namespace, marker, True)
+        setattr(namespace, self.dest, values)
 
 
 def dual_stack(ipv4, ipv6):
@@ -73,13 +83,32 @@ def regular_file(path):
     return path
 
 
-def make_job(service, binary, evidence, ipv4, ipv6):
+def requested_native_configuration(diagnostic_default):
+    if diagnostic_default not in DIAGNOSTIC_DEFAULTS:
+        raise ValueError("unknown diagnostic default")
+    return {
+        "diagnosticDefault": diagnostic_default,
+        "nat44": True,
+        "nat66": diagnostic_default != "disable-nat66",
+        "dnsProxy": True,
+        "routerAdvertisements": diagnostic_default != "disable-router-advertisement",
+        "dhcp": False,
+        "readBack": False,
+        "basis": "requested settings and documented defaults",
+    }
+
+
+def make_job(service, binary, evidence, ipv4, ipv6, diagnostic_default="baseline"):
     if not service.startswith(SERVICE_PREFIX):
         raise ValueError("not a temporary probe service")
     uuid.UUID(service[len(SERVICE_PREFIX):])
+    requested_native_configuration(diagnostic_default)
+    arguments = [str(binary), "owner", service, ipv4, ipv6]
+    if diagnostic_default != "baseline":
+        arguments.append(diagnostic_default)
     return {
         "Label": service,
-        "ProgramArguments": [str(binary), "owner", service, ipv4, ipv6],
+        "ProgramArguments": arguments,
         "MachServices": {service: True},
         "RunAtLoad": True,
         "KeepAlive": False,
@@ -106,6 +135,7 @@ def checked_summary(cases, cleanup, configured=False, matrix="all", planned_case
     passed = complete and all(entry.get("passed") is True and entry.get("cleanupConfirmed") is True for entry in cases)
     comparison_valid = configured and complete and stop_reason is None and all(
         entry.get("cleanupConfirmed") is True and (entry["case"] not in BASELINES or entry.get("passed") is True)
+        and (not entry["case"].endswith("-vz") or entry.get("nativeRealizationStatus") == "hostBridgeObserved")
         for entry in cases
     )
     scope = {
@@ -223,13 +253,17 @@ def cleanup_owner(commands, binary, service, domain):
 
 
 def execute(args):
+    matrix = getattr(args, "matrix", "all")
+    if matrix not in MATRICES:
+        raise ValueError("matrix must be all, native or vz")
+    diagnostic_default = getattr(args, "diagnostic_default", "baseline")
+    requested = requested_native_configuration(diagnostic_default)
+    if diagnostic_default != "baseline" and matrix != "native":
+        raise ValueError("non-baseline diagnostic defaults require --matrix native")
     ipv4, ipv6 = dual_stack(args.ipv4, args.ipv6)
     domain = bootstrap_domain(args.bootstrap_domain, os.geteuid())
     binary = regular_file(args.binary)
     seed = {name: regular_file(Path(args.seed) / name) for name in SEED_FILES}
-    matrix = getattr(args, "matrix", "all")
-    if matrix not in MATRICES:
-        raise ValueError("matrix must be all, native or vz")
     planned_cases = MATRICES[matrix]
     service = SERVICE_PREFIX + str(uuid.uuid4())
     plan = {
@@ -237,10 +271,11 @@ def execute(args):
         "mode": "hostOnly", "dhcp": False, "ipv4": ipv4, "ipv6": ipv6,
         "matrix": matrix, "cases": planned_cases, "plannedCases": planned_cases,
         "existingNetworksTouched": False,
+        "requestedNativeConfiguration": requested,
         "unchangedNativeDefaults": {
             "basis": "vmnet_network_configuration_create documented defaults",
             "readBack": False,
-            "nat44": True, "nat66": True, "dnsProxy": True, "routerAdvertisements": True,
+            **{feature: True for feature in ("nat44", "nat66", "dnsProxy", "routerAdvertisements") if requested[feature]},
         },
     }
     if args.dry_run:
@@ -272,7 +307,7 @@ def execute(args):
         (disposable / ".probe-seed").write_text("vmnet-native-probe-v1\n")
         clones[index] = disposable
     plist = evidence / "owner.plist"
-    plist.write_bytes(plistlib.dumps(make_job(service, binary, evidence, ipv4, ipv6)))
+    plist.write_bytes(plistlib.dumps(make_job(service, binary, evidence, ipv4, ipv6, diagnostic_default=diagnostic_default)))
     commands.run("host-build", ["/usr/bin/sw_vers"])
     commands.run("signature", ["/usr/bin/codesign", "-d", "--entitlements", ":-", str(binary)])
     verification, _ = commands.run("signature-verify", ["/usr/bin/codesign", "--verify", "--strict", str(binary)])
@@ -290,6 +325,9 @@ def execute(args):
         if code != 0:
             raise ValueError("temporary owner did not become ready")
         status = result_from(output)
+        if status.get("diagnosticDefault") != diagnostic_default or status.get("configurationReadBack") is not False:
+            stop_reason = {"code": "ownerConfigurationReceiptMismatch", "expectedDiagnosticDefault": diagnostic_default}
+            raise ValueError("owner diagnostic configuration receipt differs from request")
         owner_pid = status["ownerPID"]
         network = status["network"]
         actual_v4 = ipaddress.IPv4Address(network["ipv4Address"])
@@ -314,11 +352,21 @@ def execute(args):
             if getattr(commands, "cancellations", []):
                 result["cleanupConfirmed"] = False
                 result.setdefault("error", "clientTerminationInterruptedCleanup")
+            realization_unobserved = case.endswith("-vz") and result.get("nativeRealizationStatus") != "hostBridgeObserved"
+            if realization_unobserved:
+                result["passed"] = False
+                result.setdefault("error", "nativeRealizationUnobserved")
             cases.append(result)
             if result.get("ownerPID") != owner_pid:
                 result["passed"] = False
                 result["error"] = "ownerIdentityChangedOrMissing"
                 stop_reason = {"code": "ownerIdentityChangedOrMissing", "case": case, "index": index}
+                break
+            if realization_unobserved:
+                stop_reason = {
+                    "code": "baselineFailed" if case in BASELINES else "nativeRealizationUnobserved",
+                    "evidence": "nativeRealizationUnobserved", "case": case, "index": index,
+                }
                 break
             # A clean failed start may invalidate the daemon reservation despite
             # the owner PID and cached configuration remaining unchanged.
@@ -361,6 +409,7 @@ def main():
     parser.add_argument("--ipv6", required=True)
     parser.add_argument("--bootstrap-domain", required=True)
     parser.add_argument("--matrix", choices=tuple(MATRICES), default="all", help="independent native or VZ comparison family, or the original combined order")
+    parser.add_argument("--diagnostic-default", choices=DIAGNOSTIC_DEFAULTS, default="baseline", action=SingleUseArgument, help="single native-only default override on a fresh temporary owner")
     parser.add_argument("--confirm-unused-subnets", action="store_true")
     parser.add_argument("--confirm-stopped-seed", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

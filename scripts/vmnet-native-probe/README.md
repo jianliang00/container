@@ -10,7 +10,10 @@ service. No NAT or IPv4-only fallback is provided.
 
 Both an unused RFC1918 IPv4 `/24` and an unused locally assigned ULA IPv6 `/64`
 are required. DHCP is disabled, matching the reserved host-only backend. Other
-native network defaults remain enabled. The operator must check both prefixes
+documented native defaults (NAT44, NAT66, DNS proxy and router advertisement)
+remain unchanged. The plan identifies these as SDK defaults, not daemon
+readback. The explicit prefix replaces the configuration's default random ULA;
+there is no second documented host-only IPv6 prefix to override. The operator must check both prefixes
 against existing network reservations and host/cluster routes before execution;
 an absent bridge does not establish that a prefix is unused.
 
@@ -44,8 +47,9 @@ entitlements and identity when comparing different binaries.
 Supply a stopped, internally consistent macOS VM seed directory with three
 regular, non-hardlinked files: `HardwareModel.bin`, `AuxiliaryStorage`, and
 `Disk.img`. Paths containing symlinks are rejected; use canonical paths. The
-runner creates separate private APFS clones for the three VZ cases, never boots
-the source disk, and shares one ephemeral machine identifier across the cases. Each VM has
+runner creates separate private APFS clones for every VZ case, never boots
+the source disk, and shares one ephemeral machine identifier across the cases. Repeated
+VZ cases also get separate clones; no case boots a disk used by an earlier case. Each VM has
 4 CPUs, 8 GiB RAM, one local block device, one virtio socket device and one native
 vmnet network device with a fixed test MAC. This is an attachment control, not
 an exact recreation of a production VM configuration or a machine-state restore.
@@ -76,12 +80,24 @@ The runner creates only a unique `com.apple.container.vmnet-probe.UUID` launchd
 job. It preserves the same owner PID and reservation across all cases and
 disables job respawning. The first direct interface is repeated after teardown;
 an additional direct check follows each import/VZ case. A changed/missing owner
-PID or unconfirmed cleanup stops the matrix. Ordinary signals initiate bounded
+PID, failed direct baseline or unconfirmed cleanup stops the matrix. A successful
+configuration query and an unchanged owner PID do not establish that the daemon
+still has a live reservation after a failed start. Ordinary signals initiate bounded
 cleanup; a kill signal or host crash cannot provide an orderly-cleanup receipt.
 An interrupted or timed-out client receives termination, followed by forced
 termination after two seconds if necessary and up to three seconds for process
 reaping. Its partial output and separate cancellation receipt are retained.
 Client process exit never establishes that native cleanup completed.
+
+`--matrix all` preserves the combined twelve-case order. To keep native API
+failure from contaminating VZ observations, select `--matrix native` or
+`--matrix vz` in separate invocations, each with independently checked unused
+dual-stack prefixes. Each family runs its direct baseline twice, same-process
+import, direct recheck, cross-process import, and a final direct recheck. Every
+invocation creates a fresh owner and reservation. Failure of a direct baseline
+sets `stopReason.code` to `baselineFailed` and `comparisonValid` to false; later
+topologies are not executed. An import rejection with confirmed cleanup can be
+compared only if the following direct recheck succeeds.
 
 ## Interpret the evidence
 
@@ -89,17 +105,32 @@ Client process exit never establishes that native cleanup completed.
 | --- | --- | --- |
 | Configuration setters | Native APIs accepted both requested prefixes | A daemon reservation or interface exists |
 | Reservation create/query | A native handle was returned with the requested dual-stack configuration | The daemon can still find the reservation during interface creation |
-| `direct` / `direct-vz` | The creating process can attach through the indicated API | Imported references work |
-| `same-import` / `same-import-vz` | Serialization/import within the owner still permits attachment | Another process can attach |
-| `cross-native` / `cross-vz` | Another same-UID process imports and attaches via the indicated API | Production runtime topology, guest readiness, IPv6 routing, Services or warm restore work |
+| Native interface cases | The native start callback succeeded and the returned handle was stopped | A guest can exchange packets |
+| VZ cases | Configuration validated, VM started, its runtime attachment remained present for five seconds without a reported disconnect, and stop succeeded | A native vmnet interface is operational or a guest can exchange packets |
+| Direct / same-import / cross-import controls | The selected observation succeeded in the owner, after same-process import, or after same-UID XPC import, respectively | Production topology, guest readiness, IPv6 routing, Services or warm restore work |
 
 If a direct check initially passes but fails after the last interface is
 removed, the same-PID sequence narrows investigation to reservation/interface
 lifetime. If direct and same-process VZ pass but cross-process VZ fails, the
 cross-process native result helps distinguish an import problem from a VZ
-handoff restriction. Native vmnet and VZ may enforce different access checks;
+handoff issue only when their own direct baselines remain valid. A failed first
+direct start invalidates all later results from that reservation; those later
+results must not be used to conclude that cross-process import is unsupported.
+Native vmnet and VZ may enforce different access checks;
 retain their distinct error namespaces. A private daemon `netrb` error number
 must not be interpreted as a public `vmnet_return_t` value.
+
+VZ does not expose its underlying native interface handle or a native-start
+completion receipt. Read-only host snapshots identify bridge interfaces owning
+the exact requested IPv4 gateway before start, during observation and after the
+stop attempt. `uniqueBridgeObserved` reports existence only: a bridge can serve
+another interface, and neither its presence nor VZ's attachment property proves
+VM traffic works. Snapshot errors or missing bridges leave native realization
+unverified. VZ case results use `evidenceScope: vz-control-plane-observation`;
+all summaries retain `nativeDataplaneValidated: false` and
+`guestConnectivityValidated: false`. The native API allocates a MAC and uses
+explicit offload settings, while VZ uses the configured fixed MAC and its own
+internal interface settings; these API paths are not identical parameter tests.
 
 VZ configuration validation, VM start, the five-second observation of the
 connected runtime attachment, and native disconnect callbacks are separate
@@ -133,5 +164,8 @@ deleted, while evidence remains. Reference release does not prove private
 daemon registry removal; inspect the retained cleanup record before another run.
 
 Offline tests cover argument/path isolation, matrix interpretation, response
-records, cleanup targeting and timeout evidence. Compilation and those tests do
+records, cleanup targeting and timeout evidence. Swift self-tests create and
+remove private dummy seed fixtures under `/private/var/tmp`, accepting physical
+paths while rejecting traversal, symbolic links and hardlinks without relying
+on Foundation URL spelling. Compilation and those tests do
 not execute native networking or prove any macOS-specific topology result.

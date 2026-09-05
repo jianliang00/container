@@ -117,6 +117,13 @@ private func configuration(ipv4: String, ipv6: String) throws -> NetworkReferenc
     return configuration
 }
 
+private func gatewayAddress(subnet: UInt32, mask: UInt32) -> String {
+    var gateway = in_addr(s_addr: ((subnet & mask) | 1).bigEndian)
+    var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+    inet_ntop(AF_INET, &gateway, &buffer, socklen_t(buffer.count))
+    return String(cString: buffer)
+}
+
 @available(macOS 26, *)
 private func summary(_ reference: NetworkReference) -> [String: Any] {
     var subnet = in_addr()
@@ -131,7 +138,49 @@ private func summary(_ reference: NetworkReference) -> [String: Any] {
     inet_ntop(AF_INET, &subnet, &v4, socklen_t(v4.count))
     inet_ntop(AF_INET, &mask, &v4Mask, socklen_t(v4Mask.count))
     inet_ntop(AF_INET6, &prefix, &v6, socklen_t(v6.count))
-    return ["ipv4Address": String(cString: v4), "ipv4Mask": String(cString: v4Mask), "ipv6Prefix": String(cString: v6), "ipv6PrefixLength": length]
+    return [
+        "ipv4Address": String(cString: v4), "ipv4Mask": String(cString: v4Mask),
+        "ipv4Gateway": gatewayAddress(subnet: UInt32(bigEndian: subnet.s_addr), mask: UInt32(bigEndian: mask.s_addr)),
+        "ipv6Prefix": String(cString: v6), "ipv6PrefixLength": length,
+    ]
+}
+
+private func matchingBridges(gatewayInterfaces: Set<String>, bridgeInterfaces: Set<String>) -> [String] {
+    gatewayInterfaces.intersection(bridgeInterfaces).sorted()
+}
+
+// Read-only host evidence, limited to the exact requested IPv4 gateway. A host
+// bridge is not proof that a particular VM is attached or can exchange packets.
+private func bridgeObservation(gateway: String, phase: String) -> [String: Any] {
+    var result: [String: Any] = ["phase": phase, "ipv4Gateway": gateway, "dataPlaneValidated": false, "timestamp": ISO8601DateFormatter().string(from: Date())]
+    var target = in_addr()
+    var first: UnsafeMutablePointer<ifaddrs>?
+    guard inet_pton(AF_INET, gateway, &target) == 1, getifaddrs(&first) == 0, let first else {
+        result["error"] = "hostInterfaceInspectionFailed"
+        return result
+    }
+    defer { freeifaddrs(first) }
+    var gateways = Set<String>()
+    var bridges = Set<String>()
+    var cursor: UnsafeMutablePointer<ifaddrs>? = first
+    while let current = cursor {
+        defer { cursor = current.pointee.ifa_next }
+        guard let address = current.pointee.ifa_addr else { continue }
+        let name = String(cString: current.pointee.ifa_name)
+        switch Int32(address.pointee.sa_family) {
+        case AF_LINK:
+            if let data = current.pointee.ifa_data, data.assumingMemoryBound(to: if_data.self).pointee.ifi_type == UInt8(IFT_BRIDGE) {
+                bridges.insert(name)
+            }
+        case AF_INET:
+            if UnsafeRawPointer(address).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr == target.s_addr { gateways.insert(name) }
+        default: break
+        }
+    }
+    let matches = matchingBridges(gatewayInterfaces: gateways, bridgeInterfaces: bridges)
+    result["matchingBridgeInterfaces"] = matches
+    result["uniqueBridgeObserved"] = matches.count == 1 && gateways.count == 1
+    return result
 }
 
 @available(macOS 26, *)
@@ -158,6 +207,8 @@ private func imported(_ object: xpc_object_t) throws -> NetworkReference {
 
 @available(macOS 26, *)
 private func nativeInterface(_ reference: NetworkReference) -> [String: Any] {
+    let gateway = summary(reference)["ipv4Gateway"] as! String
+    let before = bridgeObservation(gateway: gateway, phase: "beforeStart")
     let description = xpc_dictionary_create(nil, nil, 0)
     xpc_dictionary_set_bool(description, vmnet_allocate_mac_address_key, true)
     xpc_dictionary_set_bool(description, vmnet_enable_tso_key, false)
@@ -168,9 +219,14 @@ private func nativeInterface(_ reference: NetworkReference) -> [String: Any] {
         start.complete(status)
     }
     let started = start.wait()
+    let during = bridgeObservation(gateway: gateway, phase: "afterStartWait")
+    emit(during.merging(["stage": "interface.hostBridge"]) { _, new in new })
     emit(["stage": "interface.start", "status": started?.rawValue as Any? ?? NSNull(), "timedOut": started == nil])
     guard let handle else {
-        return ["passed": false, "error": "interfaceHandleMissing", "cleanupConfirmed": true, "startStatus": started?.rawValue as Any? ?? NSNull()]
+        return [
+            "passed": false, "error": "interfaceHandleMissing", "cleanupConfirmed": true, "startStatus": started?.rawValue as Any? ?? NSNull(),
+            "evidenceScope": "native-interface-start", "hostBridgeObservations": [before, during], "dataPlaneValidated": false,
+        ]
     }
     // Stop every returned handle, including start failure and timeout paths.
     let stop = Completion<vmnet_return_t>()
@@ -178,7 +234,11 @@ private func nativeInterface(_ reference: NetworkReference) -> [String: Any] {
     let stopped = scheduled == .VMNET_SUCCESS ? stop.wait() : nil
     let cleaned = stopped == .VMNET_SUCCESS
     emit(["stage": "interface.stop", "scheduledStatus": scheduled.rawValue, "status": stopped?.rawValue as Any? ?? NSNull(), "cleanupConfirmed": cleaned])
-    return ["passed": started == .VMNET_SUCCESS && cleaned, "cleanupConfirmed": cleaned, "startStatus": started?.rawValue as Any? ?? NSNull()]
+    return [
+        "passed": started == .VMNET_SUCCESS && cleaned, "cleanupConfirmed": cleaned, "startStatus": started?.rawValue as Any? ?? NSNull(),
+        "evidenceScope": "native-interface-start", "dataPlaneValidated": false,
+        "hostBridgeObservations": [before, during, bridgeObservation(gateway: gateway, phase: "afterStopAttempt")],
+    ]
 }
 
 private func reply(_ request: xpc_object_t, on connection: xpc_connection_t, result: [String: Any], network: xpc_object_t? = nil, identity: Data? = nil) {
@@ -346,14 +406,15 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
     // Keep uncertain or still-starting native resources alive until confirmed
     // cleanup or process exit; returning a timeout must not release them early.
     private var cleanupLifetime: VMProbe?
+    private var gateway = ""
+    private var bridgeObservations: [[String: Any]] = []
     private let completed = Completion<[String: Any]>()
 
     func run(reference: NetworkReference, seed: String, identity: Data) -> [String: Any] {
         self.reference = reference
         DispatchQueue.main.async { [self] in
             do {
-                let directory = URL(fileURLWithPath: seed, isDirectory: true)
-                try validateDisposableSeed(directory)
+                let directory = try validateDisposableSeed(seed)
                 guard let model = VZMacHardwareModel(dataRepresentation: try Data(contentsOf: directory.appendingPathComponent("HardwareModel.bin"))), model.isSupported else {
                     throw ProbeError(code: "hardwareModelUnsupported")
                 }
@@ -377,6 +438,8 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
                 config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
                 try config.validate()
                 emit(["stage": "vz.validate", "passed": true])
+                gateway = summary(reference)["ipv4Gateway"] as! String
+                observeBridge(phase: "beforeStart")
                 let machine = VZVirtualMachine(configuration: config)
                 vm = machine
                 cleanupLifetime = self
@@ -417,12 +480,17 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
         guard lifecycle.requestFinish(), let vm else { return }
         let connected = vm.networkDevices.count == 1 && vm.networkDevices[0].attachment != nil
         if !connected { lifecycle.fail(["error": "networkAttachmentMissing"]) }
+        observeBridge(phase: "beforeStop")
         emit(["stage": "vz.attachment", "connected": connected, "passed": connected && !lifecycle.hasFailed])
         let finishStop: (Error?) -> Void = { [self] error in
             let cleaned = error == nil && self.vm?.state == .stopped
             // Delegate callbacks may report a disconnect while stop is pending.
             // Read the sticky failure only when producing the final receipt.
-            let result = lifecycle.result(cleanupConfirmed: cleaned, cleanupError: error)
+            observeBridge(phase: "afterStopAttempt")
+            let result = lifecycle.result(cleanupConfirmed: cleaned, cleanupError: error).merging([
+                "evidenceScope": "vz-control-plane-observation", "dataPlaneValidated": false,
+                "hostBridgeObservations": bridgeObservations,
+            ]) { _, new in new }
             emit(result.merging(["stage": "vz.stop"]) { _, new in new })
             if cleaned {
                 self.vm = nil
@@ -436,6 +504,12 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
         case .running, .paused: vm.stop(completionHandler: finishStop)
         default: finishStop(ProbeError(code: "vzCleanupStateUnsupported"))
         }
+    }
+
+    private func observeBridge(phase: String) {
+        let observation = bridgeObservation(gateway: gateway, phase: phase)
+        bridgeObservations.append(observation)
+        emit(observation.merging(["stage": "vz.hostBridge"]) { _, new in new })
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, networkDevice: VZNetworkDevice, attachmentWasDisconnectedWithError error: Error) {
@@ -455,19 +529,78 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
     }
 }
 
-private func validateDisposableSeed(_ directory: URL) throws {
-    guard directory.path == directory.resolvingSymlinksInPath().path else { throw ProbeError(code: "unsafeDisposableSeed") }
+private func validateDisposableSeed(_ directory: String) throws -> URL {
+    let components = directory.split(separator: "/", omittingEmptySubsequences: false)
+    guard directory.hasPrefix("/"), !directory.contains("\0"), components.count > 1,
+        components.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+    else { throw ProbeError(code: "unsafeDisposableSeed") }
+    // Foundation may rewrite physical /private/var paths back to /var when
+    // resolving URLs. Validate raw POSIX components instead of URL equality.
+    // The runner supplies physical paths; no symlink aliases are accepted.
+    var parent = ""
+    for component in components.dropFirst() {
+        parent += "/" + component
+        var info = stat()
+        guard lstat(parent, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { throw ProbeError(code: "unsafeDisposableSeed") }
+    }
     for name in ["", ".probe-seed", "HardwareModel.bin", "AuxiliaryStorage", "Disk.img"] {
-        let path = name.isEmpty ? directory.path : directory.appendingPathComponent(name).path
+        let path = name.isEmpty ? directory : directory + "/" + name
         var info = stat()
         guard lstat(path, &info) == 0, info.st_uid == geteuid(), info.st_mode & 0o077 == 0,
             info.st_mode & S_IFMT == (name.isEmpty ? S_IFDIR : S_IFREG),
             name.isEmpty || info.st_nlink == 1
         else { throw ProbeError(code: "unsafeDisposableSeed") }
     }
-    guard try String(contentsOf: directory.appendingPathComponent(".probe-seed"), encoding: .utf8) == "vmnet-native-probe-v1\n" else {
+    let url = URL(fileURLWithPath: directory, isDirectory: true)
+    guard try String(contentsOf: url.appendingPathComponent(".probe-seed"), encoding: .utf8) == "vmnet-native-probe-v1\n" else {
         throw ProbeError(code: "missingDisposableSeedMarker")
     }
+    return url
+}
+
+private func disposableSeedSelfTests() throws -> Int {
+    let manager = FileManager.default
+    let root = "/private/var/tmp/container-vmnet-seed-test-" + UUID().uuidString
+    try manager.createDirectory(atPath: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    var removed = false
+    defer {
+        if !removed {
+            do { try manager.removeItem(atPath: root) } catch {
+                emit(errorFields(error).merging(["stage": "offline.fixtureCleanup", "passed": false]) { _, new in new })
+            }
+        }
+    }
+    let seed = root + "/seed"
+    try manager.createDirectory(atPath: seed, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    for name in [".probe-seed", "HardwareModel.bin", "AuxiliaryStorage", "Disk.img"] {
+        let value = name == ".probe-seed" ? "vmnet-native-probe-v1\n" : "fixture"
+        try Data(value.utf8).write(to: URL(fileURLWithPath: seed + "/" + name))
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: seed + "/" + name)
+    }
+    _ = try validateDisposableSeed(seed)
+    func rejects(_ path: String) throws {
+        do {
+            _ = try validateDisposableSeed(path)
+            throw ProbeError(code: "acceptedUnsafeSeedFixture")
+        } catch let error as ProbeError {
+            guard error.code == "unsafeDisposableSeed" else { throw error }
+        }
+    }
+    try rejects(seed + "/../seed")
+    try rejects(root + "//seed")
+    try rejects(seed + "\0ignored")
+    try rejects(String(seed.dropFirst("/private".count)))
+    try manager.createSymbolicLink(atPath: root + "/alias", withDestinationPath: seed)
+    try rejects(root + "/alias")
+    try manager.linkItem(atPath: seed + "/Disk.img", toPath: root + "/disk-link")
+    try rejects(seed)
+    try manager.removeItem(atPath: root + "/disk-link")
+    try manager.moveItem(atPath: seed + "/Disk.img", toPath: root + "/disk")
+    try manager.createSymbolicLink(atPath: seed + "/Disk.img", withDestinationPath: root + "/disk")
+    try rejects(seed)
+    try manager.removeItem(atPath: root)
+    removed = true
+    return 8
 }
 
 private func offlineSelfTest() throws {
@@ -485,7 +618,7 @@ private func offlineSelfTest() throws {
         fields["errorCode"] as? Int == 9, fields["underlyingErrorCode"] as? Int == 17
     else { throw ProbeError(code: "unsafeErrorProjection") }
     do {
-        try validateDisposableSeed(URL(fileURLWithPath: "/dev/null"))
+        _ = try validateDisposableSeed("/dev/null")
         throw ProbeError(code: "acceptedNonDisposableSeed")
     } catch let error as ProbeError {
         guard error.code == "unsafeDisposableSeed" else { throw error }
@@ -510,7 +643,14 @@ private func offlineSelfTest() throws {
     guard cleanupFailure["cleanupConfirmed"] as? Bool == false,
         (cleanupFailure["cleanupError"] as? [String: Any])?["errorCode"] as? Int == 17
     else { throw ProbeError(code: "lostCleanupError") }
-    emit(["stage": "offline.selfTest", "passed": true, "checks": 10, "nativeNetworkingExecuted": false])
+    let seedChecks = try disposableSeedSelfTests()
+    guard matchingBridges(gatewayInterfaces: ["bridge100", "en0"], bridgeInterfaces: ["bridge100", "bridge101"]) == ["bridge100"],
+        matchingBridges(gatewayInterfaces: ["en0"], bridgeInterfaces: ["bridge100"]).isEmpty
+    else { throw ProbeError(code: "incorrectBridgeAttribution") }
+    guard gatewayAddress(subnet: 0xc0a8_f700, mask: 0xffff_ff00) == "192.168.247.1",
+        gatewayAddress(subnet: 0xc0a8_f701, mask: 0xffff_ff00) == "192.168.247.1"
+    else { throw ProbeError(code: "incorrectGatewayDerivation") }
+    emit(["stage": "offline.selfTest", "passed": true, "checks": 12 + seedChecks, "nativeNetworkingExecuted": false])
 }
 
 private func main() throws -> Int32? {

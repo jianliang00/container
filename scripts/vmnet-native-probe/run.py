@@ -35,6 +35,12 @@ CASES = (
     "direct", "direct", "same-import", "direct", "cross-native", "direct",
     "direct-vz", "direct", "same-import-vz", "direct", "cross-vz", "direct",
 )
+MATRICES = {
+    "all": CASES,
+    "native": ("direct", "direct", "same-import", "direct", "cross-native", "direct"),
+    "vz": ("direct-vz", "direct-vz", "same-import-vz", "direct-vz", "cross-vz", "direct-vz"),
+}
+BASELINES = frozenset(("direct", "direct-vz"))
 SERVICE_PREFIX = "com.apple.container.vmnet-probe."
 SEED_FILES = ("HardwareModel.bin", "AuxiliaryStorage", "Disk.img")
 
@@ -93,16 +99,33 @@ def result_from(output):
     return results[0]
 
 
-def checked_summary(cases, cleanup, configured=False):
-    complete = [entry["case"] for entry in cases] == list(CASES)
+def checked_summary(cases, cleanup, configured=False, matrix="all", planned_cases=None, stop_reason=None):
+    planned = tuple(planned_cases) if planned_cases is not None else MATRICES.get(matrix, ())
+    plan_valid = matrix in MATRICES and planned == MATRICES[matrix]
+    complete = plan_valid and [entry["case"] for entry in cases] == list(planned)
     passed = complete and all(entry.get("passed") is True and entry.get("cleanupConfirmed") is True for entry in cases)
+    comparison_valid = configured and complete and stop_reason is None and all(
+        entry.get("cleanupConfirmed") is True and (entry["case"] not in BASELINES or entry.get("passed") is True)
+        for entry in cases
+    )
+    scope = {
+        "all": "native-interface-and-vz-control-plane-observation",
+        "native": "native-interface-start-only",
+        "vz": "vz-control-plane-observation",
+    }.get(matrix, "invalid-matrix")
     return {
         "schemaVersion": 1,
-        "scope": "native-attachment-only",
+        "matrix": matrix,
+        "plannedCases": list(planned),
+        "planValid": plan_valid,
+        "scope": scope,
         "fullDualStackConfigured": configured,
         "guestConnectivityValidated": False,
+        "nativeDataplaneValidated": False,
         "complete": complete,
-        "passed": configured and passed and cleanup.get("passed") is True,
+        "comparisonValid": comparison_valid,
+        "stopReason": stop_reason,
+        "passed": configured and passed and comparison_valid and cleanup.get("passed") is True,
         "cases": cases,
         "cleanup": cleanup,
     }
@@ -204,11 +227,21 @@ def execute(args):
     domain = bootstrap_domain(args.bootstrap_domain, os.geteuid())
     binary = regular_file(args.binary)
     seed = {name: regular_file(Path(args.seed) / name) for name in SEED_FILES}
+    matrix = getattr(args, "matrix", "all")
+    if matrix not in MATRICES:
+        raise ValueError("matrix must be all, native or vz")
+    planned_cases = MATRICES[matrix]
     service = SERVICE_PREFIX + str(uuid.uuid4())
     plan = {
         "schemaVersion": 1, "service": service, "bootstrapDomain": domain,
         "mode": "hostOnly", "dhcp": False, "ipv4": ipv4, "ipv6": ipv6,
-        "cases": CASES, "existingNetworksTouched": False,
+        "matrix": matrix, "cases": planned_cases, "plannedCases": planned_cases,
+        "existingNetworksTouched": False,
+        "unchangedNativeDefaults": {
+            "basis": "vmnet_network_configuration_create documented defaults",
+            "readBack": False,
+            "nat44": True, "nat66": True, "dnsProxy": True, "routerAdvertisements": True,
+        },
     }
     if args.dry_run:
         print(json.dumps(plan, indent=2))
@@ -225,19 +258,19 @@ def execute(args):
     plan["binarySHA256"] = sha256(binary)
     (evidence / "plan.json").write_text(json.dumps(plan, indent=2) + "\n")
     clones = {}
-    for case in CASES:
+    for index, case in enumerate(planned_cases, start=1):
         if not case.endswith("-vz"):
             continue
-        disposable = evidence / f"seed-{case}"
+        disposable = evidence / f"seed-{index}-{case}"
         disposable.mkdir(mode=0o700)
         for name, source in seed.items():
             # APFS clone only: never boot or rewrite the supplied source image.
-            code, _ = commands.run(f"clone-{case}-{name}", ["/bin/cp", "-c", str(source), str(disposable / name)], timeout=120)
+            code, _ = commands.run(f"clone-{index}-{case}-{name}", ["/bin/cp", "-c", str(source), str(disposable / name)], timeout=120)
             if code != 0:
                 raise ValueError(f"APFS clone failed for {name}; evidence retained at {evidence}")
             (disposable / name).chmod(0o600)
         (disposable / ".probe-seed").write_text("vmnet-native-probe-v1\n")
-        clones[case] = disposable
+        clones[index] = disposable
     plist = evidence / "owner.plist"
     plist.write_bytes(plistlib.dumps(make_job(service, binary, evidence, ipv4, ipv6)))
     commands.run("host-build", ["/usr/bin/sw_vers"])
@@ -247,6 +280,7 @@ def execute(args):
         raise ValueError(f"binary signature verification failed; evidence retained at {evidence}")
     cases = []
     configured = False
+    stop_reason = None
     try:
         code, _ = commands.run("bootstrap", ["/bin/launchctl", "bootstrap", domain, str(plist)])
         if code != 0:
@@ -267,10 +301,10 @@ def execute(args):
         ):
             raise ValueError("reserved dual-stack configuration differs from request")
         configured = True
-        for index, case in enumerate(CASES, start=1):
+        for index, case in enumerate(planned_cases, start=1):
             argv = [str(binary), "case", service, case]
             if case.endswith("-vz"):
-                argv.append(str(clones[case]))
+                argv.append(str(clones[index]))
             code, output = commands.run(f"case-{index}-{case}", argv, timeout=50)
             result = result_from(output)
             result["case"] = case
@@ -284,9 +318,17 @@ def execute(args):
             if result.get("ownerPID") != owner_pid:
                 result["passed"] = False
                 result["error"] = "ownerIdentityChangedOrMissing"
+                stop_reason = {"code": "ownerIdentityChangedOrMissing", "case": case, "index": index}
                 break
-            # A rejected interface can be compared further only if it was cleaned.
+            # A clean failed start may invalidate the daemon reservation despite
+            # the owner PID and cached configuration remaining unchanged.
+            if case in BASELINES and result.get("passed") is not True:
+                stop_reason = {"code": "baselineFailed", "case": case, "index": index}
+                break
+            # A clean import rejection is followed by a direct baseline before
+            # another topology is attempted, using the explicit matrix order.
             if result.get("cleanupConfirmed") is not True:
+                stop_reason = {"code": "cleanupUnconfirmed", "case": case, "index": index}
                 break
     finally:
         # Once cleanup starts, a second ordinary signal must not skip bootout.
@@ -298,7 +340,7 @@ def execute(args):
         # native stop callbacks interrupted by termination or forced killing.
         if cleanup["cancelledCommands"]:
             cleanup["passed"] = False
-        summary = checked_summary(cases, cleanup, configured=configured)
+        summary = checked_summary(cases, cleanup, configured=configured, matrix=matrix, planned_cases=planned_cases, stop_reason=stop_reason)
         (evidence / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         # Retain all evidence and disposable files on failure, but no live test job.
         # Successful cleanup removes only the three cloned files and our marker.
@@ -318,6 +360,7 @@ def main():
     parser.add_argument("--ipv4", required=True)
     parser.add_argument("--ipv6", required=True)
     parser.add_argument("--bootstrap-domain", required=True)
+    parser.add_argument("--matrix", choices=tuple(MATRICES), default="all", help="independent native or VZ comparison family, or the original combined order")
     parser.add_argument("--confirm-unused-subnets", action="store_true")
     parser.add_argument("--confirm-stopped-seed", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

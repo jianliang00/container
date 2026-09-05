@@ -27,6 +27,19 @@ import Testing
 
 @Suite(.serialized)
 struct SidecarControlServerTests {
+    @Test(arguments: [Data(), Data([0, 0, 0, 4, 0x7b])])
+    func responseFrameTimesOutForSilentOrPartialPeers(prefix: Data) throws {
+        let pair = try makeSocketPair()
+        defer {
+            closeIfValid(pair.server)
+            closeIfValid(pair.peer)
+        }
+        try MacOSSidecarSocketIO.writeAll(data: prefix, fd: pair.server)
+        #expect(throws: POSIXError(.ETIMEDOUT)) {
+            _ = try responseFrame(fd: pair.peer, timeoutMilliseconds: 50)
+        }
+    }
+
     @Test
     func slowControlClientDoesNotBlockGuestStreamDrain() throws {
         let server = makeServer(controlWriteTimeoutMilliseconds: 5_000)
@@ -2598,18 +2611,14 @@ private func writeGuestStatusAck(_ status: MacOSGuestProcessStatusPayload, fd: I
     )
 }
 
-private func responseFrame(fd: Int32) throws -> MacOSSidecarResponse {
-    let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+private func responseFrame(fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> MacOSSidecarResponse {
+    let envelope = try readableEnvelope(fd: fd, timeoutMilliseconds: timeoutMilliseconds)
     #expect(envelope.kind == .response)
     return try #require(envelope.response)
 }
 
 private func eventFrame(fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> MacOSSidecarEvent {
-    var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-    guard Darwin.poll(&descriptor, 1, timeoutMilliseconds) > 0 else {
-        throw POSIXError(.ETIMEDOUT)
-    }
-    let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+    let envelope = try readableEnvelope(fd: fd, timeoutMilliseconds: timeoutMilliseconds)
     #expect(envelope.kind == .event)
     return try #require(envelope.event)
 }
@@ -2707,13 +2716,11 @@ private func makeServer(
 }
 
 private func readableEnvelope(fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> MacOSSidecarEnvelope {
-    var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-    guard Darwin.poll(&descriptor, 1, timeoutMilliseconds) == 1,
-        descriptor.revents & Int16(POLLIN) != 0
-    else {
-        throw POSIXError(.ETIMEDOUT)
-    }
-    return try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+    try MacOSSidecarSocketIO.readJSONFrame(
+        MacOSSidecarEnvelope.self,
+        fd: fd,
+        timeoutMilliseconds: timeoutMilliseconds
+    )
 }
 
 private func makeSocketSecurityRoot() throws -> URL {
@@ -2768,6 +2775,10 @@ private func makeSocketPair() throws -> (server: Int32, peer: Int32) {
 }
 
 private func expectEOF(fd: Int32) throws {
+    var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+    guard Darwin.poll(&descriptor, 1, 2_000) > 0 else {
+        throw POSIXError(.ETIMEDOUT)
+    }
     var buffer = UInt8.zero
     let count = Darwin.read(fd, &buffer, 1)
     if count == 0 {

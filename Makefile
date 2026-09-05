@@ -234,7 +234,7 @@ dsym:
 
 .PHONY: test
 test: build-tests
-	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests $(foreach suite,$(FORK_ISOLATED_UNIT_TEST_SUITES),--skip $(suite)) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
+	@$(SWIFT) test --skip-build --no-parallel -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests $(foreach suite,$(FORK_ISOLATED_UNIT_TEST_SUITES),--skip $(suite)) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
 	@set -e; for suite in $(FORK_ISOLATED_UNIT_TEST_SUITES); do \
 		$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter "$$suite"; \
 	done
@@ -440,7 +440,7 @@ coverage-unit: build-tests
 	@echo Running unit test coverage...
 	@mkdir -p $(UNIT_COVERAGE_RAW_DIR)
 	@rm -f $(UNIT_COVERAGE_RAW_DIR)/*.profraw
-	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-main-%p-%m.profraw" $(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests $(foreach suite,$(FORK_ISOLATED_UNIT_TEST_SUITES),--skip $(suite)) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
+	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-main-%p-%m.profraw" $(SWIFT) test --skip-build --no-parallel -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests $(foreach suite,$(FORK_ISOLATED_UNIT_TEST_SUITES),--skip $(suite)) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
 	@set -e; for suite in $(FORK_ISOLATED_UNIT_TEST_SUITES); do \
 		LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-$$suite-%p-%m.profraw" $(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter "$$suite"; \
 	done

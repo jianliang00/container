@@ -130,8 +130,25 @@ public actor DefaultNetworkService: NetworkService {
             ])
 
         var additionalData: XPCMessage?
-        try network.withAdditionalData {
-            additionalData = $0
+        do {
+            try network.withAdditionalData { additionalData = $0 }
+        } catch {
+            let allocationError = error
+            if previousIndex == nil, ownersByHostname[hostname] == nil, releaseWaitersByHostname[hostname] == nil {
+                // Serialize rollback with other allocations for this hostname.
+                // Never release an attachment that an existing session owns.
+                releaseWaitersByHostname[hostname] = []
+                defer { finishRelease(hostname: hostname) }
+                do {
+                    _ = try await allocator.deallocate(hostname: hostname)
+                } catch {
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "network allocation failed: \(allocationError); address rollback failed: \(error)"
+                    )
+                }
+            }
+            throw allocationError
         }
         macAddresses[index] = macAddress
 
@@ -160,9 +177,6 @@ public actor DefaultNetworkService: NetworkService {
                 message: "network activation requires an allocation on the same session"
             )
         }
-        guard !activatedSessions.contains(session) else {
-            return
-        }
         activationWaiterCount += 1
         defer {
             activationWaiterCount -= 1
@@ -170,12 +184,14 @@ public actor DefaultNetworkService: NetworkService {
         }
 
         while true {
+            _ = try await status()
             guard allocationsBySession[session] != nil else {
                 throw ContainerizationError(
                     .invalidState,
                     message: "network allocation was released before activation completed"
                 )
             }
+            guard !activatedSessions.contains(session) else { return }
 
             switch activationState {
             case .inactive:

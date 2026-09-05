@@ -17,12 +17,66 @@
 import ContainerResource
 import ContainerizationExtras
 import Logging
+import Synchronization
 import Testing
 
 @testable import ContainerNetworkServer
 @testable import ContainerXPC
 
 struct DefaultNetworkServiceTest {
+    @Test func invalidatedNetworkRejectsStatusAllocationAndCachedActivation() async throws {
+        let network = try TestNetwork(status: NetworkStatus(ipv4Subnet: CIDRv4("192.168.64.0/24"), ipv4Gateway: IPv4Address("192.168.64.1"), ipv6Subnet: nil))
+        let service = try await DefaultNetworkService(network: network, log: Logger(label: "DefaultNetworkServiceTest"))
+        let session = XPCServerSession()
+        _ = try await service.allocate(hostname: "original", macAddress: nil, session: session)
+        try await service.activate(session: session)
+        await network.invalidate()
+        await #expect(throws: (any Error).self) { try await service.status() }
+        await #expect(throws: (any Error).self) { try await service.activate(session: session) }
+        await #expect(throws: (any Error).self) {
+            try await service.allocate(hostname: "new", macAddress: nil, session: XPCServerSession())
+        }
+        #expect(await network.activationCount == 1)
+        await session.fireDisconnect()
+    }
+
+    @Test func invalidationWhileActivationIsPendingCannotCommitCachedSuccess() async throws {
+        let gate = ActivationGate()
+        let network = try ControlledActivationNetwork(gate: gate)
+        let service = try await DefaultNetworkService(network: network, log: Logger(label: "DefaultNetworkServiceTest"))
+        let session = XPCServerSession()
+        _ = try await service.allocate(hostname: "pending", macAddress: nil, session: session)
+        let activation = Task { try await service.activate(session: session) }
+        await waitForActivationCount(network, 1)
+        await network.invalidate()
+        await gate.open()
+        await #expect(throws: (any Error).self) { try await activation.value }
+        await #expect(throws: (any Error).self) { try await service.activate(session: session) }
+        await session.fireDisconnect()
+    }
+
+    @Test func failedReferenceExportReleasesOnlyUnownedAddress() async throws {
+        let network = try TestNetwork(status: NetworkStatus(ipv4Subnet: CIDRv4("192.168.64.0/24"), ipv4Gateway: IPv4Address("192.168.64.1"), ipv6Subnet: nil))
+        let service = try await DefaultNetworkService(network: network, log: Logger(label: "DefaultNetworkServiceTest"))
+        let preferred = try IPv4Address("192.168.64.42")
+        network.setExportFailure(true)
+        await #expect(throws: (any Error).self) {
+            try await service.allocate(hostname: "rejected", macAddress: nil, preferredIPv4Address: preferred, session: XPCServerSession())
+        }
+        network.setExportFailure(false)
+        #expect(try await service.lookup(hostname: "rejected") == nil)
+        let session = XPCServerSession()
+        let original = try await service.allocate(hostname: "owner", macAddress: nil, preferredIPv4Address: preferred, session: session).attachment
+        network.setExportFailure(true)
+        await #expect(throws: (any Error).self) {
+            try await service.allocate(hostname: "owner", macAddress: nil, session: XPCServerSession())
+        }
+        network.setExportFailure(false)
+        #expect(try await service.lookup(hostname: "owner") == original)
+        await session.fireDisconnect()
+        #expect(try await service.lookup(hostname: "owner") == nil)
+    }
+
     @Test func testAllocationIsIdempotentWithinSession() async throws {
         let service = try await makeService()
         let session = XPCServerSession()
@@ -425,7 +479,8 @@ private func waitForActivationCount(
 private actor TestNetwork: Network {
     nonisolated let id = "test-network"
     nonisolated let variant: String? = nil
-    let status: NetworkStatus?
+    private(set) var status: NetworkStatus?
+    private nonisolated let exportFailure = Mutex(false)
     private(set) var activationCount = 0
 
     init(status: NetworkStatus) {
@@ -433,8 +488,12 @@ private actor TestNetwork: Network {
     }
 
     nonisolated func withAdditionalData(_ handler: (XPCMessage?) throws -> Void) throws {
+        if exportFailure.withLock({ $0 }) { throw ControlledActivationError.injectedFailure }
         try handler(nil)
     }
+
+    nonisolated func setExportFailure(_ fail: Bool) { exportFailure.withLock { $0 = fail } }
+    func invalidate() { status = nil }
 
     func start() async throws {}
 
@@ -471,7 +530,7 @@ private actor ActivationGate {
 private actor ControlledActivationNetwork: Network {
     nonisolated let id = "controlled-network"
     nonisolated let variant: String? = nil
-    let status: NetworkStatus?
+    private(set) var status: NetworkStatus?
     private(set) var activationCount = 0
     private var failuresRemaining: Int
     private let gate: ActivationGate?
@@ -495,6 +554,8 @@ private actor ControlledActivationNetwork: Network {
     }
 
     func start() async throws {}
+
+    func invalidate() { status = nil }
 
     func activate() async throws {
         activationCount += 1

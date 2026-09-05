@@ -28,7 +28,8 @@ public protocol Network: Sendable {
     /// has only a single, default variant.
     nonisolated var variant: String? { get }
 
-    /// The network's runtime status. `nil` before ``start()`` completes.
+    /// The network's runtime status. `nil` before ``start()`` completes or when
+    /// the implementation can no longer confirm a usable network generation.
     var status: NetworkStatus? { get async }
 
     /// Use implementation-dependent network attributes.

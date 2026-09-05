@@ -30,6 +30,14 @@ import run
 
 
 class ProbeTests(unittest.TestCase):
+    def test_vz_fixture_has_graphics_and_preserves_observation_budget(self):
+        source = Path(__file__).with_name("Probe.swift").read_text()
+        self.assertIn("let graphics = VZMacGraphicsDeviceConfiguration()", source)
+        self.assertIn("VZMacGraphicsDisplayConfiguration(widthInPixels: 1440, heightInPixels: 900, pixelsPerInch: 80)", source)
+        self.assertIn("config.graphicsDevices = [graphics]", source)
+        self.assertIn(".now() + 5) { [self] in finish() }", source)
+        self.assertIn("completed.wait(seconds: 35)", source)
+
     def test_dual_stack_canonical(self):
         self.assertEqual(run.dual_stack("192.168.247.0/24", "fdab:1234:5678:9::/64"), ("192.168.247.0/24", "fdab:1234:5678:9::/64"))
 

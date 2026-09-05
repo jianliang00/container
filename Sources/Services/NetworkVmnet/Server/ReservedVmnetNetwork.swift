@@ -62,6 +62,8 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
     private struct State {
         var status: NetworkStatus?
         var network: ManagedVmnetCFReference?
+        var daemonLease: VmnetDaemonLease?
+        var invalidated = false
         var transition: Transition?
     }
 
@@ -76,6 +78,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
     private let networkInstanceID: String
     private let stateMutex: Mutex<State>
     private let hostIPv6GatewayWaiter: VmnetHostIPv6GatewayWaiter
+    private let daemonInspector: any VmnetDaemonInspecting
     private let log: Logger
 
     /// Configure a bridge network that allows external system access using
@@ -94,7 +97,8 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
     init(
         configuration: NetworkConfiguration,
         log: Logger,
-        hostIPv6GatewayReadinessChecker: any VmnetHostIPv6GatewayReadinessChecking
+        hostIPv6GatewayReadinessChecker: any VmnetHostIPv6GatewayReadinessChecking,
+        daemonInspector: any VmnetDaemonInspecting = SystemVmnetDaemonInspector()
     ) throws {
         guard configuration.mode == .nat || configuration.mode == .hostOnly else {
             throw ContainerizationError(.unsupported, message: "invalid network mode \(configuration.mode)")
@@ -105,6 +109,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         self.networkInstanceID = UUID().uuidString.lowercased()
         self.log = log
         self.hostIPv6GatewayWaiter = VmnetHostIPv6GatewayWaiter(checker: hostIPv6GatewayReadinessChecker)
+        self.daemonInspector = daemonInspector
         stateMutex = Mutex(State())
         log.info("created vmnet network")
     }
@@ -114,25 +119,40 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
     public nonisolated var variant: String? { "reserved" }
 
     public var status: NetworkStatus? {
-        stateMutex.withLock { $0.status }
+        stateMutex.withLock { state in
+            do {
+                try requireValidReservation(&state)
+                return state.status
+            } catch {
+                return nil
+            }
+        }
     }
 
     public nonisolated func withAdditionalData(_ handler: (XPCMessage?) throws -> Void) throws {
         try stateMutex.withLock { state in
-            try handler(state.network.map { try Self.serializeNetworkRef(ref: $0.value) })
+            try requireValidReservation(&state)
+            guard let network = state.network else {
+                throw ContainerizationError(.invalidState, message: "network \(configuration.id) has no reservation")
+            }
+            let serialized = try Self.serializeNetworkRef(ref: network.value)
+            try requireValidReservation(&state)
+            try handler(serialized)
         }
     }
 
     public func start() async throws {
         try stateMutex.withLock { state in
-            guard state.status == nil, state.transition == nil else {
+            guard state.status == nil, state.network == nil, state.transition == nil, !state.invalidated else {
                 throw ContainerizationError(.invalidArgument, message: "cannot start network \(configuration.id): already started or transitioning")
             }
             state.transition = .starting
         }
 
         do {
-            let networkInfo = try startNetwork(configuration: configuration, log: log)
+            let (networkInfo, daemonLease) = try VmnetDaemonLease.reserve(inspector: daemonInspector) {
+                try startNetwork(configuration: configuration, log: log)
+            }
             if let requestedIPv6Subnet = configuration.ipv6Subnet {
                 guard requestedIPv6Subnet == networkInfo.ipv6Subnet else {
                     throw ContainerizationError(
@@ -151,6 +171,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
                     networkInstanceID: networkInstanceID
                 )
                 state.network = networkInfo.network
+                state.daemonLease = daemonLease
                 state.transition = nil
             }
         } catch {
@@ -160,15 +181,15 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
     }
 
     public func activate() async throws {
-        guard configuration.mode == .hostOnly, configuration.ipv6Subnet != nil else {
-            return
-        }
         let status = try stateMutex.withLock { state -> NetworkStatus in
-            guard state.network != nil, let status = state.status, status.ipv6Gateway != nil else {
+            try requireValidReservation(&state)
+            guard let status = state.status else {
                 throw ContainerizationError(.invalidState, message: "cannot activate network \(configuration.id) before it is started")
             }
             return status
         }
+
+        guard configuration.mode == .hostOnly, configuration.ipv6Subnet != nil else { return }
 
         guard let ipv6Gateway = status.ipv6Gateway, let ipv6Subnet = status.ipv6Subnet else {
             throw ContainerizationError(.invalidState, message: "network \(configuration.id) has no explicit IPv6 gateway")
@@ -178,6 +199,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
             ipv6Gateway: ipv6Gateway,
             prefixLength: ipv6Subnet.prefix.length
         )
+        try stateMutex.withLock { try requireValidReservation(&$0) }
     }
 
     public func stop() async throws {
@@ -196,7 +218,26 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         stateMutex.withLock { state in
             state.status = nil
             state.network = nil
+            state.daemonLease = nil
             state.transition = nil
+        }
+    }
+
+    private func requireValidReservation(_ state: inout State) throws {
+        guard !state.invalidated, state.transition == nil, state.status != nil,
+            state.network != nil, let lease = state.daemonLease
+        else {
+            throw ContainerizationError(.invalidState, message: "network \(configuration.id) has no usable reservation")
+        }
+        do {
+            try lease.validate()
+        } catch {
+            state.status = nil
+            state.invalidated = true
+            // Preserve the reference and existing attachment owners until stop.
+            // A still-running helper must not advertise its cached generation.
+            log.error("vmnet reservation invalidated", metadata: ["id": "\(configuration.id)", "error": "\(error)"])
+            throw error
         }
     }
 

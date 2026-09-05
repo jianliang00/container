@@ -436,6 +436,7 @@ struct SidecarControlServerTests {
         #expect(acknowledged.withLock { $0 } == [1, 2])
     }
 
+    #if DEBUG
     @Test
     func eventAcknowledgementWaitsForDeliveryPublicationBarrier() throws {
         let buffer = SidecarEventDeliveryBuffer(log: Logger(label: "SidecarEventDeliveryBufferTests"))
@@ -491,6 +492,7 @@ struct SidecarControlServerTests {
         #expect(buffer.pendingCount() == 0)
         #expect(callbackCount.withLock { $0 } == 1)
     }
+    #endif
 
     @Test
     func failedEventWriteInvalidatesSubscriptionAndReplaysPendingEvent() throws {

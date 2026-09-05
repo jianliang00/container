@@ -487,6 +487,9 @@ private final class VMProbe: NSObject, VZVirtualMachineDelegate {
                 device.attachment = VZVmnetNetworkDeviceAttachment(network: reference.value)
                 config.networkDevices = [device]
                 config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+                let graphics = VZMacGraphicsDeviceConfiguration()
+                graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1440, heightInPixels: 900, pixelsPerInch: 80)]
+                config.graphicsDevices = [graphics]
                 try config.validate()
                 emit(["stage": "vz.validate", "passed": true])
                 gateway = summary(reference)["ipv4Gateway"] as! String

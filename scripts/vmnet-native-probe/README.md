@@ -50,8 +50,11 @@ regular, non-hardlinked files: `HardwareModel.bin`, `AuxiliaryStorage`, and
 runner creates separate private APFS clones for every VZ case, never boots
 the source disk, and shares one ephemeral machine identifier across the cases. Repeated
 VZ cases also get separate clones; no case boots a disk used by an earlier case. Each VM has
-4 CPUs, 8 GiB RAM, one local block device, one virtio socket device and one native
-vmnet network device with a fixed test MAC. This is an attachment control, not
+4 CPUs, 8 GiB RAM, one local block device, one virtio socket device, a macOS
+graphics device with a 1440×900 display at 80 PPI, and one native vmnet network
+device with a fixed test MAC. The graphics device is configured even though no
+GUI window is opened; an incomplete boot fixture can reset devices without
+providing a stable network observation. This is an attachment control, not
 an exact recreation of a production VM configuration or a machine-state restore.
 
 Set the following variables explicitly. `probe_domain` is `system` when already

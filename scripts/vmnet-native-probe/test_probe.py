@@ -16,11 +16,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import run
 
@@ -146,11 +148,77 @@ class ProbeTests(unittest.TestCase):
     def test_timeout_preserves_output(self):
         with tempfile.TemporaryDirectory() as directory:
             commands = run.Commands(Path(directory))
-            with patch.object(run.subprocess, "run", side_effect=run.subprocess.TimeoutExpired(["probe"], 1)):
-                code, _ = commands.run("case", ["probe"], timeout=1)
+            code, output = commands.run("case", [sys.executable, "-c", "import time; print('partial evidence', flush=True); time.sleep(60)"], timeout=0.5)
             self.assertEqual(code, 124)
-            self.assertTrue((Path(directory) / "case.stdout").exists())
+            self.assertIn("partial evidence", output)
             self.assertTrue((Path(directory) / "case.stderr").exists())
+            receipt = json.loads((Path(directory) / "case.cleanup.json").read_text())
+            self.assertTrue(receipt["processExited"])
+            self.assertFalse(receipt["nativeCleanupConfirmed"])
+            self.assertEqual(receipt["reason"], "timeout")
+
+    def test_parent_interruption_stops_and_reaps_live_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            commands = run.Commands(Path(directory))
+            real_popen = subprocess.Popen
+            children = []
+            interruption = KeyboardInterrupt("parent-only interruption")
+
+            def start(*args, **kwargs):
+                child = real_popen(*args, **kwargs)
+                children.append(child)
+                real_wait = child.wait
+                first_wait = True
+
+                def wait(timeout=None):
+                    nonlocal first_wait
+                    if first_wait:
+                        first_wait = False
+                        raise interruption
+                    return real_wait(timeout=timeout)
+
+                child.wait = wait
+                return child
+
+            try:
+                with patch.object(run.subprocess, "Popen", side_effect=start):
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        commands.run("case", [sys.executable, "-c", "import time; time.sleep(60)"])
+                self.assertIs(raised.exception, interruption)
+                self.assertIsNotNone(children[0].poll())
+                self.assertTrue(commands.cancellations[0]["processExited"])
+                self.assertFalse(commands.cancellations[0]["nativeCleanupConfirmed"])
+            finally:
+                for child in children:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=5)
+
+    def test_timeout_escalates_when_child_ignores_termination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            commands = run.Commands(Path(directory))
+            child_code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"
+            code, output = commands.run("case", [sys.executable, "-c", child_code], timeout=0.5)
+            self.assertEqual(code, 124)
+            self.assertIn("ready", output)
+            self.assertTrue(commands.cancellations[0]["killRequested"])
+            self.assertTrue(commands.cancellations[0]["processExited"])
+
+    def test_bounded_cleanup_failure_preserves_original_interruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            commands = run.Commands(Path(directory))
+            interruption = KeyboardInterrupt("original interruption")
+            child = Mock(pid=123)
+            child.poll.return_value = None
+            child.wait.side_effect = [interruption, subprocess.TimeoutExpired("probe", 2), subprocess.TimeoutExpired("probe", 3)]
+            with patch.object(run.subprocess, "Popen", return_value=child):
+                with self.assertRaises(KeyboardInterrupt) as raised:
+                    commands.run("case", ["probe"])
+            self.assertIs(raised.exception, interruption)
+            self.assertFalse(commands.cancellations[0]["processExited"])
+            self.assertEqual(commands.cancellations[0]["cleanupError"], "TimeoutExpired")
+            child.terminate.assert_called_once_with()
+            child.kill.assert_called_once_with()
 
     def test_native_source_has_no_runtime_or_network_configuration_mutations(self):
         source = Path(__file__).with_name("Probe.swift").read_text()
@@ -176,6 +244,7 @@ class ProbeTests(unittest.TestCase):
             class FakeCommands:
                 def __init__(self, _evidence):
                     self.service = ""
+                    self.cancellations = []
 
                 def run(self, name, argv, timeout=50):
                     calls.append(name)
@@ -194,6 +263,8 @@ class ProbeTests(unittest.TestCase):
                                 result["ownerPID"] = 456
                             if fault == "rejection":
                                 result["passed"] = False
+                            if fault == "cancelled":
+                                self.cancellations.append({"processExited": True, "nativeCleanupConfirmed": False})
                         return 0, json.dumps(result)
                     if name == "shutdown":
                         return 0, json.dumps({"stage": "case.result", "cleanupConfirmed": True, "referenceReleased": True})
@@ -240,6 +311,17 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(result["complete"])
         self.assertFalse(result["passed"])
+        self.assertTrue(retained)
+
+    def test_owner_cleanup_cannot_attest_cancelled_client_native_cleanup(self):
+        code, result, retained = self.simulate("cancelled")
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["cases"]), 3)
+        self.assertFalse(result["cases"][-1]["cleanupConfirmed"])
+        self.assertTrue(result["cleanup"]["ownerReleaseConfirmed"])
+        self.assertFalse(result["cleanup"]["passed"])
+        self.assertEqual(len(result["cleanup"]["cancelledCommands"]), 1)
         self.assertTrue(retained)
 
 

@@ -78,6 +78,10 @@ disables job respawning. The first direct interface is repeated after teardown;
 an additional direct check follows each import/VZ case. A changed/missing owner
 PID or unconfirmed cleanup stops the matrix. Ordinary signals initiate bounded
 cleanup; a kill signal or host crash cannot provide an orderly-cleanup receipt.
+An interrupted or timed-out client receives termination, followed by forced
+termination after two seconds if necessary and up to three seconds for process
+reaping. Its partial output and separate cancellation receipt are retained.
+Client process exit never establishes that native cleanup completed.
 
 ## Interpret the evidence
 
@@ -103,6 +107,14 @@ events. Start success alone is insufficient. The probe does not provision guest
 addresses or a host IPv6 gateway, weaken runtime gateway readiness, or claim
 full network connectivity. Dual-stack configuration remains present in every
 case; full Pod/Service acceptance requires its own unchanged integration suite.
+
+A VZ start still pending after 20 seconds fails the case. Because VZ does not
+allow stop during start, the probe retains the VM and network reference and
+stops a late successful start. The overall VZ operation budget is 35 seconds;
+expiry reports unconfirmed cleanup and stops the matrix. Pending or uncertain
+native resources remain retained until confirmed cleanup or process exit.
+Errors received during stop are included in the final result, independently of
+whether stop itself succeeds.
 
 All JSONL events, command stderr, host build, entitlement readback, binary
 SHA-256, plan and summary stay in the printed mode-0700 evidence directory.

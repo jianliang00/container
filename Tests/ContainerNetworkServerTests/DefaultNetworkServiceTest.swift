@@ -213,8 +213,7 @@ struct DefaultNetworkServiceTest {
 
         let first = Task { try await service.activate(session: firstSession) }
         await waitForActivationCount(network, 1)
-        let second = Task { try await service.activate(session: secondSession) }
-        for _ in 0..<10 { await Task.yield() }
+        let second = await service.beginActivation(session: secondSession)
         #expect(await network.activationCount == 1)
 
         await gate.open()
@@ -247,10 +246,7 @@ struct DefaultNetworkServiceTest {
             try await service.activate(session: disconnectedSession)
         }
         await waitForActivationCount(network, 1)
-        let surviving = Task(priority: .low) {
-            try await service.activate(session: survivingSession)
-        }
-        for _ in 0..<10 { await Task.yield() }
+        let surviving = await service.beginActivation(session: survivingSession)
 
         await disconnectedSession.fireDisconnect()
         await gate.open()
@@ -397,6 +393,21 @@ struct DefaultNetworkServiceTest {
             ),
             log: Logger(label: "DefaultNetworkServiceTest")
         )
+    }
+}
+
+extension DefaultNetworkService {
+    fileprivate func beginActivation(session: XPCServerSession) async -> Task<Void, Error> {
+        let (started, continuation) = AsyncStream<Void>.makeStream()
+        let task = Task {
+            continuation.yield()
+            continuation.finish()
+            try await activate(session: session)
+        }
+        // Both tasks run on the service actor. This returns only after the
+        // activation call has reached its first suspension, registering its waiter.
+        for await _ in started {}
+        return task
     }
 }
 

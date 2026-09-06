@@ -67,7 +67,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         var transition: Transition?
     }
 
-    private struct NetworkInfo {
+    struct NetworkInfo: Sendable {
         let network: ManagedVmnetCFReference
         let ipv4Subnet: CIDRv4
         let ipv4Gateway: IPv4Address
@@ -79,6 +79,8 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
     private let stateMutex: Mutex<State>
     private let hostIPv6GatewayWaiter: VmnetHostIPv6GatewayWaiter
     private let daemonInspector: any VmnetDaemonInspecting
+    private let createReservation: @Sendable () throws -> NetworkInfo
+    private let serializeReservation: @Sendable (OpaquePointer) throws -> XPCMessage
     private let log: Logger
 
     /// Configure a bridge network that allows external system access using
@@ -98,7 +100,9 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         configuration: NetworkConfiguration,
         log: Logger,
         hostIPv6GatewayReadinessChecker: any VmnetHostIPv6GatewayReadinessChecking,
-        daemonInspector: any VmnetDaemonInspecting = SystemVmnetDaemonInspector()
+        daemonInspector: any VmnetDaemonInspecting = SystemVmnetDaemonInspector(),
+        createReservation: (@Sendable () throws -> NetworkInfo)? = nil,
+        serializeReservation: @escaping @Sendable (OpaquePointer) throws -> XPCMessage = ReservedVmnetNetwork.serializeNetworkRef
     ) throws {
         guard configuration.mode == .nat || configuration.mode == .hostOnly else {
             throw ContainerizationError(.unsupported, message: "invalid network mode \(configuration.mode)")
@@ -110,6 +114,8 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         self.log = log
         self.hostIPv6GatewayWaiter = VmnetHostIPv6GatewayWaiter(checker: hostIPv6GatewayReadinessChecker)
         self.daemonInspector = daemonInspector
+        self.createReservation = createReservation ?? { try Self.startNetwork(configuration: configuration, log: log) }
+        self.serializeReservation = serializeReservation
         stateMutex = Mutex(State())
         log.info("created vmnet network")
     }
@@ -131,12 +137,19 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
 
     public nonisolated func withAdditionalData(_ handler: (XPCMessage?) throws -> Void) throws {
         try stateMutex.withLock { state in
-            try requireValidReservation(&state)
-            guard let network = state.network else {
-                throw ContainerizationError(.invalidState, message: "network \(configuration.id) has no reservation")
+            guard !state.invalidated, state.transition == nil, state.status != nil,
+                let network = state.network, let lease = state.daemonLease
+            else {
+                throw ContainerizationError(.invalidState, message: "network \(configuration.id) has no usable reservation")
             }
-            let serialized = try Self.serializeNetworkRef(ref: network.value)
-            try requireValidReservation(&state)
+            let serialized: XPCMessage
+            do {
+                serialized = try lease.withNativeReservation { try serializeReservation(network.value) }
+            } catch {
+                invalidateReservation(&state, error: error)
+                throw error
+            }
+            // A consumer failure does not establish that the native reservation failed.
             try handler(serialized)
         }
     }
@@ -150,9 +163,7 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         }
 
         do {
-            let (networkInfo, daemonLease) = try VmnetDaemonLease.reserve(inspector: daemonInspector) {
-                try startNetwork(configuration: configuration, log: log)
-            }
+            let (networkInfo, daemonLease) = try VmnetDaemonLease.reserve(inspector: daemonInspector, create: createReservation)
             if let requestedIPv6Subnet = configuration.ipv6Subnet {
                 guard requestedIPv6Subnet == networkInfo.ipv6Subnet else {
                     throw ContainerizationError(
@@ -232,24 +243,28 @@ public final class ReservedVmnetNetwork: ContainerNetworkServer.Network {
         do {
             try lease.validate()
         } catch {
-            state.status = nil
-            state.invalidated = true
-            // Preserve the reference and existing attachment owners until stop.
-            // A still-running helper must not advertise its cached generation.
-            log.error("vmnet reservation invalidated", metadata: ["id": "\(configuration.id)", "error": "\(error)"])
+            invalidateReservation(&state, error: error)
             throw error
         }
     }
 
+    private func invalidateReservation(_ state: inout State, error: any Error) {
+        state.status = nil
+        state.invalidated = true
+        // Preserve the reference and existing attachment owners until stop.
+        // A still-running helper must not advertise its cached generation.
+        log.error("vmnet reservation invalidated", metadata: ["id": "\(configuration.id)", "error": "\(error)"])
+    }
+
     private static func serializeNetworkRef(ref: vmnet_network_ref) throws -> XPCMessage {
         var status: vmnet_return_t = .VMNET_SUCCESS
-        guard let refObject = vmnet_network_copy_serialization(ref, &status) else {
+        guard let refObject = vmnet_network_copy_serialization(ref, &status), status == .VMNET_SUCCESS else {
             throw ContainerizationError(.invalidArgument, message: "cannot serialize vmnet_network_ref to XPC object, status \(status)")
         }
         return XPCMessage(object: refObject)
     }
 
-    private func startNetwork(configuration: NetworkConfiguration, log: Logger) throws -> NetworkInfo {
+    private static func startNetwork(configuration: NetworkConfiguration, log: Logger) throws -> NetworkInfo {
         log.info(
             "starting vmnet network",
             metadata: [

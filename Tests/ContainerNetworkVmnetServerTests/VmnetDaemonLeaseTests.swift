@@ -113,6 +113,69 @@ struct VmnetDaemonLeaseTests {
         #expect(creates == 1)
     }
 
+    @Test func nativeFailureFencesUnchangedDaemonWithoutRetryOrRelease() throws {
+        let inspector = LeaseTestInspector(original)
+        let events = LeaseTestEvents()
+        let (resource, lease) = try VmnetDaemonLease.reserve(inspector: inspector) {
+            LeaseTestResource("active", events: events)
+        }
+        var calls = 0
+        #expect(throws: LeaseTestError.native) {
+            try lease.withNativeReservation {
+                calls += 1
+                throw LeaseTestError.native
+            }
+        }
+        #expect(try inspector.isCurrent(original))
+        #expect(throws: (any Error).self) { try lease.validate() }
+        #expect(throws: (any Error).self) {
+            try lease.withNativeReservation { calls += 1 }
+        }
+        #expect(calls == 1)
+        #expect(events.values == ["create:active"])
+        withExtendedLifetime(resource) {}
+    }
+
+    @Test func daemonReplacementDuringNativeOperationDiscardsOnlyItsResult() throws {
+        let inspector = LeaseTestInspector(original)
+        let lease = VmnetDaemonLease(identity: original, inspector: inspector)
+        let events = LeaseTestEvents()
+        #expect(throws: (any Error).self) {
+            _ = try lease.withNativeReservation {
+                inspector.set(nil)
+                return LeaseTestResource("unpublished", events: events)
+            }
+        }
+        #expect(events.values == ["create:unpublished", "release:unpublished"])
+        inspector.set(original)
+        #expect(throws: (any Error).self) { try lease.validate() }
+    }
+
+    @Test func nativeOperationIsNotCalledAfterPriorInvalidation() {
+        let inspector = LeaseTestInspector(nil)
+        let lease = VmnetDaemonLease(identity: original, inspector: inspector)
+        var calls = 0
+        #expect(throws: (any Error).self) {
+            try lease.withNativeReservation { calls += 1 }
+        }
+        inspector.set(original)
+        #expect(throws: (any Error).self) {
+            try lease.withNativeReservation { calls += 1 }
+        }
+        #expect(calls == 0)
+    }
+
+    @Test func successfulNativeOperationDoesNotFenceConsumerErrors() throws {
+        let lease = VmnetDaemonLease(identity: original, inspector: LeaseTestInspector(original))
+        #expect(throws: LeaseTestError.consumer) {
+            let result = try lease.withNativeReservation { 42 }
+            #expect(result == 42)
+            throw LeaseTestError.consumer
+        }
+        try lease.validate()
+        #expect(try lease.withNativeReservation { 43 } == 43)
+    }
+
     @Test func systemInspectorReadsRootProcessWithoutElevation() throws {
         let inspector = SystemVmnetDaemonInspector(executablePath: "/sbin/launchd")
         let identity = try #require(try inspector.current())
@@ -127,6 +190,8 @@ struct VmnetDaemonLeaseTests {
 private enum LeaseTestError: Error, Equatable {
     case inspection
     case create
+    case native
+    case consumer
 }
 
 private final class LeaseTestInspector: VmnetDaemonInspecting {

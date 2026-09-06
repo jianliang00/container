@@ -29,6 +29,15 @@ cannot revive it. Existing references and allocation owners are retained until
 normal stop or session cleanup; the helper does not automatically recreate a
 network, discard active VM ownership, restart a service, or reboot the host.
 
+Reference export also permanently invalidates the reservation when the native
+serialization API returns no object or a non-success status, even if the daemon
+identity is unchanged. The first request receives the original native failure;
+later status, export and activation requests fail closed without retrying that
+reservation. Errors from the consumer of an already exported reference do not
+invalidate it. This handles explicit native failures only: serialization is
+synchronous, has no public cancellation or deadline parameter, and a successful
+serialization is not a connection-health probe.
+
 An allocation whose reference export fails rolls back its newly allocated,
 unowned address. An existing session's address is preserved. Rollback uses the
 same per-hostname release coordination as session cleanup and reports cleanup
@@ -43,15 +52,19 @@ host reboot. Deploy and fault-test this change only in a drained, isolated
 maintenance window with that policy explicitly accounted for.
 
 Process continuity is a conservative invalidation signal, not a positive native
-reservation liveness or connectivity proof. It does not detect a native client
-connection failure that leaves the same daemon process alive. A daemon can also
-exit immediately after a successful check; activation and workload-readiness
+reservation liveness or connectivity proof. A native client connection failure
+that leaves the same daemon alive and produces no serialization error remains
+undetected by these checks. A daemon can also exit immediately after a successful
+check; activation and workload-readiness
 gates remain necessary. Kernel or daemon implementation changes that prevent
 identity inspection block admission rather than falling back to cached status.
 
 Offline tests cover incarnation changes, PID reuse, missing identity, inspection
-failure, bounded on-demand startup, cleanup, sticky invalidation, cached
-activation rejection, and address ownership. Deployment acceptance additionally
+failure, explicit native operation errors, bounded on-demand startup, cleanup,
+sticky invalidation, consumer-error isolation, cached activation rejection, and
+address ownership. On macOS 26, injected native operations also exercise the real
+reserved-network state machine, including status invalidation and reference
+retention until stop, without creating a host network. Deployment acceptance additionally
 requires a dedicated temporary network on the target OS: verify ordinary
 allocation first, then verify fail-closed behavior across an authorized daemon
 failure, recovery policy behavior, and full guest network readiness. Unit tests

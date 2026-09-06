@@ -152,6 +152,24 @@ final class VmnetDaemonLease: Sendable {
         }
     }
 
+    /// Call only for operations on the native reservation, not consumer callbacks.
+    /// Native failures permanently fence this lease even if the daemon is unchanged.
+    /// The caller serializes reservation access and retains ownership until normal cleanup.
+    func withNativeReservation<Resource>(_ operation: () throws -> Resource) throws -> Resource {
+        try validate()
+        let resource: Resource
+        do {
+            resource = try operation()
+        } catch {
+            invalidation.withLock { reason in
+                if reason == nil { reason = "native reservation operation failed: \(error)" }
+            }
+            throw error
+        }
+        try validate()
+        return resource
+    }
+
     /// The first unpublished reservation may start an on-demand daemon. Discard
     /// only that startup reservation, then bracket the published create with an
     /// already-known identity. Never rebind an existing lease after invalidation.

@@ -505,6 +505,13 @@ struct CRIShimRuntimeServerTests {
             workloadSnapshots: ["container-1": sandboxWorkloadSnapshot]
         )
         let cniManager = RecordingCNIManager()
+        cniManager.addHook = {
+            let metadata = try #require(
+                try metadataStore.listSandboxes().first(where: { $0.podUID == "created-pod-uid" })
+            )
+            #expect(metadata.state == .pending)
+            #expect(metadata.networkAttachments == ["default"])
+        }
         let server = try CRIShimGRPCServer(
             socketPath: socketPath,
             config: config,
@@ -830,7 +837,17 @@ struct CRIShimRuntimeServerTests {
 
         var removeSandboxRequest = Runtime_V1_RemovePodSandboxRequest()
         removeSandboxRequest.podSandboxID = runSandbox.podSandboxID
+        runtimeManager.removeSandboxError = ContainerizationError(
+            .timeout,
+            message: "sidecar cleanup is incomplete"
+        )
+        await #expect(throws: (any Error).self) {
+            _ = try await client.removePodSandbox(removeSandboxRequest)
+        }
+        #expect(try metadataStore.sandbox(id: runSandbox.podSandboxID) != nil)
+        runtimeManager.removeSandboxError = nil
         _ = try await client.removePodSandbox(removeSandboxRequest)
+        #expect(runtimeManager.stopSandboxCalls.count == 3)
         #expect(runtimeManager.removeSandboxCalls.count == 1)
         let removeSandboxCall = try #require(runtimeManager.removeSandboxCalls.first)
         #expect(removeSandboxCall.id == runSandbox.podSandboxID)
@@ -6372,6 +6389,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var stopWorkloadExitCode: Int32 = 42
     var stopWorkloadExitedAt: Date?
     var removeWorkloadError: (any Error)?
+    var removeSandboxError: (any Error)?
     var inspectSandboxError: (any Error)?
     var inspectSandboxResults: [String: [SandboxSnapshot?]] = [:]
     var inspectWorkloadError: (any Error)?
@@ -6522,6 +6540,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         id: String,
         force: Bool
     ) async throws {
+        if let removeSandboxError {
+            throw removeSandboxError
+        }
         sandboxSnapshots.removeValue(forKey: id)
         removeSandboxCalls.append((id: id, force: force))
     }
@@ -6892,6 +6913,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
 private final class RecordingCNIManager: CRIShimCNIManaging, @unchecked Sendable {
     private(set) var addCalls: [(sandboxID: String, networkName: String)] = []
     private(set) var deleteCalls: [(sandboxID: String, networkName: String)] = []
+    var addHook: (() throws -> Void)?
 
     func add(
         sandboxID: String,
@@ -6899,6 +6921,7 @@ private final class RecordingCNIManager: CRIShimCNIManaging, @unchecked Sendable
         config: CRIShimConfig
     ) async throws -> CRIShimCNIResult {
         addCalls.append((sandboxID: sandboxID, networkName: networkName))
+        try addHook?()
         return CRIShimCNIResult(
             networkName: networkName,
             interfaceName: "eth0",

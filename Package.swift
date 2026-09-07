@@ -265,6 +265,7 @@ let package = Package(
                 "ContainerCRIShimMacOS",
                 "ContainerKit",
                 "ContainerK8sNetworkPolicyMacOS",
+                "ContainerResource",
                 "RuntimeMacOSSidecarShared",
             ]
         ),
@@ -490,6 +491,7 @@ let package = Package(
                 "ContainerRuntimeClient",
                 "ContainerVersion",
                 "ContainerXPC",
+                "RuntimeMacOSSidecarShared",
                 "TerminalProgress",
             ],
             path: "Sources/Services/ContainerAPIService/Server"
@@ -499,6 +501,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
                 "ContainerAPIService",
+                "ContainerPlugin",
                 "ContainerResource",
                 "ContainerRuntimeLinuxClient",
                 "ContainerRuntimeClient",

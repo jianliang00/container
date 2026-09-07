@@ -117,7 +117,7 @@ struct MacOSSandboxServiceWaiterTests {
     }
 
     @Test
-    func unexpectedSidecarDisconnectResumesOutstandingWaiters() async throws {
+    func unexpectedSidecarDisconnectDoesNotReportWorkloadExit() async throws {
         let tempRoot = makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
@@ -144,13 +144,28 @@ struct MacOSSandboxServiceWaiterTests {
         server.stop()
         try server.waitForCompletion()
 
-        let status = try await waitTask.value
-        #expect(status.exitCode == 255)
-        #expect(await service.testingWaiterCount(for: "exec-disconnect") == 0)
-
+        await service.handleUnexpectedSidecarDisconnect(
+            ContainerizationError(.interrupted, message: "test disconnect")
+        )
+        #expect(await service.testingWaiterCount(for: "exec-disconnect") == 1)
         let snapshot = try await service.testingInspectWorkload("exec-disconnect")
-        #expect(snapshot.status == .stopped)
-        #expect(snapshot.exitCode == 255)
+        #expect(snapshot.status == .running)
+        #expect(snapshot.exitCode == nil)
+
+        let replacement = try RecordingExecSidecarServer(socketPath: socketPath)
+        replacement.start()
+        defer { replacement.stop() }
+        try await service.testingSignalWorkload("exec-disconnect", signal: SIGUSR1)
+        #expect(
+            replacement.recordedRequests().contains {
+                $0.method == .processSignal
+            }
+        )
+
+        waitTask.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await waitTask.value
+        }
     }
 
     @Test
@@ -801,10 +816,14 @@ struct MacOSSandboxServiceWaiterTests {
 
     @Test
     func sidecarTeardownDrainsLateExitEventBeforeClosingSessions() async throws {
-        let tempRoot = makeTemporaryRoot()
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let temporaryDirectory = URL(
+            fileURLWithPath: "/tmp/macos-sidecar-\(UUID().uuidString.prefix(8))",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
 
         let configuration = try baseContainerConfiguration()
+        let tempRoot = temporaryDirectory.appendingPathComponent(configuration.id)
         let workloadID = configuration.id
         let sessionID = "__workload__pump-late-exit"
         let service = makeSandboxService(root: tempRoot)

@@ -154,12 +154,17 @@ extension MacOSSandboxService {
             machineState: config.macosGuest?.machineState
         )
 
-        // A stable launch label lets a recreated sandbox clean up an orphaned
-        // sidecar only after it has acquired the persistence lease. Refuse to
-        // unlink its socket if launchd cannot terminate it.
         if config.macosGuest?.machineState == nil {
-            try? bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
+            try await MacOSRuntimeCleanup.stop(
+                id: config.id,
+                root: root,
+                sidecarLabel: sidecarFullLaunchLabel(config: config)
+            )
+            try MacOSRuntimeCleanup.clearPending(root: root)
         } else {
+            // A stable launch label lets a recreated sandbox clean up an
+            // orphaned sidecar only after it has acquired the persistence
+            // lease.
             try bootoutLaunchAgent(fullLabel: sidecarFullLaunchLabel(config: config))
         }
         try removeStaleSidecarSocket(socketURL)
@@ -235,6 +240,47 @@ extension MacOSSandboxService {
 
     func stopAndQuitSidecarIfPresent() async throws {
         let config = configuration
+        if let config, config.macosGuest?.machineState == nil {
+            let handle = sidecarHandle
+            try MacOSRuntimeCleanup.markPending(root: root)
+            writeContainerLog(
+                Data(
+                    ("sidecar shutdown begin [label=\(handle?.launchLabel ?? sidecarLaunchLabel(config: config))]\n").utf8
+                )
+            )
+            handle?.client.setDisconnectHandler(nil)
+            do {
+                try handle?.client.stopVM()
+            } catch {
+                writeContainerLog(
+                    Data(
+                        ("sidecar stopVM failed [label=\(handle?.launchLabel ?? sidecarLaunchLabel(config: config))] error=\(String(describing: error))\n").utf8
+                    )
+                )
+            }
+            do {
+                try handle?.client.quit()
+            } catch {
+                writeContainerLog(
+                    Data(
+                        ("sidecar quit failed [label=\(handle?.launchLabel ?? sidecarLaunchLabel(config: config))] error=\(String(describing: error))\n").utf8
+                    )
+                )
+            }
+            await drainPendingSidecarExitEvents()
+            handle?.client.setEventHandler(nil)
+            await finishAndDrainSidecarEventPump()
+            try await MacOSRuntimeCleanup.stop(
+                id: config.id,
+                root: root,
+                sidecarLabel: sidecarFullLaunchLabel(config: config)
+            )
+            sidecarHandle = nil
+            handle?.client.closeControlConnection()
+            releaseMachineStateLeaseIfPresent()
+            return
+        }
+
         let requiresVerifiedCleanup = config?.macosGuest?.machineState != nil || machineStateLeaseFD >= 0
         guard let handle = sidecarHandle else {
             guard let config else {

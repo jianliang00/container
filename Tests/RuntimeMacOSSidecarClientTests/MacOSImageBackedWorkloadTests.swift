@@ -624,13 +624,13 @@ struct MacOSImageBackedWorkloadTests {
 
         server.start()
 
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
         let service = MacOSSandboxService(
-            root: tempDirectory.appendingPathComponent("sandbox"),
+            root: tempDirectory.appendingPathComponent(containerConfiguration.id),
             connection: nil,
             log: Logger(label: "MacOSImageBackedWorkloadTests"),
             contentStore: image.store
         )
-        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
         try await service.testingPrepareSandbox(containerConfiguration, state: "running")
         await service.testingInstallSidecarClient(socketPath: socketPath)
 
@@ -690,13 +690,13 @@ struct MacOSImageBackedWorkloadTests {
 
         server.start()
 
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
         let service = MacOSSandboxService(
-            root: tempDirectory.appendingPathComponent("sandbox"),
+            root: tempDirectory.appendingPathComponent(containerConfiguration.id),
             connection: nil,
             log: Logger(label: "MacOSImageBackedWorkloadTests"),
             contentStore: image.store
         )
-        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
         try await service.testingPrepareSandbox(containerConfiguration, state: "running")
         await service.testingInstallSidecarClient(socketPath: socketPath)
 
@@ -917,13 +917,13 @@ struct MacOSImageBackedWorkloadTests {
 
         server.start()
 
+        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
         let service = MacOSSandboxService(
-            root: tempDirectory.appendingPathComponent("sandbox"),
+            root: tempDirectory.appendingPathComponent(containerConfiguration.id),
             connection: nil,
             log: Logger(label: "MacOSImageBackedWorkloadTests"),
             contentStore: image.store
         )
-        let containerConfiguration = try Self.baseContainerConfiguration(indexDigest: image.indexDigest)
         try await service.testingPrepareSandbox(containerConfiguration, state: "running")
         await service.testingInstallSidecarClient(socketPath: socketPath)
 

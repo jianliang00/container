@@ -42,7 +42,7 @@ struct DurableGuestProcessSupervisorTests {
                 socklen_t(MemoryLayout<Int32>.size)
             ) == 0
         )
-        let connection = AgentConnection(fd: pair.server, processSupervisor: GuestProcessSupervisor())
+        let connection = try AgentConnection(fd: pair.server, processSupervisor: GuestProcessSupervisor())
         let started = Date()
 
         do {
@@ -430,7 +430,7 @@ struct DurableGuestProcessSupervisorTests {
                 socklen_t(MemoryLayout<Int32>.size)
             ) == 0
         )
-        let slowConnection = AgentConnection(fd: pair.server, processSupervisor: supervisor)
+        let slowConnection = try AgentConnection(fd: pair.server, processSupervisor: supervisor)
         let slowHandle = try supervisor.createAndAttach(
             frame: durableExecFrame(
                 id: executionID,
@@ -555,7 +555,7 @@ struct DurableGuestProcessSupervisorTests {
 
         let failedPair = try makeDurableProcessSocketPair()
         closeDurableProcessFD(failedPair.peer)
-        let failedConnection = AgentConnection(fd: failedPair.server, processSupervisor: supervisor)
+        let failedConnection = try AgentConnection(fd: failedPair.server, processSupervisor: supervisor)
         #expect(throws: (any Error).self) {
             _ = try supervisor.attach(
                 frame: .init(
@@ -598,7 +598,7 @@ struct DurableGuestProcessSupervisorTests {
 
         let ownerPair = try makeDurableProcessSocketPair()
         defer { closeDurableProcessFD(ownerPair.peer) }
-        let ownerConnection = AgentConnection(fd: ownerPair.server, processSupervisor: supervisor)
+        let ownerConnection = try AgentConnection(fd: ownerPair.server, processSupervisor: supervisor)
         let ownerHandle = try supervisor.createAndAttach(
             frame: durableExecFrame(id: executionID, script: "exec /bin/sleep 100"),
             connection: ownerConnection,
@@ -608,7 +608,7 @@ struct DurableGuestProcessSupervisorTests {
 
         let successorPair = try makeDurableProcessSocketPair()
         defer { closeDurableProcessFD(successorPair.peer) }
-        let successorConnection = AgentConnection(fd: successorPair.server, processSupervisor: supervisor)
+        let successorConnection = try AgentConnection(fd: successorPair.server, processSupervisor: supervisor)
         let attachResult = DurableLockedValue<Result<GuestProcessAttachmentHandle, Error>?>(nil)
         let attachFinished = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
@@ -885,10 +885,10 @@ struct DurableGuestProcessSupervisorTests {
 
         let firstPair = try makeDurableProcessSocketPair()
         defer { closeDurableProcessFD(firstPair.peer) }
-        let firstConnection = AgentConnection(fd: firstPair.server, processSupervisor: supervisor)
+        let firstConnection = try AgentConnection(fd: firstPair.server, processSupervisor: supervisor)
         let secondPair = try makeDurableProcessSocketPair()
         defer { closeDurableProcessFD(secondPair.peer) }
-        let secondConnection = AgentConnection(fd: secondPair.server, processSupervisor: supervisor)
+        let secondConnection = try AgentConnection(fd: secondPair.server, processSupervisor: supervisor)
         let firstResult = DurableLockedValue<Result<GuestProcessAttachmentHandle, Error>?>(nil)
         let secondResult = DurableLockedValue<Result<GuestProcessAttachmentHandle, Error>?>(nil)
         let ready = DispatchSemaphore(value: 0)
@@ -964,7 +964,7 @@ struct DurableGuestProcessSupervisorTests {
 
         let pair = try makeDurableProcessSocketPair()
         defer { closeDurableProcessFD(pair.peer) }
-        let connection = AgentConnection(fd: pair.server, processSupervisor: supervisor)
+        let connection = try AgentConnection(fd: pair.server, processSupervisor: supervisor)
         let handle = try supervisor.createAndAttach(
             frame: durableExecFrame(id: executionID, script: "while :; do sleep 1; done"),
             connection: connection,
@@ -1013,7 +1013,7 @@ struct DurableGuestProcessSupervisorTests {
 
         let ownerPair = try makeDurableProcessSocketPair()
         defer { closeDurableProcessFD(ownerPair.peer) }
-        let ownerConnection = AgentConnection(fd: ownerPair.server, processSupervisor: supervisor)
+        let ownerConnection = try AgentConnection(fd: ownerPair.server, processSupervisor: supervisor)
         let ownerHandle = try supervisor.createAndAttach(
             frame: durableExecFrame(
                 id: executionID,
@@ -1043,7 +1043,7 @@ struct DurableGuestProcessSupervisorTests {
 
         let successorPair = try makeDurableProcessSocketPair()
         defer { closeDurableProcessFD(successorPair.peer) }
-        let successorConnection = AgentConnection(fd: successorPair.server, processSupervisor: supervisor)
+        let successorConnection = try AgentConnection(fd: successorPair.server, processSupervisor: supervisor)
         let handoffStarted = Date()
         let successorHandle = try supervisor.attach(
             frame: .init(

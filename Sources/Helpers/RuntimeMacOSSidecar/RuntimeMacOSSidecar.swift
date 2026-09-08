@@ -1934,6 +1934,11 @@ final class SidecarControlServer: @unchecked Sendable {
         var errorDescription: String? { reason }
     }
 
+    private struct BufferedProcessEvent: Sendable {
+        let event: MacOSSidecarEvent
+        let sequence: UInt64?
+    }
+
     private final class ProcessStreamSession: @unchecked Sendable {
         let processID: String
         let guestProcessID: String
@@ -1945,6 +1950,7 @@ final class SidecarControlServer: @unchecked Sendable {
         let processIdentifier: Int32?
         let trustedLaunchFingerprint: String?
         let incarnation: String?
+        let output: BoundedOutputBuffer<BufferedProcessEvent>
 
         private let stateLock = NSLock()
         private let writeQueue: DispatchQueue
@@ -1957,6 +1963,7 @@ final class SidecarControlServer: @unchecked Sendable {
         private var reconnectBlocked = false
         private var deletePending = false
         private var readerStartedGenerations: Set<UInt64> = []
+        private var outputDrainStarted = false
         private var lastDeliveredSequence: UInt64
         private var highestQueuedSequence: UInt64
 
@@ -1973,6 +1980,7 @@ final class SidecarControlServer: @unchecked Sendable {
             incarnation: String?,
             replayCursor: UInt64,
             fd: Int32,
+            outputBufferCapacity: Int = 4 * 1024 * 1024,
             writeTimeoutMilliseconds: Int32 = 1_000
         ) throws {
             self.processID = processID
@@ -1985,6 +1993,16 @@ final class SidecarControlServer: @unchecked Sendable {
             self.processIdentifier = processIdentifier
             self.trustedLaunchFingerprint = trustedLaunchFingerprint
             self.incarnation = incarnation
+            self.output = BoundedOutputBuffer(capacity: outputBufferCapacity) { count in
+                .init(
+                    event: .init(
+                        event: .processStderr,
+                        processID: processID,
+                        data: Data("\n[container: sidecar output truncated; discarded \(count) bytes]\n".utf8)
+                    ),
+                    sequence: nil
+                )
+            }
             self.lastDeliveredSequence = replayCursor
             self.highestQueuedSequence = replayCursor
             let readerFD = Darwin.dup(fd)
@@ -2108,6 +2126,14 @@ final class SidecarControlServer: @unchecked Sendable {
                 return false
             }
             readerStartedGenerations.insert(expected.generation)
+            return true
+        }
+
+        func beginOutputDrain() -> Bool {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            guard !outputDrainStarted else { return false }
+            outputDrainStarted = true
             return true
         }
 
@@ -2305,6 +2331,7 @@ final class SidecarControlServer: @unchecked Sendable {
             let closeUnclaimedReader = current.map { !readerStartedGenerations.contains($0.generation) } ?? false
             stateLock.unlock()
 
+            output.cancel()
             if let current {
                 _ = Darwin.shutdown(current.fd, SHUT_RDWR)
                 _ = writeQueue.sync {
@@ -2369,6 +2396,8 @@ final class SidecarControlServer: @unchecked Sendable {
     )
     private let processConnectionFactory: (@Sendable (UInt32) throws -> Int32)?
     private let processReconnectDelayMicroseconds: useconds_t
+    private let processOutputBufferCapacity: Int
+    private let processOutputDrainTimeout: TimeInterval
     private let fsLock = NSLock()
     private let fsReadLock = NSLock()
     private var listenFD: Int32 = -1
@@ -2389,6 +2418,8 @@ final class SidecarControlServer: @unchecked Sendable {
         processReconnectDelayMicroseconds: useconds_t = 100_000,
         maximumBufferedEventCount: Int = 256,
         maximumBufferedEventBytes: Int = 16 * 1024 * 1024,
+        processOutputBufferCapacity: Int = 4 * 1024 * 1024,
+        processOutputDrainTimeout: TimeInterval = 2,
         controlWriteTimeoutMilliseconds: Int32 = 1_000
     ) {
         self.socketPath = socketPath
@@ -2396,6 +2427,8 @@ final class SidecarControlServer: @unchecked Sendable {
         self.log = log
         self.processConnectionFactory = processConnectionFactory
         self.processReconnectDelayMicroseconds = processReconnectDelayMicroseconds
+        self.processOutputBufferCapacity = max(processOutputBufferCapacity, 1)
+        self.processOutputDrainTimeout = max(processOutputDrainTimeout, 0)
         self.eventDelivery = SidecarEventDeliveryBuffer(
             log: log,
             maximumEventCount: maximumBufferedEventCount,
@@ -3265,6 +3298,7 @@ final class SidecarControlServer: @unchecked Sendable {
             incarnation: durable ? incarnation ?? exec.durableIncarnation : nil,
             replayCursor: replayCursor,
             fd: fd,
+            outputBufferCapacity: processOutputBufferCapacity,
             writeTimeoutMilliseconds: writeTimeoutMilliseconds
         )
         do {
@@ -3824,7 +3858,8 @@ final class SidecarControlServer: @unchecked Sendable {
                 trustedLaunchFingerprint: exec.durableLaunchFingerprint,
                 incarnation: exec.durableIncarnation,
                 replayCursor: replayCursor,
-                fd: fd
+                fd: fd,
+                outputBufferCapacity: processOutputBufferCapacity
             )
             unregisteredSession = session
             if handshake.status?.replayTruncated == true {
@@ -4334,6 +4369,22 @@ final class SidecarControlServer: @unchecked Sendable {
         initialFrames: [SidecarGuestAgentFrame] = []
     ) -> Bool {
         guard session.claimReader(connection) else { return false }
+        if session.beginOutputDrain() {
+            Thread.detachNewThread { [weak self, weak session] in
+                guard let session else { return }
+                while let record = session.output.next() {
+                    guard let self else {
+                        session.output.cancel()
+                        return
+                    }
+                    self.emitProcessEvent(
+                        record.event,
+                        session: session,
+                        sequence: record.sequence
+                    )
+                }
+            }
+        }
         Thread.detachNewThread { [weak self] in
             guard let self else {
                 Darwin.close(connection.readerFD)
@@ -4350,27 +4401,31 @@ final class SidecarControlServer: @unchecked Sendable {
         initialFrames: [SidecarGuestAgentFrame] = []
     ) {
         let processID = session.processID
-        var exitEmitted = false
+        var exitQueued = false
         var pendingExitCode: Int32?
         var pendingExitSequence: UInt64?
         var bufferedFrames = ArraySlice(initialFrames)
         defer { Darwin.close(connection.readerFD) }
         defer {
-            let detached = session.durable && exitEmitted ? false : session.detach(connection)
+            let detached = session.durable && exitQueued ? false : session.detach(connection)
             if session.durable {
-                if detached, !exitEmitted {
+                if detached, !exitQueued {
                     scheduleProcessReconnect(session)
                 }
             } else {
                 _ = removeProcessSession(processID, matching: session)
-                if !exitEmitted {
-                    emitEvent(
-                        .init(
-                            event: .processExit,
-                            processID: processID,
-                            exitCode: pendingExitCode ?? 1,
+                if !exitQueued {
+                    session.output.finish(
+                        with: .init(
+                            event: .init(
+                                event: .processExit,
+                                processID: processID,
+                                exitCode: pendingExitCode ?? 1,
+                                sequence: pendingExitSequence
+                            ),
                             sequence: pendingExitSequence
-                        )
+                        ),
+                        drainTimeout: processOutputDrainTimeout
                     )
                 }
             }
@@ -4387,17 +4442,19 @@ final class SidecarControlServer: @unchecked Sendable {
                 } else {
                     guard let drained = try readProcessFrameIfAvailable(fd: connection.readerFD, timeoutMilliseconds: 100) else {
                         session.markTerminal()
-                        emitProcessEvent(
-                            .init(
-                                event: .processExit,
-                                processID: processID,
-                                exitCode: pendingExitCode,
+                        session.output.finish(
+                            with: .init(
+                                event: .init(
+                                    event: .processExit,
+                                    processID: processID,
+                                    exitCode: pendingExitCode,
+                                    sequence: pendingExitSequence
+                                ),
                                 sequence: pendingExitSequence
                             ),
-                            session: session,
-                            sequence: pendingExitSequence
+                            drainTimeout: processOutputDrainTimeout
                         )
-                        exitEmitted = true
+                        exitQueued = true
                         return
                     }
                     frame = drained
@@ -4405,12 +4462,14 @@ final class SidecarControlServer: @unchecked Sendable {
                 if session.durable {
                     guard frame.id == session.guestProcessID else {
                         if frame.type == .stdout || frame.type == .stderr || frame.type == .exit {
-                            emitEvent(
+                            enqueueProcessEvent(
                                 .init(
                                     event: .processError,
                                     processID: processID,
                                     message: "durable process event identifier mismatch"
-                                )
+                                ),
+                                session: session,
+                                sequence: nil
                             )
                         }
                         continue
@@ -4422,7 +4481,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 switch frame.type {
                 case .stdout:
                     if let data = frame.data, !data.isEmpty {
-                        emitProcessEvent(
+                        enqueueProcessEvent(
                             .init(
                                 event: .processStdout,
                                 processID: processID,
@@ -4437,7 +4496,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     }
                 case .stderr:
                     if let data = frame.data, !data.isEmpty {
-                        emitProcessEvent(
+                        enqueueProcessEvent(
                             .init(
                                 event: .processStderr,
                                 processID: processID,
@@ -4451,7 +4510,15 @@ final class SidecarControlServer: @unchecked Sendable {
                         acknowledgeProcessEvent(session: session, sequence: frame.sequence)
                     }
                 case .error:
-                    emitEvent(.init(event: .processError, processID: processID, message: frame.message ?? "unknown guest-agent error"))
+                    enqueueProcessEvent(
+                        .init(
+                            event: .processError,
+                            processID: processID,
+                            message: frame.message ?? "unknown guest-agent error"
+                        ),
+                        session: session,
+                        sequence: nil
+                    )
                 case .exit:
                     pendingExitCode = frame.exitCode ?? 1
                     pendingExitSequence = frame.sequence
@@ -4466,17 +4533,19 @@ final class SidecarControlServer: @unchecked Sendable {
         } catch {
             if let pendingExitCode, isExpectedEOF(error) {
                 session.markTerminal()
-                emitProcessEvent(
-                    .init(
-                        event: .processExit,
-                        processID: processID,
-                        exitCode: pendingExitCode,
+                session.output.finish(
+                    with: .init(
+                        event: .init(
+                            event: .processExit,
+                            processID: processID,
+                            exitCode: pendingExitCode,
+                            sequence: pendingExitSequence
+                        ),
                         sequence: pendingExitSequence
                     ),
-                    session: session,
-                    sequence: pendingExitSequence
+                    drainTimeout: processOutputDrainTimeout
                 )
-                exitEmitted = true
+                exitQueued = true
                 return
             }
             if session.durable {
@@ -4490,9 +4559,28 @@ final class SidecarControlServer: @unchecked Sendable {
                     ]
                 )
             } else if !isExpectedEOF(error) {
-                emitEvent(.init(event: .processError, processID: processID, message: "sidecar process stream read failed: \(error.localizedDescription)"))
+                enqueueProcessEvent(
+                    .init(
+                        event: .processError,
+                        processID: processID,
+                        message: "sidecar process stream read failed: \(error.localizedDescription)"
+                    ),
+                    session: session,
+                    sequence: nil
+                )
             }
         }
+    }
+
+    private func enqueueProcessEvent(
+        _ event: MacOSSidecarEvent,
+        session: ProcessStreamSession,
+        sequence: UInt64?
+    ) {
+        session.output.append(
+            .init(event: event, sequence: sequence),
+            bytes: event.data?.count ?? event.message?.utf8.count ?? 1
+        )
     }
 
     @discardableResult

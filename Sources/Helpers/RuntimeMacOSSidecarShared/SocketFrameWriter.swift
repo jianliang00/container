@@ -29,6 +29,7 @@ public final class SocketFrameWriter: @unchecked Sendable {
     public init(fd: Int32, timeout: TimeInterval = 5) throws {
         let ownedFD = fcntl(fd, F_DUPFD_CLOEXEC, 0)
         guard ownedFD >= 0 else { throw Self.posixError() }
+        let timeout = max(timeout, 0.001)
         var noSigPipe: Int32 = 1
         guard
             setsockopt(
@@ -43,21 +44,9 @@ public final class SocketFrameWriter: @unchecked Sendable {
             Darwin.close(ownedFD)
             throw error
         }
-        let wholeSeconds = floor(timeout)
-        var sendTimeout = timeval(
-            tv_sec: Int(wholeSeconds),
-            tv_usec: Int32((timeout - wholeSeconds) * 1_000_000)
-        )
-        guard
-            setsockopt(
-                ownedFD,
-                SOL_SOCKET,
-                SO_SNDTIMEO,
-                &sendTimeout,
-                socklen_t(MemoryLayout<timeval>.size)
-            ) == 0
-        else {
-            let error = Self.posixError()
+        do {
+            try Self.configureSendTimeout(fd: ownedFD, timeout: timeout)
+        } catch {
             Darwin.close(ownedFD)
             throw error
         }
@@ -76,24 +65,29 @@ public final class SocketFrameWriter: @unchecked Sendable {
         stateLock.unlock()
     }
 
-    public func write<T: Encodable>(_ value: T) throws {
+    public func write<T: Encodable>(_ value: T, deadline requestedDeadline: Date? = nil) throws {
         let payload = try JSONEncoder().encode(value)
         guard payload.count <= MacOSSidecarSocketIO.defaultMaxFrameSize else { throw POSIXError(.EMSGSIZE) }
         var length = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
         frame.append(payload)
 
-        let deadline = DispatchTime.now() + timeout
-        guard writing.wait(timeout: deadline) == .success else { throw POSIXError(.ETIMEDOUT) }
+        let defaultDeadline = Date().addingTimeInterval(timeout)
+        let deadline = requestedDeadline.map { min($0, defaultDeadline) } ?? defaultDeadline
+        guard writing.wait(timeout: .now() + max(0, deadline.timeIntervalSinceNow)) == .success else {
+            throw POSIXError(.ETIMEDOUT)
+        }
         defer { writing.signal() }
         do {
+            defer { try? Self.configureSendTimeout(fd: fd, timeout: timeout) }
             try frame.withUnsafeBytes { bytes in
                 guard let base = bytes.baseAddress else { return }
                 var offset = 0
                 while offset < bytes.count {
                     if stateLock.withLock({ cancelled }) { throw POSIXError(.ECANCELED) }
-                    let now = DispatchTime.now()
-                    guard now < deadline else { throw POSIXError(.ETIMEDOUT) }
+                    let remaining = deadline.timeIntervalSinceNow
+                    guard remaining > 0 else { throw POSIXError(.ETIMEDOUT) }
+                    try Self.configureSendTimeout(fd: fd, timeout: remaining)
                     let count = Darwin.write(fd, base.advanced(by: offset), min(64 * 1024, bytes.count - offset))
                     if count > 0 {
                         offset += count
@@ -103,17 +97,41 @@ public final class SocketFrameWriter: @unchecked Sendable {
                     let code = errno
                     if code == EINTR { continue }
                     guard code == EAGAIN || code == EWOULDBLOCK else { throw Self.posixError(code) }
+                    let pollRemaining = deadline.timeIntervalSinceNow
+                    guard pollRemaining > 0 else { throw POSIXError(.ETIMEDOUT) }
                     var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                    let remaining = deadline.uptimeNanoseconds - now.uptimeNanoseconds
-                    let milliseconds = Int32(min(UInt64(Int32.max), max(1, remaining / 1_000_000)))
+                    let milliseconds = Int32(min(Double(Int32.max), max(1, ceil(pollRemaining * 1_000))))
                     let result = Darwin.poll(&descriptor, 1, milliseconds)
                     if result == 0 { throw POSIXError(.ETIMEDOUT) }
                     if result < 0 && errno != EINTR { throw Self.posixError() }
+                    if result > 0, descriptor.revents & Int16(POLLOUT) == 0 {
+                        throw POSIXError(.EPIPE)
+                    }
                 }
             }
         } catch {
             cancel()
             throw error
+        }
+    }
+
+    private static func configureSendTimeout(fd: Int32, timeout: TimeInterval) throws {
+        let clamped = max(timeout, 0.001)
+        let wholeSeconds = floor(clamped)
+        var sendTimeout = timeval(
+            tv_sec: Int(wholeSeconds),
+            tv_usec: Int32((clamped - wholeSeconds) * 1_000_000)
+        )
+        guard
+            setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_SNDTIMEO,
+                &sendTimeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            ) == 0
+        else {
+            throw posixError()
         }
     }
 

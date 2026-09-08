@@ -153,7 +153,7 @@ private final class VsockListener {
             let peerCID = clientAddr.svm_cid
             logAgentInfo("accepted vsock client fd=\(clientFD) cid=\(peerCID) port=\(peerPort)")
 
-            let connection = AgentConnection(fd: clientFD)
+            let connection = try AgentConnection(fd: clientFD)
             Thread.detachNewThread {
                 do {
                     try connection.run()
@@ -173,12 +173,14 @@ final class AgentConnection: @unchecked Sendable {
     }
 
     private let fd: Int32
-    private let lock = NSLock()
     private let attachmentLock = NSLock()
     private let socketHandle: FileHandle
     private let processSupervisor: GuestProcessSupervisor
     private let relayHalfCloseIdleTimeout: TimeInterval?
     private let relayPeerStateCheckInterval: TimeInterval
+    fileprivate let writer: SocketFrameWriter
+    fileprivate let outputBufferCapacity: Int
+    fileprivate let outputDrainTimeout: TimeInterval
 
     private var buffer = Data()
     private var session: (any GuestAgentProcessSession)?
@@ -191,8 +193,11 @@ final class AgentConnection: @unchecked Sendable {
         processSupervisor: GuestProcessSupervisor = .shared,
         // Raw relay EOF represents a TCP write-half-close, so no application idle deadline is imposed by default.
         relayHalfCloseIdleTimeout: TimeInterval? = nil,
-        relayPeerStateCheckInterval: TimeInterval = 1
-    ) {
+        relayPeerStateCheckInterval: TimeInterval = 1,
+        outputBufferCapacity: Int = 4 * 1024 * 1024,
+        outputDrainTimeout: TimeInterval = 1,
+        socketWriteTimeout: TimeInterval = 5
+    ) throws {
         self.fd = fd
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         self.processSupervisor = processSupervisor
@@ -201,6 +206,9 @@ final class AgentConnection: @unchecked Sendable {
             relayPeerStateCheckInterval.isFinite
             ? max(relayPeerStateCheckInterval, 0.01)
             : 1
+        self.writer = try SocketFrameWriter(fd: fd, timeout: socketWriteTimeout)
+        self.outputBufferCapacity = max(outputBufferCapacity, 1)
+        self.outputDrainTimeout = max(outputDrainTimeout, 0)
     }
 
     func run() throws {
@@ -243,6 +251,7 @@ final class AgentConnection: @unchecked Sendable {
     }
 
     private func cleanupConnection() {
+        writer.cancel()
         detachDurableProcess()
         session?.cleanup()
         for transaction in fileTransactions.values {
@@ -1047,40 +1056,11 @@ final class AgentConnection: @unchecked Sendable {
     }
 
     func send(frame: GuestAgentFrame, deadline: Date? = nil) throws {
-        let payload = try JSONEncoder().encode(frame)
-        var length = UInt32(payload.count).bigEndian
-        let header = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
-
-        if let deadline {
-            guard lock.lock(before: deadline) else {
-                throw guestAgentSocketTimeoutError()
-            }
-        } else {
-            lock.lock()
-        }
-        defer { lock.unlock() }
-        var originalFlags: Int32?
-        if deadline != nil {
-            let flags = Darwin.fcntl(fd, F_GETFL)
-            guard flags >= 0 else { throw POSIXError.fromErrno() }
-            if flags & O_NONBLOCK == 0 {
-                guard Darwin.fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
-                    throw POSIXError.fromErrno()
-                }
-                originalFlags = flags
-            }
-        }
-        defer {
-            if let originalFlags {
-                _ = Darwin.fcntl(fd, F_SETFL, originalFlags)
-            }
-        }
-        try writeAllToSocket(header, deadline: deadline)
-        try writeAllToSocket(payload, deadline: deadline)
+        try writer.write(frame, deadline: deadline)
     }
 
     func invalidate() {
-        _ = Darwin.shutdown(fd, SHUT_RDWR)
+        writer.cancel()
     }
 
     private func readSocketChunk(into storage: inout [UInt8]) throws -> Data? {
@@ -1118,56 +1098,6 @@ final class AgentConnection: @unchecked Sendable {
                 code: Int(code),
                 userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
             )
-        }
-    }
-
-    private func writeAllToSocket(_ data: Data, deadline: Date? = nil) throws {
-        let maximumWriteSize = 64 * 1024
-        try data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return }
-            var totalWritten = 0
-            while totalWritten < rawBuffer.count {
-                if let deadline, deadline.timeIntervalSinceNow <= 0 {
-                    throw guestAgentSocketTimeoutError()
-                }
-                let pointer = baseAddress.advanced(by: totalWritten)
-                let remaining = rawBuffer.count - totalWritten
-                let written: Int
-                if deadline != nil {
-                    written = Darwin.send(fd, pointer, min(remaining, maximumWriteSize), MSG_DONTWAIT | MSG_NOSIGNAL)
-                } else {
-                    written = Darwin.write(fd, pointer, remaining)
-                }
-                if written > 0 {
-                    totalWritten += written
-                    continue
-                }
-                if written == 0 {
-                    throw NSError(
-                        domain: NSPOSIXErrorDomain,
-                        code: Int(EPIPE),
-                        userInfo: [NSLocalizedDescriptionKey: "write returned 0 bytes"]
-                    )
-                }
-
-                let code = errno
-                if code == EINTR {
-                    continue
-                }
-                if code == EAGAIN || code == EWOULDBLOCK {
-                    if let deadline {
-                        try waitForGuestAgentSocketWritable(fd: fd, deadline: deadline)
-                    } else {
-                        usleep(10_000)
-                    }
-                    continue
-                }
-                throw NSError(
-                    domain: NSPOSIXErrorDomain,
-                    code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
-                )
-            }
         }
     }
 
@@ -1744,6 +1674,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
     private let terminal: Bool
     private weak var connection: AgentConnection?
     private weak var eventSink: (any SpawnedProcessEventSink)?
+    private let output: BoundedOutputBuffer<GuestAgentFrame>?
+    private let outputDrainTimeout: TimeInterval
     private let masterHandle: FileHandle?
     private let stdinHandle: FileHandle?
     private let stdoutHandle: FileHandle?
@@ -1768,6 +1700,15 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         self.terminal = terminal
         self.connection = connection
         self.eventSink = eventSink
+        if let connection {
+            self.output = BoundedOutputBuffer(capacity: connection.outputBufferCapacity) { count in
+                .stderr(Data("\n[container: output truncated; discarded \(count) bytes]\n".utf8))
+            }
+            self.outputDrainTimeout = connection.outputDrainTimeout
+        } else {
+            self.output = nil
+            self.outputDrainTimeout = 1
+        }
         self.masterHandle = masterHandle
         self.stdinHandle = stdinHandle
         self.stdoutHandle = stdoutHandle
@@ -1967,6 +1908,20 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         _ = stdoutHandle
         _ = stderrHandle
 
+        if let output, let connection {
+            Thread.detachNewThread {
+                while let frame = output.next() {
+                    do {
+                        try connection.send(frame: frame)
+                    } catch {
+                        output.cancel()
+                        connection.invalidate()
+                        return
+                    }
+                }
+            }
+        }
+
         if let masterHandle {
             masterHandle.readabilityHandler = { [weak self] handle in
                 self?.forwardAvailableData(from: handle, channel: .stdout)
@@ -2081,6 +2036,7 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         }
         outputLock.unlock()
 
+        output?.cancel()
         stdoutHandle?.readabilityHandler = nil
         stderrHandle?.readabilityHandler = nil
         masterHandle?.readabilityHandler = nil
@@ -2156,12 +2112,9 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             return
         }
 
-        guard let data = readAvailableOutput(from: handle), !data.isEmpty else {
+        if readAvailableOutput(from: handle, channel: channel) {
             handle.readabilityHandler = nil
-            return
         }
-
-        send(data, channel: channel)
     }
 
     private func flushOutputAndSendExit(_ status: Int32) {
@@ -2172,47 +2125,56 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             return
         }
 
-        drainRemainingOutput(from: masterHandle, channel: .stdout)
-        drainRemainingOutput(from: stdoutHandle, channel: .stdout)
-        drainRemainingOutput(from: stderrHandle, channel: .stderr)
+        masterHandle?.readabilityHandler = nil
+        stdoutHandle?.readabilityHandler = nil
+        stderrHandle?.readabilityHandler = nil
+
+        var remaining: [(FileHandle, GuestProcessOutputChannel)] = []
+        if let masterHandle { remaining.append((masterHandle, .stdout)) }
+        if let stdoutHandle { remaining.append((stdoutHandle, .stdout)) }
+        if let stderrHandle { remaining.append((stderrHandle, .stderr)) }
+        let deadline = DispatchTime.now() + outputDrainTimeout
+        while !remaining.isEmpty, DispatchTime.now() < deadline {
+            remaining.removeAll { handle, channel in
+                readAvailableOutput(from: handle, channel: channel)
+            }
+            if !remaining.isEmpty {
+                usleep(1_000)
+            }
+        }
+        if !remaining.isEmpty {
+            send(
+                Data("\n[container: output truncated; pipe drain timed out after process exit]\n".utf8),
+                channel: .stderr
+            )
+        }
 
         exitSent = true
         if let eventSink {
             eventSink.processSession(self, didExitWithCode: status)
         } else {
-            try? connection?.send(frame: .exit(status))
+            output?.finish(with: .exit(status))
         }
     }
 
-    private func drainRemainingOutput(from handle: FileHandle?, channel: GuestProcessOutputChannel) {
-        guard let handle else { return }
+    /// Called under outputLock. Poll plus one bounded read avoids waiting for
+    /// EOF from a descendant that inherited the process pipe.
+    private func readAvailableOutput(from handle: FileHandle, channel: GuestProcessOutputChannel) -> Bool {
+        var descriptor = pollfd(fd: handle.fileDescriptor, events: Int16(POLLIN), revents: 0)
+        let ready = Darwin.poll(&descriptor, 1, 0)
+        if ready == 0 || (ready < 0 && errno == EINTR) { return false }
+        if ready < 0 || descriptor.revents & Int16(POLLNVAL) != 0 { return true }
 
-        while true {
-            guard let data = readAvailableOutput(from: handle), !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            send(data, channel: channel)
+        var bytes = [UInt8](repeating: 0, count: 64 * 1024)
+        let count = Darwin.read(handle.fileDescriptor, &bytes, bytes.count)
+        if count > 0 {
+            send(Data(bytes.prefix(count)), channel: channel)
+            return false
         }
-    }
-
-    private func readAvailableOutput(from handle: FileHandle) -> Data? {
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let count = buffer.withUnsafeMutableBytes { bytes in
-                Darwin.read(handle.fileDescriptor, bytes.baseAddress, bytes.count)
-            }
-            if count > 0 {
-                return Data(buffer.prefix(count))
-            }
-            if count == 0 {
-                return Data()
-            }
-            if errno == EINTR {
-                continue
-            }
-            return nil
+        if count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            return false
         }
+        return true
     }
 
     private func send(_ data: Data, channel: GuestProcessOutputChannel) {
@@ -2222,9 +2184,9 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         }
         switch channel {
         case .stdout:
-            try? connection?.send(frame: .stdout(data))
+            output?.append(.stdout(data), bytes: data.count)
         case .stderr:
-            try? connection?.send(frame: .stderr(data))
+            output?.append(.stderr(data), bytes: data.count)
         }
     }
 }
@@ -2704,38 +2666,6 @@ private func enterRootDirectory(_ rootDirectory: UnsafePointer<CChar>?, fail: (I
     }
 }
 
-private func waitForGuestAgentSocketWritable(fd: Int32, deadline: Date) throws {
-    while true {
-        let remaining = deadline.timeIntervalSinceNow
-        guard remaining > 0 else {
-            throw guestAgentSocketTimeoutError()
-        }
-        let milliseconds = Int32(min(ceil(remaining * 1_000), Double(Int32.max)))
-        var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        let result = Darwin.poll(&descriptor, 1, max(milliseconds, 1))
-        if result > 0 {
-            guard descriptor.revents & Int16(POLLOUT) != 0 else {
-                throw POSIXError(.EPIPE)
-            }
-            return
-        }
-        if result == 0 {
-            throw guestAgentSocketTimeoutError()
-        }
-        if errno != EINTR {
-            throw POSIXError.fromErrno()
-        }
-    }
-}
-
-private func guestAgentSocketTimeoutError() -> NSError {
-    NSError(
-        domain: NSPOSIXErrorDomain,
-        code: Int(ETIMEDOUT),
-        userInfo: [NSLocalizedDescriptionKey: "guest-agent socket write timed out"]
-    )
-}
-
 private func applyProcessIdentity(_ identity: GuestAgentExecIdentity, fail: (Int32) -> Never) {
     let currentUID = geteuid()
     let currentGID = getegid()
@@ -2780,7 +2710,7 @@ private func sendSignalToProcessGroup(pid: pid_t, signal: Int32) throws {
     }
 }
 
-struct GuestAgentFrame: Codable {
+struct GuestAgentFrame: Codable, Sendable {
     enum FrameType: String, Codable {
         case exec
         case processInspect

@@ -28,6 +28,73 @@ import Testing
 @Suite(.serialized)
 struct SidecarControlServerTests {
     @Test
+    func slowControlClientDoesNotBlockGuestStreamDrain() throws {
+        let server = makeServer(controlWriteTimeoutMilliseconds: 5_000)
+        let guest = try makeSocketPair()
+        let control = try makeSocketPair()
+        defer {
+            server.stop()
+            closeIfValid(guest.peer)
+            closeIfValid(control.server)
+            closeIfValid(control.peer)
+        }
+        var sendBuffer: Int32 = 4_096
+        #expect(
+            setsockopt(
+                control.server,
+                SOL_SOCKET,
+                SO_SNDBUF,
+                &sendBuffer,
+                socklen_t(MemoryLayout<Int32>.size)
+            ) == 0
+        )
+        let request = MacOSSidecarExecRequestPayload(executable: "/bin/true")
+        try server._testRegisterProcessSession(
+            processID: "slow-client",
+            guestProcessID: "slow-client",
+            durable: false,
+            exec: request,
+            replayCursor: 0,
+            fd: guest.server
+        )
+        server._testSetEventClient(fd: control.server)
+        try server._testStartProcessReadLoop(processID: "slow-client")
+
+        let writer = try SocketFrameWriter(fd: guest.peer, timeout: 2)
+        let output = Data(repeating: 65, count: 64 * 1024)
+        let start = DispatchTime.now()
+        for _ in 0..<256 {
+            try writer.write(SidecarGuestAgentFrame(type: .stdout, data: output))
+        }
+        try writer.write(SidecarGuestAgentFrame(type: .exit, exitCode: 37))
+        Darwin.shutdown(guest.peer, SHUT_WR)
+        let deadline = DispatchTime.now() + 2
+        while server._testHasProcessSession(processID: "slow-client") {
+            guard DispatchTime.now() < deadline else { throw POSIXError(.ETIMEDOUT) }
+            usleep(10_000)
+        }
+        #expect(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds < 4_000_000_000)
+
+        var sawTruncation = false
+        var exitCode: Int32?
+        for _ in 0..<1_024 {
+            var descriptor = pollfd(fd: control.peer, events: Int16(POLLIN), revents: 0)
+            guard Darwin.poll(&descriptor, 1, 3_000) > 0 else { throw POSIXError(.ETIMEDOUT) }
+            let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: control.peer)
+            let event = try #require(envelope.event)
+            if String(data: event.data ?? Data(), encoding: .utf8)?.contains("output truncated") == true {
+                sawTruncation = true
+            }
+            if event.event == .processExit {
+                exitCode = event.exitCode
+                break
+            }
+        }
+        #expect(sawTruncation)
+        #expect(exitCode == 37)
+    }
+
+    @Test
     func machineStateControlClientDoesNotReplaceExplicitEventSubscriber() throws {
         signal(SIGPIPE, SIG_IGN)
         let socketPath = "/tmp/runtime-macos-sidecar-events-\(UUID().uuidString).sock"

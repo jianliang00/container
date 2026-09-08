@@ -174,7 +174,7 @@ struct GuestAgentTCPConnectTests {
         }
         closeTestFD(descriptors[1])
 
-        var connection: AgentConnection? = AgentConnection(fd: ownedFD)
+        var connection: AgentConnection? = try AgentConnection(fd: ownedFD)
         do {
             try connection?.run()
             Issue.record("expected ready write to fail after the peer closed")

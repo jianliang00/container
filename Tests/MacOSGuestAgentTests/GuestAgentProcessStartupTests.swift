@@ -355,7 +355,7 @@ struct GuestAgentProcessStartupTests {
     }
 
     @Test
-    func inheritedPipeDoesNotDelayExitIndefinitely() throws {
+    func backgroundChildDoesNotDelayExitIndefinitely() throws {
         let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {
             if let text = try? String(contentsOf: marker, encoding: .utf8), let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
@@ -374,7 +374,6 @@ struct GuestAgentProcessStartupTests {
         let start = DispatchTime.now()
         let frames = try readThroughExit(fd: harness.peerFD)
         #expect(frames.last?.exitCode == 37)
-        #expect(frames.contains { String(data: $0.data ?? Data(), encoding: .utf8)?.contains("pipe drain timed out") == true })
         #expect(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds < 2_000_000_000)
         try harness.waitForCompletion()
     }

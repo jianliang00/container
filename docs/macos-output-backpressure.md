@@ -13,7 +13,7 @@ File-transfer acknowledgements and payloads do not use the lossy output queues.
 | Sidecar event forwarding | Same bounds per process; a dedicated thread continues reading the guest stream while event delivery is slow |
 | Runtime event consumption | Same bounds per process; bounded wakeups and a reserved exit record replace unbounded event buffering |
 | Runtime log files | 4 MiB and 1,024 records per stdout/stderr writer; filesystem writes run outside the runtime actor |
-| Socket frame delivery | Five seconds, including serialization-lock acquisition; nonblocking writes preserve partial-frame offsets |
+| Socket frame delivery | Five seconds, including serialization-lock acquisition; blocking writes use a socket send timeout and preserve partial-frame offsets |
 | Pipe drain after process exit | One second, covering descendants that keep stdout/stderr open |
 | Queue drain after exit | Two seconds per queue, followed by a truncation marker and the retained terminal record |
 | Runtime log completion | Wait up to two seconds in total before publishing process completion; the actor remains available during the wait |
@@ -27,6 +27,10 @@ A socket write failure shuts down the connection. This prevents an incomplete
 JSON frame from being followed by another frame and wakes its reader. Transport
 failure follows the existing stream-failure/cleanup path; delivery of the real
 exit code requires a functioning connection.
+
+Virtualization.framework vsock descriptors remain in blocking mode because
+duplicated descriptors share file status flags. Bounded writes use
+`SO_SNDTIMEO`, fixed-size chunks, and the overall frame deadline.
 
 ## Deployment and validation
 

@@ -29,11 +29,34 @@ public final class SocketFrameWriter: @unchecked Sendable {
     public init(fd: Int32, timeout: TimeInterval = 5) throws {
         let ownedFD = fcntl(fd, F_DUPFD_CLOEXEC, 0)
         guard ownedFD >= 0 else { throw Self.posixError() }
-        // Darwin socket implementations can still block a send with only
-        // MSG_DONTWAIT. Readers wait with poll when this shared socket state
-        // produces EAGAIN.
-        let flags = fcntl(ownedFD, F_GETFL)
-        guard flags >= 0, fcntl(ownedFD, F_SETFL, flags | O_NONBLOCK) == 0 else {
+        var noSigPipe: Int32 = 1
+        guard
+            setsockopt(
+                ownedFD,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                &noSigPipe,
+                socklen_t(MemoryLayout<Int32>.size)
+            ) == 0
+        else {
+            let error = Self.posixError()
+            Darwin.close(ownedFD)
+            throw error
+        }
+        let wholeSeconds = floor(timeout)
+        var sendTimeout = timeval(
+            tv_sec: Int(wholeSeconds),
+            tv_usec: Int32((timeout - wholeSeconds) * 1_000_000)
+        )
+        guard
+            setsockopt(
+                ownedFD,
+                SOL_SOCKET,
+                SO_SNDTIMEO,
+                &sendTimeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            ) == 0
+        else {
             let error = Self.posixError()
             Darwin.close(ownedFD)
             throw error
@@ -71,7 +94,7 @@ public final class SocketFrameWriter: @unchecked Sendable {
                     if stateLock.withLock({ cancelled }) { throw POSIXError(.ECANCELED) }
                     let now = DispatchTime.now()
                     guard now < deadline else { throw POSIXError(.ETIMEDOUT) }
-                    let count = Darwin.send(fd, base.advanced(by: offset), min(64 * 1024, bytes.count - offset), MSG_DONTWAIT | MSG_NOSIGNAL)
+                    let count = Darwin.write(fd, base.advanced(by: offset), min(64 * 1024, bytes.count - offset))
                     if count > 0 {
                         offset += count
                         continue

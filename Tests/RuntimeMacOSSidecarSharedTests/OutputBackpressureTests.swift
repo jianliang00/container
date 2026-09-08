@@ -60,7 +60,7 @@ struct OutputBackpressureTests {
     }
 
     @Test
-    func sharedNonblockingDescriptorStillSupportsBlockingFrameReads() throws {
+    func writerPreservesBlockingModeForSharedDescriptor() throws {
         var pair = [Int32](repeating: -1, count: 2)
         #expect(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
         defer {
@@ -73,7 +73,7 @@ struct OutputBackpressureTests {
         let writer = try SocketFrameWriter(fd: readerFD)
         let flags = fcntl(readerFD, F_GETFL)
         #expect(flags >= 0)
-        #expect(flags & O_NONBLOCK != 0)
+        #expect(flags & O_NONBLOCK == 0)
         Thread.detachNewThread {
             usleep(50_000)
             try? MacOSSidecarSocketIO.writeJSONFrame("delayed", fd: writerFD)

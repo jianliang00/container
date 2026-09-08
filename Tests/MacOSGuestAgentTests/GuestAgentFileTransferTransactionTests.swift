@@ -246,7 +246,7 @@ struct GuestAgentFileTransferTransactionTests {
 
         let outputURL = tempDir.appendingPathComponent("payload.txt")
         let (serverFD, clientSocket) = try socketPair()
-        let connection = AgentConnection(fd: serverFD)
+        let connection = try AgentConnection(fd: serverFD)
         var clientFD = clientSocket
         defer { closeIfValid(&clientFD) }
 
@@ -287,7 +287,7 @@ struct GuestAgentFileTransferTransactionTests {
 
         let outputURL = tempDir.appendingPathComponent("payload.txt")
         let (serverFD, clientSocket) = try socketPair()
-        let connection = AgentConnection(fd: serverFD)
+        let connection = try AgentConnection(fd: serverFD)
         var clientFD = clientSocket
         defer { closeIfValid(&clientFD) }
 
@@ -410,7 +410,7 @@ struct GuestAgentFileTransferTransactionTests {
     @Test
     func ttyCloseDeliversEOFToDefaultTTYExec() throws {
         let (serverFD, clientSocket) = try socketPair()
-        let connection = AgentConnection(fd: serverFD)
+        let connection = try AgentConnection(fd: serverFD)
         var clientFD = clientSocket
         defer { closeIfValid(&clientFD) }
 
@@ -447,7 +447,7 @@ struct GuestAgentFileTransferTransactionTests {
     @Test
     func ttyCloseDeliversEOFToCurrentIdentityExec() throws {
         let (serverFD, clientSocket) = try socketPair()
-        let connection = AgentConnection(fd: serverFD)
+        let connection = try AgentConnection(fd: serverFD)
         var clientFD = clientSocket
         defer { closeIfValid(&clientFD) }
 
@@ -486,7 +486,7 @@ struct GuestAgentFileTransferTransactionTests {
     @Test
     func malformedJSONFrameReturnsErrorAndExit() throws {
         let (serverFD, clientSocket) = try socketPair()
-        let connection = AgentConnection(fd: serverFD)
+        let connection = try AgentConnection(fd: serverFD)
         var clientFD = clientSocket
         defer { closeIfValid(&clientFD) }
 
@@ -515,7 +515,7 @@ struct GuestAgentFileTransferTransactionTests {
     @Test
     func oversizedFrameReturnsErrorAndExit() throws {
         let (serverFD, clientSocket) = try socketPair()
-        let connection = AgentConnection(fd: serverFD)
+        let connection = try AgentConnection(fd: serverFD)
         var clientFD = clientSocket
         defer { closeIfValid(&clientFD) }
 

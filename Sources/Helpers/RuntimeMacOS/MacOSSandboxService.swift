@@ -34,28 +34,6 @@ import RuntimeMacOSSidecarShared
 import SocketForwarder
 import TerminalProgress
 
-final class SidecarEventPump: @unchecked Sendable {
-    let stream: AsyncStream<MacOSSidecarEvent>
-
-    private let continuation: AsyncStream<MacOSSidecarEvent>.Continuation
-
-    init() {
-        var storedContinuation: AsyncStream<MacOSSidecarEvent>.Continuation?
-        self.stream = AsyncStream { continuation in
-            storedContinuation = continuation
-        }
-        self.continuation = storedContinuation!
-    }
-
-    func yield(_ event: MacOSSidecarEvent) {
-        continuation.yield(event)
-    }
-
-    func finish() {
-        continuation.finish()
-    }
-}
-
 final class AttachmentOutputPump: @unchecked Sendable {
     private let fileHandle: FileHandle
     private let writeQueue: DispatchQueue
@@ -223,6 +201,8 @@ public actor MacOSSandboxService {
         let stderrLogURL: URL
         var stdoutLogHandle: FileHandle?
         var stderrLogHandle: FileHandle?
+        var stdoutLogWriter: ProcessLogWriter?
+        var stderrLogWriter: ProcessLogWriter?
         var attachments: [String: Attachment] = [:]
         var controllerAttachmentID: String?
         var started: Bool = false
@@ -3193,6 +3173,13 @@ extension MacOSSandboxService {
             stdoutLogHandle: logs.stdoutHandle,
             stderrLogHandle: logs.stderrHandle
         )
+        let log = self.log
+        session.stdoutLogWriter = try ProcessLogWriter(fileHandle: logs.stdoutHandle) { error in
+            log.error("process stdout log write failed", metadata: ["process_id": "\(processID)", "error": "\(error)"])
+        }
+        session.stderrLogWriter = try ProcessLogWriter(fileHandle: logs.stderrHandle) { error in
+            log.error("process stderr log write failed", metadata: ["process_id": "\(processID)", "error": "\(error)"])
+        }
         installPrimaryAttachmentIfNeeded(
             on: &session,
             sessionID: processID,
@@ -3288,6 +3275,8 @@ extension MacOSSandboxService {
         for attachment in session.attachments.values {
             closeAttachmentResources(attachment)
         }
+        session.stdoutLogWriter?.finish()
+        session.stderrLogWriter?.finish()
         try? session.stdoutLogHandle?.close()
         try? session.stderrLogHandle?.close()
     }
@@ -4013,7 +4002,7 @@ extension MacOSSandboxService {
                 for attachment in session.attachments.values {
                     attachment.stdoutPump?.enqueue(data)
                 }
-                try? session.stdoutLogHandle?.write(contentsOf: data)
+                session.stdoutLogWriter?.enqueue(data)
             }
         case .processStderr:
             if let data = event.data, !data.isEmpty {
@@ -4024,7 +4013,7 @@ extension MacOSSandboxService {
                         attachment.stdoutPump?.enqueue(data)
                     }
                 }
-                try? session.stderrLogHandle?.write(contentsOf: data)
+                session.stderrLogWriter?.enqueue(data)
                 if let text = String(data: data, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                     !text.isEmpty
@@ -4041,8 +4030,13 @@ extension MacOSSandboxService {
                 return
             }
             let code = event.exitCode ?? 1
-            writeContainerLog(Data(("sidecar process exit event for \(processID) code=\(code)\n").utf8))
             let status = ExitStatus(exitCode: code, exitedAt: Date())
+            await ProcessLogWriter.finishAndWait([session.stdoutLogWriter, session.stderrLogWriter])
+            // Other actor calls can remove or complete the session while logs
+            // finish. Re-read it rather than overwriting their changes.
+            guard let current = sessions[processID], current.exitStatus == nil else { return }
+            session = current
+            writeContainerLog(Data(("sidecar process exit event for \(processID) code=\(code)\n").utf8))
             session.exitStatus = status
             closeSessionResources(session)
             sessions[processID] = session

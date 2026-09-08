@@ -281,6 +281,122 @@ struct GuestAgentProcessStartupTests {
 
         try harness.waitForCompletion()
     }
+    @Test
+    func normalOutputRemainsCompleteAndPrecedesExit() throws {
+        let harness = try AgentConnectionHarness()
+        defer { harness.closePeer() }
+        _ = try readAgentFrame(from: harness.peerFD)
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec, id: "complete-output", executable: "/bin/sh",
+                arguments: ["-c", "/usr/bin/head -c 1048576 /dev/zero; /usr/bin/head -c 1048576 /dev/zero >&2; exit 23"],
+                environment: ["PATH=/usr/bin:/bin"], terminal: false), fd: harness.peerFD)
+        let frames = try readThroughExit(fd: harness.peerFD)
+        for channel in [GuestAgentFrame.FrameType.stdout, .stderr] {
+            let bytes = frames.filter { $0.type == channel }.reduce(into: Data()) { $0.append($1.data ?? Data()) }
+            #expect(bytes == Data(repeating: 0, count: 1024 * 1024))
+        }
+        #expect(frames.first?.type == .ack)
+        #expect(frames.last?.exitCode == 23)
+        try harness.waitForCompletion()
+    }
+
+    @Test
+    func unreadOutputDoesNotBlockChildCompletion() throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let harness = try AgentConnectionHarness(outputBufferCapacity: 64 * 1024)
+        defer { harness.closePeer() }
+        _ = try readAgentFrame(from: harness.peerFD)
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec, id: "unread-output", executable: "/bin/sh",
+                arguments: ["-c", "/usr/bin/head -c 8388608 /dev/zero; printf done > \"$1\"; exit 23", "sh", marker.path],
+                environment: ["PATH=/usr/bin:/bin"], terminal: false), fd: harness.peerFD)
+        #expect(try readAgentFrame(from: harness.peerFD).type == .ack)
+
+        // No socket reads until the child has finished writing 8 MiB to its pipe.
+        try waitForFile(marker)
+        let frames = try readThroughExit(fd: harness.peerFD)
+        #expect(frames.last?.exitCode == 23)
+        #expect(frames.contains { $0.type == .stderr && String(data: $0.data ?? Data(), encoding: .utf8)?.contains("output truncated") == true })
+        #expect(frames.reduce(0) { $0 + ($1.data?.count ?? 0) } < 8_388_608)
+        try harness.waitForCompletion()
+    }
+
+    @Test
+    func signalIsHandledWhileOutputReaderIsPaused() throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let harness = try AgentConnectionHarness(outputBufferCapacity: 64 * 1024)
+        defer { harness.closePeer() }
+        _ = try readAgentFrame(from: harness.peerFD)
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec, id: "signal-backpressure", executable: "/bin/sh",
+                arguments: ["-c", "echo $$ > \"$1\"; /usr/bin/yes output", "sh", marker.path],
+                environment: ["PATH=/usr/bin:/bin"], terminal: false), fd: harness.peerFD)
+        #expect(try readAgentFrame(from: harness.peerFD).type == .ack)
+        try waitForFile(marker)
+        let pid = try #require(Int32(String(contentsOf: marker, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+        #expect(pid > 1)
+        usleep(200_000)
+        try MacOSSidecarSocketIO.writeJSONFrame(GuestAgentFrame(type: .signal, signal: SIGKILL), fd: harness.peerFD)
+        // Reaping must finish before the output reader resumes.
+        let deadline = DispatchTime.now() + 2
+        while Darwin.kill(pid, 0) == 0 {
+            guard DispatchTime.now() < deadline else { throw POSIXError(.ETIMEDOUT) }
+            usleep(10_000)
+        }
+        #expect(errno == ESRCH)
+        let frames = try readThroughExit(fd: harness.peerFD)
+        #expect(frames.last?.exitCode == 128 + SIGKILL)
+        try harness.waitForCompletion()
+    }
+
+    @Test
+    func inheritedPipeDoesNotDelayExitIndefinitely() throws {
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            if let text = try? String(contentsOf: marker, encoding: .utf8), let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 {
+                Darwin.kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: marker)
+        }
+        let harness = try AgentConnectionHarness(outputDrainTimeout: 0.1)
+        defer { harness.closePeer() }
+        _ = try readAgentFrame(from: harness.peerFD)
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec, id: "inherited-pipe", executable: "/bin/sh",
+                arguments: ["-c", "sleep 30 & echo $! > \"$1\"; exit 37", "sh", marker.path],
+                environment: ["PATH=/usr/bin:/bin"], terminal: false), fd: harness.peerFD)
+        let start = DispatchTime.now()
+        let frames = try readThroughExit(fd: harness.peerFD)
+        #expect(frames.last?.exitCode == 37)
+        #expect(frames.contains { String(data: $0.data ?? Data(), encoding: .utf8)?.contains("pipe drain timed out") == true })
+        #expect(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds < 2_000_000_000)
+        try harness.waitForCompletion()
+    }
+
+    private func waitForFile(_ url: URL) throws {
+        let deadline = DispatchTime.now() + 2
+        while !FileManager.default.fileExists(atPath: url.path) {
+            guard DispatchTime.now() < deadline else { throw POSIXError(.ETIMEDOUT) }
+            usleep(10_000)
+        }
+    }
+
+    private func readThroughExit(fd: Int32) throws -> [GuestAgentFrame] {
+        var frames: [GuestAgentFrame] = []
+        for _ in 0..<1024 {
+            let frame = try readAgentFrame(from: fd)
+            frames.append(frame)
+            if frame.type == .exit { return frames }
+        }
+        throw POSIXError(.EOVERFLOW)
+    }
+
 }
 
 extension GuestAgentProcessStartupTests {
@@ -291,7 +407,7 @@ extension GuestAgentProcessStartupTests {
         private let errorBox = LockedValue<Error?>(nil)
         private let peerBox: LockedValue<Int32?>
 
-        init() throws {
+        init(outputBufferCapacity: Int = 4 * 1024 * 1024, outputDrainTimeout: TimeInterval = 1) throws {
             let pair = try makeSocketPair()
             self.peerFD = pair.peer
             self.peerBox = LockedValue(pair.peer)
@@ -299,7 +415,7 @@ extension GuestAgentProcessStartupTests {
             Thread.detachNewThread {
                 defer { self.done.signal() }
                 do {
-                    try AgentConnection(fd: pair.server).run()
+                    try AgentConnection(fd: pair.server, outputBufferCapacity: outputBufferCapacity, outputDrainTimeout: outputDrainTimeout).run()
                 } catch {
                     self.errorBox.withLock { $0 = error }
                 }
@@ -307,12 +423,13 @@ extension GuestAgentProcessStartupTests {
         }
 
         func closePeer() {
-            closeIfValid(
-                peerBox.withLock { current in
-                    let fd = current
-                    current = nil
-                    return fd
-                })
+            let fd = peerBox.withLock { current in
+                let fd = current
+                current = nil
+                return fd
+            }
+            if let fd { Darwin.shutdown(fd, SHUT_RDWR) }
+            closeIfValid(fd)
         }
 
         func waitForCompletion(timeout: TimeInterval = 2) throws {

@@ -374,8 +374,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             response.podSandboxID = sandboxID
             return response
         }
-        var sandboxCreated = false
         var metadataPersisted = false
+        var runtimeCreationAttempted = false
         var networkAttachAttempted = false
 
         do {
@@ -420,15 +420,18 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 )
                 leaseAcquisition = acquisition
             }
-            try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
-            sandboxCreated = true
             try metadataStore.upsertSandbox(metadata)
             metadataPersisted = true
+            runtimeCreationAttempted = true
+            try await runtimeManager.createSandbox(configuration: sandboxConfiguration)
             if handler.usesPodNetworking {
                 try vmnetRecoveryController.requireAdmission(
                     gate: .beforeNetworkAttach,
                     attemptID: admissionAttemptID
                 )
+                metadata.networkAttachments = [handler.network]
+                metadata.updatedAt = Date()
+                try metadataStore.upsertSandbox(metadata)
                 networkAttachAttempted = true
                 let network: CRIShimCNIResult
                 if let identityManager = cniManager as? any CRIShimCNIIdentityManaging {
@@ -452,33 +455,41 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             try metadataStore.upsertSandbox(metadata)
         } catch {
             let admissionError = error
-            if networkAttachAttempted {
-                let runtimeSandboxID = machineState.machineState?.persistenceID ?? sandboxID
-                if let identityManager = cniManager as? any CRIShimCNIIdentityManaging {
-                    try? await identityManager.delete(
-                        identity: .init(
-                            runtimeSandboxID: runtimeSandboxID,
-                            criSandboxID: sandboxID,
-                            restoreRequestID: request.config.annotations[CRIShimMachineStateAnnotation.restoreRequestID],
-                            podUID: request.config.metadata.uid
-                        ),
-                        networkName: handler.network,
-                        config: config
-                    )
-                } else {
-                    try? await cniManager.delete(
-                        sandboxID: runtimeSandboxID,
-                        networkName: handler.network,
-                        config: config
-                    )
-                }
-            }
             if let leaseAcquisition, leaseAcquisition.created, let policy = config.machineState {
+                var networkRollbackError: (any Error)?
+                if networkAttachAttempted {
+                    do {
+                        let runtimeSandboxID = machineState.machineState?.persistenceID ?? sandboxID
+                        if let identityManager = cniManager as? any CRIShimCNIIdentityManaging {
+                            try await identityManager.delete(
+                                identity: .init(
+                                    runtimeSandboxID: runtimeSandboxID,
+                                    criSandboxID: sandboxID,
+                                    restoreRequestID: request.config.annotations[CRIShimMachineStateAnnotation.restoreRequestID],
+                                    podUID: request.config.metadata.uid
+                                ),
+                                networkName: handler.network,
+                                config: config
+                            )
+                        } else {
+                            try await cniManager.delete(
+                                sandboxID: runtimeSandboxID,
+                                networkName: handler.network,
+                                config: config
+                            )
+                        }
+                    } catch {
+                        networkRollbackError = error
+                    }
+                }
                 switch leaseAcquisition.lease.admissionState {
                 case .runtimeCreationStarted, nil:
                     let cleanupConfirmation = try await CRIShimMachineStateRuntimeCleaner(
                         runtimeManager: runtimeManager
                     ).cleanup(lease: leaseAcquisition.lease, policy: policy)
+                    if let networkRollbackError {
+                        throw networkRollbackError
+                    }
                     if metadataPersisted {
                         try metadataStore.deleteSandbox(id: sandboxID)
                     }
@@ -488,6 +499,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     )
                     withExtendedLifetime(cleanupConfirmation) {}
                 case .runtimeDeletionConfirmed:
+                    if let networkRollbackError {
+                        throw networkRollbackError
+                    }
                     if metadataPersisted {
                         try metadataStore.deleteSandbox(id: sandboxID)
                     }
@@ -496,21 +510,58 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                         expected: leaseAcquisition.lease
                     )
                 case .reserved:
+                    if let networkRollbackError {
+                        throw networkRollbackError
+                    }
                     try CRIShimMachineStateLeaseStore.release(
                         policy: policy,
                         expected: leaseAcquisition.lease
                     )
                 }
             } else {
-                if sandboxCreated {
-                    let runtimeSandboxID =
-                        (try? metadataStore.sandbox(id: sandboxID))?.runtimeSandboxID
-                        ?? machineState.machineState?.persistenceID
-                        ?? sandboxID
-                    try? await runtimeManager.removeSandbox(id: runtimeSandboxID, force: true)
+                var rollbackError: (any Error)?
+                if runtimeCreationAttempted {
+                    do {
+                        try await runtimeManager.removeSandbox(id: sandboxID, force: true)
+                    } catch {
+                        do {
+                            try throwUnlessNotFound(error)
+                        } catch {
+                            rollbackError = error
+                        }
+                    }
+                }
+                if networkAttachAttempted {
+                    do {
+                        if let identityManager = cniManager as? any CRIShimCNIIdentityManaging {
+                            try await identityManager.delete(
+                                identity: .init(
+                                    runtimeSandboxID: sandboxID,
+                                    criSandboxID: sandboxID,
+                                    restoreRequestID: request.config.annotations[CRIShimMachineStateAnnotation.restoreRequestID],
+                                    podUID: request.config.metadata.uid
+                                ),
+                                networkName: handler.network,
+                                config: config
+                            )
+                        } else {
+                            try await cniManager.delete(
+                                sandboxID: sandboxID,
+                                networkName: handler.network,
+                                config: config
+                            )
+                        }
+                    } catch {
+                        if rollbackError == nil {
+                            rollbackError = error
+                        }
+                    }
+                }
+                if let rollbackError {
+                    throw rollbackError
                 }
                 if metadataPersisted {
-                    try? metadataStore.deleteSandbox(id: sandboxID)
+                    try metadataStore.deleteSandbox(id: sandboxID)
                 }
             }
             throw admissionError
@@ -1664,6 +1715,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             var observed = metadata.applying(sandboxSnapshot: snapshot)
             if hasActiveContainers,
                 snapshot.status != .running,
+                snapshot.status != .stopping,
                 snapshot.failureReason != .networkInvalidated
             {
                 observed.state = metadata.state
@@ -1792,7 +1844,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
 
         let containers = try metadataStore.listContainers()
             .filter { $0.sandboxID == metadata.id }
-        var sandboxStopped = metadata.state == .stopped
+        let usesMachineState =
+            metadata.annotations[CRIShimMachineStateAnnotation.enabled] == "true"
+        // Ordinary macOS cleanup requires independent process and file proof
+        // before metadata can advance to stopped.
+        var sandboxStopped = usesMachineState && metadata.state == .stopped
 
         if !sandboxStopped {
             do {

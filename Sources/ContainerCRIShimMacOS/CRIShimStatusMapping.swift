@@ -570,7 +570,8 @@ extension CRIShimSandboxMetadata {
         case .running:
             observedState = .running
         case .stopping:
-            observedState = .stopped
+            metadata.state = .pending
+            return metadata.applyingNetworkAttachments(from: sandboxSnapshot)
         case .stopped:
             let preservesIncompleteMachineStateAdmission =
                 metadata.state == .pending

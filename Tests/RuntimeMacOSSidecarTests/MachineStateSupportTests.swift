@@ -421,9 +421,11 @@ struct MachineStateSupportTests {
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let socketURL = URL(fileURLWithPath: "/tmp/container-ms-wait-\(UUID().uuidString.prefix(8)).sock")
+        let publisherThreadStarted = DispatchSemaphore(value: 0)
         let listenerStarted = DispatchSemaphore(value: 0)
         let listenerFinished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        Thread.detachNewThread {
+            publisherThreadStarted.signal()
             Thread.sleep(forTimeInterval: 0.05)
             guard let listener = try? UnixSocketListener(path: socketURL.path, expectedConnections: 1) else {
                 listenerFinished.signal()
@@ -434,6 +436,7 @@ struct MachineStateSupportTests {
             listener.close()
             listenerFinished.signal()
         }
+        #expect(publisherThreadStarted.wait(timeout: .now() + 2) == .success)
 
         let options = ContainerConfiguration.MacOSGuestOptions(
             snapshotEnabled: false,

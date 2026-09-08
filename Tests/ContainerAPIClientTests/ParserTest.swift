@@ -809,7 +809,7 @@ struct ParserTest {
         let writerError = LockedValue<Error?>(nil)
 
         group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
+        Thread.detachNewThread {
             do {
                 let handle = try FileHandle(forWritingTo: pipePath)
                 try handle.write(contentsOf: "SECRET_KEY=value123\n".data(using: .utf8)!)

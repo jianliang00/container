@@ -20,8 +20,31 @@ import Testing
 
 @testable import ContainerCRI
 @testable import ContainerCRIShimMacOS
+@testable import ContainerResource
 
 struct CRIShimCoreMappingTests {
+    @Test
+    func stoppingSandboxIsReportedAsNotReady() {
+        let metadata = CRIShimSandboxMetadata(
+            id: "sandbox",
+            runtimeHandler: "macos",
+            sandboxImage: "example.com/macos/sandbox:latest",
+            state: .running,
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+        let snapshot = SandboxSnapshot(
+            status: .stopping,
+            networks: [],
+            containers: []
+        )
+
+        let updated = metadata.applying(sandboxSnapshot: snapshot)
+
+        #expect(updated.state == .pending)
+        #expect(makeCRIPodSandbox(updated).state == .sandboxNotready)
+    }
+
     @Test
     func mapsSandboxRequestToMetadata() throws {
         var request = Runtime_V1_RunPodSandboxRequest()

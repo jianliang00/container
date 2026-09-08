@@ -3474,7 +3474,7 @@ extension MacOSSandboxService {
         try Task.checkCancellation()
 
         let waiterID = UUID()
-        return try await withTaskCancellationHandler {
+        let status: ExitStatus = try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return await withCheckedContinuation { continuation in
                 if let status = sessions[sessionID]?.exitStatus {
@@ -3494,6 +3494,8 @@ extension MacOSSandboxService {
         } onCancel: {
             Task { await self.cancelWaiter(id: sessionID, waiterID: waiterID, reason: "wait_cancelled") }
         }
+        try Task.checkCancellation()
+        return status
     }
 
     private func addWaiter(id: String, waiterID: UUID, continuation: CheckedContinuation<ExitStatus, Never>) {
@@ -4431,6 +4433,16 @@ extension MacOSSandboxService {
             }
         }
 
+        guard configuration?.macosGuest?.machineState != nil else {
+            // A control transport failure does not prove that the sidecar,
+            // guest workloads, or VM have exited. Explicit stop and API-level
+            // recovery retain enough identity to perform verified cleanup.
+            writeContainerLog(
+                Data("sidecar control recovery pending; preserving sidecar and workload sessions\n".utf8)
+            )
+            return
+        }
+
         sidecarHandle?.client.setEventHandler(nil)
         sidecarHandle?.client.setDisconnectHandler(nil)
         sidecarHandle = nil
@@ -4533,6 +4545,7 @@ extension MacOSSandboxService {
                     "failed to stop sandbox after vmnet helper disconnect",
                     metadata: ["error": "\(error)"]
                 )
+                return
             }
             sandboxState = .stopped(255)
         }

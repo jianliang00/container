@@ -42,7 +42,7 @@ struct ExecSyncTests {
             return ScriptedProcess(
                 id: "exec-sync-capture",
                 onStart: {
-                    DispatchQueue.global().async {
+                    Thread.detachNewThread {
                         do {
                             defer {
                                 try? processStdin.close()

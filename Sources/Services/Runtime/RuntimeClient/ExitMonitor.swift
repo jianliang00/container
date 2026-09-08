@@ -25,6 +25,10 @@ public actor ExitMonitor {
     /// A callback that receives the client identifier and exit code.
     public typealias ExitCallback = @Sendable (String, ExitStatus) async throws -> Void
 
+    /// Recover from a failed wait and return a terminal status only when exit
+    /// can be established independently.
+    public typealias WaitFailureCallback = @Sendable (String) async throws -> ExitStatus?
+
     /// A function that waits for work to complete, returning an exit code.
     public typealias WaitHandler = @Sendable () async throws -> ExitStatus
 
@@ -71,7 +75,13 @@ public actor ExitMonitor {
     ///   - id: The client identifier for the work.
     ///   - waitingOn: A function that waits for the work to complete,
     ///     and then returns an exit code.
-    public func track(id: String, waitingOn: @escaping WaitHandler) async throws {
+    ///   - onWaitFailure: An optional recovery callback for runtimes that can
+    ///     independently establish whether the work is still running.
+    public func track(
+        id: String,
+        waitingOn: @escaping WaitHandler,
+        onWaitFailure: WaitFailureCallback? = nil
+    ) async throws {
         guard let onExit = self.exitCallbacks[id] else {
             throw ContainerizationError(.invalidState, message: "ExitMonitor not setup for process \(id)")
         }
@@ -79,12 +89,51 @@ public actor ExitMonitor {
             throw ContainerizationError(.invalidState, message: "already have a running task tracking process \(id)")
         }
         self.runningTasks[id] = Task {
-            do {
-                let exitStatus = try await waitingOn()
-                try await onExit(id, exitStatus)
-            } catch {
-                self.log?.error("WaitHandler for \(id) threw error \(String(describing: error))")
-                try? await onExit(id, ExitStatus(exitCode: -1))
+            while !Task.isCancelled {
+                let exitStatus: ExitStatus?
+                do {
+                    exitStatus = try await waitingOn()
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.log?.error("WaitHandler for \(id) threw error \(String(describing: error))")
+                    guard let onWaitFailure else {
+                        try? await onExit(id, ExitStatus(exitCode: -1))
+                        return
+                    }
+                    do {
+                        exitStatus = try await onWaitFailure(id)
+                    } catch {
+                        self.log?.error("Wait failure recovery for \(id) failed: \(error)")
+                        do {
+                            try await Task.sleep(for: .seconds(2))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+                    guard exitStatus != nil else {
+                        do {
+                            try await Task.sleep(for: .seconds(2))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+                }
+                guard !Task.isCancelled, let exitStatus else { return }
+                while !Task.isCancelled {
+                    do {
+                        try await onExit(id, exitStatus)
+                        return
+                    } catch {
+                        self.log?.error("Exit callback for \(id) failed: \(error)")
+                        do {
+                            try await Task.sleep(for: .seconds(2))
+                        } catch {
+                            return
+                        }
+                    }
+                }
             }
         }
     }

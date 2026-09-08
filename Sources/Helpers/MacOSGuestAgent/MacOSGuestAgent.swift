@@ -1102,7 +1102,15 @@ final class AgentConnection: @unchecked Sendable {
                 continue
             }
             if code == EAGAIN || code == EWOULDBLOCK {
-                usleep(10_000)
+                var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let result = Darwin.poll(&descriptor, 1, -1)
+                if result < 0, errno != EINTR {
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain,
+                        code: Int(errno),
+                        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errno))]
+                    )
+                }
                 continue
             }
             throw NSError(

@@ -568,51 +568,49 @@ public enum MacOSSidecarSocketIO {
     }
 
     public static func sendFileDescriptorMarker(socketFD: Int32, descriptorFD: Int32) throws {
-        var marker: UInt8 = 1
-        let payloadSize = MemoryLayout<Int32>.size
-        var control = [UInt8](repeating: 0, count: cmsgSpace(payloadSize))
-        let sent = withUnsafeMutablePointer(to: &marker) { markerPtr -> Int in
-            var ioVec = iovec(iov_base: UnsafeMutableRawPointer(markerPtr), iov_len: 1)
-            return control.withUnsafeMutableBytes { controlRaw -> Int in
-                guard let controlBase = controlRaw.baseAddress else { return -1 }
-                var message = msghdr()
-                message.msg_iov = withUnsafeMutablePointer(to: &ioVec) { $0 }
-                message.msg_iovlen = 1
-                message.msg_control = controlBase
-                message.msg_controllen = socklen_t(controlRaw.count)
+        while true {
+            var marker: UInt8 = 1
+            let payloadSize = MemoryLayout<Int32>.size
+            var control = [UInt8](repeating: 0, count: cmsgSpace(payloadSize))
+            let sent = withUnsafeMutablePointer(to: &marker) { markerPtr -> Int in
+                var ioVec = iovec(iov_base: UnsafeMutableRawPointer(markerPtr), iov_len: 1)
+                return control.withUnsafeMutableBytes { controlRaw -> Int in
+                    guard let controlBase = controlRaw.baseAddress else { return -1 }
+                    var message = msghdr()
+                    message.msg_iov = withUnsafeMutablePointer(to: &ioVec) { $0 }
+                    message.msg_iovlen = 1
+                    message.msg_control = controlBase
+                    message.msg_controllen = socklen_t(controlRaw.count)
 
-                let dataOffset = cmsgDataOffset()
-                guard controlRaw.count >= dataOffset + MemoryLayout<Int32>.size else { return -1 }
+                    let dataOffset = cmsgDataOffset()
+                    guard controlRaw.count >= dataOffset + MemoryLayout<Int32>.size else { return -1 }
 
-                let cmsg = controlBase.assumingMemoryBound(to: cmsghdr.self)
-                cmsg.pointee.cmsg_level = SOL_SOCKET
-                cmsg.pointee.cmsg_type = SCM_RIGHTS
-                cmsg.pointee.cmsg_len = socklen_t(dataOffset + payloadSize)
+                    let cmsg = controlBase.assumingMemoryBound(to: cmsghdr.self)
+                    cmsg.pointee.cmsg_level = SOL_SOCKET
+                    cmsg.pointee.cmsg_type = SCM_RIGHTS
+                    cmsg.pointee.cmsg_len = socklen_t(dataOffset + payloadSize)
 
-                controlBase.advanced(by: dataOffset).assumingMemoryBound(to: Int32.self).pointee = descriptorFD
-                return Darwin.sendmsg(socketFD, &message, 0)
+                    controlBase.advanced(by: dataOffset).assumingMemoryBound(to: Int32.self).pointee = descriptorFD
+                    return Darwin.sendmsg(socketFD, &message, 0)
+                }
             }
-        }
 
-        guard sent == 1 else {
+            if sent == 1 { return }
             if sent < 0 {
-                throw makePOSIXError(errno)
+                let code = errno
+                if code == EINTR { continue }
+                if code == EAGAIN || code == EWOULDBLOCK {
+                    try waitForSocket(fd: socketFD, events: Int16(POLLOUT))
+                    continue
+                }
+                throw makePOSIXError(code)
             }
             throw makePOSIXLikeError(message: "sendmsg sent unexpected byte count: \(sent)")
         }
     }
 
     public static func sendNoFileDescriptorMarker(socketFD: Int32) throws {
-        var marker: UInt8 = 0
-        let sent = withUnsafeMutablePointer(to: &marker) { pointer in
-            Darwin.write(socketFD, pointer, 1)
-        }
-        guard sent == 1 else {
-            if sent < 0 {
-                throw makePOSIXError(errno)
-            }
-            throw makePOSIXLikeError(message: "failed to send no-fd marker")
-        }
+        try writeAll(data: Data([0]), fd: socketFD)
     }
 
     public static func receiveOptionalFileDescriptorMarker(socketFD: Int32) throws -> Int32? {
@@ -752,7 +750,7 @@ public enum MacOSSidecarSocketIO {
                 if deadlineUptimeNanoseconds != nil {
                     continue
                 }
-                usleep(10_000)
+                try waitForSocket(fd: fd, events: Int16(POLLIN))
                 continue
             }
             throw makePOSIXError(code)
@@ -801,7 +799,7 @@ public enum MacOSSidecarSocketIO {
                 if code == EINTR { continue }
                 if code == EAGAIN || code == EWOULDBLOCK {
                     guard let deadlineUptimeNanoseconds else {
-                        usleep(10_000)
+                        try waitForSocket(fd: fd, events: Int16(POLLOUT))
                         continue
                     }
                     try waitUntilWritable(fd: fd, deadlineUptimeNanoseconds: deadlineUptimeNanoseconds)
@@ -871,6 +869,16 @@ public enum MacOSSidecarSocketIO {
             }
             throw makePOSIXError(errno)
         }
+    }
+}
+
+private func waitForSocket(fd: Int32, events: Int16) throws {
+    var descriptor = pollfd(fd: fd, events: events, revents: 0)
+    while true {
+        let result = Darwin.poll(&descriptor, 1, -1)
+        if result > 0 { return }
+        if result < 0, errno == EINTR { continue }
+        if result < 0 { throw makePOSIXError(errno) }
     }
 }
 

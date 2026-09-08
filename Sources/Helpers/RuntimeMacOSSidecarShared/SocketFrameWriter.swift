@@ -30,7 +30,8 @@ public final class SocketFrameWriter: @unchecked Sendable {
         let ownedFD = fcntl(fd, F_DUPFD_CLOEXEC, 0)
         guard ownedFD >= 0 else { throw Self.posixError() }
         // Darwin socket implementations can still block a send with only
-        // MSG_DONTWAIT. The paired frame readers already handle EAGAIN.
+        // MSG_DONTWAIT. Readers wait with poll when this shared socket state
+        // produces EAGAIN.
         let flags = fcntl(ownedFD, F_GETFL)
         guard flags >= 0, fcntl(ownedFD, F_SETFL, flags | O_NONBLOCK) == 0 else {
             let error = Self.posixError()

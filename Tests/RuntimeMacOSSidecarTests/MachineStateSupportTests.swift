@@ -379,7 +379,7 @@ struct MachineStateSupportTests {
         let url = try MacOSBlockDeviceBuilder.makeNBDURL(socketPath: "/var/run/vm-storage.sock", exportName: "root")
         #expect(url.scheme == "nbd+unix")
         #expect(url.host == nil)
-        #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value == "/var/run/vm-storage.sock")
+        #expect(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value == "/private/var/run/vm-storage.sock")
     }
 
     @Test
@@ -421,9 +421,11 @@ struct MachineStateSupportTests {
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let socketURL = URL(fileURLWithPath: "/tmp/container-ms-wait-\(UUID().uuidString.prefix(8)).sock")
+        let publisherStarted = DispatchSemaphore(value: 0)
         let listenerStarted = DispatchSemaphore(value: 0)
         let listenerFinished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        Thread.detachNewThread {
+            publisherStarted.signal()
             Thread.sleep(forTimeInterval: 0.05)
             guard let listener = try? UnixSocketListener(path: socketURL.path, expectedConnections: 1) else {
                 listenerFinished.signal()
@@ -434,6 +436,8 @@ struct MachineStateSupportTests {
             listener.close()
             listenerFinished.signal()
         }
+        defer { #expect(listenerFinished.wait(timeout: .now() + 5) == .success) }
+        try #require(publisherStarted.wait(timeout: .now() + 5) == .success)
 
         let options = ContainerConfiguration.MacOSGuestOptions(
             snapshotEnabled: false,
@@ -455,7 +459,6 @@ struct MachineStateSupportTests {
         )
 
         #expect(listenerStarted.wait(timeout: .now()) == .success)
-        #expect(listenerFinished.wait(timeout: .now() + 2) == .success)
     }
 
     @Test
@@ -473,6 +476,25 @@ struct MachineStateSupportTests {
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
         #expect(elapsed >= 0.09)
         #expect(elapsed < 1)
+    }
+
+    @Test
+    func nbdSocketRejectsTraversalAndSymlinkedParentsBeforeConnecting() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let real = root.appendingPathComponent("real")
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        for path in [link.path + "/root.sock", real.path + "/../root.sock", real.path + "//root.sock"] {
+            do {
+                try MacOSBlockDeviceBuilder.waitForUnixSocket(path: path, timeoutSeconds: 0.1)
+                Issue.record("unsafe NBD socket path was accepted")
+            } catch let error as SidecarRPCError {
+                #expect(error.code == "invalidStorageConfiguration")
+            }
+        }
     }
 }
 

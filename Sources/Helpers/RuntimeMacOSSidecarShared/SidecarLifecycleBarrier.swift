@@ -95,14 +95,10 @@ public final class MacOSSidecarLifecycleLock: @unchecked Sendable {
             throw POSIXError(.EINVAL)
         }
 
-        let storageURL = URL(fileURLWithPath: storageDirectory, isDirectory: true).standardizedFileURL
-        guard storageDirectory.hasPrefix("/"), storageURL.path == storageDirectory else {
+        guard let physicalDirectory = MacOSManagedPath.canonicalPath(storageDirectory) else {
             throw POSIXError(.EINVAL)
         }
-        let directoryFD = open(storageDirectory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard directoryFD >= 0 else {
-            throw Self.posixError()
-        }
+        let directoryFD = try Self.openDirectoryWithoutSymbolicLinks(physicalDirectory)
         defer { Darwin.close(directoryFD) }
 
         var directoryValue = stat()
@@ -308,6 +304,20 @@ public final class MacOSSidecarLifecycleLock: @unchecked Sendable {
         guard fsync(directoryFD) == 0 else {
             throw posixError()
         }
+    }
+
+    private static func openDirectoryWithoutSymbolicLinks(_ path: String) throws -> Int32 {
+        let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        var descriptor = open("/", flags)
+        guard descriptor >= 0 else { throw posixError() }
+        for component in path.split(separator: "/") {
+            let child = openat(descriptor, String(component), flags)
+            let savedErrno = errno
+            Darwin.close(descriptor)
+            guard child >= 0 else { throw posixError(savedErrno) }
+            descriptor = child
+        }
+        return descriptor
     }
 
     private static func requireStableLockPath(

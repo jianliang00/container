@@ -287,6 +287,17 @@ struct UtilityTests {
         var management = try Flags.Management.parse([])
         management.networks = ["backend,mac=02:42:ac:11:00:02"]
 
+        guard #available(macOS 26, *) else {
+            #expect(throws: ContainerizationError.self) {
+                try Utility.resolveMacOSGuestNetworking(
+                    containerID: "macos-guest",
+                    management: management,
+                    override: nil
+                )
+            }
+            return
+        }
+
         let maybeResolved = try Utility.resolveMacOSGuestNetworking(
             containerID: "macos-guest",
             management: management,

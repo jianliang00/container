@@ -89,7 +89,11 @@ Delete is idempotent: a missing state returns `deleted: false`. A completed stat
 
 ## CRI configuration and binding leases
 
-CRI integration is disabled unless `machineState.enabled` is explicitly set to `true`. The remaining node policy fields select the machine-state, sidecar-control, local-NBD, and lease directories. `machineState.runtimeOwnerUID` is the effective uid of the runtime sidecar and local NBD proxy. On startup, a root CRI shim creates the configured state, control, and NBD leaf directories with mode `0700` and transfers only those leaves to `runtimeOwnerUID`. A non-root shim requires `runtimeOwnerUID` to equal its own effective uid. Symbolic-link components, untrusted owners, and group- or world-writable parents are rejected. The lease directory remains private to the CRI shim.
+CRI integration is disabled unless `machineState.enabled` is explicitly set to `true`. The remaining node policy fields select the machine-state, sidecar-control, local-NBD, and lease directories. `machineState.runtimeOwnerUID` is the effective uid of the runtime sidecar and local NBD proxy. On startup, a root CRI shim creates the configured state, control, and NBD leaf directories with mode `0700` and transfers only those leaves to `runtimeOwnerUID`. A non-root shim requires `runtimeOwnerUID` to equal its own effective uid. The lease directory remains private to the CRI shim.
+
+Machine-state cleanup requires an explicit `runtimeOwnerUID` that matches the owner of the retained lifecycle directory, lock and attestation (or the control socket for a legacy binding). Runtime and sidecar service removal and strict absence checks use that bound owner's launchd domain: `gui/<uid>` for a non-root owner, `user/0` for a root owner. The CRI shim's own uid and inherited launchd session do not select this domain. Missing, invalid or changed owner bindings fail before runtime deletion; launchd domain and permission errors remain errors and retain the lease. Ordinary non-machine-state service operations keep their existing caller-domain behavior.
+
+CRI, runtime and sidecar accept both physical paths and the fixed macOS aliases `/etc`, `/tmp` and `/var`. Each alias must be a root-owned symbolic link with its exact expected `/private` target. Managed configuration and NBD allowlist comparisons use the physical spelling, independent of whether the socket already exists. Relative components, arbitrary symbolic links and untrusted owners remain rejected. Writable ancestors are forbidden except the exact system directories `/private/tmp` (root:wheel, `1777`) and `/private/var/run` (root:daemon, `0775`). These are traversal exceptions, not permissions to change system directory modes or to accept writable descendants. Control sockets remain `0600` inside runtime-managed directories.
 
 Pod sandbox configuration uses individual annotations in the versioned `io.container.runtime.macos.machine-state.v1/` namespace:
 
@@ -108,6 +112,8 @@ Pod sandbox configuration uses individual annotations in the versioned `io.conta
 Companion annotations are rejected unless `enabled` is present and true. The five restore annotations must either all be absent or all be present. A first cold boot uses `storage-generation: "1"` without restore annotations. Restoring a state saved from generation `N` supplies the complete durable tuple and uses writable `storage-generation: "N+1"`. A cold fallback after a failed warm attempt must fence generation `N+1` and use generation `N+2` or later. The runtime requires an explicit NBD root for this restore path.
 
 Before creating sandbox metadata, the CRI shim atomically acquires `<persistence-id>.json` in the lease directory. The random CRI sandbox id remains the kubelet-facing handle; the persistence id is the stable runtime sandbox id used by the VM, sidecar, NBD socket, CNI, and workload mapping. The lease binds both ids to the Kubernetes Pod UID, selected state, pair, restore request, saved generation, and current storage generation. A retry by the same owner returns the persisted CRI sandbox id, which makes a lost `RunPodSandbox` acknowledgement idempotent. A different Pod UID, pair, request, or generation is fenced while that lease is active. `RemovePodSandbox` releases only a lease whose complete persisted owner still matches the sandbox metadata; machine-state and identity files remain available below the persistent state directory.
+
+After failed bootstrap, a typed runtime `notFound` error, including one wrapped in internal errors across XPC, allows deletion checks to continue; it does not release the lease. Cleanup must still confirm removal of both runtime services and the control socket, acquire the matching process-lifetime lock exclusively, durably retire its attestation, and synchronize metadata deletion before releasing the lease. Permission errors, transport failures, missing files and error-message text alone do not establish runtime absence. Repeated Stop/Remove requests after completed cleanup succeed without repeating runtime deletion. An absent CRI record with an outstanding durable lease remains an explicit recovery error rather than an acknowledgement of completed cleanup.
 
 The generation annotation does not create, clone, revoke, or fence an NBD export. A trusted storage controller must make generation `N` immutable after the save point, create one writable successor, and expose that successor through the same configured Unix-socket path before restore. The CRI lease prevents conflicting sandbox ownership on the node, while the storage service remains responsible for preventing stale writers.
 
@@ -155,6 +161,25 @@ These annotations select host persistence and writable node storage and therefor
 
 ## Compatibility description
 
+### Active VM identity
+
+The runtime root is the per-sandbox host directory. When machine-state persistence is configured, the binding also has a private `Identity` directory below its managed storage root. One identity provider selects the files used by VZ configuration, compatibility fingerprints, checkpoint capture, and restore:
+
+| File | Persistent binding | Legacy binding |
+| --- | --- | --- |
+| `HardwareModel.bin` | Runtime root | Runtime root |
+| `MachineIdentifier.bin` | Persistent `Identity` | Runtime root |
+| `AuxiliaryStorage` | Persistent `Identity` | Runtime root |
+| `macos-guest-network-lease.json` | Runtime root | Runtime root |
+
+A new persistent binding inherits an existing valid runtime-root machine identifier and auxiliary storage together. Templates without a machine identifier receive a new unique identifier and a private auxiliary-storage copy. Once a persistent identifier exists, a changed runtime-root identifier does not replace it. An invalid persistent identifier, or auxiliary storage left without its identifier outside an explicit restore, is rejected instead of regenerating identity.
+
+Each checkpoint contains an immutable identity bundle. Its hardware-model and machine-identifier digests must match the saved compatibility description. Restore validates the selected request, host and configuration before publishing identity files, and rejects mismatched existing hardware or machine identifiers. Auxiliary storage is restored from the verified checkpoint after those checks. All destination files are checked before any replacement, then staged on their destination filesystems and synchronized. A retry can complete an interrupted materialization before a VM is constructed; a failed restore never enters cold boot.
+
+Identity directories require trusted ownership and reject arbitrary symbolic links. Identity files must be regular, singly linked, owned by the runtime user, and not writable by other users. Published identity files use mode `0600`. Bundle integrity alone does not establish warm-restore success: the VM and workload adoption checks remain required.
+
+### Saved compatibility fields
+
 The compatibility schema contains:
 
 - compatibility schema and runtime protocol versions;
@@ -197,6 +222,11 @@ Stable machine-state error codes include:
 - `machineStateStorageGenerationMismatch`
 - `unsafeMachineStatePath`
 - `machineStateIncompatible`
+- `machineStateRestoreRequired`
+- `identityBundleMismatch`
+- `activeIdentityMismatch`
+- `activeIdentityInvalid`
+- `unsafeIdentityBundlePath`
 - `unsupportedHostArchitecture`
 - `unsupportedVMConfiguration`
 - `invalidStorageConfiguration`

@@ -665,12 +665,22 @@ actor MacOSSidecarService {
                 ])
             let agentPort = config.macosGuest?.agentPort ?? 27000
             try await startVirtualMachine(vm)
-            try await activatePreparedNetworks()
-            try await validateSocketDeviceAvailable(on: vm)
-            try await waitForGuestAgentDuringBootstrap(port: agentPort)
-            try await synchronizeGuestClock(agentPort: agentPort)
-            try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
-            try await validateNetworkAttachments()
+            for stage in MacOSGuestColdBootStage.orderedStages {
+                switch stage {
+                case .socketDeviceAvailable:
+                    try await validateSocketDeviceAvailable(on: vm)
+                case .guestAgentReady:
+                    try await waitForGuestAgentDuringBootstrap(port: agentPort)
+                case .networksActivated:
+                    try await activatePreparedNetworks()
+                case .guestClockSynchronized:
+                    try await synchronizeGuestClock(agentPort: agentPort)
+                case .guestNetworkingConfigured:
+                    try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
+                case .networkAttachmentsValidated:
+                    try await validateNetworkAttachments()
+                }
+            }
             lifecycle.complete(.start, succeeded: true)
             log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
         } catch {
@@ -5703,6 +5713,24 @@ package enum GuestAgentBootstrapRetrier {
                 message: "guest-agent bootstrap probe finished without result"
             )
     }
+}
+
+package enum MacOSGuestColdBootStage: Equatable, Sendable {
+    case socketDeviceAvailable
+    case guestAgentReady
+    case networksActivated
+    case guestClockSynchronized
+    case guestNetworkingConfigured
+    case networkAttachmentsValidated
+
+    package static let orderedStages: [Self] = [
+        .socketDeviceAvailable,
+        .guestAgentReady,
+        .networksActivated,
+        .guestClockSynchronized,
+        .guestNetworkingConfigured,
+        .networkAttachmentsValidated,
+    ]
 }
 
 private func shouldLogBootstrapGuestAgentAttempt(_ attempt: Int, maxAttempts: Int) -> Bool {

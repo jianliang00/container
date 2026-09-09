@@ -1030,6 +1030,9 @@ struct MacOSSandboxServiceWaiterTests {
                 data: Data("hello stderr\n".utf8)
             )
         )
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(event: .processExit, processID: "__workload__exec-logs", exitCode: 0)
+        )
 
         let workload = try await service.testingInspectWorkload("exec-logs")
         let sandboxLog = try String(contentsOfFile: await service.testingContainerLogPath(), encoding: .utf8)
@@ -1070,6 +1073,15 @@ struct MacOSSandboxServiceWaiterTests {
                 processID: "__workload__exec-replay-dedup",
                 data: Data("second\n".utf8),
                 sequence: 2,
+                subscriptionID: "subscription-b"
+            )
+        )
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processExit,
+                processID: "__workload__exec-replay-dedup",
+                exitCode: 0,
+                sequence: 3,
                 subscriptionID: "subscription-b"
             )
         )

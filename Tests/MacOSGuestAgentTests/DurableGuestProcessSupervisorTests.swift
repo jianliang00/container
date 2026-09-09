@@ -555,6 +555,7 @@ struct DurableGuestProcessSupervisorTests {
 
         let failedPair = try makeDurableProcessSocketPair()
         let failedConnection = try AgentConnection(fd: failedPair.server, processSupervisor: supervisor)
+        defer { failedConnection.invalidate() }
         closeDurableProcessFD(failedPair.peer)
         #expect(throws: (any Error).self) {
             _ = try supervisor.attach(
@@ -576,7 +577,6 @@ struct DurableGuestProcessSupervisorTests {
         try waitForDurableProcessCondition {
             !durableProcessExists(created.processIdentifier)
         }
-        failedConnection.invalidate()
         try owner.waitForCompletion()
     }
 

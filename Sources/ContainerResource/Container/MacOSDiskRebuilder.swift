@@ -153,42 +153,43 @@ public enum MacOSDiskRebuilder {
         blobPath: URL,
         outFd: Int32
     ) throws {
-        // Decompress zstd to a temporary tar file
-        let tempTar = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rebuild-chunk-\(chunkInfo.index)-\(UUID().uuidString).tar")
-        defer { try? FileManager.default.removeItem(at: tempTar) }
+        let tarFd = try createTemporaryTar()
+        defer { close(tarFd) }
 
-        try decompressZstd(input: blobPath, output: tempTar, chunkIndex: chunkInfo.index)
-
-        // Parse the PAX sparse tar and write data extents
-        try parseSparseAndWrite(
-            tarPath: tempTar,
-            chunkInfo: chunkInfo,
-            outFd: outFd
-        )
+        do {
+            try ZstdCodec.decompress(input: blobPath, outputFD: tarFd)
+        } catch {
+            throw RebuildError.zstdDecompressionFailed(index: chunkInfo.index, message: "\(error)")
+        }
+        guard lseek(tarFd, 0, SEEK_SET) == 0 else {
+            throw RebuildError.tarParseError(index: chunkInfo.index, message: "cannot rewind tar file")
+        }
+        try parseSparseAndWrite(tarFd: tarFd, chunkInfo: chunkInfo, outFd: outFd)
     }
 
-    /// Decompress a zstd file using the builtin libzstd decoder.
-    private static func decompressZstd(input: URL, output: URL, chunkIndex: Int) throws {
-        do {
-            try ZstdCodec.decompress(input: input, output: output)
-        } catch {
-            throw RebuildError.zstdDecompressionFailed(index: chunkIndex, message: "\(error)")
+    /// Unlink before writing so process termination cannot leave large tar files behind.
+    static func createTemporaryTar() throws -> Int32 {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rebuild-chunk-\(UUID().uuidString).tar").path
+        let fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
+        guard unlink(path) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            close(fd)
+            try? FileManager.default.removeItem(atPath: path)
+            throw error
+        }
+        return fd
     }
 
     /// Parse a PAX sparse tar file and write data extents to the output file descriptor.
     private static func parseSparseAndWrite(
-        tarPath: URL,
+        tarFd: Int32,
         chunkInfo: DiskLayout.ChunkInfo,
         outFd: Int32
     ) throws {
-        let tarFd = open(tarPath.path, O_RDONLY)
-        guard tarFd >= 0 else {
-            throw RebuildError.tarParseError(index: chunkInfo.index, message: "cannot open tar file")
-        }
-        defer { close(tarFd) }
-
         // Read and parse the PAX extended header
         var header = [UInt8](repeating: 0, count: 512)
 

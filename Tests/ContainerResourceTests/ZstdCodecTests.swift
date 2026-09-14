@@ -38,6 +38,28 @@ struct ZstdCodecTests {
     }
 
     @Test
+    func decompressesIntoUnlinkedTemporaryTar() throws {
+        let tempDirectory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let payload = Data("anonymous rebuild tar".utf8)
+        let compressedURL = tempDirectory.appendingPathComponent("payload.zst")
+        try Self.compressZstd(payload).write(to: compressedURL)
+
+        let fd = try MacOSDiskRebuilder.createTemporaryTar()
+        defer { close(fd) }
+        var metadata = stat()
+        #expect(fstat(fd, &metadata) == 0)
+        #expect(metadata.st_nlink == 0)
+        #expect(fcntl(fd, F_GETFD) & FD_CLOEXEC != 0)
+
+        try ZstdCodec.decompress(input: compressedURL, outputFD: fd)
+        #expect(lseek(fd, 0, SEEK_SET) == 0)
+        var actual = [UInt8](repeating: 0, count: payload.count)
+        #expect(read(fd, &actual, actual.count) == payload.count)
+        #expect(Data(actual) == payload)
+    }
+
+    @Test
     func compressesFrameWithoutExternalBinary() throws {
         let tempDirectory = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }

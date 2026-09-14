@@ -132,8 +132,20 @@ extension XPCClient {
     }
 
     /// Send the provided message to the service.
+    /// Set `cancelConnectionOnCancellation` only when this operation owns the
+    /// connection: cancelling it closes the transport and cancels server work.
     @discardableResult
-    public func send(_ message: XPCMessage, responseTimeout: Duration? = nil) async throws -> XPCMessage {
+    public func send(
+        _ message: XPCMessage,
+        responseTimeout: Duration? = nil,
+        cancelConnectionOnCancellation: Bool = false
+    ) async throws -> XPCMessage {
+        if cancelConnectionOnCancellation {
+            return try await Self.withConnectionCancellation(
+                operation: { try await self.send(message, responseTimeout: responseTimeout) },
+                close: { self.close() }
+            )
+        }
         let route = message.string(key: XPCMessage.routeKey) ?? "nil"
         return try await Self.awaitReply(
             responseTimeout: responseTimeout,
@@ -147,6 +159,27 @@ extension XPCClient {
                     finish(.failure(error))
                 }
             }
+        }
+    }
+
+    /// Use only for a connection owned by one operation; closing a shared connection
+    /// would also cancel unrelated requests and persistent sessions.
+    static func withConnectionCancellation<Response: Sendable>(
+        operation: @Sendable () async throws -> Response,
+        close: @Sendable () -> Void
+    ) async throws -> Response {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            do {
+                let response = try await operation()
+                try Task.checkCancellation()
+                return response
+            } catch {
+                try Task.checkCancellation()
+                throw error
+            }
+        } onCancel: {
+            close()
         }
     }
 

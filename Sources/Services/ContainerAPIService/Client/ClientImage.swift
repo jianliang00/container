@@ -485,12 +485,15 @@ extension ClientImage {
             progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
         }
 
-        let response = try await client.send(request)
-        let description = try response.imageDescription()
-        let image = ClientImage(description: description)
-
-        await progressUpdateClient?.finish()
-        return image
+        do {
+            let response = try await client.send(request, cancelConnectionOnCancellation: true)
+            let description = try response.imageDescription()
+            await progressUpdateClient?.finish()
+            return ClientImage(description: description)
+        } catch {
+            await progressUpdateClient?.finish()
+            throw error
+        }
     }
 
     public static func delete(reference: String, garbageCollect: Bool = false) async throws {

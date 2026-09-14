@@ -27,6 +27,7 @@ import Logging
 import TerminalProgress
 
 public actor ImagesService {
+    private let pullAdmission = ImagePullAdmission()
     private let log: Logger
     private let contentStore: ContentStore
     private let imageStore: ImageStore
@@ -89,6 +90,26 @@ public actor ImagesService {
     ) async throws
         -> ImageDescription
     {
+        try await pullAdmission.withPull(reference: reference) {
+            try await self.pullOnce(
+                reference: reference,
+                platform: platform,
+                insecure: insecure,
+                authentication: authentication,
+                progressUpdate: progressUpdate,
+                maxConcurrentDownloads: maxConcurrentDownloads
+            )
+        }
+    }
+
+    private func pullOnce(
+        reference: String,
+        platform: Platform?,
+        insecure: Bool,
+        authentication: Authentication?,
+        progressUpdate: ProgressUpdateHandler?,
+        maxConcurrentDownloads: Int
+    ) async throws -> ImageDescription {
         self.log.debug(
             "ImagesService: enter",
             metadata: [

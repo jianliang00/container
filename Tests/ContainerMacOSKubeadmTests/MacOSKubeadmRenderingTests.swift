@@ -20,6 +20,16 @@ import Testing
 @testable import ContainerMacOSKubeadm
 
 struct MacOSKubeadmRenderingTests {
+    @Test func kubeletConfigurationIncludesDiskPressureProtection() {
+        let rendered = MacOSKubeadmRenderer.kubeletConfiguration(clusterDNS: "10.96.0.10", clusterDomain: "cluster.local")
+        for threshold in [
+            "nodefs.available: \"10%\"", "imagefs.available: \"15%\"",
+            "nodefs.inodesFree: \"5%\"", "imagefs.inodesFree: \"5%\"",
+        ] {
+            #expect(rendered.contains(threshold))
+        }
+    }
+
     @Test func containerSystemBootstrapPlistRetriesOnlyAfterFailure() throws {
         let rendered = MacOSKubeadmRenderer.containerSystemBootstrapPlist(
             containerServiceUserID: 501

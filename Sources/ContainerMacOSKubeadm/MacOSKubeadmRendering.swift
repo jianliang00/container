@@ -109,6 +109,10 @@ public enum MacOSKubeadmRenderer {
         enforceNodeAllocatable: []
         evictionHard:
           memory.available: "0%"
+          nodefs.available: "10%"
+          nodefs.inodesFree: "5%"
+          imagefs.available: "15%"
+          imagefs.inodesFree: "5%"
         evictionPressureTransitionPeriod: "10s"
         eventRecordQPS: 5
         enableServer: true

@@ -1375,7 +1375,7 @@ actor MacOSSidecarService {
     @MainActor
     private static func captureDiagnosticWindow(windowID: CGWindowID) async throws -> Data {
         // Capture only this process's VM window; never capture the host desktop.
-        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        let content = try await SCShareableContent.currentProcess
         guard let window = content.windows.first(where: { $0.windowID == windowID && $0.owningApplication?.processID == getpid() }) else {
             throw ContainerizationError(.notFound, message: "diagnostic VM window is not available for capture")
         }

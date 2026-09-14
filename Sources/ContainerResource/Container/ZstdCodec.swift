@@ -130,6 +130,17 @@ package enum ZstdCodec {
         let outputFD = try openOutputFD(for: output)
         defer { close(outputFD) }
 
+        try decompress(inputFD: inputFD, input: input, outputFD: outputFD)
+    }
+
+    /// Writes at the current offset without closing or rewinding the caller's descriptor.
+    package static func decompress(input: URL, outputFD: Int32) throws {
+        let inputFD = try openInputFD(for: input)
+        defer { close(inputFD) }
+        try decompress(inputFD: inputFD, input: input, outputFD: outputFD)
+    }
+
+    private static func decompress(inputFD: Int32, input: URL, outputFD: Int32) throws {
         guard let stream = ZSTD_createDStream() else {
             throw Error(message: "failed to create zstd decompression stream")
         }

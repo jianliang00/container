@@ -16,10 +16,54 @@
 
 #if os(macOS)
 import Testing
+import ContainerizationError
 
 @testable import container_runtime_macos_sidecar
 
 struct GuestAgentBootstrapRetrierTests {
+    @Test
+    func diagnosticBudgetCanObserveReadinessAfterAttempt120() async throws {
+        let counter = AttemptCounter()
+        try await GuestAgentBootstrapRetrier.run(
+            maxAttempts: Int.max,
+            retryDelayNanoseconds: 0,
+            deadline: .now.advanced(by: .seconds(10))
+        ) { _, _ in
+            let current = await counter.record()
+            if current < 121 { throw ProbeError.notReady(current) }
+        }
+        #expect(await counter.value() == 121)
+    }
+
+    @Test
+    func expiredDeadlineDoesNotProbe() async throws {
+        let counter = AttemptCounter()
+        await #expect(throws: ContainerizationError.self) {
+            try await GuestAgentBootstrapRetrier.run(
+                maxAttempts: Int.max,
+                retryDelayNanoseconds: 0,
+                deadline: .now.advanced(by: .seconds(-1))
+            ) { _, _ in _ = await counter.record() }
+        }
+        #expect(await counter.value() == 0)
+    }
+
+    @Test
+    func readinessAfterDeadlineIsRejected() async throws {
+        let counter = AttemptCounter()
+        await #expect(throws: ContainerizationError.self) {
+            try await GuestAgentBootstrapRetrier.run(
+                maxAttempts: Int.max,
+                retryDelayNanoseconds: 0,
+                deadline: .now.advanced(by: .milliseconds(20))
+            ) { _, _ in
+                _ = await counter.record()
+                try await Task.sleep(for: .milliseconds(40))
+            }
+        }
+        #expect(await counter.value() <= 1)
+    }
+
     @Test
     func retriesUntilOperationSucceeds() async throws {
         let counter = AttemptCounter()

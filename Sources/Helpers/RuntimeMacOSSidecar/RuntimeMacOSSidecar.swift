@@ -26,6 +26,7 @@ import Darwin
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
+@preconcurrency import ScreenCaptureKit
 @preconcurrency import Virtualization
 
 @MainActor
@@ -629,6 +630,7 @@ actor MacOSSidecarService {
             throw error
         }
         let guiEnabled = config.macosGuest?.guiEnabled ?? false
+        let diagnostic = ProcessInfo.processInfo.environment["CONTAINER_BOOT_DIAGNOSTIC_ID"] == config.id
         log.info(
             "bootstrapStart: building vm configuration",
             metadata: [
@@ -652,11 +654,17 @@ actor MacOSSidecarService {
                 metadata: [
                     "gui_enabled": "\(guiEnabled)",
                     "present_gui": "\(presentGUI)",
-                    "will_present_gui": "\(guiEnabled && presentGUI)",
+                    "will_present_gui": "\((guiEnabled && presentGUI) || diagnostic)",
                 ])
-            if guiEnabled && presentGUI {
+            if (guiEnabled && presentGUI) || diagnostic {
                 try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
             }
+            if diagnostic {
+                // Verify capture access before consuming the isolated boot attempt.
+                try await prepareBootstrapDiagnosticCapture()
+            }
+            let diagnosticCapture = diagnostic ? Task { await self.captureBootstrapDiagnostics() } : nil
+            defer { diagnosticCapture?.cancel() }
             log.info(
                 "bootstrapStart: starting vm",
                 metadata: [
@@ -664,13 +672,17 @@ actor MacOSSidecarService {
                     "present_gui": "\(presentGUI)",
                 ])
             let agentPort = config.macosGuest?.agentPort ?? 27000
+            let diagnosticDeadline = diagnostic ? ContinuousClock.now.advanced(by: .seconds(180)) : nil
+            if diagnostic {
+                log.warning("bootstrap diagnostic enabled", metadata: ["id": "\(config.id)", "budget_seconds": "180"])
+            }
             try await startVirtualMachine(vm)
             for stage in MacOSGuestColdBootStage.orderedStages {
                 switch stage {
                 case .socketDeviceAvailable:
                     try await validateSocketDeviceAvailable(on: vm)
                 case .guestAgentReady:
-                    try await waitForGuestAgentDuringBootstrap(port: agentPort)
+                    try await waitForGuestAgentDuringBootstrap(port: agentPort, deadline: diagnosticDeadline)
                 case .networksActivated:
                     try await activatePreparedNetworks()
                 case .guestClockSynchronized:
@@ -1213,12 +1225,12 @@ actor MacOSSidecarService {
         try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
     }
 
-    func connectVsock(port: UInt32) async throws -> Int32 {
+    func connectVsock(port: UInt32, timeoutSeconds: TimeInterval = 3) async throws -> Int32 {
         guard let vm else {
             throw ContainerizationError(.invalidState, message: "vm is not running")
         }
         log.info("sidecar connectVsock begin", metadata: ["port": "\(port)"])
-        let connection = try await connectSocketOnMainWithTimeout(vm, toPort: port, timeoutSeconds: 3)
+        let connection = try await connectSocketOnMainWithTimeout(vm, toPort: port, timeoutSeconds: timeoutSeconds)
         let duplicated = dup(connection.fileDescriptor)
         guard duplicated >= 0 else {
             throw makePOSIXError(errno)
@@ -1255,10 +1267,12 @@ actor MacOSSidecarService {
         }
     }
 
-    private func waitForGuestAgentDuringBootstrap(port: UInt32) async throws {
+    private func waitForGuestAgentDuringBootstrap(port: UInt32, deadline: ContinuousClock.Instant? = nil) async throws {
+        let started = ContinuousClock.now
         try await GuestAgentBootstrapRetrier.run(
-            maxAttempts: Self.bootstrapGuestAgentMaxAttempts,
-            retryDelayNanoseconds: Self.bootstrapGuestAgentRetryDelayNanoseconds
+            maxAttempts: deadline == nil ? Self.bootstrapGuestAgentMaxAttempts : Int.max,
+            retryDelayNanoseconds: Self.bootstrapGuestAgentRetryDelayNanoseconds,
+            deadline: deadline
         ) { [self] attempt, maxAttempts in
             if shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
                 log.info(
@@ -1271,29 +1285,31 @@ actor MacOSSidecarService {
                 )
             }
 
-            let fd = try await connectVsock(port: port)
-            defer {
-                _ = Darwin.shutdown(fd, SHUT_RDWR)
-                Darwin.close(fd)
-            }
-
+            var phase = "connect"
             do {
+                let fd = try await connectVsock(port: port, timeoutSeconds: bootstrapProbeTimeout(deadline: deadline))
+                defer {
+                    _ = Darwin.shutdown(fd, SHUT_RDWR)
+                    Darwin.close(fd)
+                }
+                phase = "ready"
                 try await self.waitForGuestAgentReadyWithTimeout(
                     fd: fd,
-                    timeoutSeconds: Self.bootstrapGuestAgentReadyTimeoutSeconds
+                    timeoutSeconds: bootstrapProbeTimeout(deadline: deadline)
                 )
-                if shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
+                if deadline != nil || shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
                     log.info(
                         "bootstrap guest-agent probe succeeded",
                         metadata: [
                             "attempt": "\(attempt)",
                             "max_attempts": "\(maxAttempts)",
                             "port": "\(port)",
+                            "elapsed": "\(started.duration(to: .now))",
                         ]
                     )
                 }
             } catch {
-                if shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
+                if deadline != nil || shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
                     log.warning(
                         "bootstrap guest-agent probe failed",
                         metadata: [
@@ -1301,12 +1317,78 @@ actor MacOSSidecarService {
                             "max_attempts": "\(maxAttempts)",
                             "port": "\(port)",
                             "error": "\(error)",
+                            "phase": "\(phase)",
+                            "elapsed": "\(started.duration(to: .now))",
+                            "error_domain": "\((error as NSError).domain)",
+                            "error_code": "\((error as NSError).code)",
                         ]
                     )
                 }
                 throw error
             }
         }
+    }
+
+    private func bootstrapProbeTimeout(deadline: ContinuousClock.Instant?) throws -> TimeInterval {
+        guard let deadline else { return Self.bootstrapGuestAgentReadyTimeoutSeconds }
+        let remaining = ContinuousClock.now.duration(to: deadline).components
+        let seconds = Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18
+        guard seconds > 0 else {
+            throw ContainerizationError(.timeout, message: "guest-agent diagnostic bootstrap deadline expired")
+        }
+        return min(Self.bootstrapGuestAgentReadyTimeoutSeconds, seconds)
+    }
+
+    private func prepareBootstrapDiagnosticCapture() async throws {
+        guard let window = vmWindow else {
+            throw ContainerizationError(.notFound, message: "diagnostic VM window was not created")
+        }
+        let output = rootURL.appendingPathComponent("bootstrap-diagnostics", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let windowID = await MainActor.run { CGWindowID(window.value.windowNumber) }
+        let image = try await Self.captureDiagnosticWindow(windowID: windowID)
+        try image.write(to: output.appendingPathComponent("preflight.png"), options: .atomic)
+        log.info("bootstrap diagnostic capture preflight passed", metadata: ["window_id": "\(windowID)"])
+    }
+
+    private func captureBootstrapDiagnostics() async {
+        guard let window = vmWindow else { return }
+        let output = rootURL.appendingPathComponent("bootstrap-diagnostics", isDirectory: true)
+        do {
+            let windowID = await MainActor.run { CGWindowID(window.value.windowNumber) }
+            for sequence in 0..<19 {
+                try Task.checkCancellation()
+                let image = try await Self.captureDiagnosticWindow(windowID: windowID)
+                try Task.checkCancellation()
+                let url = output.appendingPathComponent(String(format: "frame-%02d.png", sequence))
+                try image.write(to: url, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+                log.info("bootstrap diagnostic frame", metadata: ["file": "\(url.lastPathComponent)", "window_id": "\(windowID)"])
+                try await Task.sleep(for: .seconds(10))
+            }
+        } catch is CancellationError {
+        } catch {
+            log.warning("bootstrap diagnostic capture unavailable", metadata: ["error": "\(error)"])
+        }
+    }
+
+    @MainActor
+    private static func captureDiagnosticWindow(windowID: CGWindowID) async throws -> Data {
+        // Capture only this process's VM window; never capture the host desktop.
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        guard let window = content.windows.first(where: { $0.windowID == windowID && $0.owningApplication?.processID == getpid() }) else {
+            throw ContainerizationError(.notFound, message: "diagnostic VM window is not available for capture")
+        }
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let configuration = SCStreamConfiguration()
+        configuration.width = 1440
+        configuration.height = 900
+        configuration.showsCursor = false
+        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+            throw ContainerizationError(.internalError, message: "could not encode diagnostic frame")
+        }
+        return png
     }
 
     private func configureGuestNetworkingIfNeeded(
@@ -5690,19 +5772,33 @@ package enum GuestAgentBootstrapRetrier {
     package static func run(
         maxAttempts: Int,
         retryDelayNanoseconds: UInt64,
+        deadline: ContinuousClock.Instant? = nil,
         operation: @escaping @Sendable (_ attempt: Int, _ maxAttempts: Int) async throws -> Void
     ) async throws {
         let attempts = max(1, maxAttempts)
         var lastError: Error?
 
         for attempt in 1...attempts {
+            try Task.checkCancellation()
+            if let deadline, ContinuousClock.now >= deadline {
+                throw ContainerizationError(.timeout, message: "guest-agent bootstrap deadline expired after \(attempt - 1) attempts; last error: \(String(describing: lastError))")
+            }
             do {
                 try await operation(attempt, attempts)
+                if let deadline, ContinuousClock.now >= deadline {
+                    throw ContainerizationError(.timeout, message: "guest-agent became ready after bootstrap deadline")
+                }
                 return
             } catch {
+                try Task.checkCancellation()
                 lastError = error
                 if attempt < attempts, retryDelayNanoseconds > 0 {
-                    try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                    if let deadline {
+                        let next = ContinuousClock.now.advanced(by: .nanoseconds(Int64(clamping: retryDelayNanoseconds)))
+                        try await ContinuousClock().sleep(until: min(next, deadline))
+                    } else {
+                        try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                    }
                 }
             }
         }

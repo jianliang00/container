@@ -16,12 +16,53 @@
 
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 import Testing
 
 @testable import ContainerCRIShimMacOS
 
 @Suite(.serialized)
 struct CRIShimMachineStateMappingTests {
+    @Test(arguments: [false, true])
+    func nbdAllowlistAndManagedRootsAcceptEitherSystemSpelling(aliasSocket: Bool) throws {
+        let roots = try MachineStateTestRoots()
+        defer { roots.remove() }
+        let physical = roots.nbdSocket.path
+        let alias = String(physical.dropFirst("/private".count))
+        let socketPath = aliasSocket ? alias : physical
+        var policy = roots.config
+        policy.nbdSocketAllowedRoots = [aliasSocket ? roots.nbdRoot.path : String(roots.nbdRoot.path.dropFirst("/private".count))]
+        policy.storageRoot = String(roots.storageRoot.path.dropFirst("/private".count))
+        policy.controlSocketRoot = String(roots.controlRoot.path.dropFirst("/private".count))
+        let annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "alias-test",
+            CRIShimMachineStateAnnotation.storageGeneration: "1",
+            CRIShimMachineStateAnnotation.blockDevices: "[{\"identifier\":\"root\",\"unixSocket\":\"\(socketPath)\"}]",
+        ]
+        do {
+            _ = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy)
+            Issue.record("missing NBD socket was accepted")
+        } catch {
+            #expect(CRIShimErrorMapper.disposition(for: error).kind == .unavailable)
+        }
+        do {
+            let listener = try MachineStateUnixListener(path: physical, expectedConnections: 1)
+            defer { listener.close() }
+            let mapping = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy)
+            #expect(listener.wait() == .success)
+            #expect(mapping.blockDevices.first?.path == physical)
+            #expect(mapping.machineState?.storageDirectory == roots.storageRoot.appendingPathComponent("alias-test").path)
+            #expect(mapping.machineState?.controlSocketPath == roots.controlRoot.appendingPathComponent("alias-test.sock").path)
+        }
+        do {
+            _ = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy)
+            Issue.record("disconnected NBD socket was accepted")
+        } catch {
+            #expect(CRIShimErrorMapper.disposition(for: error).kind == .unavailable)
+        }
+    }
+
     @Test
     func lexicalPathNormalizationDoesNotConsultFilesystem() {
         #expect(criLexicallyNormalizedAbsolutePath("/var/run/container/../nbd/root.sock") == "/var/run/nbd/root.sock")
@@ -298,7 +339,7 @@ private struct MachineStateTestRoots {
     let nbdSocket: URL
 
     init() throws {
-        let root = URL(fileURLWithPath: "/tmp/cms-\(UUID().uuidString)", isDirectory: true)
+        let root = URL(fileURLWithPath: "/private/tmp/cms-\(UUID().uuidString)", isDirectory: true)
         let nbdRoot = root.appendingPathComponent("nbd", isDirectory: true)
         self.root = root
         self.storageRoot = root.appendingPathComponent("state", isDirectory: true)

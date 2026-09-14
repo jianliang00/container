@@ -25,7 +25,8 @@ struct MacOSSidecarTransportFailure: Error {
 }
 
 final class MacOSSidecarClient: @unchecked Sendable {
-    private static let defaultBootstrapStartTimeoutSeconds: TimeInterval = 120.0
+    // Allow the 180-second guest diagnostic window to finish and release VM resources.
+    private static let defaultBootstrapStartTimeoutSeconds: TimeInterval = 240.0
 
     private final class PendingResponse: @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)

@@ -37,7 +37,6 @@ struct MacOSMachineStateOutcomeIndeterminate: Error, Sendable {
 }
 
 extension MacOSSandboxService {
-    private static let sidecarBootstrapStartTimeoutSeconds: TimeInterval = 120.0
     private static let sidecarRestoreTimeoutSeconds: TimeInterval = 600.0
     private static let sidecarExitEventDrainTimeoutSeconds: TimeInterval = 5.0
     private static let sidecarReconciliationPollMicroseconds: useconds_t = 100_000
@@ -168,8 +167,7 @@ extension MacOSSandboxService {
 
         let client = MacOSSidecarClient(
             socketPath: socketURL.path,
-            log: log,
-            bootstrapStartTimeoutSeconds: Self.sidecarBootstrapStartTimeoutSeconds
+            log: log
         )
         installSidecarEventPump(for: client)
         client.setDisconnectHandler { [weak self] error in

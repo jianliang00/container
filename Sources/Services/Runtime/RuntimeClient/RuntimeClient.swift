@@ -223,7 +223,10 @@ extension RuntimeClient {
         let request = XPCMessage(route: RuntimeRoutes.state.rawValue)
         let response: XPCMessage
         do {
-            response = try await self.client.send(request)
+            response = try await self.client.send(
+                request,
+                responseTimeout: runtime == "container-runtime-macos" ? .seconds(10) : nil
+            )
         } catch {
             throw ContainerizationError(
                 .internalError,
@@ -471,10 +474,19 @@ extension RuntimeClient {
         request.set(key: RuntimeKeys.stopOptions.rawValue, value: data)
 
         do {
-            try await self.client.send(request)
+            try await self.client.send(
+                request,
+                responseTimeout: runtime == "container-runtime-macos"
+                    ? Self.stopSandboxResponseTimeout(options: options)
+                    : nil
+            )
         } catch {
             throw Self.mapStopError(error, id: self.id)
         }
+    }
+
+    static func stopSandboxResponseTimeout(options: ContainerStopOptions) -> Duration {
+        .seconds(max(Int64(options.timeoutInSeconds), 0) + 30)
     }
 
     static func mapStopError(_ error: any Error, id: String) -> ContainerizationError {
@@ -608,7 +620,10 @@ extension RuntimeClient {
         let request = XPCMessage(route: RuntimeRoutes.shutdown.rawValue)
 
         do {
-            _ = try await self.client.send(request)
+            _ = try await self.client.send(
+                request,
+                responseTimeout: runtime == "container-runtime-macos" ? .seconds(10) : nil
+            )
         } catch {
             throw ContainerizationError(
                 .internalError,

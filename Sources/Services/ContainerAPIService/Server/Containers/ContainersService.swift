@@ -27,8 +27,10 @@ import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOCI
 import ContainerizationOS
+import Darwin
 import Foundation
 import Logging
+import RuntimeMacOSSidecarShared
 import SystemPackage
 
 private struct SendableXPCEndpoint: @unchecked Sendable {
@@ -37,6 +39,7 @@ private struct SendableXPCEndpoint: @unchecked Sendable {
 
 public actor ContainersService {
     private static let macOSRuntimeName = "container-runtime-macos"
+    private static let bootRecoveryRetryDelay: Duration = .seconds(2)
     static let killedInitExitWaitTimeout: Duration = .seconds(5)
 
     enum StartProcessResult: Sendable {
@@ -121,7 +124,8 @@ public actor ContainersService {
         for dir in directories {
             do {
                 let (config, options) = try Self.getContainerConfiguration(at: dir)
-                if options?.autoRemove ?? false {
+                let isStatelessMacOS = Self.isStatelessMacOSSandbox(config)
+                if (options?.autoRemove ?? false) && !isStatelessMacOS {
                     log.info(
                         "reap auto-remove container",
                         metadata: [
@@ -153,7 +157,10 @@ public actor ContainersService {
                 let state = ContainerState(
                     snapshot: .init(
                         configuration: config,
-                        status: .stopped,
+                        status: isStatelessMacOS
+                            && (MacOSRuntimeCleanup.isPending(root: dir) || options?.autoRemove == true)
+                            ? .stopping
+                            : .stopped,
                         networks: [],
                         startedDate: nil
                     ),
@@ -166,9 +173,8 @@ public actor ContainersService {
                     )
                 }
             } catch {
-                try? FileManager.default.removeItem(at: dir)
                 log.warning(
-                    "failed to load container",
+                    "failed to load container; retaining bundle for recovery",
                     metadata: [
                         "path": "\(dir.path)",
                         "error": "\(error)",
@@ -487,6 +493,10 @@ public actor ContainersService {
 
             let path = self.containerRoot.appendingPathComponent(id)
             let (config, _) = try Self.getContainerConfiguration(at: path)
+            try Self.requireNoPendingStatelessMacOSCleanup(
+                root: path,
+                configuration: config
+            )
             if let task = state.bootstrapTask {
                 return (task, config, false)
             }
@@ -683,23 +693,50 @@ public actor ContainersService {
     public func inspectSandbox(id: String) async throws -> SandboxSnapshot {
         self.log.debug("\(#function)")
 
+        try await self.confirmMissingSandboxHasExited(id: id)
         let state = try self._getContainerState(id: id)
         try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let path = self.containerRoot.appendingPathComponent(id)
+        let cleanupPending =
+            Self.isStatelessMacOSSandbox(state.snapshot.configuration)
+            && MacOSRuntimeCleanup.isPending(root: path)
 
-        if let task = state.bootstrapTask ?? state.sandboxStartTask {
+        if !cleanupPending, let task = state.bootstrapTask ?? state.sandboxStartTask {
             let client = try await task.value
             return try await client.state()
         }
-        if let client = state.client {
+        if !cleanupPending, let client = state.client {
             return try await client.state()
         }
 
-        let path = self.containerRoot.appendingPathComponent(id)
-        let (configuration, _) = try Self.getContainerConfiguration(at: path)
+        let configuration = state.snapshot.configuration
+        var status = state.snapshot.status
+        if Self.isStatelessMacOSSandbox(configuration) {
+            if cleanupPending {
+                status = .stopping
+            } else {
+                do {
+                    try await self.confirmStatelessMacOSRuntimeStopped(
+                        id: id,
+                        configuration: configuration
+                    )
+                    status = .stopped
+                } catch {
+                    status = .stopping
+                    self.log.debug(
+                        "stateless macOS sandbox exit is not confirmed",
+                        metadata: [
+                            "id": "\(id)",
+                            "error": "\(error)",
+                        ]
+                    )
+                }
+            }
+        }
         return try Self.makePersistedSandboxSnapshot(
             root: path,
             configuration: configuration,
-            containerStatus: state.snapshot.status,
+            containerStatus: status,
             containerNetworks: state.snapshot.networks,
             startedDate: state.snapshot.startedDate
         )
@@ -714,6 +751,10 @@ public actor ContainersService {
 
         let state = try self._getContainerState(id: id)
         try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        try Self.requireNoPendingStatelessMacOSCleanup(
+            root: self.containerRoot.appendingPathComponent(id),
+            configuration: state.snapshot.configuration
+        )
         let stagedContainerConfiguration =
             state.snapshot.status == .running
             ? nil
@@ -795,6 +836,10 @@ public actor ContainersService {
 
         let state = try self._getContainerState(id: id)
         try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        try Self.requireNoPendingStatelessMacOSCleanup(
+            root: self.containerRoot.appendingPathComponent(id),
+            configuration: state.snapshot.configuration
+        )
         let client = try state.getClient()
         try await client.startWorkload(workloadID)
 
@@ -874,6 +919,15 @@ public actor ContainersService {
 
         let state = try self._getContainerState(id: id)
         try Self.requireMacOSGuestControl(configuration: state.snapshot.configuration)
+        let path = self.containerRoot.appendingPathComponent(id)
+        if Self.isStatelessMacOSSandbox(state.snapshot.configuration),
+            MacOSRuntimeCleanup.isPending(root: path)
+        {
+            throw ContainerizationError(
+                .invalidState,
+                message: "sandbox \(id) cleanup is pending"
+            )
+        }
 
         if let task = state.bootstrapTask ?? state.sandboxStartTask {
             let client = try await task.value
@@ -883,7 +937,12 @@ public actor ContainersService {
             return try await client.inspectWorkload(workloadID)
         }
 
-        let path = self.containerRoot.appendingPathComponent(id)
+        if Self.isStatelessMacOSSandbox(state.snapshot.configuration) {
+            try await self.confirmStatelessMacOSRuntimeStopped(
+                id: id,
+                configuration: state.snapshot.configuration
+            )
+        }
         let (configuration, _) = try Self.getContainerConfiguration(at: path)
         let sandboxSnapshot = try Self.makePersistedSandboxSnapshot(
             root: path,
@@ -1163,6 +1222,10 @@ public actor ContainersService {
             logMetadata: ["acquirer": "\(#function)", "id": "\(id)", "processId": "\(processID)"]
         ) { context -> StartWork in
             var state = try await self.getContainerState(id: id, context: context)
+            try Self.requireNoPendingStatelessMacOSCleanup(
+                root: self.containerRoot.appendingPathComponent(id),
+                configuration: state.snapshot.configuration
+            )
 
             let isInit = Self.isInitProcess(id: id, processID: processID)
             if state.snapshot.status == .running && isInit {
@@ -1200,6 +1263,18 @@ public actor ContainersService {
                     state.processStartTasks.removeValue(forKey: processID)
                     var shouldTrackExit = false
                     if case .initProcessStarted(let networks) = result {
+                        try Self.requireNoPendingStatelessMacOSCleanup(
+                            root: self.containerRoot.appendingPathComponent(id),
+                            configuration: state.snapshot.configuration
+                        )
+                        if Self.isStatelessMacOSSandbox(state.snapshot.configuration),
+                            state.client == nil
+                        {
+                            throw ContainerizationError(
+                                .invalidState,
+                                message: "sandbox cleanup completed while the init process was starting"
+                            )
+                        }
                         shouldTrackExit = state.snapshot.status != .running
                         state.snapshot.status = .running
                         state.snapshot.networks = networks
@@ -1345,26 +1420,67 @@ public actor ContainersService {
             )
         }
 
-        let state = try self._getContainerState(id: id)
+        try await self.confirmMissingSandboxHasExited(id: id)
+        let (client, isStatelessMacOS, resolvedOptions) = try await self.lock.withLock {
+            context -> (RuntimeClient?, Bool, ContainerStopOptions) in
+            var state = try await self.getContainerState(id: id, context: context)
+            let configuration = state.snapshot.configuration
+            let isStatelessMacOS = Self.isStatelessMacOSSandbox(configuration)
+            var resolvedOptions = options
+            if resolvedOptions.signal == nil {
+                resolvedOptions.signal = configuration.stopSignal
+            }
+            if let signal = resolvedOptions.signal {
+                _ = try Signal(signal, from: Signal.platform)
+            }
+            if isStatelessMacOS {
+                guard state.bootstrapTask == nil,
+                    state.sandboxStartTask == nil,
+                    state.processStartTasks.isEmpty
+                else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "sandbox start is in progress; retry stop after it completes"
+                    )
+                }
+                try MacOSRuntimeCleanup.markPending(
+                    root: self.containerRoot.appendingPathComponent(id)
+                )
+                state.snapshot.status = .stopping
+                await self.setContainerState(id, state, context: context)
+            }
+            return (state.client, isStatelessMacOS, resolvedOptions)
+        }
 
-        // Stop should be idempotent.
-        let client: RuntimeClient
-        do {
-            client = try state.getClient()
-        } catch {
+        guard client != nil || isStatelessMacOS else {
             return
         }
 
-        var resolvedOptions = options
-        if resolvedOptions.signal == nil, let stopSignal = state.snapshot.configuration.stopSignal {
-            resolvedOptions.signal = stopSignal
-        }
-
-        do {
-            try await client.stop(options: resolvedOptions)
-        } catch let err as ContainerizationError {
-            if err.code != .interrupted {
-                throw err
+        if let client {
+            do {
+                try await client.stop(options: resolvedOptions)
+            } catch let error as ContainerizationError {
+                if !isStatelessMacOS, error.code != .interrupted {
+                    throw error
+                }
+                self.log.warning(
+                    "runtime stop did not complete; continuing with verified macOS cleanup",
+                    metadata: [
+                        "id": "\(id)",
+                        "error": "\(error)",
+                    ]
+                )
+            } catch {
+                guard isStatelessMacOS else {
+                    throw error
+                }
+                self.log.warning(
+                    "runtime stop did not complete; continuing with verified macOS cleanup",
+                    metadata: [
+                        "id": "\(id)",
+                        "error": "\(error)",
+                    ]
+                )
             }
         }
         try await handleContainerExit(id: id)
@@ -1560,47 +1676,61 @@ public actor ContainersService {
             )
         }
 
+        try await self.confirmMissingSandboxHasExited(id: id)
         let state = try self._getContainerState(id: id)
+        let isStatelessMacOS = Self.isStatelessMacOSSandbox(state.snapshot.configuration)
         switch state.snapshot.status {
         case .running:
-            if !force {
+            guard force else {
                 throw ContainerizationError(
                     .invalidState,
                     message: "container \(id) is \(state.snapshot.status) and can not be deleted"
                 )
             }
-            let opts = ContainerStopOptions(
-                timeoutInSeconds: 5,
-                signal: "SIGKILL"
-            )
-            let client = try state.getClient()
-            try await client.stop(options: opts)
-            try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
-                self.log.info(
-                    "ContainersService: attempt cleanup",
-                    metadata: [
-                        "func": "\(#function)",
-                        "id": "\(id)",
-                    ]
+            try await self.stop(
+                id: id,
+                options: ContainerStopOptions(
+                    timeoutInSeconds: 5,
+                    signal: "SIGKILL"
                 )
-                try await self.cleanUp(id: id, context: context)
-                self.log.info(
-                    "ContainersService: successful cleanup",
-                    metadata: [
-                        "func": "\(#function)",
-                        "id": "\(id)",
-                    ]
+            )
+        case .stopping:
+            guard force, isStatelessMacOS else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "container \(id) is \(state.snapshot.status) and can not be deleted"
                 )
             }
-        case .stopping:
-            throw ContainerizationError(
-                .invalidState,
-                message: "container \(id) is \(state.snapshot.status) and can not be deleted"
+            try await self.stop(
+                id: id,
+                options: ContainerStopOptions(
+                    timeoutInSeconds: 0,
+                    signal: "SIGKILL"
+                )
             )
         default:
-            try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
-                try await self.cleanUp(id: id, context: context)
-            }
+            break
+        }
+
+        guard self.containers[id] != nil else {
+            return
+        }
+        try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+            self.log.info(
+                "ContainersService: attempt cleanup",
+                metadata: [
+                    "func": "\(#function)",
+                    "id": "\(id)",
+                ]
+            )
+            try await self.cleanUp(id: id, context: context)
+            self.log.info(
+                "ContainersService: successful cleanup",
+                metadata: [
+                    "func": "\(#function)",
+                    "id": "\(id)",
+                ]
+            )
         }
     }
 
@@ -1660,7 +1790,9 @@ public actor ContainersService {
         var state: ContainerState
         do {
             state = try self.getContainerState(id: id, context: context)
-            if state.snapshot.status == .stopped {
+            if state.snapshot.status == .stopped,
+                !Self.isStatelessMacOSSandbox(state.snapshot.configuration)
+            {
                 return
             }
         } catch {
@@ -1668,22 +1800,23 @@ public actor ContainersService {
             return
         }
 
-        await self.exitMonitor.stopTracking(id: id)
-
         // Shutdown and deregister the runtime service
         self.log.info("shutting down runtime service", metadata: ["id": "\(id)"])
 
         let path = self.containerRoot.appendingPathComponent(id)
-        let bundle = ContainerResource.Bundle(path: path)
-        let config = try bundle.configuration
+        let config = state.snapshot.configuration
+        let isStatelessMacOS = Self.isStatelessMacOSSandbox(config)
         let label = Self.fullLaunchdServiceLabel(
             runtimeName: config.runtimeHandler,
             instanceId: id
         )
 
-        // Try to shutdown the client gracefully, but if the runtime service
-        // is already dead (e.g., killed externally), we should still continue
-        // with state cleanup.
+        if isStatelessMacOS {
+            try MacOSRuntimeCleanup.markPending(root: path)
+            state.snapshot.status = .stopping
+            await self.setContainerState(id, state, context: context)
+        }
+
         if let client = state.client {
             do {
                 try await client.shutdown()
@@ -1697,21 +1830,30 @@ public actor ContainersService {
             }
         }
 
-        // Deregister the service, launchd will terminate the process.
-        // This may also fail if the service was already deregistered or
-        // the process was killed externally.
-        do {
-            try ServiceManager.deregister(fullServiceLabel: label)
-            self.log.info("deregistered runtime service", metadata: ["id": "\(id)"])
-        } catch {
-            self.log.error(
-                "failed to deregister runtime service",
-                metadata: [
-                    "id": "\(id)",
-                    "error": "\(error)",
-                ])
+        if isStatelessMacOS {
+            try await MacOSRuntimeCleanup.stop(
+                id: id,
+                root: path,
+                parentLabel: label,
+                sidecarLabel: Self.statelessMacOSSidecarLabel(id: id)
+            )
+            try MacOSRuntimeCleanup.clearPending(root: path)
+        } else {
+            do {
+                try ServiceManager.deregister(fullServiceLabel: label)
+                self.log.info("deregistered runtime service", metadata: ["id": "\(id)"])
+            } catch {
+                self.log.error(
+                    "failed to deregister runtime service",
+                    metadata: [
+                        "id": "\(id)",
+                        "error": "\(error)",
+                    ]
+                )
+            }
         }
 
+        await self.exitMonitor.stopTracking(id: id)
         state.snapshot.status = .stopped
         state.snapshot.networks = []
         state.client = nil
@@ -1734,11 +1876,19 @@ public actor ContainersService {
         configuration: ContainerConfiguration,
         existingClient: RuntimeClient?
     ) async throws -> RuntimeClient {
+        let path = self.containerRoot.appendingPathComponent(id)
+        if Self.isStatelessMacOSSandbox(configuration),
+            MacOSRuntimeCleanup.isPending(root: path)
+        {
+            throw ContainerizationError(
+                .invalidState,
+                message: "sandbox cleanup is pending; finish stop or delete before starting"
+            )
+        }
         if let existingClient {
             return existingClient
         }
 
-        let path = self.containerRoot.appendingPathComponent(id)
         guard let plugin = self.runtimePlugins.first(where: { $0.name == configuration.runtimeHandler }) else {
             throw ContainerizationError(
                 .notFound,
@@ -1785,6 +1935,32 @@ public actor ContainersService {
         configuration: ContainerConfiguration
     ) async {
         await self.exitMonitor.stopTracking(id: id)
+
+        if Self.isStatelessMacOSSandbox(configuration) {
+            let root = self.containerRoot.appendingPathComponent(id)
+            do {
+                try await MacOSRuntimeCleanup.stop(
+                    id: id,
+                    root: root,
+                    parentLabel: Self.fullLaunchdServiceLabel(
+                        runtimeName: configuration.runtimeHandler,
+                        instanceId: id
+                    ),
+                    sidecarLabel: Self.statelessMacOSSidecarLabel(id: id)
+                )
+                try MacOSGuestNetworkLeaseStore.remove(from: root)
+                try MacOSRuntimeCleanup.clearPending(root: root)
+            } catch {
+                self.log.error(
+                    "failed runtime cleanup retained for retry",
+                    metadata: [
+                        "id": "\(id)",
+                        "error": "\(error)",
+                    ]
+                )
+            }
+            return
+        }
 
         if configuration.runtimeHandler == Self.macOSRuntimeName,
             let client = try? await RuntimeClient.create(id: id, runtime: configuration.runtimeHandler)
@@ -1969,16 +2145,42 @@ public actor ContainersService {
             return
         }
 
-        // To be pedantic. This is only needed if something in the "launch
-        // the init process" lifecycle fails before actually fork+exec'ing
-        // the OCI runtime.
-        await self.exitMonitor.stopTracking(id: id)
         let path = self.containerRoot.appendingPathComponent(id)
         let bundle = ContainerResource.Bundle(path: path)
+        let configuration = state.snapshot.configuration
 
-        if state.snapshot.configuration.macosGuest?.machineState != nil {
+        if Self.isStatelessMacOSSandbox(configuration) {
+            guard state.bootstrapTask == nil,
+                state.sandboxStartTask == nil,
+                state.processStartTasks.isEmpty
+            else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "sandbox start is in progress; retry delete after it completes"
+                )
+            }
+            try await MacOSRuntimeCleanup.stop(
+                id: id,
+                root: path,
+                parentLabel: Self.fullLaunchdServiceLabel(
+                    runtimeName: configuration.runtimeHandler,
+                    instanceId: id
+                ),
+                sidecarLabel: Self.statelessMacOSSidecarLabel(id: id)
+            )
+            try bundle.delete()
+            await self.exitMonitor.stopTracking(id: id)
+            self.containers.removeValue(forKey: id)
+            return
+        }
+
+        // This is needed if the init process fails before the OCI runtime has
+        // started tracking it.
+        await self.exitMonitor.stopTracking(id: id)
+
+        if configuration.macosGuest?.machineState != nil {
             let label = Self.fullLaunchdServiceLabel(
-                runtimeName: state.snapshot.configuration.runtimeHandler,
+                runtimeName: configuration.runtimeHandler,
                 instanceId: id
             )
             try ServiceManager.deregister(fullServiceLabel: label)
@@ -2068,33 +2270,78 @@ public actor ContainersService {
     }
 
     private func recoverSandboxStatesAtBoot() async {
-        let containerIDs = Array(self.containers.keys).sorted()
-        guard !containerIDs.isEmpty else {
-            return
-        }
-
-        for id in containerIDs {
-            await self.recoverSandboxStateAtBoot(id: id)
+        await Self.retrySandboxRecoveriesAtBoot(
+            containerIDs: Array(self.containers.keys),
+            retryDelay: Self.bootRecoveryRetryDelay
+        ) { [weak self] id in
+            guard let self else {
+                return false
+            }
+            return await self.recoverSandboxStateAtBoot(id: id)
         }
     }
 
-    private func recoverSandboxStateAtBoot(id: String) async {
+    static func retrySandboxRecoveriesAtBoot(
+        containerIDs: [String],
+        retryDelay: Duration,
+        recover: @escaping @Sendable (String) async -> Bool
+    ) async {
+        var pendingIDs = containerIDs.sorted()
+        while !pendingIDs.isEmpty, !Task.isCancelled {
+            var retryIDs: [String] = []
+            for id in pendingIDs {
+                if await recover(id) {
+                    retryIDs.append(id)
+                }
+            }
+            guard !retryIDs.isEmpty else {
+                return
+            }
+            do {
+                try await Task.sleep(for: retryDelay)
+            } catch {
+                return
+            }
+            pendingIDs = retryIDs
+        }
+    }
+
+    private func recoverSandboxStateAtBoot(id: String) async -> Bool {
         let runtimeName: String
         let fullServiceLabel: String
+        let configuration: ContainerConfiguration
+        let isStatelessMacOS: Bool
+        var retryAfterFailure = false
 
         do {
             let state = try self._getContainerState(id: id)
             guard state.client == nil, state.bootstrapTask == nil else {
-                return
+                return false
             }
-            runtimeName = state.snapshot.configuration.runtimeHandler
+            configuration = state.snapshot.configuration
+            runtimeName = configuration.runtimeHandler
+            isStatelessMacOS = Self.isStatelessMacOSSandbox(configuration)
+            retryAfterFailure = isStatelessMacOS
             fullServiceLabel = Self.fullLaunchdServiceLabel(
                 runtimeName: runtimeName,
                 instanceId: id
             )
 
+            if isStatelessMacOS {
+                let root = self.containerRoot.appendingPathComponent(id)
+                let autoRemove = (try? self.getContainerCreationOptions(id: id).autoRemove) == true
+                if MacOSRuntimeCleanup.isPending(root: root) || autoRemove {
+                    try await self.handleContainerExit(id: id)
+                    return false
+                }
+                if try MacOSRuntimeCleanup().serviceHasExited(label: fullServiceLabel) {
+                    try await self.handleContainerExit(id: id)
+                    return false
+                }
+            }
+
             guard try ServiceManager.isRegistered(fullServiceLabel: fullServiceLabel) else {
-                return
+                return false
             }
         } catch {
             self.log.warning(
@@ -2104,7 +2351,7 @@ public actor ContainersService {
                     "error": "\(error)",
                 ]
             )
-            return
+            return retryAfterFailure
         }
 
         do {
@@ -2135,10 +2382,10 @@ public actor ContainersService {
             )
 
             do {
-                try await self.registerContainerExitCallback(id: id)
                 guard shouldTrackExit else {
-                    return
+                    return false
                 }
+                try await self.registerContainerExitCallback(id: id)
                 try await self.trackContainerExit(id: id, client: client)
             } catch {
                 self.log.warning(
@@ -2149,6 +2396,7 @@ public actor ContainersService {
                     ]
                 )
             }
+            return false
         } catch {
             self.log.warning(
                 "failed to recover sandbox state at boot",
@@ -2158,6 +2406,25 @@ public actor ContainersService {
                     "error": "\(error)",
                 ]
             )
+            guard isStatelessMacOS else {
+                return false
+            }
+            do {
+                guard try MacOSRuntimeCleanup().serviceHasExited(label: fullServiceLabel) else {
+                    return true
+                }
+                try await self.handleContainerExit(id: id)
+                return false
+            } catch {
+                self.log.error(
+                    "failed to clean up unrecoverable stateless macOS sandbox",
+                    metadata: [
+                        "id": "\(id)",
+                        "error": "\(error)",
+                    ]
+                )
+                return true
+            }
         }
     }
 
@@ -2176,7 +2443,98 @@ public actor ContainersService {
             log.info("container \(id) finished in exit monitor, exit code \(code)")
             return code
         }
-        try await self.exitMonitor.track(id: id, waitingOn: waitFunc)
+        let configuration = try self._getContainerState(id: id).snapshot.configuration
+        if configuration.runtimeHandler == Self.macOSRuntimeName {
+            try await self.exitMonitor.track(
+                id: id,
+                waitingOn: waitFunc,
+                onWaitFailure: { [weak self] id in
+                    try await self?.recoverAfterWaitFailure(id: id)
+                }
+            )
+        } else {
+            try await self.exitMonitor.track(id: id, waitingOn: waitFunc)
+        }
+    }
+
+    private func recoverAfterWaitFailure(id: String) async throws -> ExitStatus? {
+        let state = try self._getContainerState(id: id)
+        let configuration = state.snapshot.configuration
+        guard Self.isStatelessMacOSSandbox(configuration) else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "macOS machine-state cleanup requires lifecycle proof"
+            )
+        }
+        let parentLabel = Self.fullLaunchdServiceLabel(
+            runtimeName: configuration.runtimeHandler,
+            instanceId: id
+        )
+        guard try MacOSRuntimeCleanup().serviceHasExited(label: parentLabel) else {
+            return nil
+        }
+        return ExitStatus(exitCode: 255, exitedAt: Date())
+    }
+
+    private func confirmMissingSandboxHasExited(id: String) async throws {
+        guard self.containers[id] == nil else {
+            return
+        }
+        let root = self.containerRoot.appendingPathComponent(id)
+        try await MacOSRuntimeCleanup.confirmStopped(
+            id: id,
+            root: root,
+            parentLabel: Self.fullLaunchdServiceLabel(
+                runtimeName: Self.macOSRuntimeName,
+                instanceId: id
+            ),
+            sidecarLabel: Self.statelessMacOSSidecarLabel(id: id)
+        )
+    }
+
+    private func confirmStatelessMacOSRuntimeStopped(
+        id: String,
+        configuration: ContainerConfiguration
+    ) async throws {
+        try await MacOSRuntimeCleanup.confirmStopped(
+            id: id,
+            root: self.containerRoot.appendingPathComponent(id),
+            parentLabel: Self.fullLaunchdServiceLabel(
+                runtimeName: configuration.runtimeHandler,
+                instanceId: id
+            ),
+            sidecarLabel: Self.statelessMacOSSidecarLabel(id: id)
+        )
+    }
+
+    static func requireNoPendingStatelessMacOSCleanup(
+        root: URL,
+        configuration: ContainerConfiguration
+    ) throws {
+        guard
+            !Self.isStatelessMacOSSandbox(configuration)
+                || !MacOSRuntimeCleanup.isPending(root: root)
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "sandbox cleanup is pending"
+            )
+        }
+    }
+
+    private static func isStatelessMacOSSandbox(
+        _ configuration: ContainerConfiguration
+    ) -> Bool {
+        configuration.runtimeHandler == Self.macOSRuntimeName
+            && configuration.macosGuest?.machineState == nil
+    }
+
+    private static func statelessMacOSSidecarLabel(id: String) -> String {
+        MacOSSidecarLaunchIdentity.fullLaunchLabel(
+            sandboxID: id,
+            persistenceID: nil,
+            effectiveUserID: UInt32(geteuid())
+        )
     }
 
     static func makeBootRecoveredState(

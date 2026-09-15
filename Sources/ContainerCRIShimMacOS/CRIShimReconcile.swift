@@ -721,9 +721,9 @@ private func makeCRIShimSandboxMetadataState(_ status: RuntimeStatus) -> CRIShim
     switch status {
     case .running:
         .running
-    case .stopping, .stopped:
+    case .stopped:
         .stopped
-    case .unknown:
+    case .stopping, .unknown:
         .pending
     }
 }

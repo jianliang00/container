@@ -25,7 +25,7 @@ import Glibc
 import Darwin
 #endif
 
-@Suite
+@Suite(.serialized)
 struct FileHandleByteWriterTests {
     @Test
     func partialWritesPreserveBytesAndOrder() async throws {

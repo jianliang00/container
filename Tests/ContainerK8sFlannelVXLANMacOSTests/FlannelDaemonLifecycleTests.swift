@@ -451,7 +451,7 @@ private func runControlClient<T: Sendable>(
     _ operation: @escaping @Sendable () throws -> T
 ) async throws -> T {
     try await withCheckedThrowingContinuation { continuation in
-        DispatchQueue.global(qos: .userInitiated).async {
+        Thread.detachNewThread {
             continuation.resume(with: Result(catching: operation))
         }
     }

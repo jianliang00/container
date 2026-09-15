@@ -37,7 +37,10 @@ struct MacOSSandboxServiceNetworkTests {
 
         let recorder = RecordingSandboxNetworkControl()
         let service = makeService(root: root, recorder: recorder)
-        let config = try makeConfiguration(vmnetDisconnectRecovery: .stopSandbox)
+        let config = try makeConfiguration(
+            id: root.lastPathComponent,
+            vmnetDisconnectRecovery: .stopSandbox
+        )
         try await service.testingPrepareSandbox(config, state: initialState)
 
         await service.handleSandboxNetworkInvalidation(
@@ -92,6 +95,7 @@ struct MacOSSandboxServiceNetworkTests {
         let recorder = RecordingSandboxNetworkControl()
         let service = makeService(root: root, recorder: recorder)
         let config = try makeConfiguration(
+            id: root.lastPathComponent,
             vmnetDisconnectRecovery: .rebootNode,
             vmnetRecoveryStatePath: recoveryStatePath,
             vmnetRecoveryRequestPath: recoveryRequestPath,
@@ -763,6 +767,7 @@ private func makeService(root: URL, recorder: RecordingSandboxNetworkControl) ->
 }
 
 private func makeConfiguration(
+    id: String = "sandbox-network-test",
     backend: ContainerConfiguration.MacOSGuestOptions.NetworkBackend = .vmnetShared,
     vmnetDisconnectRecovery: ContainerConfiguration.MacOSGuestOptions.VMNetDisconnectRecovery = .disabled,
     vmnetRecoveryStatePath: String? = nil,
@@ -787,7 +792,7 @@ private func makeConfiguration(
     )
 
     var config = ContainerConfiguration(
-        id: "sandbox-network-test",
+        id: id,
         image: image,
         process: process
     )

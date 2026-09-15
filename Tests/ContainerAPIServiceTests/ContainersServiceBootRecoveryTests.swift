@@ -14,9 +14,11 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerPlugin
 import ContainerXPC
 import ContainerizationExtras
 import Foundation
+import Logging
 import Testing
 
 @testable import ContainerAPIService
@@ -24,6 +26,96 @@ import Testing
 @testable import ContainerRuntimeClient
 
 struct ContainersServiceBootRecoveryTests {
+    @Test
+    func pendingCleanupRejectsStatelessMacOSStartAdmission() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        var configuration = try makeContainerConfiguration(id: root.lastPathComponent)
+        configuration.runtimeHandler = "container-runtime-macos"
+        try MacOSRuntimeCleanup.markPending(root: root)
+
+        #expect(throws: (any Error).self) {
+            try ContainersService.requireNoPendingStatelessMacOSCleanup(
+                root: root,
+                configuration: configuration
+            )
+        }
+    }
+
+    @Test
+    func bootLoadRetainsPendingAutoRemoveAndUnreadableBundles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let containers = root.appendingPathComponent("containers")
+        let path = containers.appendingPathComponent("boot-recovery")
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+        var configuration = try makeContainerConfiguration(id: "boot-recovery")
+        configuration.runtimeHandler = "container-runtime-macos"
+        let bundle = ContainerResource.Bundle(path: path)
+        try bundle.write(filename: "config.json", value: configuration)
+        try bundle.write(
+            filename: "options.json",
+            value: ContainerCreateOptions(autoRemove: true)
+        )
+
+        let unreadable = containers.appendingPathComponent("unreadable")
+        try FileManager.default.createDirectory(
+            at: unreadable,
+            withIntermediateDirectories: false
+        )
+        try Data("retained VM disk".utf8).write(
+            to: unreadable.appendingPathComponent("Disk.img")
+        )
+
+        let loader = try PluginLoader(
+            appRoot: root,
+            installRoot: root,
+            logRoot: nil,
+            pluginDirectories: [],
+            pluginFactories: []
+        )
+        let states = try ContainersService.loadAtBoot(
+            root: containers,
+            loader: loader,
+            log: Logger(label: "boot-recovery-test")
+        )
+
+        #expect(states[configuration.id]?.snapshot.status == .stopping)
+        #expect(FileManager.default.fileExists(atPath: path.path))
+        #expect(
+            FileManager.default.fileExists(
+                atPath: unreadable.appendingPathComponent("Disk.img").path
+            )
+        )
+    }
+
+    @Test
+    func bootRecoveryRetriesOnlyPendingSandboxes() async {
+        let recorder = BootRecoveryAttemptRecorder(
+            failuresRemaining: [
+                "already-clean": 0,
+                "retry-once": 1,
+            ]
+        )
+
+        await ContainersService.retrySandboxRecoveriesAtBoot(
+            containerIDs: ["retry-once", "already-clean"],
+            retryDelay: .milliseconds(1)
+        ) { id in
+            await recorder.recover(id: id)
+        }
+
+        let completedAttempts = await recorder.attempts(for: "already-clean")
+        let retriedAttempts = await recorder.attempts(for: "retry-once")
+        #expect(completedAttempts == 1)
+        #expect(retriedAttempts == 2)
+    }
+
     @Test
     func bootRecoveryKeepsRecoveredClientForStoppedSandbox() throws {
         let existing = try makeContainerState(status: .stopped, networks: [], startedDate: Date())
@@ -226,5 +318,27 @@ struct ContainersServiceBootRecoveryTests {
             runtime: "container-runtime-macos",
             client: XPCClient(service: "com.apple.container.tests.boot-recovery")
         )
+    }
+}
+
+private actor BootRecoveryAttemptRecorder {
+    private var attemptsByID: [String: Int] = [:]
+    private var failuresRemaining: [String: Int]
+
+    init(failuresRemaining: [String: Int]) {
+        self.failuresRemaining = failuresRemaining
+    }
+
+    func recover(id: String) -> Bool {
+        attemptsByID[id, default: 0] += 1
+        guard let remaining = failuresRemaining[id], remaining > 0 else {
+            return false
+        }
+        failuresRemaining[id] = remaining - 1
+        return true
+    }
+
+    func attempts(for id: String) -> Int {
+        attemptsByID[id, default: 0]
     }
 }

@@ -777,7 +777,8 @@ final class AgentConnection: @unchecked Sendable {
             workingDirectory: frame.workingDirectory,
             terminal: terminal,
             identity: spawnedIdentity ?? .currentProcess(),
-            connection: self
+            connection: self,
+            trace: trace
         )
         trace.record(.spawnCompleted)
         self.session = session
@@ -1738,7 +1739,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         workingDirectory: String?,
         terminal: Bool,
         identity: GuestAgentExecIdentity,
-        connection: AgentConnection
+        connection: AgentConnection,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> SpawnedProcessSession {
         try spawn(
             executable: executable,
@@ -1749,7 +1751,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             terminal: terminal,
             identity: identity,
             connection: connection,
-            eventSink: nil
+            eventSink: nil,
+            trace: trace
         )
     }
 
@@ -1761,7 +1764,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         workingDirectory: String?,
         terminal: Bool,
         identity: GuestAgentExecIdentity,
-        eventSink: any SpawnedProcessEventSink
+        eventSink: any SpawnedProcessEventSink,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> SpawnedProcessSession {
         try spawn(
             executable: executable,
@@ -1772,7 +1776,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             terminal: terminal,
             identity: identity,
             connection: nil,
-            eventSink: eventSink
+            eventSink: eventSink,
+            trace: trace
         )
     }
 
@@ -1785,7 +1790,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         terminal: Bool,
         identity: GuestAgentExecIdentity,
         connection: AgentConnection?,
-        eventSink: (any SpawnedProcessEventSink)?
+        eventSink: (any SpawnedProcessEventSink)?,
+        trace: MacOSProcessStartTrace?
     ) throws -> SpawnedProcessSession {
         if let rootDirectory, !rootDirectory.hasPrefix("/") {
             throw POSIXError(.EINVAL)
@@ -1807,6 +1813,7 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         if bootstrapLaunch == nil {
             try setCloseOnExec(execStatus.writeEnd)
         }
+        trace?.record(.bootstrapPrepared)
 
         let childExecutable = bootstrapLaunch?.executable ?? executable
         let childArguments = bootstrapLaunch?.arguments ?? arguments
@@ -1837,6 +1844,7 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             stderrPipe = try makePipe()
         }
 
+        trace?.record(.forkBegin)
         let pid = sysFork()
         guard pid >= 0 else {
             closeIfValid(execStatus.readEnd)
@@ -1887,6 +1895,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             }
         }
 
+        // Emit only in the parent; logging is not safe in the post-fork child.
+        trace?.record(.forkReturned)
         closeIfValid(execStatus.writeEnd)
         closeIfValid(bootstrapLaunch?.payloadFD)
         closeIfValid(slaveFD)
@@ -1896,7 +1906,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
 
         if let errorCode = try readExecStatus(
             execStatus.readEnd,
-            requireHelperReady: bootstrapLaunch != nil
+            requireHelperReady: bootstrapLaunch != nil,
+            trace: trace
         ) {
             closeIfValid(masterFD)
             closeIfValid(stdinPipe?.writeEnd)
@@ -2298,7 +2309,7 @@ private func setCloseOnExec(_ fd: Int32) throws {
 
 private let execHelperReadyStatus: Int32 = -1
 
-private func readExecStatus(_ fd: Int32, requireHelperReady: Bool = false) throws -> Int32? {
+func readExecStatus(_ fd: Int32, requireHelperReady: Bool = false, trace: MacOSProcessStartTrace? = nil) throws -> Int32? {
     defer { closeIfValid(fd) }
     if requireHelperReady {
         guard let firstStatus = try readExecStatusCode(fd) else {
@@ -2307,8 +2318,13 @@ private func readExecStatus(_ fd: Int32, requireHelperReady: Bool = false) throw
         if firstStatus != execHelperReadyStatus {
             return firstStatus
         }
+        trace?.record(.helperReady)
     }
-    return try readExecStatusCode(fd)
+    let status = try readExecStatusCode(fd)
+    if status == nil {
+        trace?.record(.execConfirmed)
+    }
+    return status
 }
 
 private func readExecStatusCode(_ fd: Int32) throws -> Int32? {

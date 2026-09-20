@@ -52,13 +52,49 @@ struct GuestAgentProcessStartupTests {
         let lines = messages.withLock { $0 }
         let stages = lines.compactMap { $0.split(separator: " ").first { $0.hasPrefix("stage=") }.map(String.init) }
         let expected =
-            ["received", "identityBegin", "identityResolved", "spawnBegin"]
-            + (success ? ["spawnCompleted", "ackSendBegin", "ackSent"] : ["failed"])
+            ["received", "identityBegin", "identityResolved", "spawnBegin", "bootstrapPrepared", "forkBegin", "forkReturned"]
+            + (success ? ["execConfirmed", "spawnCompleted", "ackSendBegin", "ackSent"] : ["failed"])
         #expect(stages == expected.map { "stage=" + $0 })
         #expect(!lines.joined().contains("private"))
         #expect(!lines.joined().contains("sensitive-id"))
         #expect(!lines.joined().contains("secret-value"))
         #expect(lines.allSatisfy { !$0.contains("\n") })
+    }
+
+    @Test(arguments: [true, false])
+    func helperTimingRequiresReadyMarkerAndSuccessfulExec(success: Bool) throws {
+        let messages = LockedValue<[String]>([])
+        let trace = MacOSProcessStartTrace(processID: "helper-test") { message in
+            messages.withLock { $0.append(message) }
+        }
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        var marker: Int32 = -1
+        #expect(write(fds[1], &marker, MemoryLayout<Int32>.size) == MemoryLayout<Int32>.size)
+        if !success {
+            var error = Int32(ENOENT)
+            #expect(write(fds[1], &error, MemoryLayout<Int32>.size) == MemoryLayout<Int32>.size)
+        }
+        close(fds[1])
+        let status = try readExecStatus(fds[0], requireHelperReady: true, trace: trace)
+        #expect(status == (success ? nil : Int32(ENOENT)))
+        let stages = messages.withLock { $0 }.compactMap { $0.split(separator: " ").first { $0.hasPrefix("stage=") }.map(String.init) }
+        #expect(stages == (success ? ["stage=helperReady", "stage=execConfirmed"] : ["stage=helperReady"]))
+    }
+
+    @Test
+    func missingHelperMarkerDoesNotReportSuccessfulExec() throws {
+        let messages = LockedValue<[String]>([])
+        let trace = MacOSProcessStartTrace(processID: "missing-helper") { message in
+            messages.withLock { $0.append(message) }
+        }
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        close(fds[1])
+        #expect(throws: POSIXError.self) {
+            _ = try readExecStatus(fds[0], requireHelperReady: true, trace: trace)
+        }
+        #expect(messages.withLock { $0 }.isEmpty)
     }
 
     @Test

@@ -47,7 +47,7 @@ struct DurableGuestProcessSupervisorTests {
             }
             let expected =
                 ["identityBegin", "identityResolved"]
-                + (retry ? ["processReused"] : ["spawnBegin", "spawnCompleted"])
+                + (retry ? ["processReused"] : ["spawnBegin", "bootstrapPrepared", "forkBegin", "forkReturned", "execConfirmed", "spawnCompleted"])
                 + ["ackSendBegin", "ackSent"]
             #expect(stages == expected.map { "stage=" + $0 })
         }

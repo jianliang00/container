@@ -345,7 +345,8 @@ final class GuestProcessSupervisor: @unchecked Sendable {
                     workingDirectory: spec.workingDirectory,
                     terminal: spec.terminal,
                     identity: spec.identity,
-                    eventSink: created
+                    eventSink: created,
+                    trace: trace
                 )
                 trace?.record(.spawnCompleted)
                 created.install(session: session)

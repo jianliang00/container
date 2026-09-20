@@ -84,6 +84,10 @@ values or treat them as synchronized timestamps.
 | Sidecar | `sendBegin`, `sent`, `ackReceived` | Sending the exec frame and waiting for its startup ACK |
 | Guest | `received`, `identityBegin`, `identityResolved` | Receiving exec and resolving the requested user and groups |
 | Guest | `spawnBegin`, `spawnCompleted` | Starting the process, including the non-root bootstrap helper and exec-status pipe |
+| Guest | `bootstrapPrepared` | Exec-status pipe and optional user-bootstrap payload prepared |
+| Guest | `forkBegin`, `forkReturned` | Parent-side boundaries around fork; no trace logging runs in the child |
+| Guest, user bootstrap | `helperReady` | Parent received the helper marker after launchctl and helper initialization |
+| Guest | `execConfirmed` | Exec-status pipe reached successful EOF; errors do not emit this stage |
 | Guest | `ackSendBegin`, `ackSent` | Sending the ACK after successful process startup |
 | Guest, durable retry | `processReused` instead of spawn stages | Reattaching to an existing durable process without spawning it again |
 | Either endpoint | `failed` | The startup operation failed; preceding stages locate the last completed boundary |
@@ -93,6 +97,14 @@ proof that the command did not execute, and these logs do not authorize replay.
 Use the guest stage sequence and durable process inspection to establish the
 outcome before retrying. The guest binary inside the image must also contain
 this instrumentation; installing only a new host sidecar cannot add guest stages.
+
+For a slow spawn, compare `spawnBegin` to `bootstrapPrepared` (payload setup),
+`bootstrapPrepared` to `forkBegin` (argument and I/O preparation), and
+`forkBegin` to `forkReturned` (fork). For non-root launches, the interval from
+`forkReturned` to `helperReady` includes launchctl's user-bootstrap transition,
+loading the helper, and decoding its payload; it does not isolate any one of
+those operations. `helperReady` to `execConfirmed` includes identity and working
+directory setup plus the target exec. Direct launches omit `helperReady`.
 
 ## Operational Notes
 

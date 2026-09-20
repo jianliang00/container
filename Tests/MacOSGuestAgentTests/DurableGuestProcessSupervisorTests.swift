@@ -25,6 +25,35 @@ import Testing
 @Suite(.serialized)
 struct DurableGuestProcessSupervisorTests {
     @Test
+    func startupTimingDistinguishesCreateFromRetry() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let supervisor = GuestProcessSupervisor()
+        defer { supervisor.removeAllForTesting() }
+        let pair = try makeDurableProcessSocketPair()
+        defer { closeDurableProcessFD(pair.peer) }
+        let connection = try AgentConnection(fd: pair.server, processSupervisor: supervisor)
+        let messages = DurableLockedValue<[String]>([])
+        let trace = MacOSProcessStartTrace(processID: "trace-retry") { message in
+            messages.withLock { $0.append(message) }
+        }
+        let frame = durableExecFrame(id: "trace-retry", script: "sleep 10")
+        for retry in [false, true] {
+            messages.withLock { $0.removeAll() }
+            _ = try supervisor.createAndAttach(frame: frame, connection: connection, cursor: 0, trace: trace)
+            let ack = try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: pair.peer)
+            #expect(ack.type == .ack)
+            let stages = messages.withLock { $0 }.compactMap {
+                $0.split(separator: " ").first { $0.hasPrefix("stage=") }.map(String.init)
+            }
+            let expected =
+                ["identityBegin", "identityResolved"]
+                + (retry ? ["processReused"] : ["spawnBegin", "spawnCompleted"])
+                + ["ackSendBegin", "ackSent"]
+            #expect(stages == expected.map { "stage=" + $0 })
+        }
+    }
+
+    @Test
     func boundedAgentConnectionWriteTimesOutWhenPeerStopsReading() throws {
         signal(SIGPIPE, SIG_IGN)
         let pair = try makeDurableProcessSocketPair()

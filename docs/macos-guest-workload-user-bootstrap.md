@@ -66,6 +66,34 @@ security find-identity -v -p codesigning
 The list should include the user's keychain entries rather than only
 `/Library/Keychains/System.keychain` and root's login keychain.
 
+## Process Startup Timing
+
+The sidecar and guest agent emit `process_start_timing` log lines for exec
+startup. `process_hash` is SHA-256 of the protocol process ID; it is shared
+between the two endpoints. `attempt` distinguishes local trace instances, not
+host/guest pairs. Match the process hash and the controlled request order when
+diagnosing retries. These lines never include the command, user name,
+arguments, environment, or raw process ID.
+
+`elapsed_ns` is monotonic time since that endpoint's trace began. Compare
+successive stages within one attempt; never subtract host and guest elapsed
+values or treat them as synchronized timestamps.
+
+| Endpoint | Stages | Meaning |
+| --- | --- | --- |
+| Sidecar | `sendBegin`, `sent`, `ackReceived` | Sending the exec frame and waiting for its startup ACK |
+| Guest | `received`, `identityBegin`, `identityResolved` | Receiving exec and resolving the requested user and groups |
+| Guest | `spawnBegin`, `spawnCompleted` | Starting the process, including the non-root bootstrap helper and exec-status pipe |
+| Guest | `ackSendBegin`, `ackSent` | Sending the ACK after successful process startup |
+| Guest, durable retry | `processReused` instead of spawn stages | Reattaching to an existing durable process without spawning it again |
+| Either endpoint | `failed` | The startup operation failed; preceding stages locate the last completed boundary |
+
+The sidecar retains its three-second startup ACK timeout. A missing ACK is not
+proof that the command did not execute, and these logs do not authorize replay.
+Use the guest stage sequence and durable process inspection to establish the
+outcome before retrying. The guest binary inside the image must also contain
+this instrumentation; installing only a new host sidecar cannot add guest stages.
+
 ## Operational Notes
 
 This runtime behavior does not install certificates or create build keychains.

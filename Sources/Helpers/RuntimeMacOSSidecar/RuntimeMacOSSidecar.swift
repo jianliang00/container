@@ -3755,6 +3755,9 @@ final class SidecarControlServer: @unchecked Sendable {
 
         let fd = try connectProcessStream(port: port)
         var unregisteredSession: ProcessStreamSession?
+        let trace = MacOSProcessStartTrace(processID: exec.durableExecutionID ?? processID) { [log] message in
+            log.info("\(message)")
+        }
 
         do {
             let durable = exec.durableExecutionID != nil
@@ -3797,6 +3800,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 existingStatus = nil
             }
             let attachment = try guestAttachmentSelection(exec: exec, existingStatus: existingStatus)
+            trace.record(.sendBegin)
             try MacOSSidecarSocketIO.writeJSONFrame(
                 SidecarGuestAgentFrame.exec(
                     id: guestProcessID,
@@ -3820,11 +3824,13 @@ final class SidecarControlServer: @unchecked Sendable {
                 ),
                 fd: fd
             )
+            trace.record(.sent)
             let handshake = try waitForProcessStartAck(
                 fd: fd,
                 expectedProcessID: guestProcessID,
                 timeoutSeconds: 3
             )
+            trace.record(.ackReceived)
             let durableStatus: MacOSGuestProcessStatusPayload?
             if durable {
                 guard let status = handshake.status else {
@@ -3894,6 +3900,7 @@ final class SidecarControlServer: @unchecked Sendable {
             )
             unregisteredSession = nil
         } catch {
+            trace.record(.failed)
             if let unregisteredSession {
                 unregisteredSession.cancelAndClose()
             } else {

@@ -265,10 +265,13 @@ final class GuestProcessSupervisor: @unchecked Sendable {
     func createAndAttach(
         frame: GuestAgentFrame,
         connection: AgentConnection,
-        cursor: UInt64
+        cursor: UInt64,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> GuestProcessAttachmentHandle {
         let executionID = try requireExecutionID(frame.id)
+        trace?.record(.identityBegin)
         let spec = try DurableGuestProcessLaunchSpec(frame: frame)
+        trace?.record(.identityResolved)
         let fingerprint = try spec.fingerprint()
         let requestedAttachment = try DurableGuestProcessAttachmentRequest(frame: frame)
 
@@ -303,6 +306,7 @@ final class GuestProcessSupervisor: @unchecked Sendable {
             disposition = .existing
             attachmentRequest = requestedAttachment
             lock.unlock()
+            trace?.record(.processReused)
         } else {
             guard cursor == 0 else {
                 lock.unlock()
@@ -332,6 +336,7 @@ final class GuestProcessSupervisor: @unchecked Sendable {
             )
             let session: SpawnedProcessSession
             do {
+                trace?.record(.spawnBegin)
                 session = try SpawnedProcessSession.spawn(
                     executable: spec.executable,
                     arguments: spec.arguments,
@@ -342,6 +347,7 @@ final class GuestProcessSupervisor: @unchecked Sendable {
                     identity: spec.identity,
                     eventSink: created
                 )
+                trace?.record(.spawnCompleted)
                 created.install(session: session)
                 processes[executionID] = created
                 try session.start(stdoutHandle: nil, stderrHandle: nil)
@@ -362,7 +368,8 @@ final class GuestProcessSupervisor: @unchecked Sendable {
             connection: connection,
             cursor: cursor,
             disposition: disposition,
-            request: attachmentRequest
+            request: attachmentRequest,
+            trace: trace
         )
     }
 
@@ -640,7 +647,8 @@ private final class DurableGuestProcess: SpawnedProcessEventSink, @unchecked Sen
         connection: AgentConnection,
         cursor: UInt64,
         disposition: MacOSGuestProcessDisposition,
-        request: DurableGuestProcessAttachmentRequest
+        request: DurableGuestProcessAttachmentRequest,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> GuestProcessAttachmentHandle {
         let handle = GuestProcessAttachmentHandle(executionID: executionID, token: UUID())
         let candidate: Attachment
@@ -707,10 +715,12 @@ private final class DurableGuestProcess: SpawnedProcessEventSink, @unchecked Sen
         // success, the previous controller can no longer issue a command.
         let writeDeadline = Date().addingTimeInterval(attachmentWriteTimeout)
         do {
+            trace?.record(.ackSendBegin)
             try connection.send(
                 frame: .ack(id: executionID, data: try JSONEncoder().encode(payload)),
                 deadline: writeDeadline
             )
+            trace?.record(.ackSent)
             afterAttachmentAcknowledgement?(disposition)
         } catch {
             lock.lock()

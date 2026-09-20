@@ -23,6 +23,7 @@ import Foundation
 public struct MacOSProcessStartTrace: Sendable {
     public enum Stage: String, Sendable {
         case received, identityBegin, identityResolved, spawnBegin, spawnCompleted
+        case bootstrapPrepared, forkBegin, forkReturned, helperReady, execConfirmed
         case processReused, ackSendBegin, ackSent, sendBegin, sent, ackReceived, failed
     }
 

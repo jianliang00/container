@@ -58,9 +58,25 @@ public enum MacOSDiskRebuilder {
     ) throws {
         let fm = FileManager.default
 
-        // Create output directory if needed
         let outputDir = outputPath.deletingLastPathComponent()
+        guard let lock = try MacOSGuestCache.lockRebuildEntry(outputDir) else {
+            throw RebuildError.cacheDirectoryCreationFailed(path: outputDir.path)
+        }
+        defer { close(lock) }
         try fm.createDirectory(at: outputDir, withIntermediateDirectories: true)
+
+        // Only the lock owner can rebuild this manifest. Reclaim interrupted output
+        // from previous processes before allocating another full-size disk image.
+        for entry in try fm.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil) {
+            let name = entry.lastPathComponent
+            if name.hasPrefix(".rebuild-"), name.hasSuffix(".tmp"),
+                UUID(uuidString: String(name.dropFirst(9).dropLast(4))) != nil
+            {
+                try fm.removeItem(at: entry)
+            }
+        }
+        // A competing process may have populated the cache while we waited.
+        if cacheExists(at: outputPath) { return }
 
         // Use a temporary file for atomic write
         let tempPath = outputDir.appendingPathComponent(".rebuild-\(UUID().uuidString).tmp")
@@ -118,7 +134,9 @@ public enum MacOSDiskRebuilder {
                 throw error
             }
 
-            fsync(outFd)
+            guard fsync(outFd) == 0 else {
+                throw POSIXError(POSIXError.Code(rawValue: errno) ?? .EIO)
+            }
         }
 
         // Atomic rename

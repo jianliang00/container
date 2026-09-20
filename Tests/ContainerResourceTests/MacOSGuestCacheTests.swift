@@ -70,6 +70,27 @@ struct MacOSGuestCacheTests {
     }
 
     @Test
+    func pruningSkipsARebuildOwnedByAnotherFileDescriptor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("cache-lock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entry = root.appendingPathComponent("sha256-test")
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        try Data("partial".utf8).write(to: entry.appendingPathComponent(".rebuild-test.tmp"))
+        let owner = try #require(try MacOSGuestCache.lockRebuildEntry(entry))
+        let reclaimed: UInt64
+        do {
+            defer { close(owner) }
+            reclaimed = try MacOSGuestCache.pruneOrphanedRebuildCache(cacheDir: root, liveManifestDigests: [])
+        }
+        #expect(reclaimed == 0)
+        #expect(FileManager.default.fileExists(atPath: entry.path))
+        _ = try MacOSGuestCache.pruneOrphanedRebuildCache(cacheDir: root, liveManifestDigests: [])
+        #expect(!FileManager.default.fileExists(atPath: entry.path))
+        // Persistent lock files are infrastructure, not reclaimable cache entries.
+        #expect(try MacOSGuestCache.rebuildCacheUsage(cacheDir: root, liveManifestDigests: []).entryCount == 0)
+    }
+
+    @Test
     func guestDiskCacheUsageTreatsAllEntriesAsReclaimable() throws {
         let fileManager = FileManager.default
         let tempDir = fileManager.temporaryDirectory.appendingPathComponent("macos-guest-disk-cache-\(UUID().uuidString)")

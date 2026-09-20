@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import Synchronization
 import Testing
 import libzstd
 
@@ -77,7 +78,7 @@ struct ZstdCodecTests {
     }
 
     @Test
-    func rebuildsDiskChunkWithoutExternalBinary() throws {
+    func concurrentRebuildsReuseOneDiskAndRecoverAfterFailure() throws {
         let tempDirectory = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
 
@@ -109,11 +110,33 @@ struct ZstdCodecTests {
             ]
         )
 
-        try MacOSDiskRebuilder.rebuild(
-            layout: layout,
-            chunkBlobPaths: [blobDigest: blobURL],
-            outputPath: outputURL
-        )
+        #expect(throws: MacOSDiskRebuilder.RebuildError.self) {
+            try MacOSDiskRebuilder.rebuild(layout: layout, chunkBlobPaths: [:], outputPath: outputURL)
+        }
+        #expect(!FileManager.default.fileExists(atPath: outputURL.path))
+        let stale = outputURL.deletingLastPathComponent().appendingPathComponent(".rebuild-\(UUID().uuidString).tmp")
+        try Data("interrupted output".utf8).write(to: stale)
+        let result = Mutex((rebuildCount: 0, errors: [String]()))
+        DispatchQueue.concurrentPerform(iterations: 8) { _ in
+            do {
+                try MacOSDiskRebuilder.rebuild(
+                    layout: layout,
+                    chunkBlobPaths: [blobDigest: blobURL],
+                    outputPath: outputURL,
+                    progressHandler: { _, _ in
+                        result.withLock { $0.rebuildCount += 1 }
+                    }
+                )
+            } catch {
+                result.withLock { $0.errors.append(String(describing: error)) }
+            }
+        }
+        #expect(result.withLock { $0.errors.isEmpty })
+        #expect(result.withLock { $0.rebuildCount } == 1)
+        #expect(!FileManager.default.fileExists(atPath: stale.path))
+        // Cache reuse must not reopen a chunk that image maintenance has removed.
+        try FileManager.default.removeItem(at: blobURL)
+        try MacOSDiskRebuilder.rebuild(layout: layout, chunkBlobPaths: [:], outputPath: outputURL)
 
         let rebuilt = try Data(contentsOf: outputURL)
         #expect(rebuilt.count == Int(chunkLength))

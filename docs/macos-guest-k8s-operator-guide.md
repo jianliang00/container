@@ -392,3 +392,28 @@ cover a closed target port, 64 active PortForward pairs in one SPDY session,
 rejection of the 65th pair, quota release and reconnect, pending-byte limits,
 concurrent exec, cancellation, and file-descriptor recovery. A successful local
 TCP connect without a guest payload is not a passing PortForward result.
+
+## Sandbox Image Storage
+
+Images annotated with `org.apple.container.macos.image.role=sandbox` are pinned
+in CRI image listings and status responses. CRI refuses to remove these images,
+including requests by digest or another tag for the same digest. Kubelet does
+not track the separate sandbox base image as a workload image, so automatic
+image GC must not reclaim its blobs while a sandbox is being prepared.
+Workload images remain eligible for kubelet image GC. Retire obsolete sandbox
+images explicitly with the container image CLI after isolating the node and
+confirming that no running or preparing sandbox needs those versions. Reserve
+space for pinned base images when planning node capacity.
+
+Disk rebuilds for the same cached manifest are serialized across processes.
+Waiters reuse the completed disk instead of decompressing it again. Cache GC
+skips entries whose rebuild lock is held. Interrupted `.rebuild-<UUID>.tmp`
+outputs are reclaimed under that lock before the next rebuild; lock files stay
+outside cache entries so pruning cannot invalidate a waiting process's lock.
+
+Chunk extraction uses unlinked temporary files, which the operating system
+reclaims when the owning process exits. Named `rebuild-chunk-*.tar` files left
+by older releases require a one-time maintenance cleanup: first isolate the
+node, confirm that no process has the files open or is still rebuilding, and
+remove only verified stale files. Do not delete the complete temporary directory
+or lower disk-pressure thresholds to hide storage exhaustion.

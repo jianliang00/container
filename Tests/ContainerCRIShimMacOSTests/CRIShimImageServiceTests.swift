@@ -26,6 +26,27 @@ import Testing
 
 struct CRIShimImageServiceTests {
     @Test
+    func sandboxImagesAndDigestAliasesAreProtectedFromGarbageCollection() throws {
+        let sandbox = CRIShimImageRecord(
+            reference: "localhost/sandbox:r111", digest: "sha256:base", size: 123,
+            annotations: MacOSImageContract.annotations(for: .sandbox))
+        let alias = CRIShimImageRecord(reference: "localhost/sandbox:latest", digest: sandbox.digest, size: 123)
+        let workload = CRIShimImageRecord(
+            reference: "localhost/workload:latest", digest: "sha256:workload", size: 42,
+            annotations: MacOSImageContract.annotations(for: .workload))
+        let images = [sandbox, alias, workload]
+        let advertised = pinCRIInfrastructureImages(images)
+        #expect(advertised.map(\.pinned) == [true, true, false])
+        for reference in [sandbox.reference, sandbox.digest, alias.reference, "localhost/sandbox@sha256:base"] {
+            #expect(throws: CRIShimError.self) {
+                try removableCRIImageReferences(images, reference: reference)
+            }
+        }
+        #expect(try removableCRIImageReferences(images, reference: workload.digest) == [workload.reference])
+        #expect(try removableCRIImageReferences(images, reference: "missing") == [])
+    }
+
+    @Test
     func mapsUsernamePasswordAuthConfigToBasicAuthentication() throws {
         var auth = Runtime_V1_AuthConfig()
         auth.username = "user"

@@ -115,11 +115,32 @@ public enum MacOSGuestCache {
                 continue
             }
 
+            guard let lock = try lockRebuildEntry(entry, nonBlocking: true) else { continue }
+            defer { close(lock) }
+            guard fileManager.fileExists(atPath: entry.path) else { continue }
             reclaimedBytes += try allocatedSize(at: entry, fileManager: fileManager)
             try fileManager.removeItem(at: entry)
         }
 
         return reclaimedBytes
+    }
+
+    // Keep lock files outside cache entries: pruning an entry must not replace the
+    // inode on which another process is waiting. Closing the fd releases the lock.
+    static func lockRebuildEntry(_ entry: URL, nonBlocking: Bool = false) throws -> Int32? {
+        let parent = entry.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let path = parent.appendingPathComponent(".\(entry.lastPathComponent).rebuild.lock")
+        let fd = open(path.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        while flock(fd, LOCK_EX | (nonBlocking ? LOCK_NB : 0)) != 0 {
+            let code = errno
+            if code == EINTR { continue }
+            close(fd)
+            if nonBlocking && code == EWOULDBLOCK { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        return fd
     }
 
     private static func topLevelEntries(

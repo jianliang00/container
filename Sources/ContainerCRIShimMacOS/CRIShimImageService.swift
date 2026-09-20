@@ -198,6 +198,12 @@ extension CRIShimImageRecord {
         self.reference == reference || digest == reference || repoDigests.contains(reference)
     }
 
+    // Kubelet tracks workload image references, not the separate macOS base image.
+    // Treat sandbox images as node infrastructure; remove obsolete versions explicitly.
+    var garbageCollectionPinned: Bool {
+        pinned || (try? MacOSImageContract.role(descriptorAnnotations: annotations)) == .sandbox
+    }
+
     var repoDigests: [String] {
         guard !reference.contains("@"), !digest.isEmpty else {
             return reference.contains("@") ? [reference] : []
@@ -212,6 +218,24 @@ extension CRIShimImageRecord {
             }
         return ["\(baseReference)@\(digest)"]
     }
+}
+
+func pinCRIInfrastructureImages(_ images: [CRIShimImageRecord]) -> [CRIShimImageRecord] {
+    let pinnedDigests = Set(images.filter(\.garbageCollectionPinned).map(\.digest))
+    return images.map { image in
+        var result = image
+        result.pinned = pinnedDigests.contains(image.digest)
+        return result
+    }
+}
+
+func removableCRIImageReferences(_ images: [CRIShimImageRecord], reference: String) throws -> [String] {
+    let matches = images.filter { $0.matches(reference: reference) }
+    let digests = Set(matches.map(\.digest))
+    guard !images.contains(where: { digests.contains($0.digest) && $0.garbageCollectionPinned }) else {
+        throw CRIShimError.invalidArgument("image \(reference) is pinned by the runtime and cannot be garbage collected")
+    }
+    return Array(Set(matches.map(\.reference))).sorted()
 }
 
 func runtimeManagedFilesystemUsedBytes(_ usage: DiskUsageStats) -> UInt64 {

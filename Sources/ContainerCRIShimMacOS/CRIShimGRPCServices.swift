@@ -2079,7 +2079,7 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
     ) async throws -> Runtime_V1_ListImagesResponse {
         try await handlerLogger.handle(operation: CRIImageOperation.listImages.rawValue) {
             var response = Runtime_V1_ListImagesResponse()
-            let images = try await imageManager.listImages()
+            let images = try pinCRIInfrastructureImages(await imageManager.listImages())
             response.images = filteredImages(images, request: request).map(makeCRIImage)
             return response
         }
@@ -2111,13 +2111,9 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
     ) async throws -> Runtime_V1_RemoveImageResponse {
         try await handlerLogger.handle(operation: CRIImageOperation.removeImage.rawValue) {
             let reference = try CRIShimImageReference.resolve(request.image)
-            let references = Array(
-                Set(
-                    try await imageManager.listImages()
-                        .filter { $0.matches(reference: reference) }
-                        .map(\.reference)
-                )
-            ).sorted()
+            let references = try removableCRIImageReferences(
+                await imageManager.listImages(), reference: reference
+            )
             try await imageManager.removeImages(references: references)
             return Runtime_V1_RemoveImageResponse()
         }
@@ -2150,7 +2146,7 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
     }
 
     private func findImage(reference: String) async throws -> CRIShimImageRecord {
-        let images = try await imageManager.listImages()
+        let images = try pinCRIInfrastructureImages(await imageManager.listImages())
         guard let image = images.first(where: { $0.matches(reference: reference) }) else {
             throw CRIShimError.notFound("image not found: \(reference)")
         }

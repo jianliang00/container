@@ -1076,6 +1076,23 @@ struct CRIShimRuntimeServerTests {
         let imageClient = Runtime_V1_ImageServiceAsyncClient(channel: channel)
         let listImages = try await imageClient.listImages(Runtime_V1_ListImagesRequest())
         #expect(listImages.images.count == 3)
+        #expect(listImages.images.first { $0.id == "sha256:sandbox" }?.pinned == true)
+        var removeSandboxImageRequest = Runtime_V1_RemoveImageRequest()
+        for reference in ["sha256:sandbox", "localhost/macos-sandbox:latest", "localhost/macos-sandbox@sha256:sandbox"] {
+            removeSandboxImageRequest.image.image = reference
+            do {
+                _ = try await imageClient.removeImage(removeSandboxImageRequest)
+                Issue.record("sandbox base image must not be garbage collected")
+            } catch let status as GRPCStatus {
+                #expect(status.code == .invalidArgument)
+            }
+        }
+        #expect(imageManager.removedReferences.isEmpty)
+        var sandboxImageStatusRequest = Runtime_V1_ImageStatusRequest()
+        sandboxImageStatusRequest.image.image = "sha256:sandbox"
+        let sandboxImageStatus = try await imageClient.imageStatus(sandboxImageStatusRequest)
+        #expect(sandboxImageStatus.image.pinned)
+
         let listedWorkloadImage = try #require(
             listImages.images.first { $0.id == "sha256:abc123" }
         )

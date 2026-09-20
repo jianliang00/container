@@ -174,6 +174,7 @@ final class AgentConnection: @unchecked Sendable {
     }
 
     private let fd: Int32
+    private let processStartTraceSink: @Sendable (String) -> Void
     private let attachmentLock = NSLock()
     private let socketHandle: FileHandle
     private let processSupervisor: GuestProcessSupervisor
@@ -197,9 +198,11 @@ final class AgentConnection: @unchecked Sendable {
         relayPeerStateCheckInterval: TimeInterval = 1,
         outputBufferCapacity: Int = 4 * 1024 * 1024,
         outputDrainTimeout: TimeInterval = 1,
-        socketWriteTimeout: TimeInterval = 5
+        socketWriteTimeout: TimeInterval = 5,
+        processStartTraceSink: @escaping @Sendable (String) -> Void = { logAgentInfo($0) }
     ) throws {
         self.fd = fd
+        self.processStartTraceSink = processStartTraceSink
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         self.processSupervisor = processSupervisor
         self.relayHalfCloseIdleTimeout = relayHalfCloseIdleTimeout.map { max($0, 0) }
@@ -303,6 +306,8 @@ final class AgentConnection: @unchecked Sendable {
     private func handle(frame: GuestAgentFrame) throws -> FrameAction {
         switch frame.type {
         case .exec:
+            let trace = MacOSProcessStartTrace(processID: frame.id, emit: processStartTraceSink)
+            trace.record(.received)
             if frame.durable == true {
                 let previousAttachment = currentDurableAttachment()
                 session?.cleanup()
@@ -311,12 +316,14 @@ final class AgentConnection: @unchecked Sendable {
                     let installed = try processSupervisor.createAndAttach(
                         frame: frame,
                         connection: self,
-                        cursor: frame.cursor ?? 0
+                        cursor: frame.cursor ?? 0,
+                        trace: trace
                     )
                     if let previousAttachment, previousAttachment != installed {
                         processSupervisor.detach(previousAttachment)
                     }
                 } catch {
+                    trace.record(.failed)
                     let message = "failed to create durable process: \(describeError(error))"
                     logAgentError(message)
                     try? send(
@@ -332,8 +339,9 @@ final class AgentConnection: @unchecked Sendable {
 
             detachDurableProcess()
             do {
-                try startProcess(frame: frame)
+                try startProcess(frame: frame, trace: trace)
             } catch {
+                trace.record(.failed)
                 session?.cleanup()
                 session = nil
                 let message = "failed to start process: \(describeError(error))"
@@ -734,7 +742,7 @@ final class AgentConnection: @unchecked Sendable {
         }
     }
 
-    private func startProcess(frame: GuestAgentFrame) throws {
+    private func startProcess(frame: GuestAgentFrame, trace: MacOSProcessStartTrace) throws {
         session?.cleanup()
 
         guard let processID = frame.id, !processID.isEmpty else {
@@ -754,10 +762,13 @@ final class AgentConnection: @unchecked Sendable {
         }
 
         let terminal = frame.terminal == true
+        trace.record(.identityBegin)
         let explicitIdentity = try GuestAgentExecIdentity.resolve(from: frame)
+        trace.record(.identityResolved)
         let spawnedIdentity = explicitIdentity.flatMap { identity in
             identity.requiresSpawnedSession() ? identity : nil
         }
+        trace.record(.spawnBegin)
         let session = try SpawnedProcessSession.spawn(
             executable: executable,
             arguments: frame.arguments ?? [],
@@ -768,9 +779,12 @@ final class AgentConnection: @unchecked Sendable {
             identity: spawnedIdentity ?? .currentProcess(),
             connection: self
         )
+        trace.record(.spawnCompleted)
         self.session = session
         do {
+            trace.record(.ackSendBegin)
             try send(frame: .ack(id: processID))
+            trace.record(.ackSent)
             try session.start(stdoutHandle: nil, stderrHandle: nil)
         } catch {
             session.cleanup()

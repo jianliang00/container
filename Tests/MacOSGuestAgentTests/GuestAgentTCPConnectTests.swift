@@ -28,6 +28,7 @@ struct GuestAgentTCPConnectTests {
     func releaseCapabilitiesAreStableAndSerializable() throws {
         let expected = [
             "tcpConnectV1",
+            MacOSGuestProcessProtocol.boundedProcessStartV1,
             MacOSGuestProcessProtocol.durableProcessV1,
             MacOSGuestProcessProtocol.durableProcessV2,
             MacOSGuestProcessProtocol.durableProcessV3,

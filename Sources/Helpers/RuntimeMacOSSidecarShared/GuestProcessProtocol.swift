@@ -19,6 +19,9 @@ import Foundation
 /// Guest-agent capability for processes whose lifetime is independent from a
 /// single host-to-guest transport connection.
 public enum MacOSGuestProcessProtocol {
+    /// Bounded helper startup, legacy execution-ID reservations and disconnect cleanup.
+    public static let boundedProcessStartV1 = "boundedProcessStartV1"
+    public static let processStartTimeoutSeconds: TimeInterval = 10
     public static let durableProcessV1 = "durableProcessV1"
     /// Adds launch-fingerprint verification and storage-generation fencing to
     /// durable process creation and attachment.

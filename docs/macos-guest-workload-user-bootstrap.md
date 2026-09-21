@@ -92,11 +92,40 @@ values or treat them as synchronized timestamps.
 | Guest, durable retry | `processReused` instead of spawn stages | Reattaching to an existing durable process without spawning it again |
 | Either endpoint | `failed` | The startup operation failed; preceding stages locate the last completed boundary |
 
-The sidecar retains its three-second startup ACK timeout. A missing ACK is not
-proof that the command did not execute, and these logs do not authorize replay.
-Use the guest stage sequence and durable process inspection to establish the
-outcome before retrying. The guest binary inside the image must also contain
+The sidecar gives process startup a ten-second budget, including checkpoint
+admission, guest readiness and the startup ACK. The extended ACK wait requires
+the guest capability `boundedProcessStartV1`; older guests retain an ACK wait
+of at most three seconds. The control client allows twelve seconds for the
+startup response so the sidecar has transport and cleanup margin. Command
+execution time after a successful start is not part of this budget.
+
+A missing ACK is not proof that the command did not execute, and these logs do
+not authorize replay. Use the guest stage sequence and durable process inspection
+to establish the outcome. The guest binary inside the image must also contain
 this instrumentation; installing only a new host sidecar cannot add guest stages.
+
+## Startup Failure and Cancellation
+
+The guest's exec-status wait has a ten-second deadline shared by the helper-ready
+and target-exec stages. A stalled helper, malformed status or disconnected legacy
+exec connection causes the guest to close its process I/O, kill the child process
+group and reap the child. Disconnect detection while waiting for helper status is
+polled at most every 100 ms. The sidecar closes the guest connection on startup
+timeout. A legacy control-client disconnect is checked before sending the command
+and after receiving its ACK; it is not an immediate, out-of-band cancellation
+protocol. Cleanup of a cancelled startup can take until the startup deadline.
+If delivery of a new legacy startup response fails, the sidecar also cancels that
+new session; it does not cancel an existing session reused by an idempotent request.
+
+Legacy execution IDs are reserved for the guest-agent lifetime, even when startup
+fails or the connection disappears. A later connection cannot launch the same ID
+again. Durable processes keep their existing inspect/reattach behavior after a
+lost ACK; disconnect does not kill an established durable process. A durable
+spawn that fails before publication reserves its ID as failed rather than allowing
+a later retry to recreate a command whose outcome may be uncertain. Do not switch
+to a new ID to bypass either reservation without first establishing the original
+command's outcome. Reservations are in-memory and do not survive guest-agent
+restart; cross-restart exactly-once execution is not promised.
 
 For a slow spawn, compare `spawnBegin` to `bootstrapPrepared` (payload setup),
 `bootstrapPrepared` to `forkBegin` (argument and I/O preparation), and

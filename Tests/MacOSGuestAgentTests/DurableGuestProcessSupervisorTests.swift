@@ -25,6 +25,25 @@ import Testing
 @Suite(.serialized)
 struct DurableGuestProcessSupervisorTests {
     @Test
+    func failedSpawnCannotBeRetriedAsDurableOrLegacyCommand() throws {
+        let supervisor = GuestProcessSupervisor()
+        defer { supervisor.removeAllForTesting() }
+        let pair = try makeDurableProcessSocketPair()
+        defer { closeDurableProcessFD(pair.peer) }
+        let connection = try AgentConnection(fd: pair.server, processSupervisor: supervisor)
+        let invalid = GuestAgentFrame(type: .exec, id: "failed-launch", executable: "/missing/executable", durable: true)
+        #expect(throws: Error.self) {
+            _ = try supervisor.createAndAttach(frame: invalid, connection: connection, cursor: 0)
+        }
+        #expect(throws: Error.self) {
+            _ = try supervisor.createAndAttach(
+                frame: durableExecFrame(id: "failed-launch", script: "exit 0"), connection: connection, cursor: 0
+            )
+        }
+        #expect(throws: Error.self) { try supervisor.reserveLegacyExecution("failed-launch") }
+    }
+
+    @Test
     func startupTimingDistinguishesCreateFromRetry() throws {
         signal(SIGPIPE, SIG_IGN)
         let supervisor = GuestProcessSupervisor()

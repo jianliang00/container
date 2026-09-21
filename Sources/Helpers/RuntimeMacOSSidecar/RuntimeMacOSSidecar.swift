@@ -2774,6 +2774,7 @@ final class SidecarControlServer: @unchecked Sendable {
 
         while true {
             var parsedRequest: MacOSSidecarRequest?
+            var newlyStartedProcess: ProcessStreamSession?
             do {
                 let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: clientFD)
                 guard envelope.kind == .request, let request = envelope.request else {
@@ -2785,7 +2786,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 }
 
                 log.info("control request received", metadata: ["method": "\(request.method.rawValue)", "request_id": "\(request.requestID)"])
-                let response = try perform(request: request, clientFD: clientFD)
+                let response = try perform(request: request, clientFD: clientFD) { newlyStartedProcess = $0 }
                 if request.method == .eventsSubscribe, response.ok {
                     try writeEventSubscriptionResponse(
                         response,
@@ -2797,6 +2798,9 @@ final class SidecarControlServer: @unchecked Sendable {
                 }
                 log.info("control request completed", metadata: ["method": "\(request.method.rawValue)", "request_id": "\(request.requestID)", "ok": "\(response.ok)"])
             } catch {
+                if let newlyStartedProcess, !newlyStartedProcess.durable {
+                    cancelProcessSession(newlyStartedProcess)
+                }
                 if parsedRequest == nil, isExpectedEOF(error) {
                     return
                 }
@@ -3333,9 +3337,10 @@ final class SidecarControlServer: @unchecked Sendable {
     func _testStartProcessStream(
         port: UInt32 = 27_000,
         processID: String,
-        exec: MacOSSidecarExecRequestPayload
+        exec: MacOSSidecarExecRequestPayload,
+        clientFD: Int32? = nil
     ) throws {
-        try startProcessStream(port: port, processID: processID, exec: exec)
+        try startProcessStream(port: port, processID: processID, exec: exec, clientFD: clientFD)
     }
 
     func _testPrepareCheckpoint(
@@ -3716,9 +3721,16 @@ final class SidecarControlServer: @unchecked Sendable {
         )
     }
 
-    private func startProcessStream(port: UInt32, processID: String, exec: MacOSSidecarExecRequestPayload) throws {
-        checkpointAdmissionLock.lock()
+    private func startProcessStream(
+        port: UInt32, processID: String, exec: MacOSSidecarExecRequestPayload,
+        clientFD: Int32? = nil, didStart: ((ProcessStreamSession) -> Void)? = nil
+    ) throws {
+        let deadline = sidecarReadDeadline(timeoutSeconds: MacOSGuestProcessProtocol.processStartTimeoutSeconds)
+        guard checkpointAdmissionLock.lock(before: Date(timeIntervalSinceNow: MacOSGuestProcessProtocol.processStartTimeoutSeconds)) else {
+            throw ContainerizationError(.timeout, message: "process start admission timed out")
+        }
         defer { checkpointAdmissionLock.unlock() }
+        _ = try sidecarRemainingReadMilliseconds(until: deadline)
         try ensureCheckpointAllowsNewSession()
 
         try validateDurableProcessRequest(exec)
@@ -3763,7 +3775,9 @@ final class SidecarControlServer: @unchecked Sendable {
             let durable = exec.durableExecutionID != nil
             let generationFenced = exec.storageGeneration != nil
             let identityFenced = exec.durableIncarnation != nil
-            let capabilities = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            let capabilities = try waitForGuestAgentReadyWithTimeout(
+                fd: fd, timeoutSeconds: min(3, Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000)
+            )
             if durable, !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV1) {
                 throw ContainerizationError(
                     .unsupported,
@@ -3800,6 +3814,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 existingStatus = nil
             }
             let attachment = try guestAttachmentSelection(exec: exec, existingStatus: existingStatus)
+            if !durable { try ensureProcessStartClientConnected(clientFD) }
             trace.record(.sendBegin)
             try MacOSSidecarSocketIO.writeJSONFrame(
                 SidecarGuestAgentFrame.exec(
@@ -3822,15 +3837,21 @@ final class SidecarControlServer: @unchecked Sendable {
                     storageGeneration: exec.storageGeneration,
                     previousStorageGeneration: attachment.previousStorageGeneration
                 ),
-                fd: fd
+                fd: fd,
+                timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
             )
             trace.record(.sent)
+            let remainingSeconds = Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000
+            let ackBudget =
+                capabilities.contains(MacOSGuestProcessProtocol.boundedProcessStartV1)
+                ? remainingSeconds : min(3, remainingSeconds)
             let handshake = try waitForProcessStartAck(
                 fd: fd,
                 expectedProcessID: guestProcessID,
-                timeoutSeconds: 3
+                timeoutSeconds: ackBudget
             )
             trace.record(.ackReceived)
+            if !durable { try ensureProcessStartClientConnected(clientFD) }
             let durableStatus: MacOSGuestProcessStatusPayload?
             if durable {
                 guard let status = handshake.status else {
@@ -3898,6 +3919,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 connection: connection,
                 initialFrames: handshake.bufferedFrames
             )
+            didStart?(session)
             unregisteredSession = nil
         } catch {
             trace.record(.failed)
@@ -3917,6 +3939,19 @@ final class SidecarControlServer: @unchecked Sendable {
         }
         return try syncValue {
             try await self.service.connectVsock(port: port)
+        }
+    }
+
+    private func ensureProcessStartClientConnected(_ fd: Int32?) throws {
+        guard let fd else { return }
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard Darwin.poll(&descriptor, 1, 0) >= 0 else { throw makePOSIXError(errno) }
+        var byte: UInt8 = 0
+        let disconnected =
+            descriptor.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0
+            || (descriptor.revents & Int16(POLLIN) != 0 && Darwin.recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT) == 0)
+        if disconnected {
+            throw ContainerizationError(.interrupted, message: "process start control client disconnected")
         }
     }
 
@@ -4353,6 +4388,10 @@ final class SidecarControlServer: @unchecked Sendable {
             case ESTALE, EPERM:
                 code = .invalidState
             case EBUSY:
+                code = .interrupted
+            case ETIMEDOUT:
+                code = .timeout
+            case ECANCELED:
                 code = .interrupted
             default:
                 code = .internalError
@@ -5053,7 +5092,10 @@ final class SidecarControlServer: @unchecked Sendable {
         self.activeCheckpoint = nil
     }
 
-    private func perform(request: MacOSSidecarRequest, clientFD: Int32) throws -> MacOSSidecarResponse {
+    private func perform(
+        request: MacOSSidecarRequest, clientFD: Int32,
+        didStart: ((ProcessStreamSession) -> Void)? = nil
+    ) throws -> MacOSSidecarResponse {
         let service = self.service
         let requestID = request.requestID
         if let versionError = protocolVersionError(for: request) {
@@ -5157,7 +5199,7 @@ final class SidecarControlServer: @unchecked Sendable {
                         await self.service.releaseProcessStartAdmission(admission)
                     }
                 }
-                try startProcessStream(port: port, processID: processID, exec: exec)
+                try startProcessStream(port: port, processID: processID, exec: exec, clientFD: clientFD, didStart: didStart)
                 return .success(requestID: requestID)
             } catch {
                 return failureResponse(requestID: requestID, error: error)

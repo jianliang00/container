@@ -930,7 +930,8 @@ struct MacOSSidecarClientTests {
         let client = MacOSSidecarClient(
             socketPath: socketPath,
             log: Logger(label: "MacOSSidecarClientTests"),
-            requestTimeoutSeconds: 0.1
+            requestTimeoutSeconds: 0.1,
+            processStartTimeoutSeconds: 0.1
         )
         defer { client.closeControlConnection() }
         client.setDisconnectHandler { _ in
@@ -992,7 +993,8 @@ struct MacOSSidecarClientTests {
         let client = MacOSSidecarClient(
             socketPath: socketPath,
             log: Logger(label: "MacOSSidecarClientTests"),
-            requestTimeoutSeconds: 0.1
+            requestTimeoutSeconds: 0.1,
+            processStartTimeoutSeconds: 0.1
         )
         defer { client.closeControlConnection() }
 

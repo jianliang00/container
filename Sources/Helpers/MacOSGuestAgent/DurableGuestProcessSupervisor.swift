@@ -241,6 +241,10 @@ final class GuestProcessSupervisor: @unchecked Sendable {
     private let beforeEventAppendBarrier: (@Sendable () -> Void)?
     private let afterAttachmentAcknowledgement: (@Sendable (MacOSGuestProcessDisposition) -> Void)?
     private var processes: [String: DurableGuestProcess] = [:]
+    // Legacy commands have no inspect/reattach protocol. Keep reservations for
+    // the VM/agent lifetime, including failed or disconnected startup attempts.
+    private var legacyExecutionIDs: Set<String> = []
+    private var failedStartExecutionIDs: Set<String> = []
     private var lifecycleLocks: [String: NSLock] = [:]
     // Retained for the guest-agent/VM lifetime. Incarnations are never silently
     // collected because doing so could let a delayed pre-delete start revive.
@@ -291,6 +295,14 @@ final class GuestProcessSupervisor: @unchecked Sendable {
                 code: ESTALE,
                 message: "execution \(executionID) incarnation \(incarnation) was already deleted"
             )
+        }
+        if failedStartExecutionIDs.contains(executionID) {
+            lock.unlock()
+            throw durableProcessError(code: ESTALE, message: "execution startup failed; its outcome must not be replayed")
+        }
+        if legacyExecutionIDs.contains(executionID) {
+            lock.unlock()
+            throw durableProcessError(code: EEXIST, message: "execution identifier was used by a legacy command")
         }
         if let existing = processes[executionID] {
             guard existing.matches(spec: spec) else {
@@ -356,6 +368,7 @@ final class GuestProcessSupervisor: @unchecked Sendable {
                 disposition = .created
                 lock.unlock()
             } catch {
+                failedStartExecutionIDs.insert(executionID)
                 if processes[executionID] === created {
                     processes.removeValue(forKey: executionID)
                 }
@@ -372,6 +385,16 @@ final class GuestProcessSupervisor: @unchecked Sendable {
             request: attachmentRequest,
             trace: trace
         )
+    }
+
+    func reserveLegacyExecution(_ executionID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard processes[executionID] == nil, failedStartExecutionIDs.contains(executionID) == false,
+            deletedIncarnations[executionID] == nil, legacyExecutionIDs.insert(executionID).inserted
+        else {
+            throw durableProcessError(code: EEXIST, message: "legacy execution identifier cannot be replayed")
+        }
     }
 
     func inspect(executionID rawExecutionID: String?) throws -> MacOSGuestProcessStatusPayload {
@@ -504,6 +527,8 @@ final class GuestProcessSupervisor: @unchecked Sendable {
         lock.lock()
         values = Array(processes.values)
         processes.removeAll()
+        legacyExecutionIDs.removeAll()
+        failedStartExecutionIDs.removeAll()
         deletedIncarnations.removeAll()
         lock.unlock()
         for process in values {

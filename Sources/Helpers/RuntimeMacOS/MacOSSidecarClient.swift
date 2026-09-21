@@ -41,6 +41,7 @@ final class MacOSSidecarClient: @unchecked Sendable {
     private let socketPath: String
     private let log: Logger
     private let requestTimeoutSeconds: TimeInterval
+    private let processStartTimeoutSeconds: TimeInterval
     private let bootstrapStartTimeoutSeconds: TimeInterval
     private let stateLock = NSLock()
     private let connectionLock = NSLock()
@@ -61,11 +62,13 @@ final class MacOSSidecarClient: @unchecked Sendable {
         socketPath: String,
         log: Logger,
         requestTimeoutSeconds: TimeInterval = 10.0,
+        processStartTimeoutSeconds: TimeInterval = MacOSGuestProcessProtocol.processStartTimeoutSeconds + 2,
         bootstrapStartTimeoutSeconds: TimeInterval? = nil
     ) {
         self.socketPath = socketPath
         self.log = log
         self.requestTimeoutSeconds = requestTimeoutSeconds
+        self.processStartTimeoutSeconds = processStartTimeoutSeconds
         self.bootstrapStartTimeoutSeconds =
             bootstrapStartTimeoutSeconds
             ?? max(requestTimeoutSeconds, Self.defaultBootstrapStartTimeoutSeconds)
@@ -291,7 +294,12 @@ final class MacOSSidecarClient: @unchecked Sendable {
     func processStart(port: UInt32, processID: String, request exec: MacOSSidecarExecRequestPayload) throws {
         let request = MacOSSidecarRequest(method: .processStart, port: port, processID: processID, exec: exec)
         do {
-            _ = try requestResponse(request, socketConnectRetries: 1)
+            // The sidecar owns the ten-second launch deadline. Leave a small
+            // transport/cleanup margin so it can return the actual outcome.
+            _ = try requestResponse(
+                request, timeoutSeconds: processStartTimeoutSeconds,
+                socketConnectRetries: 1
+            )
         } catch let error as ContainerizationError where error.code == .timeout && exec.durableExecutionID != nil {
             try recoverDurableProcessStart(
                 port: port,

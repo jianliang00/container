@@ -24,6 +24,81 @@ import Testing
 
 @Suite(.serialized)
 struct GuestAgentProcessStartupTests {
+    @Test(arguments: [false, true])
+    func stalledExecStatusTimesOut(helper: Bool) throws {
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        defer { close(fds[1]) }
+        if helper {
+            var marker: Int32 = -1
+            #expect(write(fds[1], &marker, MemoryLayout<Int32>.size) == MemoryLayout<Int32>.size)
+        }
+        let start = DispatchTime.now().uptimeNanoseconds
+        #expect(throws: POSIXError(.ETIMEDOUT)) {
+            _ = try readExecStatus(fds[0], requireHelperReady: helper, timeoutSeconds: 0.05)
+        }
+        #expect(DispatchTime.now().uptimeNanoseconds - start < 1_000_000_000)
+    }
+
+    @Test
+    func cancelledExecStatusDoesNotWaitForHelper() throws {
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        defer { close(fds[1]) }
+        #expect(throws: POSIXError(.ECANCELED)) {
+            _ = try readExecStatus(fds[0], cancelled: { true })
+        }
+    }
+
+    @Test
+    func legacyReservationRejectsConcurrentAndLaterReplay() throws {
+        let supervisor = GuestProcessSupervisor()
+        let outcomes = LockedValue<[Bool]>([])
+        DispatchQueue.concurrentPerform(iterations: 16) { _ in
+            do {
+                try supervisor.reserveLegacyExecution("one-command")
+                outcomes.withLock { $0.append(true) }
+            } catch {
+                outcomes.withLock { $0.append(false) }
+            }
+        }
+        #expect(outcomes.withLock { $0.filter { $0 }.count } == 1)
+        #expect(throws: Error.self) { try supervisor.reserveLegacyExecution("one-command") }
+        try supervisor.reserveLegacyExecution("independent-command")
+    }
+
+    @Test
+    func legacyReplayOnNewConnectionDoesNotExecuteTwice() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let supervisor = GuestProcessSupervisor()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("starts")
+        let frame = GuestAgentFrame(
+            type: .exec, id: "legacy-one-shot", executable: "/bin/sh",
+            arguments: ["-c", "echo start >> \"$MARKER\""], environment: ["MARKER=\(marker.path)"],
+            uid: UInt32(geteuid()), gid: UInt32(getegid())
+        )
+        let first = try AgentConnectionHarness(processSupervisor: supervisor)
+        defer { first.closePeer() }
+        #expect(try readAgentFrame(from: first.peerFD).type == .ready)
+        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: first.peerFD)
+        #expect(try readAgentFrame(from: first.peerFD).type == .ack)
+        #expect(try readAgentFrame(from: first.peerFD).type == .exit)
+        try first.waitForCompletion()
+
+        let second = try AgentConnectionHarness(processSupervisor: supervisor)
+        defer { second.closePeer() }
+        #expect(try readAgentFrame(from: second.peerFD).type == .ready)
+        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: second.peerFD)
+        let rejected = try readAgentFrame(from: second.peerFD)
+        #expect(rejected.type == .error)
+        #expect(rejected.errorCode == EEXIST)
+        #expect(try String(contentsOf: marker, encoding: .utf8) == "start\n")
+        try second.waitForCompletion()
+    }
+
     @Test(arguments: [true, false])
     func startupTimingPreservesAckAndRedactsInputs(success: Bool) throws {
         signal(SIGPIPE, SIG_IGN)
@@ -480,6 +555,7 @@ extension GuestAgentProcessStartupTests {
         private let peerBox: LockedValue<Int32?>
 
         init(
+            processSupervisor: GuestProcessSupervisor = GuestProcessSupervisor(),
             outputBufferCapacity: Int = 4 * 1024 * 1024, outputDrainTimeout: TimeInterval = 1,
             processStartTraceSink: @escaping @Sendable (String) -> Void = { _ in }
         ) throws {
@@ -491,7 +567,7 @@ extension GuestAgentProcessStartupTests {
                 defer { self.done.signal() }
                 do {
                     try AgentConnection(
-                        fd: pair.server, outputBufferCapacity: outputBufferCapacity,
+                        fd: pair.server, processSupervisor: processSupervisor, outputBufferCapacity: outputBufferCapacity,
                         outputDrainTimeout: outputDrainTimeout, processStartTraceSink: processStartTraceSink
                     ).run()
                 } catch {

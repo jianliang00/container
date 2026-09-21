@@ -25,6 +25,25 @@ import Testing
 
 struct RuntimeClientTests {
     @Test
+    func sandboxStopResponseTimeoutCoversGuestShutdown() {
+        #expect(
+            RuntimeClient.stopSandboxResponseTimeout(
+                options: ContainerStopOptions(timeoutInSeconds: 0, signal: nil)
+            ) == .seconds(30)
+        )
+        #expect(
+            RuntimeClient.stopSandboxResponseTimeout(
+                options: ContainerStopOptions(timeoutInSeconds: 30, signal: nil)
+            ) == .seconds(60)
+        )
+        #expect(
+            RuntimeClient.stopSandboxResponseTimeout(
+                options: ContainerStopOptions(timeoutInSeconds: .max, signal: nil)
+            ) == .seconds(2_147_483_677)
+        )
+    }
+
+    @Test
     func stopWorkloadResponseTimeoutCoversGracefulAndForcedWaits() {
         #expect(
             RuntimeClient.stopWorkloadResponseTimeout(

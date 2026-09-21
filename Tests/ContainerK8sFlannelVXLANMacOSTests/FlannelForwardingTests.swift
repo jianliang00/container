@@ -665,7 +665,7 @@ private final class ForwardingReadGate: @unchecked Sendable {
 
     func waitUntilBlocked() async -> Bool {
         await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [entered] in
+            Thread.detachNewThread { [entered] in
                 continuation.resume(returning: entered.wait(timeout: .now() + 10) == .success)
             }
         }
@@ -680,7 +680,7 @@ private func runForwardingOperation<T: Sendable>(
     _ operation: @escaping @Sendable () throws -> T
 ) async throws -> T {
     try await withCheckedThrowingContinuation { continuation in
-        DispatchQueue.global(qos: .userInitiated).async {
+        Thread.detachNewThread {
             continuation.resume(with: Result(catching: operation))
         }
     }

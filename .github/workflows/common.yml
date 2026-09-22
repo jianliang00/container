@@ -68,6 +68,9 @@ jobs:
             false
           fi
 
+      - name: Check storage admission safety
+        run: python3 scripts/macos-storage-preflight-self-test.py
+
       - name: Check protobuf
         run: |
           make protos

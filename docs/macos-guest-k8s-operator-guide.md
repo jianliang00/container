@@ -395,6 +395,9 @@ TCP connect without a guest payload is not a passing PortForward result.
 
 ## Sandbox Image Storage
 
+For bounded validation commands, use the mandatory capacity and installed-CRI
+checks in [Storage admission for Mac validation](macos-storage-validation-admission.md).
+
 CRI pins the sandbox images configured by the default profile and runtime
 handlers, images used by persisted or runtime sandboxes, and images being
 prepared by `RunPodSandbox`. Protection applies to every tag sharing the same

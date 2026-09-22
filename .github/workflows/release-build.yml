@@ -5,6 +5,11 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      include_cri_shim:
+        description: "Include the same-source signed CRI shim without kubelet or node configuration"
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -13,6 +18,7 @@ jobs:
     with:
       release: true
       sign_release_artifacts: true
+      include_cri_shim: ${{ inputs.include_cri_shim }}
       notarize_release_artifacts: true
       skip_virtualization_tests: true
       verify_swiftpm_consumer: true

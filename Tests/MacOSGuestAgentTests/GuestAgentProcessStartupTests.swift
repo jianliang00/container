@@ -24,6 +24,154 @@ import Testing
 
 @Suite(.serialized)
 struct GuestAgentProcessStartupTests {
+    @Test(arguments: [false, true])
+    func stalledExecStatusTimesOut(helper: Bool) throws {
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        defer { close(fds[1]) }
+        if helper {
+            var marker: Int32 = -1
+            #expect(write(fds[1], &marker, MemoryLayout<Int32>.size) == MemoryLayout<Int32>.size)
+        }
+        let start = DispatchTime.now().uptimeNanoseconds
+        #expect(throws: POSIXError(.ETIMEDOUT)) {
+            _ = try readExecStatus(fds[0], requireHelperReady: helper, timeoutSeconds: 0.05)
+        }
+        #expect(DispatchTime.now().uptimeNanoseconds - start < 1_000_000_000)
+    }
+
+    @Test
+    func cancelledExecStatusDoesNotWaitForHelper() throws {
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        defer { close(fds[1]) }
+        #expect(throws: POSIXError(.ECANCELED)) {
+            _ = try readExecStatus(fds[0], cancelled: { true })
+        }
+    }
+
+    @Test
+    func legacyReservationRejectsConcurrentAndLaterReplay() throws {
+        let supervisor = GuestProcessSupervisor()
+        let outcomes = LockedValue<[Bool]>([])
+        DispatchQueue.concurrentPerform(iterations: 16) { _ in
+            do {
+                try supervisor.reserveLegacyExecution("one-command")
+                outcomes.withLock { $0.append(true) }
+            } catch {
+                outcomes.withLock { $0.append(false) }
+            }
+        }
+        #expect(outcomes.withLock { $0.filter { $0 }.count } == 1)
+        #expect(throws: Error.self) { try supervisor.reserveLegacyExecution("one-command") }
+        try supervisor.reserveLegacyExecution("independent-command")
+    }
+
+    @Test
+    func legacyReplayOnNewConnectionDoesNotExecuteTwice() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let supervisor = GuestProcessSupervisor()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("starts")
+        let frame = GuestAgentFrame(
+            type: .exec, id: "legacy-one-shot", executable: "/bin/sh",
+            arguments: ["-c", "echo start >> \"$MARKER\""], environment: ["MARKER=\(marker.path)"],
+            uid: UInt32(geteuid()), gid: UInt32(getegid())
+        )
+        let first = try AgentConnectionHarness(processSupervisor: supervisor)
+        defer { first.closePeer() }
+        #expect(try readAgentFrame(from: first.peerFD).type == .ready)
+        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: first.peerFD)
+        #expect(try readAgentFrame(from: first.peerFD).type == .ack)
+        #expect(try readAgentFrame(from: first.peerFD).type == .exit)
+        try first.waitForCompletion()
+
+        let second = try AgentConnectionHarness(processSupervisor: supervisor)
+        defer { second.closePeer() }
+        #expect(try readAgentFrame(from: second.peerFD).type == .ready)
+        try MacOSSidecarSocketIO.writeJSONFrame(frame, fd: second.peerFD)
+        let rejected = try readAgentFrame(from: second.peerFD)
+        #expect(rejected.type == .error)
+        #expect(rejected.errorCode == EEXIST)
+        #expect(try String(contentsOf: marker, encoding: .utf8) == "start\n")
+        try second.waitForCompletion()
+    }
+
+    @Test(arguments: [true, false])
+    func startupTimingPreservesAckAndRedactsInputs(success: Bool) throws {
+        signal(SIGPIPE, SIG_IGN)
+        let messages = LockedValue<[String]>([])
+        let harness = try AgentConnectionHarness(processStartTraceSink: { message in
+            messages.withLock { $0.append(message) }
+        })
+        defer { harness.closePeer() }
+        #expect(try readAgentFrame(from: harness.peerFD).type == .ready)
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec, id: "sensitive-id\ninjected",
+                executable: success ? "/bin/echo" : "/missing/private-path",
+                arguments: ["private-argument"], environment: ["PRIVATE_TOKEN=secret-value"],
+                workingDirectory: "/", terminal: false, uid: UInt32(geteuid()), gid: UInt32(getegid())
+            ), fd: harness.peerFD
+        )
+        var frames: [GuestAgentFrame] = []
+        for _ in 0..<8 {
+            let frame = try readAgentFrame(from: harness.peerFD)
+            frames.append(frame)
+            if frame.type == .exit { break }
+        }
+        try harness.waitForCompletion()
+        #expect(frames.contains { $0.type == .ack } == success)
+        let lines = messages.withLock { $0 }
+        let stages = lines.compactMap { $0.split(separator: " ").first { $0.hasPrefix("stage=") }.map(String.init) }
+        let expected =
+            ["received", "identityBegin", "identityResolved", "spawnBegin", "bootstrapPrepared", "forkBegin", "forkReturned"]
+            + (success ? ["execConfirmed", "spawnCompleted", "ackSendBegin", "ackSent"] : ["failed"])
+        #expect(stages == expected.map { "stage=" + $0 })
+        #expect(!lines.joined().contains("private"))
+        #expect(!lines.joined().contains("sensitive-id"))
+        #expect(!lines.joined().contains("secret-value"))
+        #expect(lines.allSatisfy { !$0.contains("\n") })
+    }
+
+    @Test(arguments: [true, false])
+    func helperTimingRequiresReadyMarkerAndSuccessfulExec(success: Bool) throws {
+        let messages = LockedValue<[String]>([])
+        let trace = MacOSProcessStartTrace(processID: "helper-test") { message in
+            messages.withLock { $0.append(message) }
+        }
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        var marker: Int32 = -1
+        #expect(write(fds[1], &marker, MemoryLayout<Int32>.size) == MemoryLayout<Int32>.size)
+        if !success {
+            var error = Int32(ENOENT)
+            #expect(write(fds[1], &error, MemoryLayout<Int32>.size) == MemoryLayout<Int32>.size)
+        }
+        close(fds[1])
+        let status = try readExecStatus(fds[0], requireHelperReady: true, trace: trace)
+        #expect(status == (success ? nil : Int32(ENOENT)))
+        let stages = messages.withLock { $0 }.compactMap { $0.split(separator: " ").first { $0.hasPrefix("stage=") }.map(String.init) }
+        #expect(stages == (success ? ["stage=helperReady", "stage=execConfirmed"] : ["stage=helperReady"]))
+    }
+
+    @Test
+    func missingHelperMarkerDoesNotReportSuccessfulExec() throws {
+        let messages = LockedValue<[String]>([])
+        let trace = MacOSProcessStartTrace(processID: "missing-helper") { message in
+            messages.withLock { $0.append(message) }
+        }
+        var fds = [Int32](repeating: -1, count: 2)
+        try #require(pipe(&fds) == 0)
+        close(fds[1])
+        #expect(throws: POSIXError.self) {
+            _ = try readExecStatus(fds[0], requireHelperReady: true, trace: trace)
+        }
+        #expect(messages.withLock { $0 }.isEmpty)
+    }
+
     @Test
     func missingExecutableReportsErrorWithoutAck() throws {
         signal(SIGPIPE, SIG_IGN)
@@ -406,7 +554,11 @@ extension GuestAgentProcessStartupTests {
         private let errorBox = LockedValue<Error?>(nil)
         private let peerBox: LockedValue<Int32?>
 
-        init(outputBufferCapacity: Int = 4 * 1024 * 1024, outputDrainTimeout: TimeInterval = 1) throws {
+        init(
+            processSupervisor: GuestProcessSupervisor = GuestProcessSupervisor(),
+            outputBufferCapacity: Int = 4 * 1024 * 1024, outputDrainTimeout: TimeInterval = 1,
+            processStartTraceSink: @escaping @Sendable (String) -> Void = { _ in }
+        ) throws {
             let pair = try makeSocketPair()
             self.peerFD = pair.peer
             self.peerBox = LockedValue(pair.peer)
@@ -414,7 +566,10 @@ extension GuestAgentProcessStartupTests {
             Thread.detachNewThread {
                 defer { self.done.signal() }
                 do {
-                    try AgentConnection(fd: pair.server, outputBufferCapacity: outputBufferCapacity, outputDrainTimeout: outputDrainTimeout).run()
+                    try AgentConnection(
+                        fd: pair.server, processSupervisor: processSupervisor, outputBufferCapacity: outputBufferCapacity,
+                        outputDrainTimeout: outputDrainTimeout, processStartTraceSink: processStartTraceSink
+                    ).run()
                 } catch {
                     self.errorBox.withLock { $0 = error }
                 }

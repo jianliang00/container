@@ -213,9 +213,9 @@ struct MacOSSidecarClientTests {
         #expect(methods.withLock { $0 } == [.vmCapabilities, .vmRestoreMachineState])
     }
 
-    @Test
-    func persistenceLeaseSerializesRecreatedSandboxes() async throws {
-        let root = URL(fileURLWithPath: "/tmp/ms-lease-\(UUID().uuidString)", isDirectory: true)
+    @Test(arguments: ["/tmp", "/private/tmp"])
+    func persistenceLeaseSerializesRecreatedSandboxes(base: String) async throws {
+        let root = URL(fileURLWithPath: base, isDirectory: true).appendingPathComponent("ms-lease-\(UUID().uuidString)")
         let storage = root.appendingPathComponent("state", isDirectory: true)
         let control = root.appendingPathComponent("control", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -930,7 +930,8 @@ struct MacOSSidecarClientTests {
         let client = MacOSSidecarClient(
             socketPath: socketPath,
             log: Logger(label: "MacOSSidecarClientTests"),
-            requestTimeoutSeconds: 0.1
+            requestTimeoutSeconds: 0.1,
+            processStartTimeoutSeconds: 0.1
         )
         defer { client.closeControlConnection() }
         client.setDisconnectHandler { _ in
@@ -992,7 +993,8 @@ struct MacOSSidecarClientTests {
         let client = MacOSSidecarClient(
             socketPath: socketPath,
             log: Logger(label: "MacOSSidecarClientTests"),
-            requestTimeoutSeconds: 0.1
+            requestTimeoutSeconds: 0.1,
+            processStartTimeoutSeconds: 0.1
         )
         defer { client.closeControlConnection() }
 

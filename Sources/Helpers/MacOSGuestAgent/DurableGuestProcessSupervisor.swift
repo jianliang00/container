@@ -241,6 +241,10 @@ final class GuestProcessSupervisor: @unchecked Sendable {
     private let beforeEventAppendBarrier: (@Sendable () -> Void)?
     private let afterAttachmentAcknowledgement: (@Sendable (MacOSGuestProcessDisposition) -> Void)?
     private var processes: [String: DurableGuestProcess] = [:]
+    // Legacy commands have no inspect/reattach protocol. Keep reservations for
+    // the VM/agent lifetime, including failed or disconnected startup attempts.
+    private var legacyExecutionIDs: Set<String> = []
+    private var failedStartExecutionIDs: Set<String> = []
     private var lifecycleLocks: [String: NSLock] = [:]
     // Retained for the guest-agent/VM lifetime. Incarnations are never silently
     // collected because doing so could let a delayed pre-delete start revive.
@@ -265,10 +269,13 @@ final class GuestProcessSupervisor: @unchecked Sendable {
     func createAndAttach(
         frame: GuestAgentFrame,
         connection: AgentConnection,
-        cursor: UInt64
+        cursor: UInt64,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> GuestProcessAttachmentHandle {
         let executionID = try requireExecutionID(frame.id)
+        trace?.record(.identityBegin)
         let spec = try DurableGuestProcessLaunchSpec(frame: frame)
+        trace?.record(.identityResolved)
         let fingerprint = try spec.fingerprint()
         let requestedAttachment = try DurableGuestProcessAttachmentRequest(frame: frame)
 
@@ -289,6 +296,14 @@ final class GuestProcessSupervisor: @unchecked Sendable {
                 message: "execution \(executionID) incarnation \(incarnation) was already deleted"
             )
         }
+        if failedStartExecutionIDs.contains(executionID) {
+            lock.unlock()
+            throw durableProcessError(code: ESTALE, message: "execution startup failed; its outcome must not be replayed")
+        }
+        if legacyExecutionIDs.contains(executionID) {
+            lock.unlock()
+            throw durableProcessError(code: EEXIST, message: "execution identifier was used by a legacy command")
+        }
         if let existing = processes[executionID] {
             guard existing.matches(spec: spec) else {
                 let existingFingerprint = existing.launchFingerprint
@@ -303,6 +318,7 @@ final class GuestProcessSupervisor: @unchecked Sendable {
             disposition = .existing
             attachmentRequest = requestedAttachment
             lock.unlock()
+            trace?.record(.processReused)
         } else {
             guard cursor == 0 else {
                 lock.unlock()
@@ -332,6 +348,7 @@ final class GuestProcessSupervisor: @unchecked Sendable {
             )
             let session: SpawnedProcessSession
             do {
+                trace?.record(.spawnBegin)
                 session = try SpawnedProcessSession.spawn(
                     executable: spec.executable,
                     arguments: spec.arguments,
@@ -340,8 +357,10 @@ final class GuestProcessSupervisor: @unchecked Sendable {
                     workingDirectory: spec.workingDirectory,
                     terminal: spec.terminal,
                     identity: spec.identity,
-                    eventSink: created
+                    eventSink: created,
+                    trace: trace
                 )
+                trace?.record(.spawnCompleted)
                 created.install(session: session)
                 processes[executionID] = created
                 try session.start(stdoutHandle: nil, stderrHandle: nil)
@@ -349,6 +368,7 @@ final class GuestProcessSupervisor: @unchecked Sendable {
                 disposition = .created
                 lock.unlock()
             } catch {
+                failedStartExecutionIDs.insert(executionID)
                 if processes[executionID] === created {
                     processes.removeValue(forKey: executionID)
                 }
@@ -362,8 +382,19 @@ final class GuestProcessSupervisor: @unchecked Sendable {
             connection: connection,
             cursor: cursor,
             disposition: disposition,
-            request: attachmentRequest
+            request: attachmentRequest,
+            trace: trace
         )
+    }
+
+    func reserveLegacyExecution(_ executionID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard processes[executionID] == nil, failedStartExecutionIDs.contains(executionID) == false,
+            deletedIncarnations[executionID] == nil, legacyExecutionIDs.insert(executionID).inserted
+        else {
+            throw durableProcessError(code: EEXIST, message: "legacy execution identifier cannot be replayed")
+        }
     }
 
     func inspect(executionID rawExecutionID: String?) throws -> MacOSGuestProcessStatusPayload {
@@ -496,6 +527,8 @@ final class GuestProcessSupervisor: @unchecked Sendable {
         lock.lock()
         values = Array(processes.values)
         processes.removeAll()
+        legacyExecutionIDs.removeAll()
+        failedStartExecutionIDs.removeAll()
         deletedIncarnations.removeAll()
         lock.unlock()
         for process in values {
@@ -640,7 +673,8 @@ private final class DurableGuestProcess: SpawnedProcessEventSink, @unchecked Sen
         connection: AgentConnection,
         cursor: UInt64,
         disposition: MacOSGuestProcessDisposition,
-        request: DurableGuestProcessAttachmentRequest
+        request: DurableGuestProcessAttachmentRequest,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> GuestProcessAttachmentHandle {
         let handle = GuestProcessAttachmentHandle(executionID: executionID, token: UUID())
         let candidate: Attachment
@@ -707,10 +741,12 @@ private final class DurableGuestProcess: SpawnedProcessEventSink, @unchecked Sen
         // success, the previous controller can no longer issue a command.
         let writeDeadline = Date().addingTimeInterval(attachmentWriteTimeout)
         do {
+            trace?.record(.ackSendBegin)
             try connection.send(
                 frame: .ack(id: executionID, data: try JSONEncoder().encode(payload)),
                 deadline: writeDeadline
             )
+            trace?.record(.ackSent)
             afterAttachmentAcknowledgement?(disposition)
         } catch {
             lock.lock()

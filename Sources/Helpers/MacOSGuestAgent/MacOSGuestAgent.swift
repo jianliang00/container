@@ -73,6 +73,7 @@ struct MacOSGuestAgent: ParsableCommand {
 enum MacOSGuestAgentCapabilities {
     static let advertised = [
         "tcpConnectV1",
+        MacOSGuestProcessProtocol.boundedProcessStartV1,
         MacOSGuestProcessProtocol.durableProcessV1,
         MacOSGuestProcessProtocol.durableProcessV2,
         MacOSGuestProcessProtocol.durableProcessV3,
@@ -172,7 +173,8 @@ final class AgentConnection: @unchecked Sendable {
         case relayTCP(targetFD: Int32, bufferedInput: Data)
     }
 
-    private let fd: Int32
+    fileprivate let fd: Int32
+    private let processStartTraceSink: @Sendable (String) -> Void
     private let attachmentLock = NSLock()
     private let socketHandle: FileHandle
     private let processSupervisor: GuestProcessSupervisor
@@ -196,9 +198,11 @@ final class AgentConnection: @unchecked Sendable {
         relayPeerStateCheckInterval: TimeInterval = 1,
         outputBufferCapacity: Int = 4 * 1024 * 1024,
         outputDrainTimeout: TimeInterval = 1,
-        socketWriteTimeout: TimeInterval = 5
+        socketWriteTimeout: TimeInterval = 5,
+        processStartTraceSink: @escaping @Sendable (String) -> Void = { logAgentInfo($0) }
     ) throws {
         self.fd = fd
+        self.processStartTraceSink = processStartTraceSink
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         self.processSupervisor = processSupervisor
         self.relayHalfCloseIdleTimeout = relayHalfCloseIdleTimeout.map { max($0, 0) }
@@ -302,6 +306,8 @@ final class AgentConnection: @unchecked Sendable {
     private func handle(frame: GuestAgentFrame) throws -> FrameAction {
         switch frame.type {
         case .exec:
+            let trace = MacOSProcessStartTrace(processID: frame.id, emit: processStartTraceSink)
+            trace.record(.received)
             if frame.durable == true {
                 let previousAttachment = currentDurableAttachment()
                 session?.cleanup()
@@ -310,12 +316,14 @@ final class AgentConnection: @unchecked Sendable {
                     let installed = try processSupervisor.createAndAttach(
                         frame: frame,
                         connection: self,
-                        cursor: frame.cursor ?? 0
+                        cursor: frame.cursor ?? 0,
+                        trace: trace
                     )
                     if let previousAttachment, previousAttachment != installed {
                         processSupervisor.detach(previousAttachment)
                     }
                 } catch {
+                    trace.record(.failed)
                     let message = "failed to create durable process: \(describeError(error))"
                     logAgentError(message)
                     try? send(
@@ -331,8 +339,9 @@ final class AgentConnection: @unchecked Sendable {
 
             detachDurableProcess()
             do {
-                try startProcess(frame: frame)
+                try startProcess(frame: frame, trace: trace)
             } catch {
+                trace.record(.failed)
                 session?.cleanup()
                 session = nil
                 let message = "failed to start process: \(describeError(error))"
@@ -733,7 +742,7 @@ final class AgentConnection: @unchecked Sendable {
         }
     }
 
-    private func startProcess(frame: GuestAgentFrame) throws {
+    private func startProcess(frame: GuestAgentFrame, trace: MacOSProcessStartTrace) throws {
         session?.cleanup()
 
         guard let processID = frame.id, !processID.isEmpty else {
@@ -752,11 +761,17 @@ final class AgentConnection: @unchecked Sendable {
             )
         }
 
+        // An ACK can be lost after exec. Never reuse a legacy ID, even after
+        // its connection is gone; a new connection must not replay the command.
+        try processSupervisor.reserveLegacyExecution(processID)
         let terminal = frame.terminal == true
+        trace.record(.identityBegin)
         let explicitIdentity = try GuestAgentExecIdentity.resolve(from: frame)
+        trace.record(.identityResolved)
         let spawnedIdentity = explicitIdentity.flatMap { identity in
             identity.requiresSpawnedSession() ? identity : nil
         }
+        trace.record(.spawnBegin)
         let session = try SpawnedProcessSession.spawn(
             executable: executable,
             arguments: frame.arguments ?? [],
@@ -765,11 +780,15 @@ final class AgentConnection: @unchecked Sendable {
             workingDirectory: frame.workingDirectory,
             terminal: terminal,
             identity: spawnedIdentity ?? .currentProcess(),
-            connection: self
+            connection: self,
+            trace: trace
         )
+        trace.record(.spawnCompleted)
         self.session = session
         do {
+            trace.record(.ackSendBegin)
             try send(frame: .ack(id: processID))
+            trace.record(.ackSent)
             try session.start(stdoutHandle: nil, stderrHandle: nil)
         } catch {
             session.cleanup()
@@ -1723,7 +1742,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         workingDirectory: String?,
         terminal: Bool,
         identity: GuestAgentExecIdentity,
-        connection: AgentConnection
+        connection: AgentConnection,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> SpawnedProcessSession {
         try spawn(
             executable: executable,
@@ -1734,7 +1754,9 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             terminal: terminal,
             identity: identity,
             connection: connection,
-            eventSink: nil
+            eventSink: nil,
+            startupCancelled: { socketCannotSendToPeer(connection.fd) },
+            trace: trace
         )
     }
 
@@ -1746,7 +1768,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         workingDirectory: String?,
         terminal: Bool,
         identity: GuestAgentExecIdentity,
-        eventSink: any SpawnedProcessEventSink
+        eventSink: any SpawnedProcessEventSink,
+        trace: MacOSProcessStartTrace? = nil
     ) throws -> SpawnedProcessSession {
         try spawn(
             executable: executable,
@@ -1757,7 +1780,9 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             terminal: terminal,
             identity: identity,
             connection: nil,
-            eventSink: eventSink
+            eventSink: eventSink,
+            startupCancelled: nil,
+            trace: trace
         )
     }
 
@@ -1770,8 +1795,14 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         terminal: Bool,
         identity: GuestAgentExecIdentity,
         connection: AgentConnection?,
-        eventSink: (any SpawnedProcessEventSink)?
+        eventSink: (any SpawnedProcessEventSink)?,
+        startupCancelled: (() -> Bool)?,
+        trace: MacOSProcessStartTrace?
     ) throws -> SpawnedProcessSession {
+        let startupDeadline =
+            DispatchTime.now().uptimeNanoseconds
+            + UInt64(MacOSGuestProcessProtocol.processStartTimeoutSeconds * 1_000_000_000)
+        if startupCancelled?() == true { throw POSIXError(.ECANCELED) }
         if let rootDirectory, !rootDirectory.hasPrefix("/") {
             throw POSIXError(.EINVAL)
         }
@@ -1792,6 +1823,7 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         if bootstrapLaunch == nil {
             try setCloseOnExec(execStatus.writeEnd)
         }
+        trace?.record(.bootstrapPrepared)
 
         let childExecutable = bootstrapLaunch?.executable ?? executable
         let childArguments = bootstrapLaunch?.arguments ?? arguments
@@ -1822,8 +1854,7 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             stderrPipe = try makePipe()
         }
 
-        let pid = sysFork()
-        guard pid >= 0 else {
+        func closePreparedDescriptors() {
             closeIfValid(execStatus.readEnd)
             closeIfValid(execStatus.writeEnd)
             closeIfValid(bootstrapLaunch?.payloadFD)
@@ -1832,7 +1863,22 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             closePipe(stdinPipe)
             closePipe(stdoutPipe)
             closePipe(stderrPipe)
-            throw POSIXError.fromErrno()
+        }
+
+        if startupCancelled?() == true {
+            closePreparedDescriptors()
+            throw POSIXError(.ECANCELED)
+        }
+        guard DispatchTime.now().uptimeNanoseconds < startupDeadline else {
+            closePreparedDescriptors()
+            throw POSIXError(.ETIMEDOUT)
+        }
+        trace?.record(.forkBegin)
+        let pid = sysFork()
+        guard pid >= 0 else {
+            let error = POSIXError.fromErrno()
+            closePreparedDescriptors()
+            throw error
         }
 
         if pid == 0 {
@@ -1872,6 +1918,8 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             }
         }
 
+        // Emit only in the parent; logging is not safe in the post-fork child.
+        trace?.record(.forkReturned)
         closeIfValid(execStatus.writeEnd)
         closeIfValid(bootstrapLaunch?.payloadFD)
         closeIfValid(slaveFD)
@@ -1879,17 +1927,28 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         closeIfValid(stdoutPipe?.writeEnd)
         closeIfValid(stderrPipe?.writeEnd)
 
-        if let errorCode = try readExecStatus(
-            execStatus.readEnd,
-            requireHelperReady: bootstrapLaunch != nil
-        ) {
+        do {
+            if let errorCode = try readExecStatus(
+                execStatus.readEnd,
+                requireHelperReady: bootstrapLaunch != nil,
+                deadlineUptimeNanoseconds: startupDeadline,
+                cancelled: startupCancelled,
+                trace: trace
+            ) {
+                throw POSIXError(POSIXErrorCode(rawValue: errorCode) ?? .EIO)
+            }
+        } catch {
             closeIfValid(masterFD)
             closeIfValid(stdinPipe?.writeEnd)
             closeIfValid(stdoutPipe?.readEnd)
             closeIfValid(stderrPipe?.readEnd)
+            // Also covers timeout, cancellation and malformed helper status.
+            // Kill before reaping so neither a helper nor its descendants can
+            // outlive a failed startup and the PID cannot be recycled early.
+            try? sendSignalToProcessTree(pid: pid, signal: SIGKILL)
             var status: Int32 = 0
-            _ = waitpid(pid, &status, 0)
-            throw POSIXError(POSIXErrorCode(rawValue: errorCode) ?? .EIO)
+            while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+            throw error
         }
 
         return .init(
@@ -2283,20 +2342,53 @@ private func setCloseOnExec(_ fd: Int32) throws {
 
 private let execHelperReadyStatus: Int32 = -1
 
-private func readExecStatus(_ fd: Int32, requireHelperReady: Bool = false) throws -> Int32? {
+func readExecStatus(
+    _ fd: Int32,
+    requireHelperReady: Bool = false,
+    timeoutSeconds: TimeInterval = MacOSGuestProcessProtocol.processStartTimeoutSeconds,
+    deadlineUptimeNanoseconds: UInt64? = nil,
+    cancelled: (() -> Bool)? = nil,
+    trace: MacOSProcessStartTrace? = nil
+) throws -> Int32? {
     defer { closeIfValid(fd) }
+    guard timeoutSeconds.isFinite, timeoutSeconds > 0, timeoutSeconds <= MacOSGuestProcessProtocol.processStartTimeoutSeconds else {
+        throw POSIXError(.EINVAL)
+    }
+    let deadline =
+        deadlineUptimeNanoseconds
+        ?? (DispatchTime.now().uptimeNanoseconds + UInt64(timeoutSeconds * 1_000_000_000))
     if requireHelperReady {
-        guard let firstStatus = try readExecStatusCode(fd) else {
+        guard let firstStatus = try readExecStatusCode(fd, deadline: deadline, cancelled: cancelled) else {
             throw POSIXError(.EIO)
         }
         if firstStatus != execHelperReadyStatus {
             return firstStatus
         }
+        trace?.record(.helperReady)
     }
-    return try readExecStatusCode(fd)
+    let status = try readExecStatusCode(fd, deadline: deadline, cancelled: cancelled)
+    if status == nil {
+        trace?.record(.execConfirmed)
+    }
+    return status
 }
 
-private func readExecStatusCode(_ fd: Int32) throws -> Int32? {
+private func readExecStatusCode(_ fd: Int32, deadline: UInt64, cancelled: (() -> Bool)?) throws -> Int32? {
+    while true {
+        if cancelled?() == true { throw POSIXError(.ECANCELED) }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline else { throw POSIXError(.ETIMEDOUT) }
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let milliseconds = Int32(min(100, max(1, (deadline - now) / 1_000_000)))
+        let result = Darwin.poll(&descriptor, 1, milliseconds)
+        if result < 0 {
+            if errno == EINTR { continue }
+            throw POSIXError.fromErrno()
+        }
+        if result == 0 { continue }
+        if descriptor.revents & Int16(POLLNVAL) != 0 { throw POSIXError(.EBADF) }
+        break
+    }
     var code: Int32 = 0
     let bytes = withUnsafeMutablePointer(to: &code) {
         Darwin.read(fd, $0, MemoryLayout<Int32>.size)

@@ -25,6 +25,54 @@ import Testing
 @Suite(.serialized)
 struct DurableGuestProcessSupervisorTests {
     @Test
+    func failedSpawnCannotBeRetriedAsDurableOrLegacyCommand() throws {
+        let supervisor = GuestProcessSupervisor()
+        defer { supervisor.removeAllForTesting() }
+        let pair = try makeDurableProcessSocketPair()
+        defer { closeDurableProcessFD(pair.peer) }
+        let connection = try AgentConnection(fd: pair.server, processSupervisor: supervisor)
+        let invalid = GuestAgentFrame(type: .exec, id: "failed-launch", executable: "/missing/executable", durable: true)
+        #expect(throws: Error.self) {
+            _ = try supervisor.createAndAttach(frame: invalid, connection: connection, cursor: 0)
+        }
+        #expect(throws: Error.self) {
+            _ = try supervisor.createAndAttach(
+                frame: durableExecFrame(id: "failed-launch", script: "exit 0"), connection: connection, cursor: 0
+            )
+        }
+        #expect(throws: Error.self) { try supervisor.reserveLegacyExecution("failed-launch") }
+    }
+
+    @Test
+    func startupTimingDistinguishesCreateFromRetry() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let supervisor = GuestProcessSupervisor()
+        defer { supervisor.removeAllForTesting() }
+        let pair = try makeDurableProcessSocketPair()
+        defer { closeDurableProcessFD(pair.peer) }
+        let connection = try AgentConnection(fd: pair.server, processSupervisor: supervisor)
+        let messages = DurableLockedValue<[String]>([])
+        let trace = MacOSProcessStartTrace(processID: "trace-retry") { message in
+            messages.withLock { $0.append(message) }
+        }
+        let frame = durableExecFrame(id: "trace-retry", script: "sleep 10")
+        for retry in [false, true] {
+            messages.withLock { $0.removeAll() }
+            _ = try supervisor.createAndAttach(frame: frame, connection: connection, cursor: 0, trace: trace)
+            let ack = try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: pair.peer)
+            #expect(ack.type == .ack)
+            let stages = messages.withLock { $0 }.compactMap {
+                $0.split(separator: " ").first { $0.hasPrefix("stage=") }.map(String.init)
+            }
+            let expected =
+                ["identityBegin", "identityResolved"]
+                + (retry ? ["processReused"] : ["spawnBegin", "bootstrapPrepared", "forkBegin", "forkReturned", "execConfirmed", "spawnCompleted"])
+                + ["ackSendBegin", "ackSent"]
+            #expect(stages == expected.map { "stage=" + $0 })
+        }
+    }
+
+    @Test
     func boundedAgentConnectionWriteTimesOutWhenPeerStopsReading() throws {
         signal(SIGPIPE, SIG_IGN)
         let pair = try makeDurableProcessSocketPair()
@@ -554,8 +602,9 @@ struct DurableGuestProcessSupervisorTests {
         #expect(created.storageGeneration == 40)
 
         let failedPair = try makeDurableProcessSocketPair()
-        closeDurableProcessFD(failedPair.peer)
         let failedConnection = try AgentConnection(fd: failedPair.server, processSupervisor: supervisor)
+        defer { failedConnection.invalidate() }
+        closeDurableProcessFD(failedPair.peer)
         #expect(throws: (any Error).self) {
             _ = try supervisor.attach(
                 frame: .init(
@@ -576,7 +625,6 @@ struct DurableGuestProcessSupervisorTests {
         try waitForDurableProcessCondition {
             !durableProcessExists(created.processIdentifier)
         }
-        failedConnection.invalidate()
         try owner.waitForCompletion()
     }
 

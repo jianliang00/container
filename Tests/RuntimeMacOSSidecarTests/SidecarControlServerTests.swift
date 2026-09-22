@@ -27,6 +27,19 @@ import Testing
 
 @Suite(.serialized)
 struct SidecarControlServerTests {
+    @Test(arguments: [Data(), Data([0, 0, 0, 4, 0x7b])])
+    func responseFrameTimesOutForSilentOrPartialPeers(prefix: Data) throws {
+        let pair = try makeSocketPair()
+        defer {
+            closeIfValid(pair.server)
+            closeIfValid(pair.peer)
+        }
+        try MacOSSidecarSocketIO.writeAll(data: prefix, fd: pair.server)
+        #expect(throws: POSIXError(.ETIMEDOUT)) {
+            _ = try responseFrame(fd: pair.peer, timeoutMilliseconds: 50)
+        }
+    }
+
     @Test
     func slowControlClientDoesNotBlockGuestStreamDrain() throws {
         let server = makeServer(controlWriteTimeoutMilliseconds: 5_000)
@@ -173,9 +186,9 @@ struct SidecarControlServerTests {
         #expect(eventEnvelope.event?.processID == "legacy-process")
     }
 
-    @Test
-    func cleanupCreatesSecureParentsAndSupportsSystemTemporaryDirectoryAlias() throws {
-        let root = URL(fileURLWithPath: "/tmp/runtime-macos-sidecar-security-\(UUID().uuidString)")
+    @Test(arguments: ["/tmp", "/private/tmp", NSTemporaryDirectory()])
+    func cleanupCreatesSecureParentsAndSupportsSystemTemporaryDirectoryAlias(base: String) throws {
+        let root = URL(fileURLWithPath: base).appendingPathComponent("s-\(UUID().uuidString.prefix(8))")
         defer { try? FileManager.default.removeItem(at: root) }
         let parent = root.appendingPathComponent("nested")
         let socketPath = parent.appendingPathComponent("control.sock").path
@@ -503,6 +516,7 @@ struct SidecarControlServerTests {
         #expect(acknowledged.withLock { $0 } == [1, 2])
     }
 
+    #if DEBUG
     @Test
     func eventAcknowledgementWaitsForDeliveryPublicationBarrier() throws {
         let buffer = SidecarEventDeliveryBuffer(log: Logger(label: "SidecarEventDeliveryBufferTests"))
@@ -558,6 +572,7 @@ struct SidecarControlServerTests {
         #expect(buffer.pendingCount() == 0)
         #expect(callbackCount.withLock { $0 } == 1)
     }
+    #endif
 
     @Test
     func failedEventWriteInvalidatesSubscriptionAndReplaysPendingEvent() throws {
@@ -1220,6 +1235,94 @@ struct SidecarControlServerTests {
         #expect(initialFrames.count == 1)
         #expect(initialFrames.first?.type == .stdout)
         #expect(initialFrames.first?.data == Data("early-output\n".utf8))
+    }
+
+    @Test(arguments: [false, true])
+    func extendedStartupBudgetRequiresBoundedGuestCapability(bounded: Bool) throws {
+        signal(SIGPIPE, SIG_IGN)
+        let pair = try makeSocketPair()
+        let fd = LockedValue<Int32?>(pair.server)
+        let server = makeServer(processConnectionFactory: { _ in
+            try #require(
+                fd.withLock { current in
+                    defer { current = nil }
+                    return current
+                })
+        })
+        let done = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        defer {
+            release.signal()
+            server._testCloseAllProcessSessions()
+            _ = done.wait(timeout: .now() + 5)
+            closeIfValid(fd.withLock { $0 })
+            closeIfValid(pair.peer)
+        }
+        Thread.detachNewThread {
+            defer { done.signal() }
+            do {
+                try MacOSSidecarSocketIO.writeJSONFrame(
+                    SidecarGuestAgentFrame(type: .ready, capabilities: bounded ? [MacOSGuestProcessProtocol.boundedProcessStartV1] : []),
+                    fd: pair.peer
+                )
+                let request = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: pair.peer)
+                usleep(3_200_000)
+                try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.ack(id: request.id!), fd: pair.peer)
+                _ = release.wait(timeout: .now() + 2)
+            } catch {
+                if bounded { Issue.record(error) }
+            }
+        }
+        do {
+            try server._testStartProcessStream(processID: "cold-helper", exec: .init(executable: "/bin/true"))
+            #expect(bounded)
+            #expect(server._testHasProcessSession(processID: "cold-helper"))
+        } catch let error as ContainerizationError {
+            #expect(!bounded)
+            #expect(error.code == .timeout)
+            #expect(!server._testHasProcessSession(processID: "cold-helper"))
+        }
+    }
+
+    @Test
+    func disconnectedStartupClientDoesNotLeaveLegacySession() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let pair = try makeSocketPair()
+        let fd = LockedValue<Int32?>(pair.server)
+        let server = makeServer(processConnectionFactory: { _ in
+            try #require(
+                fd.withLock { current in
+                    defer { current = nil }
+                    return current
+                })
+        })
+        let clientPair = try makeSocketPair()
+        defer {
+            server._testCloseAllProcessSessions()
+            closeIfValid(fd.withLock { $0 })
+            closeIfValid(pair.peer)
+            closeIfValid(clientPair.server)
+            closeIfValid(clientPair.peer)
+        }
+        try writeGuestReady(fd: pair.peer)
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            defer { done.signal() }
+            do {
+                _ = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: pair.peer)
+                _ = Darwin.shutdown(clientPair.peer, SHUT_RDWR)
+                try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.ack(id: "cancelled-start"), fd: pair.peer)
+            } catch { Issue.record(error) }
+        }
+        #expect(throws: Error.self) {
+            try server._testStartProcessStream(
+                processID: "cancelled-start", exec: .init(executable: "/bin/true"), clientFD: clientPair.server
+            )
+        }
+        #expect(done.wait(timeout: .now() + 2) == .success)
+        #expect(!server._testHasProcessSession(processID: "cancelled-start"))
+        var byte: UInt8 = 0
+        #expect(Darwin.recv(pair.peer, &byte, 1, MSG_DONTWAIT) == 0)
     }
 
     @Test
@@ -2596,18 +2699,14 @@ private func writeGuestStatusAck(_ status: MacOSGuestProcessStatusPayload, fd: I
     )
 }
 
-private func responseFrame(fd: Int32) throws -> MacOSSidecarResponse {
-    let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+private func responseFrame(fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> MacOSSidecarResponse {
+    let envelope = try readableEnvelope(fd: fd, timeoutMilliseconds: timeoutMilliseconds)
     #expect(envelope.kind == .response)
     return try #require(envelope.response)
 }
 
 private func eventFrame(fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> MacOSSidecarEvent {
-    var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-    guard Darwin.poll(&descriptor, 1, timeoutMilliseconds) > 0 else {
-        throw POSIXError(.ETIMEDOUT)
-    }
-    let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+    let envelope = try readableEnvelope(fd: fd, timeoutMilliseconds: timeoutMilliseconds)
     #expect(envelope.kind == .event)
     return try #require(envelope.event)
 }
@@ -2705,13 +2804,11 @@ private func makeServer(
 }
 
 private func readableEnvelope(fd: Int32, timeoutMilliseconds: Int32 = 2_000) throws -> MacOSSidecarEnvelope {
-    var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-    guard Darwin.poll(&descriptor, 1, timeoutMilliseconds) == 1,
-        descriptor.revents & Int16(POLLIN) != 0
-    else {
-        throw POSIXError(.ETIMEDOUT)
-    }
-    return try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd)
+    try MacOSSidecarSocketIO.readJSONFrame(
+        MacOSSidecarEnvelope.self,
+        fd: fd,
+        timeoutMilliseconds: timeoutMilliseconds
+    )
 }
 
 private func makeSocketSecurityRoot() throws -> URL {
@@ -2766,6 +2863,10 @@ private func makeSocketPair() throws -> (server: Int32, peer: Int32) {
 }
 
 private func expectEOF(fd: Int32) throws {
+    var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+    guard Darwin.poll(&descriptor, 1, 2_000) > 0 else {
+        throw POSIXError(.ETIMEDOUT)
+    }
     var buffer = UInt8.zero
     let count = Darwin.read(fd, &buffer, 1)
     if count == 0 {

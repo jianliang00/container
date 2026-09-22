@@ -17,6 +17,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 
 /// Persists the host-independent VM identity needed to pair a disk snapshot
 /// with either a same-host machine-state restore or a cross-host cold boot.
@@ -48,9 +49,19 @@ struct MacOSMachineIdentityBundleStore: Sendable {
     /// Captures an immutable identity bundle. `stateDirectoryURL` must be a
     /// newly reserved, private machine-state directory.
     static func capture(from runtimeRootURL: URL, into stateDirectoryURL: URL) throws {
-        let runtimeRoot = canonicalRuntimeRoot(runtimeRootURL)
-        let stateDirectory = lexicalDirectoryURL(stateDirectoryURL)
-        try requireManagedDirectory(runtimeRoot, role: "runtime root", requirePrivateMode: false)
+        try capture(from: MacOSActiveMachineIdentity(runtimeRootURL: runtimeRootURL), into: stateDirectoryURL)
+    }
+
+    static func capture(
+        from identity: MacOSActiveMachineIdentity,
+        into stateDirectoryURL: URL,
+        compatibility: MacOSMachineStateCompatibilityDescription? = nil
+    ) throws {
+        guard !identity.isPersistent || compatibility != nil else {
+            throw SidecarRPCError(code: "identityBundleMismatch", message: "persistent identity capture requires the configured VM compatibility description")
+        }
+        try identity.validateDirectories()
+        let stateDirectory = try lexicalDirectoryURL(stateDirectoryURL)
         try requireManagedDirectory(stateDirectory, role: "machine-state directory", requirePrivateMode: true)
 
         let finalURL = stateDirectory.appendingPathComponent(bundleDirectoryName, isDirectory: true)
@@ -77,7 +88,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
 
         var records: [Manifest.FileRecord] = []
         for filename in requiredFilenames + optionalFilenames {
-            let sourceURL = runtimeRoot.appendingPathComponent(filename)
+            let sourceURL = try identity.fileURL(for: filename)
             if optionalFilenames.contains(filename), try pathStatus(sourceURL) == .missing {
                 continue
             }
@@ -86,6 +97,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         }
         let manifest = Manifest(schemaVersion: 1, files: records.sorted { $0.name < $1.name })
         try validateManifest(manifest)
+        if let compatibility { try validateBinding(manifest, compatibility: compatibility) }
         try writeManifest(manifest, to: temporaryURL.appendingPathComponent(manifestFilename))
         try syncDirectory(temporaryURL)
 
@@ -100,49 +112,70 @@ struct MacOSMachineIdentityBundleStore: Sendable {
     /// retry after a crash is safe: all target files are staged again and then
     /// atomically replaced one at a time before VM configuration is created.
     static func materialize(from stateDirectoryURL: URL, into runtimeRootURL: URL) throws {
-        let runtimeRoot = canonicalRuntimeRoot(runtimeRootURL)
-        let stateDirectory = lexicalDirectoryURL(stateDirectoryURL)
-        try requireManagedDirectory(runtimeRoot, role: "runtime root", requirePrivateMode: false)
-        let bundleURL = stateDirectory.appendingPathComponent(bundleDirectoryName, isDirectory: true)
-        let manifest = try verify(in: stateDirectory)
+        try materialize(from: stateDirectoryURL, into: MacOSActiveMachineIdentity(runtimeRootURL: runtimeRootURL))
+    }
 
-        let stagingURL = runtimeRoot.appendingPathComponent(
-            ".identity-materialize-\(UUID().uuidString.lowercased()).tmp",
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(
-            at: stagingURL,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: NSNumber(value: 0o700)]
-        )
-        defer { try? FileManager.default.removeItem(at: stagingURL) }
+    static func materialize(
+        from stateDirectoryURL: URL,
+        into identity: MacOSActiveMachineIdentity,
+        compatibility: MacOSMachineStateCompatibilityDescription? = nil
+    ) throws {
+        guard !identity.isPersistent || compatibility != nil else {
+            throw SidecarRPCError(code: "identityBundleMismatch", message: "persistent identity restore requires the saved VM compatibility description")
+        }
+        try identity.validateDirectories()
+        let stateDirectory = try lexicalDirectoryURL(stateDirectoryURL)
+        let bundleURL = stateDirectory.appendingPathComponent(bundleDirectoryName, isDirectory: true)
+        let manifest = try verify(in: stateDirectory, compatibility: compatibility)
+        // Validate every destination before publishing any file. A persistent
+        // identity cannot silently adopt a different machine or hardware model.
+        for filename in requiredFilenames + optionalFilenames {
+            let destination = try identity.fileURL(for: filename)
+            switch try pathStatus(destination) {
+            case .missing: break
+            case .regularFile:
+                try validateFile(destination)
+            default:
+                throw SidecarRPCError(code: "unsafeIdentityBundlePath", message: "VM identity destination is not a regular file")
+            }
+        }
+        if compatibility != nil || identity.isPersistent {
+            for filename in ["HardwareModel.bin", "MachineIdentifier.bin"] {
+                let destination = try identity.fileURL(for: filename)
+                if try pathStatus(destination) != .missing,
+                    try fileRecord(destination) != manifest.files.first(where: { $0.name == filename })
+                {
+                    throw SidecarRPCError(code: "activeIdentityMismatch", message: "existing \(filename) differs from the saved VM identity")
+                }
+            }
+        }
+
+        // Stage on each destination filesystem; persistent storage need not be
+        // on the same volume as the sandbox runtime directory.
+        var staged: [(temporary: URL, destination: URL)] = []
+        defer { for entry in staged { try? FileManager.default.removeItem(at: entry.temporary) } }
 
         for record in manifest.files {
+            let destination = try identity.fileURL(for: record.name)
+            let temporary = destination.deletingLastPathComponent()
+                .appendingPathComponent(".identity-materialize-\(UUID().uuidString.lowercased()).tmp")
             _ = try copyAndDigest(
                 from: bundleURL.appendingPathComponent(record.name),
-                to: stagingURL.appendingPathComponent(record.name),
+                to: temporary,
                 expected: record
             )
+            staged.append((temporary, destination))
         }
-        try syncDirectory(stagingURL)
 
-        for record in manifest.files {
-            let destinationURL = runtimeRoot.appendingPathComponent(record.name)
-            let status = try pathStatus(destinationURL)
-            guard status == .missing || status == .regularFile else {
-                throw SidecarRPCError(
-                    code: "unsafeIdentityBundlePath",
-                    message: "VM identity destination is not a regular file"
-                )
-            }
-            guard rename(stagingURL.appendingPathComponent(record.name).path, destinationURL.path) == 0 else {
+        for entry in staged {
+            guard rename(entry.temporary.path, entry.destination.path) == 0 else {
                 throw posixError(code: "identityBundleMaterializeFailed", message: "failed to materialize VM identity")
             }
         }
 
         let included = Set(manifest.files.map(\.name))
         for filename in optionalFilenames where !included.contains(filename) {
-            let destinationURL = runtimeRoot.appendingPathComponent(filename)
+            let destinationURL = try identity.fileURL(for: filename)
             switch try pathStatus(destinationURL) {
             case .missing:
                 break
@@ -160,12 +193,14 @@ struct MacOSMachineIdentityBundleStore: Sendable {
                 )
             }
         }
-        try syncDirectory(runtimeRoot)
+        for directory in Set(staged.map { $0.destination.deletingLastPathComponent() }) {
+            try syncDirectory(directory)
+        }
     }
 
     @discardableResult
-    static func verify(in stateDirectoryURL: URL) throws -> Manifest {
-        let stateDirectory = lexicalDirectoryURL(stateDirectoryURL)
+    static func verify(in stateDirectoryURL: URL, compatibility: MacOSMachineStateCompatibilityDescription? = nil) throws -> Manifest {
+        let stateDirectory = try lexicalDirectoryURL(stateDirectoryURL)
         try requireManagedDirectory(stateDirectory, role: "machine-state directory", requirePrivateMode: true)
         let bundleURL = stateDirectory.appendingPathComponent(bundleDirectoryName, isDirectory: true)
         do {
@@ -191,10 +226,19 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         for record in manifest.files {
             _ = try digestFile(bundleURL.appendingPathComponent(record.name), expected: record)
         }
+        if let compatibility { try validateBinding(manifest, compatibility: compatibility) }
         return manifest
     }
 
-    private enum PathStatus: Equatable {
+    private static func validateBinding(_ manifest: Manifest, compatibility: MacOSMachineStateCompatibilityDescription) throws {
+        guard manifest.files.first(where: { $0.name == "HardwareModel.bin" })?.sha256 == compatibility.hardwareModelFingerprint,
+            manifest.files.first(where: { $0.name == "MachineIdentifier.bin" })?.sha256 == compatibility.machineIdentifierFingerprint
+        else {
+            throw SidecarRPCError(code: "identityBundleMismatch", message: "VM identity bundle does not match the machine-state compatibility description")
+        }
+    }
+
+    enum PathStatus: Equatable {
         case missing
         case regularFile
         case directory
@@ -202,7 +246,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         case other
     }
 
-    private static func pathStatus(_ url: URL) throws -> PathStatus {
+    static func pathStatus(_ url: URL) throws -> PathStatus {
         var information = stat()
         guard lstat(url.path, &information) == 0 else {
             if errno == ENOENT { return .missing }
@@ -216,7 +260,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         }
     }
 
-    private static func requireManagedDirectory(
+    static func requireManagedDirectory(
         _ url: URL,
         role: String,
         requirePrivateMode: Bool
@@ -241,19 +285,12 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         try rejectSymbolicLinkComponents(in: url)
     }
 
-    /// Darwin exposes `/var` and `/tmp` as fixed system aliases into
-    /// `/private`. Normalize only those two aliases; arbitrary symlinked roots
+    /// Canonicalize only verified system aliases; arbitrary symbolic links
     /// remain rejected by `requireManagedDirectory`.
-    private static func canonicalRuntimeRoot(_ url: URL) -> URL {
-        let path = macOSLexicallyNormalizedAbsolutePath(url.path) ?? url.path
-        if path == "/var" || path.hasPrefix("/var/") || path == "/tmp" || path.hasPrefix("/tmp/") {
-            return URL(fileURLWithPath: "/private\(path)", isDirectory: true)
+    private static func lexicalDirectoryURL(_ url: URL) throws -> URL {
+        guard url.isFileURL, let path = MacOSManagedPath.canonicalPath(url.path) else {
+            throw SidecarRPCError(code: "unsafeIdentityBundlePath", message: "VM identity bundle requires a canonical local directory")
         }
-        return lexicalDirectoryURL(url)
-    }
-
-    private static func lexicalDirectoryURL(_ url: URL) -> URL {
-        let path = macOSLexicallyNormalizedAbsolutePath(url.path) ?? url.path
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
@@ -295,12 +332,12 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         }
     }
 
-    private static func copyAndDigest(
+    static func copyAndDigest(
         from sourceURL: URL,
         to destinationURL: URL,
         expected: Manifest.FileRecord?
     ) throws -> Manifest.FileRecord {
-        let sourceDescriptor = open(sourceURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let sourceDescriptor = open(sourceURL.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard sourceDescriptor >= 0 else {
             if errno == ENOENT {
                 throw SidecarRPCError(code: "identityBundleIncomplete", message: "required VM identity file is missing")
@@ -344,7 +381,15 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         _ url: URL,
         expected: Manifest.FileRecord
     ) throws -> Manifest.FileRecord {
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let actual = try fileRecord(url)
+        guard actual == expected else {
+            throw SidecarRPCError(code: "identityBundleCorrupt", message: "VM identity bundle failed integrity validation")
+        }
+        return actual
+    }
+
+    static func fileRecord(_ url: URL) throws -> Manifest.FileRecord {
+        let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else {
             if errno == ENOENT {
                 throw SidecarRPCError(code: "identityBundleIncomplete", message: "VM identity bundle is incomplete")
@@ -354,20 +399,26 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         defer { close(descriptor) }
         let size = try validateRegularFileDescriptor(descriptor)
         let digest = try hash(descriptor: descriptor, expectedSize: size)
-        let actual = Manifest.FileRecord(name: url.lastPathComponent, size: size, sha256: digest)
-        guard actual == expected else {
-            throw SidecarRPCError(code: "identityBundleCorrupt", message: "VM identity bundle failed integrity validation")
-        }
-        return actual
+        return Manifest.FileRecord(name: url.lastPathComponent, size: size, sha256: digest)
     }
 
-    private static func validateRegularFileDescriptor(_ descriptor: Int32) throws -> UInt64 {
+    static func validateFile(_ url: URL) throws {
+        let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw posixError(code: "identityBundleReadFailed", message: "failed to open VM identity file") }
+        defer { close(descriptor) }
+        _ = try validateRegularFileDescriptor(descriptor)
+    }
+
+    static func validateRegularFileDescriptor(_ descriptor: Int32, effectiveUserID: uid_t = geteuid()) throws -> UInt64 {
         var information = stat()
         guard fstat(descriptor, &information) == 0 else {
             throw posixError(code: "identityBundleReadFailed", message: "failed to inspect VM identity file")
         }
         guard information.st_mode & S_IFMT == S_IFREG, information.st_size >= 0 else {
             throw SidecarRPCError(code: "unsafeIdentityBundlePath", message: "VM identity source is not a regular file")
+        }
+        guard information.st_uid == effectiveUserID, information.st_nlink == 1, information.st_mode & 0o022 == 0 else {
+            throw SidecarRPCError(code: "unsafeIdentityBundlePath", message: "VM identity file has an unsafe owner, permissions, or link count")
         }
         return UInt64(information.st_size)
     }
@@ -422,8 +473,8 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func readRegularFile(_ url: URL, maximumSize: Int) throws -> Data {
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    static func readRegularFile(_ url: URL, maximumSize: Int) throws -> Data {
+        let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
@@ -455,7 +506,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         }
     }
 
-    private static func writeAll(_ data: Data, to descriptor: Int32) throws {
+    static func writeAll(_ data: Data, to descriptor: Int32) throws {
         try data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {
@@ -469,7 +520,7 @@ struct MacOSMachineIdentityBundleStore: Sendable {
         }
     }
 
-    private static func syncDirectory(_ url: URL) throws {
+    static func syncDirectory(_ url: URL) throws {
         let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else {
             throw posixError(code: "identityBundleWriteFailed", message: "failed to open VM identity directory")

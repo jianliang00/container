@@ -28,6 +28,7 @@ struct GuestAgentTCPConnectTests {
     func releaseCapabilitiesAreStableAndSerializable() throws {
         let expected = [
             "tcpConnectV1",
+            MacOSGuestProcessProtocol.boundedProcessStartV1,
             MacOSGuestProcessProtocol.durableProcessV1,
             MacOSGuestProcessProtocol.durableProcessV2,
             MacOSGuestProcessProtocol.durableProcessV3,
@@ -172,9 +173,8 @@ struct GuestAgentTCPConnectTests {
             closeTestFD(descriptors[1])
             throw POSIXError(POSIXErrorCode(rawValue: duplicateErrno) ?? .EIO)
         }
-        closeTestFD(descriptors[1])
-
         var connection: AgentConnection? = try AgentConnection(fd: ownedFD)
+        closeTestFD(descriptors[1])
         do {
             try connection?.run()
             Issue.record("expected ready write to fail after the peer closed")

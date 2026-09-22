@@ -23,27 +23,6 @@ import Logging
 import RuntimeMacOSSidecarShared
 @preconcurrency import Virtualization
 
-/// Normalizes path components without consulting the filesystem. Foundation's
-/// `standardizingPath` resolves Darwin's `/private/var` alias back to `/var`
-/// once the path exists, which would silently reintroduce a symbolic-link
-/// component into managed machine-state paths.
-func macOSLexicallyNormalizedAbsolutePath(_ path: String) -> String? {
-    guard path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
-    var components: [Substring] = []
-    for component in path.split(separator: "/", omittingEmptySubsequences: false).dropFirst() {
-        switch component {
-        case "", ".":
-            continue
-        case "..":
-            guard !components.isEmpty else { return nil }
-            components.removeLast()
-        default:
-            components.append(component)
-        }
-    }
-    return "/" + components.joined(separator: "/")
-}
-
 struct SidecarRPCError: Error, Sendable {
     let code: String
     let message: String
@@ -200,8 +179,6 @@ struct MacOSVMLifecycleCoordinator: Sendable {
 }
 
 struct MacOSMachineStateStore: Sendable {
-    private static let allowedSystemSymbolicLinks: Set<String> = ["/etc", "/tmp", "/var"]
-
     struct Reservation: Sendable {
         let directoryURL: URL
         let stateURL: URL
@@ -470,10 +447,10 @@ struct MacOSMachineStateStore: Sendable {
     /// ancestor. The CRI integration owns and protects the parent directory;
     /// the sidecar only owns its binding-specific child.
     static func preparePersistentRoot(at rootURL: URL, effectiveUserID: uid_t = geteuid()) throws {
-        let root = lexicalDirectoryURL(rootURL)
-        guard root.isFileURL, root.path.hasPrefix("/"), root.path != "/" else {
-            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state root must be absolute")
+        guard rootURL.isFileURL, let path = MacOSManagedPath.canonicalPath(rootURL.path), path != "/" else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "machine-state root must be an absolute canonical file path")
         }
+        let root = URL(fileURLWithPath: path, isDirectory: true)
         let parent = root.deletingLastPathComponent()
         try requirePersistentDirectory(parent, effectiveUserID: effectiveUserID, requirePrivateMode: true)
         try rejectAllSymbolicLinkComponents(through: parent)
@@ -594,7 +571,7 @@ struct MacOSMachineStateStore: Sendable {
         guard lstat(root.path, &rootValue) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ENOENT)
         }
-        if (rootValue.st_mode & S_IFMT) == S_IFLNK, !Self.allowedSystemSymbolicLinks.contains(root.path) {
+        if (rootValue.st_mode & S_IFMT) == S_IFLNK {
             throw SidecarRPCError(code: "unsafeMachineStatePath", message: "runtime root cannot be a symbolic link")
         }
         var current = root
@@ -605,24 +582,25 @@ struct MacOSMachineStateStore: Sendable {
                 if errno == ENOENT { return }
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
-            if (value.st_mode & S_IFMT) == S_IFLNK, !Self.allowedSystemSymbolicLinks.contains(current.path) {
+            if (value.st_mode & S_IFMT) == S_IFLNK {
                 throw SidecarRPCError(code: "unsafeMachineStatePath", message: "symbolic links are not allowed in managed paths")
             }
         }
     }
 
-    private static func rejectSymbolicLinksInAbsolutePath(_ url: URL) throws {
+    static func rejectSymbolicLinksInAbsolutePath(_ url: URL) throws {
+        guard let path = MacOSManagedPath.canonicalPath(url.path) else {
+            throw SidecarRPCError(code: "unsafeMachineStatePath", message: "managed path must be canonical with only trusted system aliases")
+        }
         var current = URL(fileURLWithPath: "/", isDirectory: true)
-        for component in url.pathComponents.dropFirst() {
+        for component in URL(fileURLWithPath: path).pathComponents.dropFirst() {
             current.appendPathComponent(component)
             var value = stat()
             if lstat(current.path, &value) != 0 {
                 if errno == ENOENT { return }
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
-            if value.st_mode & S_IFMT == S_IFLNK,
-                !allowedSystemSymbolicLinks.contains(current.path)
-            {
+            if value.st_mode & S_IFMT == S_IFLNK {
                 throw SidecarRPCError(
                     code: "unsafeMachineStatePath",
                     message: "symbolic links are not allowed in managed paths"
@@ -667,7 +645,7 @@ struct MacOSMachineStateStore: Sendable {
     }
 
     private static func lexicalDirectoryURL(_ url: URL) -> URL {
-        let path = macOSLexicallyNormalizedAbsolutePath(url.path) ?? url.path
+        let path = MacOSManagedPath.canonicalPath(url.path) ?? url.path
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 }
@@ -1002,8 +980,13 @@ enum MacOSBlockDeviceBuilder {
         guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else {
             throw SidecarRPCError(code: "invalidStorageConfiguration", message: "runtime disk image path must be relative")
         }
-        let root = rootURL.standardizedFileURL
-        let candidate = root.appendingPathComponent(relativePath).standardizedFileURL
+        guard let rootPath = MacOSManagedPath.canonicalPath(rootURL.path),
+            let candidatePath = MacOSManagedPath.lexicallyNormalizedAbsolutePath(rootPath + "/" + relativePath)
+        else {
+            throw SidecarRPCError(code: "invalidStorageConfiguration", message: "runtime disk image path must be canonical")
+        }
+        let root = URL(fileURLWithPath: rootPath)
+        let candidate = URL(fileURLWithPath: candidatePath)
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         guard candidate.path.hasPrefix(prefix) else {
             throw SidecarRPCError(code: "invalidStorageConfiguration", message: "runtime disk image path escapes the runtime directory")
@@ -1013,13 +996,13 @@ enum MacOSBlockDeviceBuilder {
     }
 
     static func makeNBDURL(socketPath: String, exportName: String?) throws -> URL {
-        guard socketPath.hasPrefix("/") else {
-            throw SidecarRPCError(code: "invalidStorageConfiguration", message: "NBD Unix socket path must be absolute")
+        guard let physicalPath = MacOSManagedPath.canonicalPath(socketPath) else {
+            throw SidecarRPCError(code: "invalidStorageConfiguration", message: "NBD Unix socket path must be absolute and canonical")
         }
         var components = URLComponents()
         components.scheme = "nbd+unix"
         components.path = "/" + (exportName ?? "")
-        components.queryItems = [URLQueryItem(name: "socket", value: socketPath)]
+        components.queryItems = [URLQueryItem(name: "socket", value: physicalPath)]
         guard let url = components.url else {
             throw SidecarRPCError(code: "invalidStorageConfiguration", message: "failed to construct NBD Unix socket URL")
         }
@@ -1027,11 +1010,16 @@ enum MacOSBlockDeviceBuilder {
     }
 
     static func validateUnixSocket(path: String) throws {
-        guard path.hasPrefix("/") else {
-            throw SidecarRPCError(code: "invalidStorageConfiguration", message: "NBD Unix socket path must be absolute")
+        guard let physicalPath = MacOSManagedPath.canonicalPath(path) else {
+            throw SidecarRPCError(code: "invalidStorageConfiguration", message: "NBD Unix socket path must be absolute and canonical")
+        }
+        do {
+            try MacOSMachineStateStore.rejectSymbolicLinksInAbsolutePath(URL(fileURLWithPath: physicalPath))
+        } catch {
+            throw SidecarRPCError(code: "invalidStorageConfiguration", message: "NBD socket path is unsafe", details: String(describing: error))
         }
         var value = stat()
-        guard lstat(path, &value) == 0 else {
+        guard lstat(physicalPath, &value) == 0 else {
             throw SidecarRPCError(code: "storageUnavailable", message: "NBD Unix socket does not exist", details: path)
         }
         guard (value.st_mode & S_IFMT) == S_IFSOCK else {

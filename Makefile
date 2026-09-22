@@ -16,6 +16,7 @@
 BUILD_CONFIGURATION ?= debug
 WARNINGS_AS_ERRORS ?= true
 CONTAINER_SKIP_VIRTUALIZATION_TESTS ?= 0
+INCLUDE_CRI_SHIM ?= false
 SWIFT_CONFIGURATION := $(if $(filter-out false,$(WARNINGS_AS_ERRORS)),-Xswiftc -warnings-as-errors) -Xswiftc -enable-testing
 # Each suite that forks guest processes runs in its own test process.
 FORK_ISOLATED_UNIT_TEST_SUITES := GuestAgentProcessStartupTests DurableGuestProcessSupervisorTests
@@ -131,6 +132,8 @@ install: installer-pkg
 		$(SUDO) installer -pkg $(PKG_PATH) -target / ; \
 	fi
 
+# Rebuild staging even after a failed package attempt or a changed payload option.
+.PHONY: $(STAGING_DIR)
 $(STAGING_DIR):
 	@echo Installing container binaries from "$(BUILD_BIN_DIR)" into "$(STAGING_DIR)"...
 	@rm -rf "$(STAGING_DIR)"
@@ -148,6 +151,9 @@ $(STAGING_DIR):
 
 	@install "$(BUILD_BIN_DIR)/container" "$(join $(STAGING_DIR), bin/container)"
 	@install "$(BUILD_BIN_DIR)/container-apiserver" "$(join $(STAGING_DIR), bin/container-apiserver)"
+	@if [ "$(INCLUDE_CRI_SHIM)" = "true" ]; then \
+		install "$(BUILD_BIN_DIR)/container-cri-shim-macos" "$(join $(STAGING_DIR), bin/container-cri-shim-macos)" ; \
+	fi
 	@install "$(BUILD_BIN_DIR)/container-runtime-linux" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
 	@install Sources/Plugins/RuntimeLinux/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/config.toml)"
 	@install "$(BUILD_BIN_DIR)/container-runtime-macos" "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"
@@ -178,6 +184,10 @@ installer-pkg: $(STAGING_DIR)
 	@echo Signing container binaries...
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --identifier com.apple.container.cli "$(join $(STAGING_DIR), bin/container)"
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --identifier com.apple.container.apiserver "$(join $(STAGING_DIR), bin/container-apiserver)"
+	@if [ "$(INCLUDE_CRI_SHIM)" = "true" ]; then \
+		codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --identifier com.apple.container.cri-shim-macos "$(join $(STAGING_DIR), bin/container-cri-shim-macos)" && \
+		codesign --verify --strict "$(join $(STAGING_DIR), bin/container-cri-shim-macos)" ; \
+	fi
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/container-core-images/bin/container-core-images)"
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-linux.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux)"
 	@codesign --force --sign "$(CODESIGN_IDENTITY)" $(CODESIGN_TIMESTAMP_OPTS) $(CODESIGN_EXTRA_OPTS) $(if $(strip $(CODESIGN_KEYCHAIN)),--keychain "$(CODESIGN_KEYCHAIN)") --prefix=com.apple.container. --entitlements=signing/container-runtime-macos.entitlements "$(join $(STAGING_DIR), libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos)"

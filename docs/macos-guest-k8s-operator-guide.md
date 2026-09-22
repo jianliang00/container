@@ -395,6 +395,9 @@ TCP connect without a guest payload is not a passing PortForward result.
 
 ## Sandbox Image Storage
 
+For bounded validation commands, use the mandatory capacity and installed-CRI
+checks in [Storage admission for Mac validation](macos-storage-validation-admission.md).
+
 Images annotated with `org.apple.container.macos.image.role=sandbox` are pinned
 in CRI image listings and status responses. CRI refuses to remove these images,
 including requests by digest or another tag for the same digest. Kubelet does

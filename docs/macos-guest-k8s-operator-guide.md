@@ -3,6 +3,9 @@
 This guide defines the first-rollout operator contract for using macOS hosts as
 Kubernetes worker nodes. The control plane remains Linux.
 
+For bounded validation commands, use the mandatory capacity and installed-CRI
+checks in [Storage admission for Mac validation](macos-storage-validation-admission.md).
+
 ## Scheduling Contract
 
 macOS workloads must opt in. Ordinary Pods must not land on macOS nodes.
@@ -394,9 +397,6 @@ concurrent exec, cancellation, and file-descriptor recovery. A successful local
 TCP connect without a guest payload is not a passing PortForward result.
 
 ## Sandbox Image Storage
-
-For bounded validation commands, use the mandatory capacity and installed-CRI
-checks in [Storage admission for Mac validation](macos-storage-validation-admission.md).
 
 CRI pins the sandbox images configured by the default profile and runtime
 handlers, images used by persisted or runtime sandboxes, and images being

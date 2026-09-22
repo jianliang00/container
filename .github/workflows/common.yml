@@ -14,6 +14,10 @@ on:
         type: boolean
         description: "Sign the release installer package with Developer ID certificates"
         default: false
+      include_cri_shim:
+        type: boolean
+        description: "Include the same-source CRI shim in the runtime installer; no node configuration or kubelet"
+        default: false
       notarize_release_artifacts:
         type: boolean
         description: "Submit the signed release installer package for notarization"
@@ -40,6 +44,8 @@ jobs:
     name: Build and test the project
     timeout-minutes: 75
     runs-on: macos-26
+    env:
+      INCLUDE_CRI_SHIM: ${{ inputs.include_cri_shim && 'true' || 'false' }}
     permissions:
       contents: read
       packages: read
@@ -178,6 +184,21 @@ jobs:
         if: ${{ inputs.sign_release_artifacts }}
         run: |
           pkgutil --check-signature "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
+
+      - name: Verify optional CRI payload
+        if: ${{ inputs.include_cri_shim }}
+        run: |
+          set -euo pipefail
+          inspect_root="$(mktemp -d "${RUNNER_TEMP}/cri-payload.XXXXXX")"
+          pkgutil --expand-full "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}" "${inspect_root}/expanded"
+          shim="${inspect_root}/expanded/Payload/bin/container-cri-shim-macos"
+          test -f "${shim}"
+          codesign --verify --strict "${shim}"
+          if [[ '${{ inputs.sign_release_artifacts }}' == 'true' ]]; then
+            codesign -dv --verbose=2 "${shim}" 2>&1 | grep -F 'Authority=Developer ID Application'
+          fi
+          test ! -e "${inspect_root}/expanded/Payload/bin/kubelet"
+          test ! -d "${inspect_root}/expanded/Payload/Library/LaunchDaemons"
 
       - name: Notarize signed installer package
         if: ${{ inputs.notarize_release_artifacts }}

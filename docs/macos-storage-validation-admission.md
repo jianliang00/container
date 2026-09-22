@@ -7,6 +7,16 @@ their automatic removal; it does not create capacity or disable disk pressure.
 
 ## Runtime protection
 
+The manual signed build accepts `include_cri_shim=true` to include the
+same-source CRI shim in the runtime installer. The default remains false.
+With the option enabled, CI verifies the shim's Developer ID signature before
+notarizing the complete installer. No kubelet, launchd service definition, or
+node configuration is added. This is a scoped runtime maintenance artifact,
+not a full node release or a substitute for node-release guest/image pairing.
+Record artifact and binary digests, back up the installed runtime, and verify
+compatibility before restarting any idle-node service. Never infer installation
+or active-process identity solely from successful packaging.
+
 The installed CRI must advertise sandbox images as `pinned=true` in both
 ListImages and ImageStatus, and reject RemoveImage by tag, digest, and digest
 alias. This behavior requires the sandbox role annotation

@@ -35,11 +35,14 @@ struct CRIShimImageServiceTests {
             reference: "localhost/workload:latest", digest: "sha256:workload", size: 42,
             annotations: MacOSImageContract.annotations(for: .workload))
         let images = [sandbox, alias, workload]
-        let advertised = pinCRIInfrastructureImages(images)
+        #expect(pinCRIInfrastructureImages(images, protectedReferences: ["other.registry/sandbox:tag@sha256:base"]).map(\.pinned) == [true, true, false])
+        let advertised = pinCRIInfrastructureImages(images, protectedReferences: [sandbox.reference])
         #expect(advertised.map(\.pinned) == [true, true, false])
+        #expect(pinCRIInfrastructureImages(images).allSatisfy { !$0.pinned })
+        #expect(try removableCRIImageReferences(images, reference: sandbox.digest) == [sandbox.reference, alias.reference].sorted())
         for reference in [sandbox.reference, sandbox.digest, alias.reference, "localhost/sandbox@sha256:base"] {
             #expect(throws: CRIShimError.self) {
-                try removableCRIImageReferences(images, reference: reference)
+                try removableCRIImageReferences(images, reference: reference, protectedReferences: [sandbox.reference])
             }
         }
         #expect(try removableCRIImageReferences(images, reference: workload.digest) == [workload.reference])

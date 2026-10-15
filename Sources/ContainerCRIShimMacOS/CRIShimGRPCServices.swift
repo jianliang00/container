@@ -106,6 +106,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let streamingServer: CRIShimStreamingServer?
     private let handlerLogger: CRIShimGRPCHandlerLogger
     private let lifecycleCoordinator = CRIShimLifecycleCoordinator()
+    private let imageGCProtection: CRIShimImageGCProtection
 
     public init(
         config: CRIShimConfig,
@@ -119,11 +120,13 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         podNetworkStateStore: PodNetworkStateStore = PodNetworkStateStore(),
         vmnetRecoveryController: CRIShimVMNetRecoveryController? = nil,
         streamingServer: CRIShimStreamingServer? = nil,
-        handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService()
+        handlerLogger: CRIShimGRPCHandlerLogger = .runtimeService(),
+        imageGCProtection: CRIShimImageGCProtection? = nil
     ) {
         self.config = config
         self.versionInfo = versionInfo
         self.metadataStore = metadataStore
+        self.imageGCProtection = imageGCProtection ?? CRIShimImageGCProtection(config: config, metadataStore: metadataStore, runtimeManager: runtimeManager)
         self.readinessChecker = readinessChecker
         self.runtimeManager = runtimeManager
         self.imageManager = imageManager
@@ -268,43 +271,52 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
 
             var handler = try config.resolveRuntimeHandler(request.runtimeHandler)
             handler.sandboxImage = try sandboxImageReference(request: request, handler: handler)
-            let proposedSandboxID = UUID().uuidString.lowercased()
-            let sandboxImage = try await resolveSandboxImage(reference: handler.sandboxImage)
-            try validateCRIShimImage(
-                sandboxImage,
-                expectedRole: .sandbox,
-                requestedReference: handler.sandboxImage
+            let resolvedHandler = handler
+            return try await imageGCProtection.withProtectedImage(handler.sandboxImage) {
+                try await self.runProtectedPodSandbox(request: request, handler: resolvedHandler, admissionAttemptID: admissionAttemptID)
+            }
+        }
+    }
+
+    private func runProtectedPodSandbox(
+        request: Runtime_V1_RunPodSandboxRequest, handler: ResolvedRuntimeHandler, admissionAttemptID: UUID
+    ) async throws -> Runtime_V1_RunPodSandboxResponse {
+        let proposedSandboxID = UUID().uuidString.lowercased()
+        let sandboxImage = try await resolveSandboxImage(reference: handler.sandboxImage)
+        try validateCRIShimImage(
+            sandboxImage,
+            expectedRole: .sandbox,
+            requestedReference: handler.sandboxImage
+        )
+        let networkMTUOverride = try await resolvePodNetworkMTUOverride(handler: handler)
+        let machineState = try makeCRIShimMachineStateMapping(
+            annotations: request.config.annotations,
+            nodeConfig: config.machineState
+        )
+        let provision = {
+            try await self.provisionPodSandbox(
+                request: request,
+                handler: handler,
+                sandboxImage: sandboxImage,
+                networkMTUOverride: networkMTUOverride,
+                machineState: machineState,
+                proposedSandboxID: proposedSandboxID,
+                admissionAttemptID: admissionAttemptID
             )
-            let networkMTUOverride = try await resolvePodNetworkMTUOverride(handler: handler)
-            let machineState = try makeCRIShimMachineStateMapping(
-                annotations: request.config.annotations,
-                nodeConfig: config.machineState
+        }
+        guard let resolved = machineState.machineState else {
+            return try await provision()
+        }
+        guard let policy = config.machineState else {
+            throw CRIShimError.internalError("machine-state policy disappeared during admission")
+        }
+        return try await withLifecycleLock(key: "machine-state:\(resolved.persistenceID)") {
+            let admissionLock = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
+                policy: policy,
+                persistenceID: resolved.persistenceID
             )
-            let provision = {
-                try await self.provisionPodSandbox(
-                    request: request,
-                    handler: handler,
-                    sandboxImage: sandboxImage,
-                    networkMTUOverride: networkMTUOverride,
-                    machineState: machineState,
-                    proposedSandboxID: proposedSandboxID,
-                    admissionAttemptID: admissionAttemptID
-                )
-            }
-            guard let resolved = machineState.machineState else {
-                return try await provision()
-            }
-            guard let policy = config.machineState else {
-                throw CRIShimError.internalError("machine-state policy disappeared during admission")
-            }
-            return try await withLifecycleLock(key: "machine-state:\(resolved.persistenceID)") {
-                let admissionLock = try CRIShimMachineStateLeaseStore.acquireAdmissionLock(
-                    policy: policy,
-                    persistenceID: resolved.persistenceID
-                )
-                defer { withExtendedLifetime(admissionLock) {} }
-                return try await provision()
-            }
+            defer { withExtendedLifetime(admissionLock) {} }
+            return try await provision()
         }
     }
 
@@ -2029,13 +2041,16 @@ extension CRIShimSandboxMetadata.State {
 
 public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProvider, @unchecked Sendable {
     private let imageManager: any CRIShimImageManaging
+    private let protection: CRIShimImageGCProtection
     private let handlerLogger: CRIShimGRPCHandlerLogger
 
     public init(
         imageManager: any CRIShimImageManaging = ContainerKitCRIShimImageManager(),
-        handlerLogger: CRIShimGRPCHandlerLogger = .imageService()
+        handlerLogger: CRIShimGRPCHandlerLogger = .imageService(),
+        protection: CRIShimImageGCProtection = CRIShimImageGCProtection()
     ) {
         self.imageManager = imageManager
+        self.protection = protection
         self.handlerLogger = handlerLogger
     }
 
@@ -2045,7 +2060,7 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
     ) async throws -> Runtime_V1_ListImagesResponse {
         try await handlerLogger.handle(operation: CRIImageOperation.listImages.rawValue) {
             var response = Runtime_V1_ListImagesResponse()
-            let images = try pinCRIInfrastructureImages(await imageManager.listImages())
+            let images = try await pinCRIInfrastructureImages(imageManager.listImages(), protectedReferences: protection.references())
             response.images = filteredImages(images, request: request).map(makeCRIImage)
             return response
         }
@@ -2077,10 +2092,12 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
     ) async throws -> Runtime_V1_RemoveImageResponse {
         try await handlerLogger.handle(operation: CRIImageOperation.removeImage.rawValue) {
             let reference = try CRIShimImageReference.resolve(request.image)
-            let references = try removableCRIImageReferences(
-                await imageManager.listImages(), reference: reference
-            )
-            try await imageManager.removeImages(references: references)
+            try await protection.withRemoval { protectedReferences in
+                let references = try removableCRIImageReferences(
+                    await self.imageManager.listImages(), reference: reference, protectedReferences: protectedReferences
+                )
+                try await self.imageManager.removeImages(references: references)
+            }
             return Runtime_V1_RemoveImageResponse()
         }
     }
@@ -2112,7 +2129,7 @@ public final class CRIShimImageServiceProvider: Runtime_V1_ImageServiceAsyncProv
     }
 
     private func findImage(reference: String) async throws -> CRIShimImageRecord {
-        let images = try pinCRIInfrastructureImages(await imageManager.listImages())
+        let images = try await pinCRIInfrastructureImages(imageManager.listImages(), protectedReferences: protection.references())
         guard let image = images.first(where: { $0.matches(reference: reference) }) else {
             throw CRIShimError.notFound("image not found: \(reference)")
         }

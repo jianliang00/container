@@ -711,7 +711,8 @@ private func shouldPreserveExitCode(_ current: Int32?, over incoming: Int32?) ->
     return current != 0 || incoming == 0
 }
 
-public final class CRIShimMetadataStore {
+// Entity stores and their shared encoder/decoder are accessed only under lock.
+public final class CRIShimMetadataStore: @unchecked Sendable {
     public let rootURL: URL
     private let lock = NSLock()
     private let sandboxStore: CRIShimEntityStore<CRIShimSandboxMetadata>

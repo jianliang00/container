@@ -36,6 +36,40 @@ import Darwin
 @Suite
 struct CRIShimRuntimeServerTests {
     @Test
+    func runtimeSandboxDigestProtectsRetaggedImageAndMissingConfigurationBlocksRemoval() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = try makeSandboxConfiguration(id: "sandbox-gc")
+        let runtime = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            logRootURL: root,
+            sandboxSnapshots: ["sandbox-gc": SandboxSnapshot(configuration: configuration, status: .running, networks: [], containers: [])])
+        let protection = CRIShimImageGCProtection(runtimeManager: runtime)
+        let oldImage = CRIShimImageRecord(reference: "example.com/macos/sandbox:old", digest: configuration.image.digest, size: 10)
+        let references = try await protection.references()
+        #expect(references.contains(configuration.image.digest))
+        #expect(pinCRIInfrastructureImages([oldImage], protectedReferences: references)[0].pinned)
+        let incompleteRuntime = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            logRootURL: root,
+            sandboxSnapshots: ["sandbox-gc": makeLifecycleSandboxSnapshot(status: .stopped)])
+        let incompleteProtection = CRIShimImageGCProtection(runtimeManager: incompleteRuntime)
+        await #expect(throws: CRIShimError.self) {
+            try await incompleteProtection.withRemoval { _ in
+                Issue.record("must not remove images when runtime references are unknown")
+            }
+        }
+        try await runtime.removeSandbox(id: "sandbox-gc", force: true)
+        try await incompleteRuntime.removeSandbox(id: "sandbox-gc", force: true)
+        try await incompleteProtection.withRemoval { references in #expect(references.isEmpty) }
+        try await protection.withRemoval { references in
+            #expect(references.isEmpty)
+            let removable = try removableCRIImageReferences([oldImage], reference: oldImage.digest, protectedReferences: references)
+            #expect(removable == [oldImage.reference])
+        }
+    }
+
+    @Test
     func runnerCreatesServerAndRunsItAfterValidation() async throws {
         let stateDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: stateDirectory) }
@@ -1340,7 +1374,7 @@ struct CRIShimRuntimeServerTests {
                     imageManager: imageManager,
                     cniManager: cniManager
                 ),
-                CRIShimImageServiceProvider(imageManager: imageManager),
+                CRIShimImageServiceProvider(imageManager: imageManager, protection: CRIShimImageGCProtection(config: config, metadataStore: metadataStore)),
             ],
             eventLoopGroup: group,
             startupTasks: []
@@ -1490,7 +1524,7 @@ struct CRIShimRuntimeServerTests {
                     imageManager: imageManager,
                     cniManager: cniManager
                 ),
-                CRIShimImageServiceProvider(imageManager: imageManager),
+                CRIShimImageServiceProvider(imageManager: imageManager, protection: CRIShimImageGCProtection(config: config, metadataStore: metadataStore)),
             ],
             eventLoopGroup: group,
             startupTasks: []
@@ -2422,7 +2456,7 @@ struct CRIShimRuntimeServerTests {
                     logManager: logManager,
                     streamingServer: streamingServer
                 ),
-                CRIShimImageServiceProvider(imageManager: imageManager),
+                CRIShimImageServiceProvider(imageManager: imageManager, protection: CRIShimImageGCProtection(config: config, metadataStore: metadataStore)),
             ],
             eventLoopGroup: group,
             startupTasks: [],

@@ -244,6 +244,7 @@ public struct ClientImage: Sendable {
         let cacheDir = MacOSGuestCache.rebuildCacheDirectory()
         let cachedPath = MacOSDiskRebuilder.rebuildCachePath(cacheDir: cacheDir, manifestDigest: manifestDigest)
         if MacOSDiskRebuilder.cacheExists(at: cachedPath) {
+            try MacOSGuestCache.cleanInterruptedRebuilds(in: cachedPath.deletingLastPathComponent())
             return cachedPath
         }
 

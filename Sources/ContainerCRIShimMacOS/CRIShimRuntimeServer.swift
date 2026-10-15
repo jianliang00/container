@@ -97,6 +97,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
     ) throws {
         let stateDirectoryURL = URL(fileURLWithPath: config.normalizedStateDirectory)
         let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectoryURL)
+        let imageGCProtection = CRIShimImageGCProtection(config: config, metadataStore: metadataStore, runtimeManager: runtimeManager)
         let logManager = CRIShimLogManager(stateDirectoryURL: stateDirectoryURL)
         let streamingServer = CRIShimStreamingServer(
             config: config,
@@ -126,9 +127,10 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     imageManager: imageManager,
                     cniManager: cniManager,
                     logManager: logManager,
-                    streamingServer: streamingServer
+                    streamingServer: streamingServer,
+                    imageGCProtection: imageGCProtection
                 ),
-                CRIShimImageServiceProvider(imageManager: imageManager),
+                CRIShimImageServiceProvider(imageManager: imageManager, protection: imageGCProtection),
             ],
             eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount),
             ownsEventLoopGroup: true,
@@ -149,6 +151,7 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
     ) throws {
         let stateDirectoryURL = URL(fileURLWithPath: config.normalizedStateDirectory)
         let metadataStore = try CRIShimMetadataStore(rootURL: stateDirectoryURL)
+        let imageGCProtection = CRIShimImageGCProtection(config: config, metadataStore: metadataStore, runtimeManager: runtimeManager)
         let logManager = CRIShimLogManager(stateDirectoryURL: stateDirectoryURL)
         let streamingServer = CRIShimStreamingServer(
             config: config,
@@ -179,9 +182,10 @@ public final class CRIShimGRPCServer: CRIShimServerLifecycle, @unchecked Sendabl
                     imageManager: imageManager,
                     cniManager: cniManager,
                     logManager: logManager,
-                    streamingServer: streamingServer
+                    streamingServer: streamingServer,
+                    imageGCProtection: imageGCProtection
                 ),
-                CRIShimImageServiceProvider(imageManager: imageManager),
+                CRIShimImageServiceProvider(imageManager: imageManager, protection: imageGCProtection),
             ],
             eventLoopGroup: eventLoopGroup,
             startupTasks: startupTasks,

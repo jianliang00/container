@@ -395,20 +395,22 @@ TCP connect without a guest payload is not a passing PortForward result.
 
 ## Sandbox Image Storage
 
-Images annotated with `org.apple.container.macos.image.role=sandbox` are pinned
-in CRI image listings and status responses. CRI refuses to remove these images,
-including requests by digest or another tag for the same digest. Kubelet does
-not track the separate sandbox base image as a workload image, so automatic
-image GC must not reclaim its blobs while a sandbox is being prepared.
-Workload images remain eligible for kubelet image GC. Retire obsolete sandbox
-images explicitly with the container image CLI after isolating the node and
-confirming that no running or preparing sandbox needs those versions. Reserve
-space for pinned base images when planning node capacity.
+CRI pins the sandbox images configured by the default profile and runtime
+handlers, images used by persisted or runtime sandboxes, and images being
+prepared by `RunPodSandbox`. Protection applies to every tag sharing the same
+digest. Stopped sandboxes retain protection until removal. If sandbox references
+cannot be read, image deletion fails without removing data.
+
+Sandbox images with no remaining references are eligible for kubelet image GC.
+Image removal and new sandbox-image reservations are coordinated so removal
+cannot race the gap before sandbox metadata is persisted. Workload images remain
+subject to kubelet's normal in-use checks.
 
 Disk rebuilds for the same cached manifest are serialized across processes.
 Waiters reuse the completed disk instead of decompressing it again. Cache GC
 skips entries whose rebuild lock is held. Interrupted `.rebuild-<UUID>.tmp`
-outputs are reclaimed under that lock before the next rebuild; lock files stay
+outputs are reclaimed under that lock during rebuild, cache reuse, or cache GC,
+including entries whose completed disk is still referenced. Lock files stay
 outside cache entries so pruning cannot invalidate a waiting process's lock.
 
 Chunk extraction uses unlinked temporary files, which the operating system

@@ -67,14 +67,7 @@ public enum MacOSDiskRebuilder {
 
         // Only the lock owner can rebuild this manifest. Reclaim interrupted output
         // from previous processes before allocating another full-size disk image.
-        for entry in try fm.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil) {
-            let name = entry.lastPathComponent
-            if name.hasPrefix(".rebuild-"), name.hasSuffix(".tmp"),
-                UUID(uuidString: String(name.dropFirst(9).dropLast(4))) != nil
-            {
-                try fm.removeItem(at: entry)
-            }
-        }
+        try MacOSGuestCache.removeInterruptedRebuilds(in: outputDir)
         // A competing process may have populated the cache while we waited.
         if cacheExists(at: outputPath) { return }
 

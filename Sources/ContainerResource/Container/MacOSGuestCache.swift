@@ -111,18 +111,39 @@ public enum MacOSGuestCache {
         var reclaimedBytes: UInt64 = 0
 
         for entry in entries {
-            guard !liveCacheKeys.contains(entry.lastPathComponent) else {
-                continue
-            }
-
             guard let lock = try lockRebuildEntry(entry, nonBlocking: true) else { continue }
             defer { close(lock) }
             guard fileManager.fileExists(atPath: entry.path) else { continue }
-            reclaimedBytes += try allocatedSize(at: entry, fileManager: fileManager)
-            try fileManager.removeItem(at: entry)
+            if liveCacheKeys.contains(entry.lastPathComponent) {
+                reclaimedBytes += try removeInterruptedRebuilds(in: entry, fileManager: fileManager)
+            } else {
+                reclaimedBytes += try allocatedSize(at: entry, fileManager: fileManager)
+                try fileManager.removeItem(at: entry)
+            }
         }
 
         return reclaimedBytes
+    }
+
+    /// A cache hit must also reclaim output left by an interrupted older rebuild.
+    public static func cleanInterruptedRebuilds(in entry: URL) throws {
+        guard let lock = try lockRebuildEntry(entry, nonBlocking: true) else { return }
+        defer { close(lock) }
+        _ = try removeInterruptedRebuilds(in: entry)
+    }
+
+    @discardableResult
+    static func removeInterruptedRebuilds(in entry: URL, fileManager: FileManager = .default) throws -> UInt64 {
+        var reclaimed: UInt64 = 0
+        for file in try fileManager.contentsOfDirectory(at: entry, includingPropertiesForKeys: nil) {
+            let name = file.lastPathComponent
+            guard name.hasPrefix(".rebuild-"), name.hasSuffix(".tmp"),
+                UUID(uuidString: String(name.dropFirst(9).dropLast(4))) != nil
+            else { continue }
+            reclaimed += try allocatedSize(at: file, fileManager: fileManager)
+            try fileManager.removeItem(at: file)
+        }
+        return reclaimed
     }
 
     // Keep lock files outside cache entries: pruning an entry must not replace the

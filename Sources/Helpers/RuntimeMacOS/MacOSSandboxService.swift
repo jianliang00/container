@@ -2850,6 +2850,7 @@ extension MacOSSandboxService {
         let cachedPath = MacOSDiskRebuilder.rebuildCachePath(cacheDir: cacheDir, manifestDigest: manifestDigest)
 
         if MacOSDiskRebuilder.cacheExists(at: cachedPath) {
+            try MacOSGuestCache.cleanInterruptedRebuilds(in: cachedPath.deletingLastPathComponent())
             return cachedPath
         }
 

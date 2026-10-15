@@ -21,6 +21,29 @@ import Testing
 
 struct MacOSGuestCacheTests {
     @Test
+    func cacheHitCleansInterruptedOutputButPreservesDiskAndActiveRebuild() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entry = root.appendingPathComponent("sha256-live")
+        try FileManager.default.createDirectory(at: entry, withIntermediateDirectories: true)
+        let disk = entry.appendingPathComponent("Disk.img")
+        let temporary = entry.appendingPathComponent(".rebuild-\(UUID().uuidString).tmp")
+        try Data("valid disk".utf8).write(to: disk)
+        try Data("interrupted".utf8).write(to: temporary)
+        let lock = try #require(try MacOSGuestCache.lockRebuildEntry(entry))
+        try MacOSGuestCache.cleanInterruptedRebuilds(in: entry)
+        #expect(FileManager.default.fileExists(atPath: temporary.path))
+        close(lock)
+        try MacOSGuestCache.cleanInterruptedRebuilds(in: entry)
+        #expect(!FileManager.default.fileExists(atPath: temporary.path))
+        #expect(try Data(contentsOf: disk) == Data("valid disk".utf8))
+        try Data("another interrupted rebuild".utf8).write(to: temporary)
+        _ = try MacOSGuestCache.pruneOrphanedRebuildCache(cacheDir: root, liveManifestDigests: ["sha256:live"])
+        #expect(!FileManager.default.fileExists(atPath: temporary.path))
+        #expect(FileManager.default.fileExists(atPath: disk.path))
+    }
+
+    @Test
     func rebuildCacheUsageAndPruneTrackOrphans() throws {
         let fileManager = FileManager.default
         let tempDir = fileManager.temporaryDirectory.appendingPathComponent("macos-guest-cache-\(UUID().uuidString)")

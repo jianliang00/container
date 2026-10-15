@@ -196,12 +196,7 @@ extension CRIShimImageRecord {
 
     func matches(reference: String) -> Bool {
         self.reference == reference || digest == reference || repoDigests.contains(reference)
-    }
-
-    // Kubelet tracks workload image references, not the separate macOS base image.
-    // Treat sandbox images as node infrastructure; remove obsolete versions explicitly.
-    var garbageCollectionPinned: Bool {
-        pinned || (try? MacOSImageContract.role(descriptorAnnotations: annotations)) == .sandbox
+            || (reference.contains("@") && reference.split(separator: "@").last.map(String.init) == digest)
     }
 
     var repoDigests: [String] {
@@ -220,8 +215,11 @@ extension CRIShimImageRecord {
     }
 }
 
-func pinCRIInfrastructureImages(_ images: [CRIShimImageRecord]) -> [CRIShimImageRecord] {
-    let pinnedDigests = Set(images.filter(\.garbageCollectionPinned).map(\.digest))
+func pinCRIInfrastructureImages(_ images: [CRIShimImageRecord], protectedReferences: Set<String> = []) -> [CRIShimImageRecord] {
+    let pinnedDigests = Set(
+        images.filter { image in
+            image.pinned || protectedReferences.contains { image.matches(reference: $0) }
+        }.map(\.digest))
     return images.map { image in
         var result = image
         result.pinned = pinnedDigests.contains(image.digest)
@@ -229,10 +227,10 @@ func pinCRIInfrastructureImages(_ images: [CRIShimImageRecord]) -> [CRIShimImage
     }
 }
 
-func removableCRIImageReferences(_ images: [CRIShimImageRecord], reference: String) throws -> [String] {
+func removableCRIImageReferences(_ images: [CRIShimImageRecord], reference: String, protectedReferences: Set<String> = []) throws -> [String] {
     let matches = images.filter { $0.matches(reference: reference) }
     let digests = Set(matches.map(\.digest))
-    guard !images.contains(where: { digests.contains($0.digest) && $0.garbageCollectionPinned }) else {
+    guard !pinCRIInfrastructureImages(images, protectedReferences: protectedReferences).contains(where: { digests.contains($0.digest) && $0.pinned }) else {
         throw CRIShimError.invalidArgument("image \(reference) is pinned by the runtime and cannot be garbage collected")
     }
     return Array(Set(matches.map(\.reference))).sorted()

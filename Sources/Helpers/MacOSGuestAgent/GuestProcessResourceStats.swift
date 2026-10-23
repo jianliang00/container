@@ -49,6 +49,8 @@ final class GuestProcessStatisticsRegistry: @unchecked Sendable {
 /// The caller holds the session's exit lock, preventing root PID reuse while sampling.
 struct GuestProcessTreeSampler {
     static func sample(rootPID: pid_t, id: String) throws -> GuestProcessResourceStats {
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS else { throw POSIXError(.EIO) }
         // Reaping a child moves its CPU counters to its parent. Retry when that
         // happens during traversal so a child is not counted twice.
         for _ in 0..<3 {
@@ -58,7 +60,7 @@ struct GuestProcessTreeSampler {
                 return GuestProcessResourceStats(
                     executionID: id,
                     timestampNanoseconds: Int64(Date().timeIntervalSince1970 * 1_000_000_000),
-                    cpuUsageNanoseconds: value.cpu,
+                    cpuUsageNanoseconds: try cpuNanoseconds(value.cpu, timebase: timebase),
                     residentMemoryBytes: value.memory,
                     processCount: value.count)
             } catch let error as POSIXError where error.code == .EAGAIN {
@@ -66,6 +68,15 @@ struct GuestProcessTreeSampler {
             }
         }
         throw POSIXError(.EAGAIN)
+    }
+
+    // proc_pid_rusage reports CPU time in Mach ticks, including reaped-child
+    // counters. Apple Silicon's timebase is not necessarily one nanosecond.
+    static func cpuNanoseconds(_ ticks: UInt64, timebase: mach_timebase_info_data_t) throws -> UInt64 {
+        guard timebase.numer > 0, timebase.denom > 0 else { throw POSIXError(.EINVAL) }
+        let product = ticks.multipliedFullWidth(by: UInt64(timebase.numer))
+        guard product.high < UInt64(timebase.denom) else { throw POSIXError(.EOVERFLOW) }
+        return UInt64(timebase.denom).dividingFullWidth(product).quotient
     }
 
     private static func usage(_ pid: pid_t) throws -> rusage_info_v2 {

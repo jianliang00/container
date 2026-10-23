@@ -19,6 +19,7 @@ import ContainerCRI
 import ContainerKit
 import ContainerPlugin
 import ContainerResource
+import ContainerizationError
 import ContainerizationOS
 import Foundation
 import RuntimeMacOSSidecarShared
@@ -76,6 +77,8 @@ public protocol CRIShimRuntimeManaging: Sendable {
     func inspectSandbox(
         id: String
     ) async throws -> SandboxSnapshot
+
+    func workloadStatistics(sandboxID: String, workloadID: String) async throws -> ContainerStats
 
     func listSandboxSnapshots() async throws -> [SandboxSnapshot]
 
@@ -174,6 +177,12 @@ private struct ContainerKitCRIShimStreamingProcess: CRIShimStreamingProcess {
 
     func wait() async throws -> Int32 {
         try await process.wait()
+    }
+}
+
+extension CRIShimRuntimeManaging {
+    public func workloadStatistics(sandboxID: String, workloadID: String) async throws -> ContainerStats {
+        throw ContainerizationError(.unsupported, message: "runtime does not provide workload statistics")
     }
 }
 
@@ -334,6 +343,10 @@ public struct ContainerKitCRIShimRuntimeManager: CRIShimRuntimeManaging {
         workloadID: String
     ) async throws {
         try await kit.removeWorkload(sandboxID: sandboxID, workloadID: workloadID)
+    }
+
+    public func workloadStatistics(sandboxID: String, workloadID: String) async throws -> ContainerStats {
+        try await kit.workloadStatistics(sandboxID: sandboxID, workloadID: workloadID)
     }
 
     public func inspectWorkload(

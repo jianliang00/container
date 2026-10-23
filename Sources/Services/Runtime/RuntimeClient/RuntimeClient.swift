@@ -653,8 +653,9 @@ extension RuntimeClient {
         }
     }
 
-    public func statistics() async throws -> ContainerStats {
+    public func statistics(workloadID: String? = nil) async throws -> ContainerStats {
         let request = XPCMessage(route: RuntimeRoutes.statistics.rawValue)
+        if let workloadID { request.set(key: RuntimeKeys.workloadIdentifier.rawValue, value: workloadID) }
 
         let response: XPCMessage
         do {

@@ -25,6 +25,83 @@ import Testing
 @Suite(.serialized)
 struct GuestAgentProcessStartupTests {
     @Test
+    func resourceStatisticsUseSeparateConnectionAndIncludeChildren() throws {
+        signal(SIGPIPE, SIG_IGN)
+        let workload = try AgentConnectionHarness()
+        defer { workload.closePeer() }
+        _ = try readAgentFrame(from: workload.peerFD)
+        let id = UUID().uuidString
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec, id: id, executable: "/bin/sh",
+                arguments: ["-c", "while :; do :; done & echo started; wait"],
+                environment: ["PATH=/usr/bin:/bin"], terminal: false), fd: workload.peerFD)
+        #expect(try readAgentFrame(from: workload.peerFD).type == .ack)
+        #expect(try readAgentFrame(from: workload.peerFD).type == .stdout)
+
+        let query = try AgentConnectionHarness()
+        defer { query.closePeer() }
+        let ready = try readAgentFrame(from: query.peerFD)
+        #expect(ready.capabilities?.contains(GuestProcessResourceStats.capability) == true)
+        func sample() throws -> GuestProcessResourceStats {
+            try MacOSSidecarSocketIO.writeJSONFrame(GuestAgentFrame(type: .processStats, id: id), fd: query.peerFD)
+            let response = try readAgentFrame(from: query.peerFD)
+            #expect(response.type == .ack)
+            #expect(response.id == id)
+            return try JSONDecoder().decode(GuestProcessResourceStats.self, from: #require(response.data))
+        }
+        let first = try sample()
+        Thread.sleep(forTimeInterval: 0.1)
+        let second = try sample()
+        #expect(first.processCount >= 2)
+        #expect(first.residentMemoryBytes > 0)
+        #expect(second.cpuUsageNanoseconds > first.cpuUsageNanoseconds)
+        #expect(second.timestampNanoseconds > first.timestampNanoseconds)
+        try workload.waitForCompletion()
+        try MacOSSidecarSocketIO.writeJSONFrame(GuestAgentFrame(type: .processStats, id: id), fd: query.peerFD)
+        #expect(try readAgentFrame(from: query.peerFD).type == .error)
+        try query.waitForCompletion()
+    }
+
+    @Test
+    func resourceStatisticsRetainReapedChildCPU() throws {
+        let stopFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: stopFile) }
+        let workload = try AgentConnectionHarness()
+        defer { workload.closePeer() }
+        _ = try readAgentFrame(from: workload.peerFD)
+        let id = UUID().uuidString
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            GuestAgentFrame(
+                type: .exec, id: id, executable: "/bin/sh",
+                arguments: ["-c", "while [ ! -f \"$1\" ]; do :; done & echo started; wait; echo reaped; read hold", "stats-test", stopFile.path],
+                environment: ["PATH=/usr/bin:/bin"], terminal: false), fd: workload.peerFD)
+        #expect(try readAgentFrame(from: workload.peerFD).type == .ack)
+        #expect(try readAgentFrame(from: workload.peerFD).type == .stdout)
+        Thread.sleep(forTimeInterval: 0.1)
+        let before = try GuestProcessStatisticsRegistry.shared.statistics(id: id)
+        #expect(before.processCount == 2)
+        try Data().write(to: stopFile)
+        #expect(try readAgentFrame(from: workload.peerFD).type == .stdout)
+        let after = try GuestProcessStatisticsRegistry.shared.statistics(id: id)
+        #expect(after.processCount == 1)
+        #expect(after.cpuUsageNanoseconds >= before.cpuUsageNanoseconds)
+        try workload.waitForCompletion()
+    }
+
+    @Test
+    func missingResourceStatisticsReturnErrorInsteadOfZero() throws {
+        let query = try AgentConnectionHarness()
+        defer { query.closePeer() }
+        _ = try readAgentFrame(from: query.peerFD)
+        try MacOSSidecarSocketIO.writeJSONFrame(GuestAgentFrame(type: .processStats, id: UUID().uuidString), fd: query.peerFD)
+        let response = try readAgentFrame(from: query.peerFD)
+        #expect(response.type == .error)
+        #expect(response.data == nil)
+        try query.waitForCompletion()
+    }
+
+    @Test
     func missingExecutableReportsErrorWithoutAck() throws {
         signal(SIGPIPE, SIG_IGN)
 

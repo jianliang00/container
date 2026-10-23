@@ -30,6 +30,7 @@ struct SidecarControlProtocolTests {
         #expect(decoded.method.rawValue == "events.subscribe")
         #expect(MacOSSidecarMethod(rawValue: "events.subscribe") == .eventsSubscribe)
         #expect(MacOSSidecarMethod(rawValue: "process.inspect") == .processInspect)
+        #expect(MacOSSidecarMethod(rawValue: "process.stats") == .processStats)
         #expect(MacOSSidecarMethod(rawValue: "process.delete") == .processDelete)
         #expect(MacOSSidecarMethod(rawValue: "vm.deleteMachineState") == .vmDeleteMachineState)
     }

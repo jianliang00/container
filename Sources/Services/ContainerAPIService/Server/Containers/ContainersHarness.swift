@@ -544,7 +544,7 @@ public struct ContainersHarness: Sendable {
                 message: "id cannot be empty"
             )
         }
-        let stats = try await service.stats(id: id)
+        let stats = try await service.stats(id: id, workloadID: message.string(key: .workloadIdentifier))
         let data = try JSONEncoder().encode(stats)
         let reply = message.reply()
         reply.set(key: .statistics, value: data)

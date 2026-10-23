@@ -665,9 +665,10 @@ public struct ContainerClient: Sendable {
     }
 
     /// Get resource usage statistics for a container.
-    public func stats(id: String) async throws -> ContainerStats {
+    public func stats(id: String, workloadID: String? = nil) async throws -> ContainerStats {
         let request = XPCMessage(route: .containerStats)
         request.set(key: .id, value: id)
+        if let workloadID { request.set(key: .workloadIdentifier, value: workloadID) }
 
         do {
             let response = try await xpcClient.send(request)

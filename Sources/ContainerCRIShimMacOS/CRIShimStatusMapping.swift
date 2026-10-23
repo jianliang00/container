@@ -121,7 +121,13 @@ func makeCRIContainerStatus(
     makeCRIContainerStatus(metadata.applying(workloadSnapshot: workloadSnapshot))
 }
 
-func makeCRIContainerStats(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_ContainerStats {
+func makeCRIContainerStats(_ metadata: CRIShimContainerMetadata, usage: ContainerStats) throws -> Runtime_V1_ContainerStats {
+    guard let timestamp = usage.timestampNanoseconds, timestamp > 0,
+        let cpu = usage.cpuUsageUsec, cpu <= UInt64.max / 1000,
+        let memory = usage.memoryUsageBytes
+    else {
+        throw CRIShimError.invalidArgument("runtime returned incomplete workload statistics")
+    }
     var stats = Runtime_V1_ContainerStats()
     var attributes = Runtime_V1_ContainerAttributes()
     attributes.id = metadata.id
@@ -129,10 +135,16 @@ func makeCRIContainerStats(_ metadata: CRIShimContainerMetadata) -> Runtime_V1_C
     attributes.labels = metadata.labels
     attributes.annotations = metadata.annotations
     stats.attributes = attributes
+    stats.cpu.timestamp = timestamp
+    stats.cpu.usageCoreNanoSeconds.value = cpu * 1000
+    stats.memory.timestamp = timestamp
+    stats.memory.workingSetBytes.value = memory
+    stats.memory.usageBytes.value = memory
+    stats.memory.rssBytes.value = memory
     return stats
 }
 
-func makeCRIPodSandboxStats(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_PodSandboxStats {
+func makeCRIPodSandboxStats(_ metadata: CRIShimSandboxMetadata, containers: [Runtime_V1_ContainerStats], complete: Bool) -> Runtime_V1_PodSandboxStats {
     var stats = Runtime_V1_PodSandboxStats()
     var attributes = Runtime_V1_PodSandboxAttributes()
     attributes.id = metadata.id
@@ -140,6 +152,17 @@ func makeCRIPodSandboxStats(_ metadata: CRIShimSandboxMetadata) -> Runtime_V1_Po
     attributes.labels = metadata.labels
     attributes.annotations = metadata.annotations
     stats.attributes = attributes
+    // Darwin kubelet consumes the CRI Linux statistics structure.
+    stats.linux.containers = containers
+    if complete, let timestamp = containers.map({ $0.cpu.timestamp }).min() {
+        stats.linux.cpu.timestamp = timestamp
+        stats.linux.cpu.usageCoreNanoSeconds.value = containers.reduce(0) { $0 + $1.cpu.usageCoreNanoSeconds.value }
+        stats.linux.memory.timestamp = timestamp
+        let memory = containers.reduce(UInt64(0)) { $0 + $1.memory.workingSetBytes.value }
+        stats.linux.memory.workingSetBytes.value = memory
+        stats.linux.memory.usageBytes.value = memory
+        stats.linux.memory.rssBytes.value = memory
+    }
     return stats
 }
 

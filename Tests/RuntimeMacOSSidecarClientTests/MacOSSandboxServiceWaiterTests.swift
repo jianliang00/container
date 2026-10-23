@@ -1031,6 +1031,9 @@ struct MacOSSandboxServiceWaiterTests {
             )
         )
 
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(event: .processExit, processID: "__workload__exec-logs", exitCode: 0)
+        )
         let workload = try await service.testingInspectWorkload("exec-logs")
         let sandboxLog = try String(contentsOfFile: await service.testingContainerLogPath(), encoding: .utf8)
         let stdoutLog = try String(contentsOfFile: try #require(workload.stdoutLogPath), encoding: .utf8)
@@ -1074,6 +1077,9 @@ struct MacOSSandboxServiceWaiterTests {
             )
         )
 
+        await service.handleSidecarEvent(
+            MacOSSidecarEvent(event: .processExit, processID: "__workload__exec-replay-dedup", exitCode: 0)
+        )
         let workload = try await service.testingInspectWorkload("exec-replay-dedup")
         let stdout = try String(contentsOfFile: try #require(workload.stdoutLogPath), encoding: .utf8)
         #expect(stdout == "first\nsecond\n")

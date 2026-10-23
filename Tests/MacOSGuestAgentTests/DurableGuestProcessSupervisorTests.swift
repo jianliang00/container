@@ -554,8 +554,8 @@ struct DurableGuestProcessSupervisorTests {
         #expect(created.storageGeneration == 40)
 
         let failedPair = try makeDurableProcessSocketPair()
-        closeDurableProcessFD(failedPair.peer)
         let failedConnection = try AgentConnection(fd: failedPair.server, processSupervisor: supervisor)
+        closeDurableProcessFD(failedPair.peer)
         #expect(throws: (any Error).self) {
             _ = try supervisor.attach(
                 frame: .init(

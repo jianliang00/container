@@ -233,7 +233,7 @@ dsym:
 
 .PHONY: test
 test: build-tests
-	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests --skip $(FORK_ISOLATED_UNIT_TEST_SUITE) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
+	@$(SWIFT) test --skip-build --no-parallel -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests --skip $(FORK_ISOLATED_UNIT_TEST_SUITE) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
 	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter $(FORK_ISOLATED_UNIT_TEST_SUITE)
 	@$(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter $(IO_ISOLATED_UNIT_TEST_SUITE)
 
@@ -437,7 +437,7 @@ coverage-unit: build-tests
 	@echo Running unit test coverage...
 	@mkdir -p $(UNIT_COVERAGE_RAW_DIR)
 	@rm -f $(UNIT_COVERAGE_RAW_DIR)/*.profraw
-	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-main-%p-%m.profraw" $(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests --skip $(FORK_ISOLATED_UNIT_TEST_SUITE) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
+	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-main-%p-%m.profraw" $(SWIFT) test --skip-build --no-parallel -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --skip TestCLI --skip IntegrationTests --skip $(FORK_ISOLATED_UNIT_TEST_SUITE) --skip $(IO_ISOLATED_UNIT_TEST_SUITE)
 	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-guest-process-%p-%m.profraw" $(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter $(FORK_ISOLATED_UNIT_TEST_SUITE)
 	@LLVM_PROFILE_FILE="$(UNIT_COVERAGE_RAW_DIR)/unit-cri-streaming-%p-%m.profraw" $(SWIFT) test --skip-build -c $(BUILD_CONFIGURATION) $(SWIFT_CONFIGURATION) --filter $(IO_ISOLATED_UNIT_TEST_SUITE)
 	@echo Merging unit coverage profdata...

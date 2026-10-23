@@ -568,6 +568,7 @@ public enum MacOSKubeadmRenderer {
             "kubernetes.io/os=darwin",
             "node.kubernetes.io/macos=true",
             "node.kubernetes.io/macos-network=\(networkMode.nodeNetworkLabelValue)",
+            "kross.io/workload-resource-stats=v1",
         ].joined(separator: ",")
         let nodeTaints: String
         switch networkMode {

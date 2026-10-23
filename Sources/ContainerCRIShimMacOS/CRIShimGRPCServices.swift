@@ -107,6 +107,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     private let handlerLogger: CRIShimGRPCHandlerLogger
     private let lifecycleCoordinator = CRIShimLifecycleCoordinator()
     private let imageGCProtection: CRIShimImageGCProtection
+    let sandboxImagePulls = CRIShimSandboxImagePulls()
 
     public init(
         config: CRIShimConfig,
@@ -283,6 +284,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_RunPodSandboxResponse {
         let proposedSandboxID = UUID().uuidString.lowercased()
         let sandboxImage = try await resolveSandboxImage(reference: handler.sandboxImage)
+        try Task.checkCancellation()
         try validateCRIShimImage(
             sandboxImage,
             expectedRole: .sandbox,
@@ -1958,7 +1960,18 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         if let image = try await findOptionalImage(reference: reference) {
             return image
         }
-        return try await imageManager.pullImage(reference: reference, authentication: nil)
+        return try await sandboxImagePulls.pull(reference: reference) { [self] in
+            // The request's GC protection ends when it times out. The shared pull
+            // needs its own protection until the image is fully prepared.
+            try await imageGCProtection.withProtectedImage(reference) {
+                // Another pull may have completed between the initial lookup and
+                // joining the coordinator, so resolve again before downloading.
+                if let image = try await self.findOptionalImage(reference: reference) {
+                    return image
+                }
+                return try await imageManager.pullImage(reference: reference, authentication: nil)
+            }
+        }
     }
 
     private func sandboxImageReference(

@@ -504,6 +504,8 @@ jobs:
           test_filter+='|ContainerOSTests\.DirectoryWatcherTest'
           test_filter+='|ContainerResourceTests\.ContainerConfigurationMacOSTests'
           test_filter+='|ContainerCRIShimMacOSTests\.CRIShimResourceStatsTests'
+          test_filter+='|ContainerCRIShimMacOSTests\.(CRIShimSandboxImagePullsTests|CRIShimImageGCProtectionTests)'
+          test_filter+='|ContainerCRIShimMacOSTests\.CRIShimRuntimeServerTests/runPodSandboxPullsSandboxImageWhenMissing'
           test_filter+='|MacOSGuestAgentTests\.GuestProcessResourceStatsTests'
           test_filter+='|MacOSGuestAgentTests\.GuestAgentProcessStartupTests/resourceStatistics'
           test_filter+='|MacOSGuestAgentTests\.GuestDNSProxyTests'

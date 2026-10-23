@@ -360,7 +360,7 @@ jobs:
             packaging/macos-node/launchd/com.apple.container.kubelet.plist | \
             jq -e '
               index("--node-labels") as $index
-              | .[$index + 1] == "kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full"
+              | .[$index + 1] == "kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full,kross.io/workload-resource-stats=v1"
             ' >/dev/null
           ruby -ryaml <<'RUBY'
           documents = YAML.load_stream(File.read("packaging/macos-node/manifests/macos-node-bootstrap-rbac.yaml"))

@@ -1351,7 +1351,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 operation: "ContainerStats"
             )
             var response = Runtime_V1_ContainerStatsResponse()
-            response.stats = makeCRIContainerStats(metadata)
+            response.stats = try await workloadResourceStats(metadata)
             return response
         }
     }
@@ -1362,8 +1362,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_ListContainerStatsResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.listContainerStats.rawValue) {
             var response = Runtime_V1_ListContainerStatsResponse()
-            response.stats = try filterCRIContainers(metadataStore.listContainers(), request: request)
-                .map(makeCRIContainerStats)
+            let containers = try filterCRIContainers(metadataStore.listContainers(), request: request)
+            response.stats = await availableWorkloadResourceStats(containers)
             return response
         }
     }
@@ -1378,7 +1378,7 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 operation: "PodSandboxStats"
             )
             var response = Runtime_V1_PodSandboxStatsResponse()
-            response.stats = makeCRIPodSandboxStats(metadata)
+            response.stats = try await podResourceStats(metadata)
             return response
         }
     }
@@ -1389,8 +1389,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
     ) async throws -> Runtime_V1_ListPodSandboxStatsResponse {
         try await handlerLogger.handle(operation: CRIRuntimeOperation.listPodSandboxStats.rawValue) {
             var response = Runtime_V1_ListPodSandboxStatsResponse()
-            response.stats = try filterCRIPodSandboxes(metadataStore.listSandboxes(), request: request)
-                .map(makeCRIPodSandboxStats)
+            for sandbox in try filterCRIPodSandboxes(metadataStore.listSandboxes(), request: request) {
+                do { response.stats.append(try await podResourceStats(sandbox)) } catch {
+                    handlerLogger.logger.debug("pod statistics unavailable", metadata: ["sandbox": "\(sandbox.id)", "error": "\(error)"])
+                }
+            }
             return response
         }
     }
@@ -1757,6 +1760,33 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             await lifecycleCoordinator.release(key)
             throw error
         }
+    }
+
+    private func workloadResourceStats(_ metadata: CRIShimContainerMetadata) async throws -> Runtime_V1_ContainerStats {
+        guard metadata.state == .running else { throw CRIShimError.notFound("container is not running") }
+        let sandbox = try sandboxMetadata(id: metadata.sandboxID, operation: "ContainerStats")
+        let usage = try await runtimeManager.workloadStatistics(sandboxID: sandbox.runtimeSandboxID, workloadID: metadata.runtimeWorkloadID)
+        guard usage.id == metadata.runtimeWorkloadID else { throw CRIShimError.invalidArgument("workload statistics identity mismatch") }
+        return try makeCRIContainerStats(metadata, usage: usage)
+    }
+
+    private func availableWorkloadResourceStats(_ containers: [CRIShimContainerMetadata]) async -> [Runtime_V1_ContainerStats] {
+        var stats: [Runtime_V1_ContainerStats] = []
+        for container in containers where container.state == .running {
+            do { stats.append(try await workloadResourceStats(container)) } catch {
+                // A missing guest capability or a terminating workload must not
+                // turn into zero usage or suppress statistics for healthy peers.
+                handlerLogger.logger.debug("container statistics unavailable", metadata: ["container": "\(container.id)", "error": "\(error)"])
+            }
+        }
+        return stats
+    }
+
+    private func podResourceStats(_ metadata: CRIShimSandboxMetadata) async throws -> Runtime_V1_PodSandboxStats {
+        let containers = try metadataStore.listContainers().filter { $0.sandboxID == metadata.id && $0.state == .running }
+        let stats = await availableWorkloadResourceStats(containers)
+        guard !stats.isEmpty else { throw CRIShimError.notFound("no workload statistics available for pod") }
+        return makeCRIPodSandboxStats(metadata, containers: stats, complete: stats.count == containers.count)
     }
 
     private func sandboxMetadata(id rawID: String, operation: String) throws -> CRIShimSandboxMetadata {

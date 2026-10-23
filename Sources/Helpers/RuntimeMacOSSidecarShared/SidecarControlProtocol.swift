@@ -25,6 +25,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
     case vmConnectVsock
     case processStart
     case processInspect
+    case processStats
     case processStdin
     case processSignal
     case processResize
@@ -61,6 +62,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         case .vmConnectVsock: "vm.connectVsock"
         case .processStart: "process.start"
         case .processInspect: "process.inspect"
+        case .processStats: "process.stats"
         case .processStdin: "process.stdin"
         case .processSignal: "process.signal"
         case .processResize: "process.resize"
@@ -113,6 +115,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         Self.vmConnectVsock.rawValue: .vmConnectVsock,
         Self.processStart.rawValue: .processStart,
         Self.processInspect.rawValue: .processInspect,
+        Self.processStats.rawValue: .processStats,
         Self.processStdin.rawValue: .processStdin,
         Self.processSignal.rawValue: .processSignal,
         Self.processResize.rawValue: .processResize,

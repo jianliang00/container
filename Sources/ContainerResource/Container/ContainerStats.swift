@@ -18,6 +18,8 @@ import Foundation
 
 /// Statistics for a container suitable for CLI display.
 public struct ContainerStats: Sendable, Codable {
+    /// Time of resource sampling, in Unix nanoseconds.
+    public var timestampNanoseconds: Int64?
     /// Container ID
     public var id: String
     /// Physical memory usage in bytes
@@ -46,8 +48,10 @@ public struct ContainerStats: Sendable, Codable {
         networkTxBytes: UInt64?,
         blockReadBytes: UInt64?,
         blockWriteBytes: UInt64?,
-        numProcesses: UInt64?
+        numProcesses: UInt64?,
+        timestampNanoseconds: Int64? = nil
     ) {
+        self.timestampNanoseconds = timestampNanoseconds
         self.id = id
         self.memoryUsageBytes = memoryUsageBytes
         self.memoryLimitBytes = memoryLimitBytes

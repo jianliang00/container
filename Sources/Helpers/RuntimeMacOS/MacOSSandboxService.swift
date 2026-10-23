@@ -919,6 +919,23 @@ extension MacOSSandboxService {
 
     @Sendable
     public func statistics(_ message: XPCMessage) async throws -> XPCMessage {
+        if let workloadID = message.string(key: RuntimeKeys.workloadIdentifier.rawValue) {
+            guard let workload = workloads[workloadID], let sessionID = workload.sessionID,
+                let session = sessions[sessionID], session.started, session.exitStatus == nil,
+                let client = sidecarHandle?.client
+            else {
+                throw ContainerizationError(.notFound, message: "running workload not found for statistics")
+            }
+            let usage = try client.processStatistics(processID: session.processID)
+            let stats = ContainerStats(
+                id: workloadID, memoryUsageBytes: usage.residentMemoryBytes,
+                memoryLimitBytes: nil, cpuUsageUsec: usage.cpuUsageNanoseconds / 1000,
+                networkRxBytes: nil, networkTxBytes: nil, blockReadBytes: nil, blockWriteBytes: nil,
+                numProcesses: usage.processCount, timestampNanoseconds: usage.timestampNanoseconds)
+            let reply = message.reply()
+            reply.set(key: RuntimeKeys.statistics.rawValue, value: try JSONEncoder().encode(stats))
+            return reply
+        }
         let stats = ContainerStats(
             id: configuration?.id ?? "unknown",
             memoryUsageBytes: nil,

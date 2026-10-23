@@ -1517,7 +1517,7 @@ public actor ContainersService {
     }
 
     /// Get statistics for the container.
-    public func stats(id: String) async throws -> ContainerStats {
+    public func stats(id: String, workloadID: String? = nil) async throws -> ContainerStats {
         log.debug(
             "ContainersService: enter",
             metadata: [
@@ -1537,7 +1537,7 @@ public actor ContainersService {
 
         let state = try self._getContainerState(id: id)
         let client = try state.getClient()
-        return try await client.statistics()
+        return try await client.statistics(workloadID: workloadID)
     }
 
     /// Delete a container and its resources.

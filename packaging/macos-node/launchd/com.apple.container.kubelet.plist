@@ -16,7 +16,7 @@
         <string>--hostname-override</string>
         <string>__NODE_NAME__</string>
         <string>--node-labels</string>
-        <string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full</string>
+        <string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full,kross.io/workload-resource-stats=v1</string>
         <string>--register-with-taints</string>
         <string>node.kubernetes.io/macos=true:NoSchedule</string>
         <string>--root-dir</string>

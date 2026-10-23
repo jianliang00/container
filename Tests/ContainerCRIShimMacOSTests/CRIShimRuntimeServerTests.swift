@@ -2165,8 +2165,8 @@ struct CRIShimRuntimeServerTests {
         await shutdown(group)
     }
 
-    @Test
-    func runPodSandboxPullsSandboxImageWhenMissing() async throws {
+    @Test(arguments: [false, true])
+    func runPodSandboxPullsSandboxImageWhenMissing(requestTimesOut: Bool) async throws {
         let socketPath = "/tmp/cri-shim-sandbox-pull-\(UUID().uuidString.prefix(8)).sock"
         let stateDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: stateDirectory) }
@@ -2192,41 +2192,30 @@ struct CRIShimRuntimeServerTests {
         let runtimeManager = RecordingRuntimeManager(
             execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data())
         )
-        let imageManager = RecordingImageManager(
-            images: [],
-            pulledImage: CRIShimImageRecord(
+        let finishDownload = AsyncStream<Void>.makeStream()
+        defer { finishDownload.continuation.finish() }
+        let imageManager = SandboxPullTestImageManager(
+            image: CRIShimImageRecord(
                 reference: sandboxImageReference,
                 digest: "sha256:sandbox",
                 size: 16_384,
                 annotations: ["org.apple.container.macos.image.role": "sandbox"]
-            )
+            ),
+            finishDownload: requestTimesOut ? finishDownload.stream : nil
         )
         let cniManager = RecordingCNIManager()
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let server = try CRIShimGRPCServer(
-            socketPath: socketPath,
+        let runtimeProvider = CRIShimRuntimeServiceProvider(
             config: config,
-            versionInfo: CRIShimRuntimeVersionInfo(),
-            eventLoopGroup: group,
-            readinessChecker: StaticReadinessChecker(
-                snapshot: CRIShimReadinessSnapshot(
-                    runtime: CRIShimRuntimeConditionSnapshot(
-                        type: CRIShimRuntimeConditionType.runtimeReady,
-                        status: true,
-                        reason: "RuntimeHealthOK",
-                        message: "test runtime ready"
-                    ),
-                    network: CRIShimRuntimeConditionSnapshot(
-                        type: CRIShimRuntimeConditionType.networkReady,
-                        status: true,
-                        reason: "NATReady",
-                        message: "test network ready"
-                    )
-                )
-            ),
+            metadataStore: try CRIShimMetadataStore(rootURL: stateDirectory),
             runtimeManager: runtimeManager,
             imageManager: imageManager,
             cniManager: cniManager
+        )
+        let server = CRIShimGRPCServer(
+            socketPath: socketPath,
+            serviceProviders: [runtimeProvider],
+            eventLoopGroup: group
         )
         let serverTask = Task {
             try await server.run()
@@ -2248,11 +2237,32 @@ struct CRIShimRuntimeServerTests {
         runSandboxRequest.config.metadata.namespace = "default"
         runSandboxRequest.config.metadata.name = "pull-pod"
         runSandboxRequest.config.metadata.attempt = 1
+        if requestTimesOut {
+            do {
+                _ = try await client.runPodSandbox(
+                    runSandboxRequest,
+                    callOptions: CallOptions(timeLimit: .timeout(.milliseconds(500)))
+                )
+                Issue.record("cold download should outlive the first CRI request")
+            } catch let error as any GRPCStatusTransformable {
+                #expect(error.makeGRPCStatus().code == .deadlineExceeded)
+            }
+            #expect(await imageManager.pulledReferences == [sandboxImageReference])
+            #expect(runtimeManager.createSandboxCalls.isEmpty)
+            // A client deadline precedes delivery of cancellation to the server.
+            // Keep the download blocked until the cancelled handler has detached.
+            let cancellationDeadline = ContinuousClock.now + .seconds(5)
+            while await runtimeProvider.sandboxImagePulls.waitingRequestCount != 0 {
+                try #require(ContinuousClock.now < cancellationDeadline)
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            finishDownload.continuation.yield(())
+        }
         let runSandbox = try await client.runPodSandbox(runSandboxRequest)
 
         #expect(!runSandbox.podSandboxID.isEmpty)
-        #expect(imageManager.pulledReferences == [sandboxImageReference])
-        #expect(imageManager.pulledAuthentications == [nil])
+        #expect(await imageManager.pulledReferences == [sandboxImageReference])
+        #expect(await imageManager.pulledAuthentications == [nil])
         #expect(runtimeManager.createSandboxCalls.count == 1)
         let createSandboxCall = try #require(runtimeManager.createSandboxCalls.first)
         #expect(createSandboxCall.image.reference == sandboxImageReference)
@@ -6983,6 +6993,40 @@ private final class RecordingCNIManager: CRIShimCNIManaging, @unchecked Sendable
         config: CRIShimConfig
     ) async throws {
         deleteCalls.append((sandboxID: sandboxID, networkName: networkName))
+    }
+}
+
+private actor SandboxPullTestImageManager: CRIShimImageManaging {
+    let image: CRIShimImageRecord
+    let finishDownload: AsyncStream<Void>?
+    private var images: [CRIShimImageRecord] = []
+    private(set) var pulledReferences: [String] = []
+    private(set) var pulledAuthentications: [CRIShimImagePullAuthentication?] = []
+
+    init(image: CRIShimImageRecord, finishDownload: AsyncStream<Void>?) {
+        self.image = image
+        self.finishDownload = finishDownload
+    }
+
+    func listImages() async throws -> [CRIShimImageRecord] { images }
+
+    func pullImage(reference: String, authentication: CRIShimImagePullAuthentication?) async throws -> CRIShimImageRecord {
+        pulledReferences.append(reference)
+        pulledAuthentications.append(authentication)
+        if let finishDownload {
+            for await _ in finishDownload { break }
+        }
+        try Task.checkCancellation()
+        images = [image]
+        return image
+    }
+
+    func removeImages(references: [String]) async throws {
+        throw CRIShimError.unsupported("not used by sandbox pull test")
+    }
+
+    func imageFilesystemUsage() async throws -> CRIShimImageFilesystemUsage {
+        throw CRIShimError.unsupported("not used by sandbox pull test")
     }
 }
 

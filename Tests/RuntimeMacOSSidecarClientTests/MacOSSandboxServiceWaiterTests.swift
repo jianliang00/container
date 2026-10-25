@@ -282,6 +282,61 @@ struct MacOSSandboxServiceWaiterTests {
         #expect(!snapshotIDs.contains(processID))
     }
 
+    @Test(arguments: [0, 4096])
+    func processStdinRemainsBufferedUntilStartAndPrecedesEOF(byteCount: Int) async throws {
+        let tempRoot = makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let service = makeSandboxService(root: tempRoot)
+        try await service.testingPrepareSandbox(baseContainerConfiguration())
+
+        let socketPath = "/tmp/ctr-stdin-\(UUID().uuidString.prefix(8)).sock"
+        let server = try RecordingExecSidecarServer(socketPath: socketPath)
+        defer { server.stop() }
+        server.start()
+        await service.testingInstallSidecarClient(socketPath: socketPath)
+
+        let input = Pipe()
+        defer {
+            try? input.fileHandleForReading.close()
+            try? input.fileHandleForWriting.close()
+        }
+        let expected = Data((0..<byteCount).map { UInt8($0 % 251) })
+        try input.fileHandleForWriting.write(contentsOf: expected)
+        try input.fileHandleForWriting.close()
+
+        let processID = "exec-buffered-stdin"
+        try await service.testingCreateProcess(
+            processID,
+            config: makeProcessConfiguration(executable: "/usr/bin/wc", arguments: ["-c"]),
+            stdio: [input.fileHandleForReading, nil, nil]
+        )
+        // Creation must not consume a ready pipe before the guest process exists.
+        #expect(input.fileHandleForReading.readabilityHandler == nil)
+
+        try await service.testingStartProcess(processID)
+        for _ in 0..<100 {
+            if server.recordedRequests().contains(where: { $0.method == .processClose && $0.processID == processID }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let requests = server.recordedRequests().filter { $0.processID == processID }
+        let closeIndex = try #require(requests.firstIndex { $0.method == .processClose })
+        let stdinIndices = requests.indices.filter { requests[$0].method == .processStdin }
+        let actual = stdinIndices.reduce(into: Data()) { bytes, index in
+            bytes.append(requests[index].data ?? Data())
+        }
+        #expect(actual == expected)
+        #expect(stdinIndices.allSatisfy { $0 < closeIndex })
+        #expect(requests.filter { $0.method == .processClose }.count == 1)
+
+        await service.testingCloseAllSessions()
+        server.stop()
+        try server.waitForCompletion()
+    }
+
     @Test
     func killHandlerAcceptsStringSignalFromCurrentRuntimeClient() async throws {
         let tempRoot = makeTemporaryRoot()

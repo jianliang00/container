@@ -187,6 +187,7 @@ public actor MacOSSandboxService {
         struct Attachment {
             let id: String
             let stdin: FileHandle?
+            var stdinPump: AttachmentInputPump?
             var stdoutPump: AttachmentOutputPump?
             var stderrPump: AttachmentOutputPump?
             let takesControl: Bool
@@ -3258,31 +3259,48 @@ extension MacOSSandboxService {
     }
 
     private func installControllerReadabilityHandler(processID: String, session: inout Session) {
-        for attachment in session.attachments.values {
-            attachment.stdin?.readabilityHandler = nil
+        for id in Array(session.attachments.keys) where !session.started || id != session.controllerAttachmentID {
+            session.attachments[id]?.stdinPump?.stop()
+            session.attachments[id]?.stdinPump = nil
         }
 
-        guard let controllerAttachmentID = session.controllerAttachmentID,
+        // Keep pre-start input in the pipe: forwarding cannot accept it until
+        // the guest start request has succeeded.
+        guard session.started,
+            let controllerAttachmentID = session.controllerAttachmentID,
             let attachment = session.attachments[controllerAttachmentID],
+            !attachment.stdinClosed,
             let stdin = attachment.stdin
         else {
             return
         }
 
+        // An unrelated attachment change must not discard input already read
+        // by the current controller while its forwarding task awaits this actor.
+        guard attachment.stdinPump == nil else { return }
+
         let service = self
-        stdin.readabilityHandler = { handle in
-            let data = handle.availableData
-            Task {
+        let log = self.log
+        let pump = AttachmentInputPump(
+            fileHandle: stdin,
+            forward: { pumpID, data in
                 await service.forwardAttachmentStdin(
                     processID: processID,
                     attachmentID: controllerAttachmentID,
+                    pumpID: pumpID,
                     data: data
                 )
+            },
+            onFailure: { error in
+                log.error("failed to read stdin", metadata: ["process_id": "\(processID)", "error": "\(error)"])
             }
-        }
+        )
+        session.attachments[controllerAttachmentID]?.stdinPump = pump
+        pump.start()
     }
 
     private func closeAttachmentResources(_ attachment: Session.Attachment) {
+        attachment.stdinPump?.stop()
         attachment.stdin?.readabilityHandler = nil
         try? attachment.stdin?.close()
         attachment.stdoutPump?.close()
@@ -3866,6 +3884,7 @@ extension MacOSSandboxService {
     private func forwardAttachmentStdin(
         processID: String,
         attachmentID: String,
+        pumpID: UUID,
         data: Data
     ) async {
         guard var session = sessions[processID], session.started else {
@@ -3874,7 +3893,9 @@ extension MacOSSandboxService {
         guard session.controllerAttachmentID == attachmentID else {
             return
         }
-        guard var attachment = session.attachments[attachmentID], attachment.takesControl else {
+        guard var attachment = session.attachments[attachmentID], attachment.takesControl,
+            attachment.stdinPump?.id == pumpID
+        else {
             return
         }
 
@@ -4646,13 +4667,14 @@ extension MacOSSandboxService {
     func testingCreateProcess(
         _ id: String,
         config: ProcessConfiguration,
-        targetWorkloadID: String? = nil
+        targetWorkloadID: String? = nil,
+        stdio: [FileHandle?] = [nil, nil, nil]
     ) async throws {
         try await createExecProcessIfNeeded(
             processID: id,
             config: config,
             targetWorkloadID: targetWorkloadID,
-            stdio: [nil, nil, nil]
+            stdio: stdio
         )
     }
 

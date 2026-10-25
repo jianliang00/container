@@ -52,6 +52,16 @@ package and sandbox guest-agent checksums match.
 
 The deployment system must verify the private manifest against the SHA-256 published in the Release before passing image references to `container-macos-kubeadm join` and RuntimeClass configuration.
 
+Source provenance accepts the recorded sandbox source commit when it is an
+ancestor of the package source commit, or when its complete Git tree matches a
+commit in the package source history. This accommodates rebased or cherry-picked
+release history without changing the recorded build origin or adding a merge
+commit. Partial source matches are not accepted, and the check requires a full
+Git checkout. Tree equivalence does not prove binary compatibility: formal
+publication still requires the package guest-agent SHA-256 and capabilities to
+match the private sandbox pairing exactly. The workflow validates the pairing
+record; it does not pull or boot the sandbox image.
+
 ## Deployment order
 
 1. Confirm that the control plane allocates dual-stack PodCIDRs and that the flannel network configuration enables IPv6.

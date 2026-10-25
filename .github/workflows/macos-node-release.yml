@@ -336,12 +336,8 @@ jobs:
           fi
 
           paired_container_commit="$(jq -er '.sandboxImage.source.containerCommit' "${RELEASE_PAIRING_PATH}")"
-          git cat-file -e "${container_commit}^{commit}"
-          git cat-file -e "${paired_container_commit}^{commit}"
-          if ! git merge-base --is-ancestor "${paired_container_commit}" "${container_commit}"; then
-            echo "::error::Release pairing source commit ${paired_container_commit} is not an ancestor of release commit ${container_commit}"
-            exit 1
-          fi
+          bash scripts/macos-node-installer/validate-source-provenance.sh \
+            "${paired_container_commit}" "${container_commit}"
 
           echo "CONTAINER_COMMIT=${container_commit}" >> "$GITHUB_ENV"
 
@@ -352,6 +348,7 @@ jobs:
           make swift-fmt-check
           git diff --check
           bash -n scripts/macos-node-installer/build.sh
+          bash scripts/macos-node-installer/test-source-provenance.sh
           plutil -lint packaging/macos-node/launchd/*.plist
           for config_path in packaging/macos-node/config/*.json packaging/macos-node/config/*.conf packaging/macos-node/config/*.conflist; do
             jq -e . "${config_path}" >/dev/null

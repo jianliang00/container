@@ -321,6 +321,11 @@ jobs:
               echo "::error::Draft target ${container_commit} does not match ${RELEASE_TAG}"
               exit 1
             fi
+            # The PR branch may have been deleted after a rebase merge.
+            # Fetch the exact recorded source without changing the checked-out release workflow.
+            if ! git cat-file -e "${container_commit}^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "${container_commit}"
+            fi
             jq -e \
               --arg package_name "${PACKAGE_NAME}" \
               --arg checksum_name "${PACKAGE_NAME}.sha256" \

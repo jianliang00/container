@@ -498,31 +498,3 @@ scripts/macos-node-installer/build.sh \
 Set `PKG_SIGN_IDENTITY` to sign the resulting pkg with `productsign`. Set
 `CODESIGN_IDENTITY` to control code signing for staged executables; the default
 is ad-hoc signing.
-
-## Workload CPU and memory statistics
-
-The guest agent exposes `processResourceStatsV1`. The runtime forwards measurements
-for each running workload through CRI `ContainerStats`, `ListContainerStats`,
-`PodSandboxStats`, and `ListPodSandboxStats`. Darwin kubelet publishes these values
-at `/metrics/resource`; `/metrics/cadvisor` contains host statistics only.
-
-CPU is cumulative user and kernel CPU time for the primary process and its
-attached descendants, including CPU time of children already reaped by their
-parent. Memory is the sum of their resident sets, not the VM memory allocation or
-the configured memory limit. Shared pages can be counted in multiple processes.
-Detached background processes outside the primary process tree are outside this
-measurement. Network and filesystem usage are not synthesized from host totals.
-
-An older guest agent, an exited process, or a failed sample produces no workload
-sample. Other workloads remain observable. Pod totals are emitted only when all
-running containers in that Pod have measurements. A guest-agent upgrade requires
-a new sandbox image and newly started guests; replacing the host package alone
-does not update agents already running inside VMs.
-
-Deploy the package and matching sandbox image together. New node registrations
-include `kross.io/workload-resource-stats=v1`. For an existing node, verify nonzero
-CPU and memory for a test Pod at `/metrics/resource` before applying that label.
-The monitoring job uses it to exclude older runtimes that return zero-valued
-placeholder statistics. Remove the label before rolling back the runtime.
-Preserve running workloads during rollout and upgrade occupied nodes only after
-their workloads have completed or an agreed maintenance window begins.

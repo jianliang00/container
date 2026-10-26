@@ -302,14 +302,6 @@ final class MacOSSidecarClient: @unchecked Sendable {
         }
     }
 
-    func processStatistics(processID: String) throws -> GuestProcessResourceStats {
-        let response = try requestResponse(MacOSSidecarRequest(method: .processStats, processID: processID), socketConnectRetries: 1)
-        guard let data = response.data else {
-            throw ContainerizationError(.internalError, message: "sidecar statistics response missing data")
-        }
-        return try JSONDecoder().decode(GuestProcessResourceStats.self, from: data)
-    }
-
     func processInspect(
         port: UInt32,
         processID: String,

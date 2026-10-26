@@ -934,9 +934,8 @@ struct CRIShimRuntimeServerTests {
         let containerStats = try await client.containerStats(containerStatsRequest)
         #expect(containerStats.stats.attributes.id == "container-1")
         #expect(containerStats.stats.attributes.metadata.name == "workload")
-        #expect(containerStats.stats.cpu.usageCoreNanoSeconds.value == 1_234_567_000)
-        #expect(containerStats.stats.memory.workingSetBytes.value == 134_217_728)
-        #expect(containerStats.stats.cpu.timestamp == 1_700_000_031_000_000_000)
+        #expect(!containerStats.stats.hasCpu)
+        #expect(!containerStats.stats.hasMemory)
 
         var listContainerStatsRequest = Runtime_V1_ListContainerStatsRequest()
         listContainerStatsRequest.filter.podSandboxID = "sandbox-1"
@@ -949,17 +948,12 @@ struct CRIShimRuntimeServerTests {
         let podSandboxStats = try await client.podSandboxStats(podSandboxStatsRequest)
         #expect(podSandboxStats.stats.attributes.id == "sandbox-1")
         #expect(podSandboxStats.stats.attributes.metadata.name == "demo")
-        #expect(podSandboxStats.stats.linux.cpu.usageCoreNanoSeconds.value == 1_234_567_000)
-        #expect(podSandboxStats.stats.linux.containers.map(\.attributes.id) == ["container-1"])
+        #expect(!podSandboxStats.stats.hasLinux)
 
         var listPodSandboxStatsRequest = Runtime_V1_ListPodSandboxStatsRequest()
         listPodSandboxStatsRequest.filter.labelSelector = ["app": "demo"]
         let podSandboxStatsList = try await client.listPodSandboxStats(listPodSandboxStatsRequest)
         #expect(podSandboxStatsList.stats.map(\.attributes.id) == ["sandbox-1"])
-        runtimeManager.unavailableStatistics.insert("container-1")
-        #expect(try await client.listContainerStats(listContainerStatsRequest).stats.isEmpty)
-        #expect(try await client.listPodSandboxStats(listPodSandboxStatsRequest).stats.isEmpty)
-        runtimeManager.unavailableStatistics.removeAll()
 
         var createRequest = Runtime_V1_CreateContainerRequest()
         createRequest.podSandboxID = "sandbox-1"
@@ -6398,7 +6392,6 @@ private final class MachineStateLegacySocketFixture: @unchecked Sendable {
 }
 
 private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked Sendable {
-    var unavailableStatistics = Set<String>()
     var execSyncResult: ExecSyncResult
     private let logRootURL: URL
     private var sandboxSnapshots: [String: SandboxSnapshot]
@@ -6777,15 +6770,6 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         workloadConfigurations.removeValue(forKey: workloadID)
         workloadSnapshots.removeValue(forKey: workloadID)
         removeWorkloadSnapshot(workloadID, sandboxID: sandboxID)
-    }
-
-    func workloadStatistics(sandboxID: String, workloadID: String) async throws -> ContainerStats {
-        guard !unavailableStatistics.contains(workloadID) else { throw CRIShimError.notFound("sample unavailable") }
-        return ContainerStats(
-            id: workloadID, memoryUsageBytes: 134_217_728, memoryLimitBytes: nil,
-            cpuUsageUsec: 1_234_567, networkRxBytes: nil, networkTxBytes: nil,
-            blockReadBytes: nil, blockWriteBytes: nil, numProcesses: 2,
-            timestampNanoseconds: 1_700_000_031_000_000_000)
     }
 
     func inspectWorkload(

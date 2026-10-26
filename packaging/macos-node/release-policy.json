@@ -3,7 +3,6 @@
   "guestAgent": {
     "requiredCapabilities": [
       "tcpConnectV1",
-      "processResourceStatsV1",
       "durableProcessV1",
       "durableProcessV2",
       "durableProcessV3",

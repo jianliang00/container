@@ -357,7 +357,7 @@ jobs:
             packaging/macos-node/launchd/com.apple.container.kubelet.plist | \
             jq -e '
               index("--node-labels") as $index
-              | .[$index + 1] == "kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full,kross.io/workload-resource-stats=v1"
+              | .[$index + 1] == "kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full"
             ' >/dev/null
           ruby -ryaml <<'RUBY'
           documents = YAML.load_stream(File.read("packaging/macos-node/manifests/macos-node-bootstrap-rbac.yaml"))
@@ -500,11 +500,8 @@ jobs:
           test_filter+='|VMNetRecoveryMacOSTests\.'
           test_filter+='|ContainerOSTests\.DirectoryWatcherTest'
           test_filter+='|ContainerResourceTests\.ContainerConfigurationMacOSTests'
-          test_filter+='|ContainerCRIShimMacOSTests\.CRIShimResourceStatsTests'
           test_filter+='|ContainerCRIShimMacOSTests\.(CRIShimSandboxImagePullsTests|CRIShimImageGCProtectionTests)'
           test_filter+='|ContainerCRIShimMacOSTests\.CRIShimRuntimeServerTests/runPodSandboxPullsSandboxImageWhenMissing'
-          test_filter+='|MacOSGuestAgentTests\.GuestProcessResourceStatsTests'
-          test_filter+='|MacOSGuestAgentTests\.GuestAgentProcessStartupTests/resourceStatistics'
           test_filter+='|MacOSGuestAgentTests\.GuestDNSProxyTests'
           test_filter+='|MacOSGuestAgentTests\.GuestNetworkConfiguratorTests'
           test_filter+='|RuntimeMacOSSidecarClientTests\.MacOSSandboxServiceNetworkTests'

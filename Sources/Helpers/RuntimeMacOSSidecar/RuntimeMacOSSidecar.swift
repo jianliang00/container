@@ -218,7 +218,6 @@ struct SidecarGuestAgentFrame: Codable {
     enum FrameType: String, Codable {
         case exec
         case processInspect
-        case processStats
         case processAttach
         case processEventAck
         case processStop
@@ -1142,7 +1141,7 @@ actor MacOSSidecarService {
                     throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
                 case .exit:
                     throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
-                case .stdout, .stderr, .ack, .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop,
+                case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
                     .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync,
                     .clockResult,
                     .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
@@ -1263,7 +1262,7 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest network configuration stream exited unexpectedly (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .ack, .stdout, .stderr, .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop,
+            case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
                 .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd,
                 .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
@@ -1315,7 +1314,7 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest agent exited during clock synchronization (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .ack, .stdout, .stderr, .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop,
+            case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
                 .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .fsBegin,
                 .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
@@ -1858,7 +1857,7 @@ actor MacOSSidecarService {
                     .internalError,
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
-            case .stdout, .stderr, .ack, .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete,
+            case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete,
                 .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd,
                 .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
@@ -3932,30 +3931,6 @@ final class SidecarControlServer: @unchecked Sendable {
         return status
     }
 
-    private func processStatistics(processID: String) throws -> GuestProcessResourceStats {
-        let session = try processSession(for: processID)
-        let fd = try connectProcessStream(port: session.port)
-        defer {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
-            Darwin.close(fd)
-        }
-        let capabilities = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
-        guard capabilities.contains(GuestProcessResourceStats.capability) else {
-            throw ContainerizationError(.unsupported, message: "guest agent does not support process resource statistics")
-        }
-        try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame(type: .processStats, id: session.guestProcessID), fd: fd)
-        let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd, timeoutMilliseconds: 3000)
-        if frame.type == .error { throw guestProcessCommandError(frame, operation: "statistics") }
-        guard frame.type == .ack, frame.id == session.guestProcessID, let data = frame.data else {
-            throw ContainerizationError(.invalidState, message: "invalid process statistics response")
-        }
-        let stats = try JSONDecoder().decode(GuestProcessResourceStats.self, from: data)
-        guard stats.executionID == session.guestProcessID else {
-            throw ContainerizationError(.invalidState, message: "process statistics identity mismatch")
-        }
-        return stats
-    }
-
     private func queryDurableProcess(port: UInt32, executionID: String) throws -> MacOSGuestProcessStatusPayload {
         let fd = try connectProcessStream(port: port)
         defer {
@@ -4327,7 +4302,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     throw guestProcessCommandError(frame, operation: operation)
                 case .stdout, .stderr, .exit, .ready:
                     continue
-                case .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
+                case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
                     .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
                     .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
@@ -4549,7 +4524,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     pendingExitSequence = frame.sequence
                 case .ready:
                     continue
-                case .ack, .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
+                case .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
                     .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
                     .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
@@ -4694,7 +4669,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 bufferedFrames.append(frame)
             case .ready:
                 continue
-            case .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
+            case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
                 .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
                 .fsReadEnd, .fsListDir:
                 continue
@@ -4758,7 +4733,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 )
             case .ready, .stdout, .stderr, .networkResult, .clockResult:
                 continue
-            case .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
+            case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
                 .close, .networkConfigure, .clockSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
                 .fsListDir:
                 continue
@@ -4792,7 +4767,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 )
             case .ready, .stdout, .stderr, .networkResult, .clockResult:
                 continue
-            case .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
+            case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
                 .close, .networkConfigure, .clockSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
                 .fsListDir:
                 continue
@@ -4838,7 +4813,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
                 case .exit:
                     throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
-                case .stdout, .stderr, .ack, .exec, .processStats, .processInspect, .processAttach, .processEventAck, .processStop,
+                case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
                     .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync,
                     .clockResult,
                     .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
@@ -5184,13 +5159,6 @@ final class SidecarControlServer: @unchecked Sendable {
             } catch {
                 return failureResponse(requestID: requestID, error: error)
             }
-        case .processStats:
-            guard let processID = request.processID, !processID.isEmpty else {
-                return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
-            }
-            do {
-                return .success(requestID: requestID, data: try JSONEncoder().encode(processStatistics(processID: processID)))
-            } catch { return failureResponse(requestID: requestID, error: error) }
         case .processStdin:
             guard let processID = request.processID else {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing processID")
@@ -5640,7 +5608,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     ]
                 )
             }
-        case .vmBootstrapStart, .vmShowGUI, .vmConnectVsock, .processStart, .processStats, .processInspect, .processStdin, .processSignal,
+        case .vmBootstrapStart, .vmShowGUI, .vmConnectVsock, .processStart, .processInspect, .processStdin, .processSignal,
             .processResize, .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
             .fsListDir, .vmCapabilities, .vmStop, .sidecarQuit, .unknown:
             break
@@ -5697,7 +5665,7 @@ extension MacOSSidecarMethod {
         case .vmBootstrapStart, .vmShowGUI, .processStart, .processStdin, .processSignal, .processResize,
             .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
             true
-        case .eventsSubscribe, .eventsAcknowledge, .vmConnectVsock, .processStats, .processInspect, .processDelete, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
+        case .eventsSubscribe, .eventsAcknowledge, .vmConnectVsock, .processInspect, .processDelete, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
             .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmPrepareCheckpoint,
             .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .vmStop, .sidecarQuit, .unknown:
             false

@@ -73,7 +73,6 @@ struct MacOSGuestAgent: ParsableCommand {
 enum MacOSGuestAgentCapabilities {
     static let advertised = [
         "tcpConnectV1",
-        GuestProcessResourceStats.capability,
         MacOSGuestProcessProtocol.durableProcessV1,
         MacOSGuestProcessProtocol.durableProcessV2,
         MacOSGuestProcessProtocol.durableProcessV3,
@@ -340,18 +339,6 @@ final class AgentConnection: @unchecked Sendable {
                 logAgentError(message)
                 try? send(frame: .error(message, errorCode: structuredPOSIXErrorCode(error)))
                 try? send(frame: .exit(1))
-            }
-            return .continueReading
-        case .processStats:
-            do {
-                guard let id = frame.id else { throw POSIXError(.EINVAL) }
-                let stats = try GuestProcessStatisticsRegistry.shared.statistics(id: id)
-                try send(frame: .ack(id: id, data: try JSONEncoder().encode(stats)))
-            } catch {
-                try? send(
-                    frame: .error(
-                        id: frame.id, message: "process statistics unavailable: \(describeError(error))",
-                        errorCode: structuredPOSIXErrorCode(error)))
             }
             return .continueReading
         case .processInspect:
@@ -781,7 +768,6 @@ final class AgentConnection: @unchecked Sendable {
             connection: self
         )
         self.session = session
-        session.registerStatistics(id: processID)
         do {
             try send(frame: .ack(id: processID))
             try session.start(stdoutHandle: nil, stderrHandle: nil)
@@ -1699,7 +1685,6 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
     private var exitSent = false
     private var cleanedUp = false
     private var exitObservedBeforeReap = false
-    private var statisticsID: String?
 
     private init(
         pid: pid_t,
@@ -1955,22 +1940,6 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
         }
     }
 
-    deinit {
-        if let statisticsID { GuestProcessStatisticsRegistry.shared.remove(self, id: statisticsID) }
-    }
-
-    func registerStatistics(id: String) {
-        statisticsID = id
-        GuestProcessStatisticsRegistry.shared.register(self, id: id)
-    }
-
-    func resourceStatistics(id: String) throws -> GuestProcessResourceStats {
-        outputLock.lock()
-        defer { outputLock.unlock() }
-        guard !cleanedUp, !exitObservedBeforeReap else { throw POSIXError(.ESRCH) }
-        return try GuestProcessTreeSampler.sample(rootPID: pid, id: id)
-    }
-
     var processIdentifier: Int32 {
         pid
     }
@@ -2108,7 +2077,6 @@ final class SpawnedProcessSession: GuestAgentProcessSession, @unchecked Sendable
             outputLock.unlock()
         }
 
-        if let statisticsID { GuestProcessStatisticsRegistry.shared.remove(self, id: statisticsID) }
         var status: Int32 = 0
         let result: pid_t
         while true {
@@ -2746,7 +2714,6 @@ struct GuestAgentFrame: Codable, Sendable {
     enum FrameType: String, Codable {
         case exec
         case processInspect
-        case processStats
         case processAttach
         case processEventAck
         case processStop

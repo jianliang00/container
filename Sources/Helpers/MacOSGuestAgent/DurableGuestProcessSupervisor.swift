@@ -629,7 +629,6 @@ private final class DurableGuestProcess: SpawnedProcessEventSink, @unchecked Sen
         lock.lock()
         self.session = session
         self.processIdentifier = session.processIdentifier
-        session.registerStatistics(id: executionID)
         lock.unlock()
     }
 

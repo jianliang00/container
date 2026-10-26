@@ -112,7 +112,7 @@ struct MacOSKubeadmPlanTests {
                     && contents.contains("<string>localhost/macos-sandbox:test</string>")
                     && contents.contains("<string>/etc/kubernetes/kubelet.conf</string>")
                     && contents.contains(
-                        "<string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full,kross.io/workload-resource-stats=v1</string>"
+                        "<string>kubernetes.io/os=darwin,node.kubernetes.io/macos=true,node.kubernetes.io/macos-network=full</string>"
                     )
             })
 

@@ -18,6 +18,7 @@ import Foundation
 
 public enum MacOSSidecarFSOperation: String, Codable, Sendable {
     case writeFile = "write_file"
+    case projectedVolume = "projected_volume"
     case mkdir
     case symlink
 }

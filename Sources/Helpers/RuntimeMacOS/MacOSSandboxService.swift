@@ -258,6 +258,9 @@ public actor MacOSSandboxService {
     private var closedWorkloadSessions: [String: ClosedWorkloadSession] = [:]
     private var externalProcessIDs: Set<String> = []
     private var waiters: [String: [SessionWaiter]] = [:]
+    var projectedVolumeTask: Task<Void, Never>?
+    var projectedVolumeGenerations: [String: String] = [:]
+    var projectedVolumeFailures: Set<String> = []
     var guestMountsPrepared = false
     var readOnlyInjectionsPrepared = false
     private var guestAgentLogCaptureProcessID: String?
@@ -287,6 +290,7 @@ public actor MacOSSandboxService {
     }
 
     deinit {
+        projectedVolumeTask?.cancel()
         for forwarder in socketForwarders {
             forwarder.close()
         }
@@ -584,6 +588,9 @@ extension MacOSSandboxService {
         let stopSignalName = stopOptions.signal ?? "SIGTERM"
         let stopSignal = try Signal(stopSignalName, from: Signal.platform).rawValue
         let waitTimeout = Self.stopWaitTimeout(for: stopOptions)
+        projectedVolumeTask?.cancel()
+        projectedVolumeTask = nil
+        projectedVolumeGenerations.removeAll()
         sandboxState = .stopping
         writeContainerLog(Data(("stop requested signal=\(stopSignalName) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
 
@@ -4405,6 +4412,7 @@ extension MacOSSandboxService {
             return
         }
 
+        projectedVolumeGenerations.removeAll()
         writeContainerLog(Data(("sidecar disconnected unexpectedly: \(error.message)\n").utf8))
         if let config = configuration, config.macosGuest?.machineState != nil {
             guard !sidecarControlRecoveryInProgress else { return }

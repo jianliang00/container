@@ -26,12 +26,17 @@ extension MacOSSandboxService {
             return
         }
 
-        let shares: [MacOSGuestMountMapping.HostPathShare]
+        var shares: [MacOSGuestMountMapping.HostPathShare]
         do {
             shares = try MacOSGuestMountMapping.hostPathShares(from: containerConfig.mounts)
         } catch let error as MacOSGuestMountMapping.Error {
             throw ContainerizationError(.invalidArgument, message: error.localizedDescription)
         }
+
+        let projections = shares.filter(\.isKubernetesProjection)
+        try reconcileProjectedVolumes(projections, failOnError: true)
+        startProjectedVolumeUpdates(projections)
+        shares.removeAll(where: \.isKubernetesProjection)
 
         guard !shares.isEmpty else {
             guestMountsPrepared = true

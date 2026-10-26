@@ -1502,7 +1502,7 @@ actor MacOSSidecarService {
     private func createDirectorySharingDevices(
         containerConfig: ContainerConfiguration
     ) throws -> [VZDirectorySharingDeviceConfiguration] {
-        let shares = try MacOSGuestMountMapping.hostPathShares(from: containerConfig.mounts)
+        let shares = try MacOSGuestMountMapping.hostPathShares(from: containerConfig.mounts).filter { !$0.isKubernetesProjection }
         guard !shares.isEmpty else {
             return []
         }
@@ -3444,7 +3444,10 @@ final class SidecarControlServer: @unchecked Sendable {
         }
 
         do {
-            _ = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            let capabilities = try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 3)
+            if payload.op == .projectedVolume, !capabilities.contains("projectedVolumeV1") {
+                throw ContainerizationError(.unsupported, message: "guest agent does not support projected volumes; use the sandbox paired with this node package")
+            }
             try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.fsBegin(payload), fd: fd)
             try waitForFSAck(fd: fd, expectedID: payload.txID)
 

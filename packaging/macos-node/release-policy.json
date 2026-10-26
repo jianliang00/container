@@ -6,7 +6,8 @@
       "durableProcessV1",
       "durableProcessV2",
       "durableProcessV3",
-      "durableProcessV4"
+      "durableProcessV4",
+      "projectedVolumeV1"
     ]
   },
   "deploymentPairing": {

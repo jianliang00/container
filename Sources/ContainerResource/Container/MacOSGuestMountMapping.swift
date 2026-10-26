@@ -35,6 +35,16 @@ public enum MacOSGuestMountMapping {
             self.readOnly = readOnly
         }
 
+        /// Kubelet's AtomicWriter volumes need local projection because virtiofs can retain replaced inodes.
+        public var isKubernetesProjection: Bool {
+            let components = URL(fileURLWithPath: source).pathComponents
+            let plugins: Set<String> = ["kubernetes.io~configmap", "kubernetes.io~secret", "kubernetes.io~projected", "kubernetes.io~downward-api"]
+            guard readOnly, let index = components.lastIndex(of: "volumes"), index >= 2,
+                components[index - 2] == "pods", components.count == index + 3
+            else { return false }
+            return plugins.contains(components[index + 1])
+        }
+
         public var guestRealPath: String {
             MacOSGuestMountMapping.guestRealPath(forShareName: name)
         }

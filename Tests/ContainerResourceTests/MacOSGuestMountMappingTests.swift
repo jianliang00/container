@@ -20,6 +20,19 @@ import Testing
 @testable import ContainerResource
 
 struct MacOSGuestMountMappingTests {
+    @Test func recognizesOnlyReadOnlyKubeletProjectionRoots() {
+        func projected(_ path: String, readOnly: Bool = true) -> Bool {
+            MacOSGuestMountMapping.HostPathShare(name: "config", source: path, guestPath: "/opt/config", readOnly: readOnly).isKubernetesProjection
+        }
+        for plugin in ["configmap", "secret", "projected", "downward-api"] {
+            #expect(projected("/var/lib/kubelet/pods/uid/volumes/kubernetes.io~\(plugin)/config"))
+        }
+        #expect(!projected("/var/lib/kubelet/pods/uid/volumes/kubernetes.io~configmap/config", readOnly: false))
+        #expect(!projected("/var/lib/kubelet/pods/uid/volumes/kubernetes.io~configmap/config/nested"))
+        #expect(!projected("/var/lib/kubelet/pods/uid/volumes/kubernetes.io~empty-dir/data"))
+        #expect(!projected("/tmp/volumes/kubernetes.io~configmap/data"))
+    }
+
     @Test
     func defaultSeedPathUsesAutomountRoot() {
         #expect(MacOSGuestMountMapping.automountTag == "com.apple.virtio-fs.automount")

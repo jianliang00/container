@@ -77,6 +77,7 @@ enum MacOSGuestAgentCapabilities {
         MacOSGuestProcessProtocol.durableProcessV2,
         MacOSGuestProcessProtocol.durableProcessV3,
         MacOSGuestProcessProtocol.durableProcessV4,
+        "projectedVolumeV1",
     ]
 
     static func encodedJSON() throws -> Data {

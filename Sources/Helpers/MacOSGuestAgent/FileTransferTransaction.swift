@@ -32,7 +32,7 @@ final class GuestAgentFileTransferTransaction {
         guard !normalizedPath.path.isEmpty else {
             throw POSIXError(.EINVAL)
         }
-        if request.digest != nil, request.op != .writeFile {
+        if request.digest != nil, request.op != .writeFile, request.op != .projectedVolume {
             throw POSIXError(.EINVAL)
         }
 
@@ -40,9 +40,13 @@ final class GuestAgentFileTransferTransaction {
         self.finalURL = normalizedPath
 
         switch request.op {
-        case .writeFile:
-            let parent = normalizedPath.deletingLastPathComponent()
+        case .writeFile, .projectedVolume:
+            let parent =
+                request.op == .projectedVolume
+                ? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("container-projection-incoming")
+                : normalizedPath.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            if request.op == .projectedVolume { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path) }
 
             if !request.overwrite, FileManager.default.fileExists(atPath: normalizedPath.path) {
                 throw POSIXError(.EEXIST)
@@ -74,7 +78,7 @@ final class GuestAgentFileTransferTransaction {
     }
 
     func append(data: Data, offset: UInt64) throws {
-        guard request.op == .writeFile else {
+        guard request.op == .writeFile || request.op == .projectedVolume else {
             throw POSIXError(.EINVAL)
         }
         guard let fileHandle else {
@@ -92,6 +96,8 @@ final class GuestAgentFileTransferTransaction {
             switch request.op {
             case .writeFile:
                 try commitWriteFile(expectedDigest: digest)
+            case .projectedVolume:
+                try commitProjectedVolume(expectedDigest: digest)
             case .mkdir:
                 try commitDirectory()
             case .symlink:
@@ -142,6 +148,17 @@ final class GuestAgentFileTransferTransaction {
 
         self.tempURL = nil
         try applyMetadata(at: finalURL.path, followSymlink: true)
+    }
+
+    private func commitProjectedVolume(expectedDigest: String?) throws {
+        try fileHandle?.close()
+        fileHandle = nil
+        guard let tempURL else { throw POSIXError(.ENOENT) }
+        guard let expectedDigest, normalizedDigest(expectedDigest) == (try sha256(of: tempURL)) else { throw POSIXError(.EBADMSG) }
+        let snapshot = try JSONDecoder().decode(ProjectedVolumeSnapshot.self, from: Data(contentsOf: tempURL))
+        try GuestAgentProjectedVolume.publish(snapshot, at: finalURL)
+        try FileManager.default.removeItem(at: tempURL)
+        self.tempURL = nil
     }
 
     private func commitDirectory() throws {

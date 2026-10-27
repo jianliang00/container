@@ -17,6 +17,30 @@ Record artifact and binary digests, back up the installed runtime, and verify
 compatibility before restarting any idle-node service. Never infer installation
 or active-process identity solely from successful packaging.
 
+### Network helper replacement
+
+Inspect `podNetwork.vmnetDisconnectRecovery` and the live recovery status before
+stopping runtime services. With `rebootNode`, repeated helper probe failures or
+a network instance change in the same host boot session can fence the network
+and request a host reboot. A package without node configuration or installer
+scripts can still require reboot maintenance when its network helper changes.
+
+Replace a managed network helper only on a cordoned node with no active Pods,
+containers, VMs, or image preparation workers. Preserve completed Pods and
+stopped container records. Back up the installed files, verify the replacement
+package, install it while retaining the existing network helper generation,
+and complete an explicitly planned host reboot before admitting test VMs.
+Do not stop the network helper as an ordinary service restart while its recovery
+coordinator remains active. Do not clear recovery state, remove a fence, or
+disable recovery to avoid the reboot requirement.
+
+After reboot, verify the same node UID and cordon, all installed binary hashes,
+unchanged node configuration and image inventory, and recovery status bound to
+the current boot session. Require healthy recovery, no pending fence or reboot,
+and both CRI RuntimeReady and NetworkReady before taking fresh storage admission
+evidence. An interrupted installer session must be reconciled from installed
+files and service state before deciding whether another installation is needed.
+
 The installed CRI must advertise sandbox images as `pinned=true` in both
 ListImages and ImageStatus, and reject RemoveImage by tag, digest, and digest
 alias. Configure each validation base in the default sandbox profile or a

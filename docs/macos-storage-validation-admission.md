@@ -19,10 +19,11 @@ or active-process identity solely from successful packaging.
 
 The installed CRI must advertise sandbox images as `pinned=true` in both
 ListImages and ImageStatus, and reject RemoveImage by tag, digest, and digest
-alias. This behavior requires the sandbox role annotation
-`org.apple.container.macos.image.role=sandbox`, or an explicit runtime pin.
-Unannotated legacy images are not automatically protected. Installing only a
-candidate sidecar or guest agent does not update the installed CRI image service.
+alias. Configure each validation base in the default sandbox profile or a
+runtime handler before starting the validation. The installed CRI also protects
+images referenced by persisted, runtime, or preparing sandboxes. A sandbox role
+annotation alone does not pin an unused image. Installing only a candidate
+sidecar or guest agent does not update the installed CRI image service.
 Do not test RemoveImage against business images to discover whether protection
 is installed. Validate rejection with the gRPC regression fixtures first; a
 node-level negative test requires a separately owned disposable image.

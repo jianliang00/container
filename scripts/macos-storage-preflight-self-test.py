@@ -124,7 +124,9 @@ class StoragePreflightTests(unittest.TestCase):
 
     def test_missing_live_filesystem_fails_closed(self):
         for response in [None, {}, {"imageFilesystems": []}, {"imageFilesystems": [None]},
-                         {"imageFilesystems": [{"fsId": {}}]}]:
+                         {"imageFilesystems": [{"fsId": {}}]}, {"status": None},
+                         {"status": []}, {"status": {}}, {"status": {"imageFilesystems": []}},
+                         {"status": None, "imageFilesystems": [{"fsId": {"mountpoint": "/"}}]}]:
             with patch.object(gate, "cri_json", return_value=response), self.assertRaises(gate.Rejected):
                 gate.inspect(SimpleNamespace(storage_root=[]), 85)
 
@@ -132,14 +134,16 @@ class StoragePreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             image_root = Path(root, "images")
             image_root.mkdir()
-            responses = [{"imageFilesystems": [{"fsId": {"mountpoint": str(image_root)}}]},
-                         {"images": [{"id": DIGEST, "pinned": True}]}]
+            filesystem = {"imageFilesystems": [{"fsId": {"mountpoint": str(image_root)}}]}
             args = SimpleNamespace(storage_root=[root], peak_additional_bytes=10, margin_percent=5, require_pinned=[DIGEST])
             stats = SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=300)
-            with patch.object(gate, "cri_json", side_effect=responses), patch.object(gate.os, "statvfs", return_value=stats):
-                result = gate.inspect(args, 85)
-            self.assertEqual(len(result["filesystems"]), 2)
-            self.assertTrue(all(fs["projectedUsedBytes"] == 710 for fs in result["filesystems"]))
+            for response in [filesystem, {"status": filesystem}]:
+                responses = [response, {"images": [{"id": DIGEST, "pinned": True}]}]
+                with self.subTest(response=response), patch.object(gate, "cri_json", side_effect=responses), \
+                        patch.object(gate.os, "statvfs", return_value=stats):
+                    result = gate.inspect(args, 85)
+                self.assertEqual(len(result["filesystems"]), 2)
+                self.assertTrue(all(fs["projectedUsedBytes"] == 710 for fs in result["filesystems"]))
 
     def test_failed_command_still_checks_postflight(self):
         inspect = Mock(return_value={"images": []})

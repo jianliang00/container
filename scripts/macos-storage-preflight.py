@@ -123,6 +123,11 @@ def inspect(args, high):
     payload = cri_json(args, "imagefsinfo")
     if not isinstance(payload, dict):
         raise Rejected("CRI filesystem response must be an object")
+    # crictl imagefsinfo wraps the CRI response in a status object. Also accept
+    # the unwrapped response used by older clients.
+    payload = payload.get("status", payload)
+    if not isinstance(payload, dict):
+        raise Rejected("CRI filesystem status must be an object")
     filesystems = payload.get("imageFilesystems")
     if not isinstance(filesystems, list) or not filesystems:
         raise Rejected("CRI did not report its image filesystem")

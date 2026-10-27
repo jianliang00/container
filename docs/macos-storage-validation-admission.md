@@ -17,6 +17,21 @@ Record artifact and binary digests, back up the installed runtime, and verify
 compatibility before restarting any idle-node service. Never infer installation
 or active-process identity solely from successful packaging.
 
+The installed CRI must advertise sandbox images as `pinned=true` in both
+ListImages and ImageStatus, and reject RemoveImage by tag, digest, and digest
+alias. Configure each validation base in the default sandbox profile or a
+runtime handler before starting the validation. The installed CRI also protects
+images referenced by persisted, runtime, or preparing sandboxes. A sandbox role
+annotation alone does not pin an unused image. Installing only a candidate
+sidecar or guest agent does not update the installed CRI image service.
+Do not test RemoveImage against business images to discover whether protection
+is installed. Validate rejection with the gRPC regression fixtures first; a
+node-level negative test requires a separately owned disposable image.
+
+Rebuilds sharing a manifest hold the same process lock. Cache GC skips an entry
+while rebuilding, and waiting rebuilds reuse completed output. This protection
+does not cover arbitrary CLI deletions or unrelated host cleanup processes.
+
 ### Network helper replacement
 
 Inspect `podNetwork.vmnetDisconnectRecovery` and the live recovery status before
@@ -40,21 +55,6 @@ the current boot session. Require healthy recovery, no pending fence or reboot,
 and both CRI RuntimeReady and NetworkReady before taking fresh storage admission
 evidence. An interrupted installer session must be reconciled from installed
 files and service state before deciding whether another installation is needed.
-
-The installed CRI must advertise sandbox images as `pinned=true` in both
-ListImages and ImageStatus, and reject RemoveImage by tag, digest, and digest
-alias. Configure each validation base in the default sandbox profile or a
-runtime handler before starting the validation. The installed CRI also protects
-images referenced by persisted, runtime, or preparing sandboxes. A sandbox role
-annotation alone does not pin an unused image. Installing only a candidate
-sidecar or guest agent does not update the installed CRI image service.
-Do not test RemoveImage against business images to discover whether protection
-is installed. Validate rejection with the gRPC regression fixtures first; a
-node-level negative test requires a separately owned disposable image.
-
-Rebuilds sharing a manifest hold the same process lock. Cache GC skips an entry
-while rebuilding, and waiting rebuilds reuse completed output. This protection
-does not cover arbitrary CLI deletions or unrelated host cleanup processes.
 
 ## Admission and postflight
 

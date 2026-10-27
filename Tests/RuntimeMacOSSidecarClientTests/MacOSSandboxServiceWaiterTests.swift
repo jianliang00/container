@@ -1086,10 +1086,6 @@ struct MacOSSandboxServiceWaiterTests {
             )
         )
         await service.handleSidecarEvent(
-            MacOSSidecarEvent(event: .processExit, processID: "__workload__exec-logs", exitCode: 0)
-        )
-
-        await service.handleSidecarEvent(
             MacOSSidecarEvent(
                 event: .processStdout,
                 processID: "__workload__exec-logs",

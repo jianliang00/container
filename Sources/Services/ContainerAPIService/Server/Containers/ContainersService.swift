@@ -1477,18 +1477,33 @@ public actor ContainersService {
         // first try and get the container state so we get a nicer error message
         // (container foo not found) however.
         do {
-            _ = try _getContainerState(id: id)
+            let state = try _getContainerState(id: id)
             let path = self.containerRoot.appendingPathComponent(id)
-            let bundle = ContainerResource.Bundle(path: path)
-            return [
-                try FileHandle(forReadingFrom: bundle.containerLog),
-                try FileHandle(forReadingFrom: bundle.bootlog),
-            ]
+            return try Self.openContainerLogs(root: path, configuration: state.snapshot.configuration)
         } catch {
             throw ContainerizationError(
                 .internalError,
                 message: "failed to open container logs: \(error)"
             )
+        }
+    }
+
+    /// Read persisted logs without requiring a live runtime helper. macOS keeps
+    /// sandbox events separate from the init workload's combined stdout/stderr.
+    static func openContainerLogs(root: URL, configuration: ContainerConfiguration) throws -> [FileHandle] {
+        let bundle = ContainerResource.Bundle(path: root)
+        let workloadStdioURL = MacOSSandboxLayout(root: root).workloadStdioLogURL(id: configuration.id)
+        let stdioURL =
+            configuration.runtimeHandler == Self.macOSRuntimeName
+                && FileManager.default.fileExists(atPath: workloadStdioURL.path)
+            ? workloadStdioURL
+            : bundle.containerLog
+        let stdio = try FileHandle(forReadingFrom: stdioURL)
+        do {
+            return [stdio, try FileHandle(forReadingFrom: bundle.bootlog)]
+        } catch {
+            try? stdio.close()
+            throw error
         }
     }
 

@@ -165,6 +165,67 @@ struct ContainersServiceBootRecoveryTests {
         #expect(workload.exitedAt == nil)
     }
 
+    @Test
+    func macOSContainerLogsReadInitWorkloadOutputInsteadOfSandboxEvents() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        var configuration = try makeContainerConfiguration(id: "macos-logs")
+        configuration.runtimeHandler = "container-runtime-macos"
+        let layout = MacOSSandboxLayout(root: tempRoot)
+        try layout.prepareBaseDirectories()
+        try FileManager.default.createDirectory(at: layout.workloadDirectoryURL(id: configuration.id), withIntermediateDirectories: true)
+        let expected = Data("stdout marker\nstderr marker\n".utf8)
+        try expected.write(to: layout.workloadStdioLogURL(id: configuration.id))
+        try Data("sandbox diagnostic\n".utf8).write(to: layout.stdioLogURL)
+        try Data("boot diagnostic\n".utf8).write(to: layout.bootLogURL)
+
+        let handles = try ContainersService.openContainerLogs(root: tempRoot, configuration: configuration)
+        defer { handles.forEach { try? $0.close() } }
+
+        #expect(try handles[0].readToEnd() == expected)
+        #expect(try handles[1].readToEnd() == Data("boot diagnostic\n".utf8))
+    }
+
+    @Test
+    func linuxContainerLogsKeepUsingBundleStdioLog() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let configuration = try makeContainerConfiguration(id: "linux-logs")
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let bundle = ContainerResource.Bundle(path: tempRoot)
+        let expected = Data("linux stdio\n".utf8)
+        try expected.write(to: bundle.containerLog)
+        try Data("linux boot\n".utf8).write(to: bundle.bootlog)
+
+        let handles = try ContainersService.openContainerLogs(root: tempRoot, configuration: configuration)
+        defer { handles.forEach { try? $0.close() } }
+
+        #expect(try handles[0].readToEnd() == expected)
+        #expect(try handles[1].readToEnd() == Data("linux boot\n".utf8))
+    }
+
+    @Test
+    func legacyMacOSContainerLogsFallBackToBundleStdioLog() throws {
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        var configuration = try makeContainerConfiguration(id: "legacy-macos-logs")
+        configuration.runtimeHandler = "container-runtime-macos"
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let bundle = ContainerResource.Bundle(path: tempRoot)
+        let expected = Data("legacy sandbox log\n".utf8)
+        try expected.write(to: bundle.containerLog)
+        try Data("legacy boot\n".utf8).write(to: bundle.bootlog)
+
+        let handles = try ContainersService.openContainerLogs(root: tempRoot, configuration: configuration)
+        defer { handles.forEach { try? $0.close() } }
+
+        #expect(try handles[0].readToEnd() == expected)
+        #expect(try handles[1].readToEnd() == Data("legacy boot\n".utf8))
+    }
+
     private func makeContainerState(
         status: RuntimeStatus,
         networks: [ContainerResource.Attachment],

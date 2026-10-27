@@ -125,6 +125,11 @@ public struct MacOSSandboxLayout: Sendable, Equatable {
         workloadDirectoryURL(id: id).appendingPathComponent("stderr.log")
     }
 
+    /// Host path to the workload's stdout and stderr in event order.
+    public func workloadStdioLogURL(id: String) -> URL {
+        workloadDirectoryURL(id: id).appendingPathComponent("stdio.log")
+    }
+
     public func prepareBaseDirectories(fileManager: FileManager = .default) throws {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: stateRootURL, withIntermediateDirectories: true)

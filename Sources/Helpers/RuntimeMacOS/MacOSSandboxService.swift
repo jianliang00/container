@@ -181,6 +181,7 @@ public actor MacOSSandboxService {
         let stderrURL: URL
         let stdoutHandle: FileHandle
         let stderrHandle: FileHandle
+        let stdioHandle: FileHandle?
     }
 
     struct Session {
@@ -202,8 +203,10 @@ public actor MacOSSandboxService {
         let stderrLogURL: URL
         var stdoutLogHandle: FileHandle?
         var stderrLogHandle: FileHandle?
+        var stdioLogHandle: FileHandle?
         var stdoutLogWriter: ProcessLogWriter?
         var stderrLogWriter: ProcessLogWriter?
+        var stdioLogWriter: ProcessLogWriter?
         var attachments: [String: Attachment] = [:]
         var controllerAttachmentID: String?
         var started: Bool = false
@@ -2664,7 +2667,20 @@ extension MacOSSandboxService {
     private func openWorkloadLogFiles(processID: String) throws -> WorkloadLogFiles {
         let stdoutURL = workloadStdoutLogPath(for: processID)
         let stderrURL = workloadStderrLogPath(for: processID)
-        return try openLogFiles(stdoutURL: stdoutURL, stderrURL: stderrURL)
+        let files = try openLogFiles(stdoutURL: stdoutURL, stderrURL: stderrURL)
+        do {
+            return WorkloadLogFiles(
+                stdoutURL: files.stdoutURL,
+                stderrURL: files.stderrURL,
+                stdoutHandle: files.stdoutHandle,
+                stderrHandle: files.stderrHandle,
+                stdioHandle: try openAppendLogHandle(at: layout.workloadStdioLogURL(id: processID))
+            )
+        } catch {
+            try? files.stdoutHandle.close()
+            try? files.stderrHandle.close()
+            throw error
+        }
     }
 
     private func openLogFiles(stdoutURL: URL, stderrURL: URL) throws -> WorkloadLogFiles {
@@ -2672,7 +2688,8 @@ extension MacOSSandboxService {
             stdoutURL: stdoutURL,
             stderrURL: stderrURL,
             stdoutHandle: try openAppendLogHandle(at: stdoutURL),
-            stderrHandle: try openAppendLogHandle(at: stderrURL)
+            stderrHandle: try openAppendLogHandle(at: stderrURL),
+            stdioHandle: nil
         )
     }
 
@@ -3180,7 +3197,8 @@ extension MacOSSandboxService {
             stdoutLogURL: logs.stdoutURL,
             stderrLogURL: logs.stderrURL,
             stdoutLogHandle: logs.stdoutHandle,
-            stderrLogHandle: logs.stderrHandle
+            stderrLogHandle: logs.stderrHandle,
+            stdioLogHandle: logs.stdioHandle
         )
         let log = self.log
         session.stdoutLogWriter = try ProcessLogWriter(fileHandle: logs.stdoutHandle) { error in
@@ -3188,6 +3206,11 @@ extension MacOSSandboxService {
         }
         session.stderrLogWriter = try ProcessLogWriter(fileHandle: logs.stderrHandle) { error in
             log.error("process stderr log write failed", metadata: ["process_id": "\(processID)", "error": "\(error)"])
+        }
+        if let stdioHandle = logs.stdioHandle {
+            session.stdioLogWriter = try ProcessLogWriter(fileHandle: stdioHandle) { error in
+                log.error("process stdio log write failed", metadata: ["process_id": "\(processID)", "error": "\(error)"])
+            }
         }
         installPrimaryAttachmentIfNeeded(
             on: &session,
@@ -3303,8 +3326,10 @@ extension MacOSSandboxService {
         }
         session.stdoutLogWriter?.finish()
         session.stderrLogWriter?.finish()
+        session.stdioLogWriter?.finish()
         try? session.stdoutLogHandle?.close()
         try? session.stderrLogHandle?.close()
+        try? session.stdioLogHandle?.close()
     }
 
     private func handleAttachmentOutputFailure(
@@ -4032,6 +4057,7 @@ extension MacOSSandboxService {
                     attachment.stdoutPump?.enqueue(data)
                 }
                 session.stdoutLogWriter?.enqueue(data)
+                session.stdioLogWriter?.enqueue(data)
             }
         case .processStderr:
             if let data = event.data, !data.isEmpty {
@@ -4043,6 +4069,7 @@ extension MacOSSandboxService {
                     }
                 }
                 session.stderrLogWriter?.enqueue(data)
+                session.stdioLogWriter?.enqueue(data)
                 if let text = String(data: data, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                     !text.isEmpty
@@ -4060,7 +4087,11 @@ extension MacOSSandboxService {
             }
             let code = event.exitCode ?? 1
             let status = ExitStatus(exitCode: code, exitedAt: Date())
-            await ProcessLogWriter.finishAndWait([session.stdoutLogWriter, session.stderrLogWriter])
+            await ProcessLogWriter.finishAndWait([
+                session.stdoutLogWriter,
+                session.stderrLogWriter,
+                session.stdioLogWriter,
+            ])
             // Other actor calls can remove or complete the session while logs
             // finish. Re-read it rather than overwriting their changes.
             guard let current = sessions[processID], current.exitStatus == nil else { return }
@@ -4201,6 +4232,7 @@ extension MacOSSandboxService {
             session.exitStatus = ExitStatus(exitCode: exitCode, exitedAt: Date())
             try? session.stdoutLogHandle?.close()
             try? session.stderrLogHandle?.close()
+            try? session.stdioLogHandle?.close()
         }
         sessions[actualSessionID] = session
         if includeInSnapshots {

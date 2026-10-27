@@ -91,6 +91,7 @@ struct SandboxConfigurationTests {
         #expect(layout.readonlyInjectionManifestURL == stateRoot.appendingPathComponent("readonly/manifest.json"))
         #expect(layout.workloadConfigurationURL(id: "exec-1") == stateRoot.appendingPathComponent("workloads/exec-1/config.json"))
         #expect(layout.workloadStdoutLogURL(id: "exec-1") == stateRoot.appendingPathComponent("workloads/exec-1/stdout.log"))
+        #expect(layout.workloadStdioLogURL(id: "exec-1") == stateRoot.appendingPathComponent("workloads/exec-1/stdio.log"))
         #expect(FileManager.default.fileExists(atPath: layout.stateRootURL.path))
         #expect(FileManager.default.fileExists(atPath: layout.temporaryDirectoryURL.path))
         #expect(FileManager.default.fileExists(atPath: layout.readonlyInjectionDirectoryURL.path))

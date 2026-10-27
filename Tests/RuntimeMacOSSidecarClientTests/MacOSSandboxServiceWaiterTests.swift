@@ -1087,15 +1087,27 @@ struct MacOSSandboxServiceWaiterTests {
         )
 
         await service.handleSidecarEvent(
+            MacOSSidecarEvent(
+                event: .processStdout,
+                processID: "__workload__exec-logs",
+                data: Data("second stdout\n".utf8)
+            )
+        )
+        await service.handleSidecarEvent(
             MacOSSidecarEvent(event: .processExit, processID: "__workload__exec-logs", exitCode: 0)
         )
         let workload = try await service.testingInspectWorkload("exec-logs")
         let sandboxLog = try String(contentsOfFile: await service.testingContainerLogPath(), encoding: .utf8)
         let stdoutLog = try String(contentsOfFile: try #require(workload.stdoutLogPath), encoding: .utf8)
         let stderrLog = try String(contentsOfFile: try #require(workload.stderrLogPath), encoding: .utf8)
+        let stdioLog = try String(
+            contentsOf: MacOSSandboxLayout(root: tempRoot).workloadStdioLogURL(id: "exec-logs"),
+            encoding: .utf8
+        )
 
         #expect(stdoutLog.contains("hello stdout"))
         #expect(stderrLog.contains("hello stderr"))
+        #expect(stdioLog == "hello stdout\nhello stderr\nsecond stdout\n")
         #expect(!sandboxLog.contains("hello stdout"))
         #expect(!sandboxLog.contains("hello stderr"))
     }
@@ -1137,7 +1149,12 @@ struct MacOSSandboxServiceWaiterTests {
         )
         let workload = try await service.testingInspectWorkload("exec-replay-dedup")
         let stdout = try String(contentsOfFile: try #require(workload.stdoutLogPath), encoding: .utf8)
+        let stdio = try String(
+            contentsOf: MacOSSandboxLayout(root: tempRoot).workloadStdioLogURL(id: "exec-replay-dedup"),
+            encoding: .utf8
+        )
         #expect(stdout == "first\nsecond\n")
+        #expect(stdio == "first\nsecond\n")
     }
 
     @Test

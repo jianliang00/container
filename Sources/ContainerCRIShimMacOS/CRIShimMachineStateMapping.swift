@@ -451,7 +451,8 @@ private func createPrivateDirectoryHierarchy(_ url: URL, ownerUID: UInt32?) thro
         guard mkdir(current.path, mode_t(S_IRWXU)) == 0 || errno == EEXIST else {
             throw CRIShimError.internalError("failed to create managed directory \(current.path): \(posixMessage())")
         }
-        try securePrivateDirectory(current, ownerUID: ownerUID)
+        let directoryOwner = current.path == url.path ? ownerUID : UInt32(geteuid())
+        try securePrivateDirectory(current, ownerUID: directoryOwner)
     }
 }
 
@@ -480,9 +481,9 @@ private func repairPrivateDirectoryAncestors(_ url: URL, ownerUID: UInt32?) thro
             return
         }
 
-        // A previous recursive creation can leave a root-owned 0700 chain
-        // above the runtime-owned leaf. Adopt only an unambiguous private
-        // single-child chain; never broaden access to a shared ancestor.
+        // Preserve the CRI-owned parent hierarchy required at startup. Grant
+        // traversal only on a private single-child chain; runtime-owned leaves
+        // remain 0700 and their parents never become writable by the runtime.
         let entries: [String]
         do {
             entries = try FileManager.default.contentsOfDirectory(atPath: current.path)
@@ -500,13 +501,13 @@ private func repairPrivateDirectoryAncestors(_ url: URL, ownerUID: UInt32?) thro
                 "managed directory ancestor is not traversable by runtime owner \(ownerUID): \(current.path)"
             )
         }
-        try securePrivateDirectory(current, ownerUID: ownerUID)
+        try securePrivateDirectory(current, ownerUID: UInt32(geteuid()), permissions: 0o711)
         child = current
         current.deleteLastPathComponent()
     }
 }
 
-private func securePrivateDirectory(_ url: URL, ownerUID: UInt32?) throws {
+private func securePrivateDirectory(_ url: URL, ownerUID: UInt32?, permissions: mode_t = mode_t(S_IRWXU)) throws {
     var value = stat()
     let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
     guard fd >= 0 else {
@@ -533,7 +534,7 @@ private func securePrivateDirectory(_ url: URL, ownerUID: UInt32?) throws {
             }
         }
     }
-    guard fchmod(fd, mode_t(S_IRWXU)) == 0 else {
+    guard fchmod(fd, permissions) == 0 else {
         throw CRIShimError.internalError("failed to set private permissions on \(url.path): \(posixMessage())")
     }
 }

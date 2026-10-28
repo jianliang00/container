@@ -2372,11 +2372,19 @@ struct CRIShimRuntimeServerTests {
         runSandboxRequest.config.metadata.name = "pull-pod"
         runSandboxRequest.config.metadata.attempt = 1
         if requestTimesOut {
+            let firstRequest = client.makeRunPodSandboxCall(
+                runSandboxRequest,
+                callOptions: CallOptions(timeLimit: .timeout(.seconds(10)))
+            )
+            defer { firstRequest.cancel() }
+            // Observe the in-flight download before checking deadline behavior.
+            // Dispatch and connection setup can exceed a short RPC deadline
+            // while the rest of this suite is exercising its event loops.
+            try await waitForAsyncCondition(description: "cold sandbox image pull entered", timeout: .seconds(5)) {
+                await imageManager.pulledReferences == [sandboxImageReference]
+            }
             do {
-                _ = try await client.runPodSandbox(
-                    runSandboxRequest,
-                    callOptions: CallOptions(timeLimit: .timeout(.milliseconds(500)))
-                )
+                _ = try await firstRequest.response
                 Issue.record("cold download should outlive the first CRI request")
             } catch let error as any GRPCStatusTransformable {
                 #expect(error.makeGRPCStatus().code == .deadlineExceeded)

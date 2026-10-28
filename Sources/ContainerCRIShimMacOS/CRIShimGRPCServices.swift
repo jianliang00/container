@@ -185,6 +185,11 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 response.info[CRIShimRestoreInfoKey.capabilities] = makeCRIStatusJSONString(
                     CRIShimRestoreCapabilities()
                 )
+                if let policy = config.machineState, policy.enabled == true,
+                    let retention = try? CRIShimMachineStateRetentionSnapshot(policy: policy)
+                {
+                    response.info[CRIShimMachineStateRetentionSnapshot.infoKey] = makeCRIStatusJSONString(retention)
+                }
             }
             return response
         }

@@ -24,6 +24,35 @@ import Testing
 @testable import ContainerCRIShimMacOS
 
 struct CRIShimMachineStateLeaseTests {
+    @Test
+    func retentionInventoryKeepsBindingUntilDurableLeaseRelease() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        #expect(try CRIShimMachineStateRetentionSnapshot(policy: fixture.policy).retainedPersistenceIDs.isEmpty)
+        let acquisition = try acquireLease(
+            fixture: fixture, persistenceID: "workload-retained", sandboxID: "sandbox-retained",
+            podUID: "pod-retained", storageGeneration: 8
+        )
+        // No CRI metadata is required for this reserved lease to retain its binding.
+        #expect(try CRIShimMachineStateRetentionSnapshot(policy: fixture.policy).retainedPersistenceIDs == ["workload-retained"])
+        try CRIShimMachineStateLeaseStore.release(policy: fixture.policy, expected: acquisition.lease)
+        #expect(try CRIShimMachineStateRetentionSnapshot(policy: fixture.policy).retainedPersistenceIDs.isEmpty)
+    }
+
+    @Test
+    func corruptLeaseCannotProduceAnEmptyRetentionProof() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try acquireLease(
+            fixture: fixture, persistenceID: "workload-corrupt", sandboxID: "sandbox-corrupt",
+            podUID: "pod-corrupt", storageGeneration: 8
+        )
+        try Data("invalid".utf8).write(to: URL(fileURLWithPath: fixture.policy.normalizedLeaseRoot).appendingPathComponent("workload-corrupt.json"))
+        #expect(throws: (any Error).self) {
+            try CRIShimMachineStateRetentionSnapshot(policy: fixture.policy)
+        }
+    }
+
     @Test(arguments: [false, true])
     func reservedLeaseRecoversCrashBeforeLifecycleBarrierPublication(removeLock: Bool) throws {
         let fixture = try makeFixture()

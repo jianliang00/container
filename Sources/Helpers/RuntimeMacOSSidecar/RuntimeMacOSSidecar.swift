@@ -1355,6 +1355,14 @@ actor MacOSSidecarService {
                 }
                 return
             case .error:
+                let inventory = try? await guestNetworkInventory(agentPort: agentPort)
+                log.error(
+                    "guest network configuration failed",
+                    metadata: [
+                        "requested_macs": "\(request.interfaces.map(\.macAddress).joined(separator: ","))",
+                        "observed_interfaces": "\(inventory ?? "unavailable")",
+                    ]
+                )
                 throw ContainerizationError(
                     .internalError,
                     message: "guest network configuration failed: \(frame.message ?? "unknown error")"
@@ -1367,6 +1375,46 @@ actor MacOSSidecarService {
             case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
                 .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd,
                 .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
+                continue
+            }
+        }
+    }
+
+    // Capture MAC-to-BSD-name mappings while the failed VM is still available.
+    // Keep the original startup failure and omit guest IPs, routes, and DNS.
+    private func guestNetworkInventory(agentPort: UInt32) async throws -> String {
+        let fd = try await connectVsock(port: agentPort)
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+        let deadline = sidecarReadDeadline(timeoutSeconds: 3)
+        try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 1)
+        let id = "network-inventory-\(UUID().uuidString.lowercased())"
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame.exec(
+                id: id, executable: "/sbin/ifconfig", arguments: ["-a"],
+                environment: [], rootDirectory: nil, workingDirectory: "/",
+                terminal: false, user: nil, uid: 0, gid: 0, supplementalGroups: []
+            ), fd: fd
+        )
+        var output = Data()
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(
+                SidecarGuestAgentFrame.self, fd: fd,
+                timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+            )
+            switch frame.type {
+            case .stdout:
+                if let data = frame.data {
+                    output.append(data.prefix(max(0, 16 * 1024 - output.count)))
+                }
+            case .exit:
+                guard frame.exitCode == 0 else { throw POSIXError(.EIO) }
+                return MacOSGuestNetworkBootstrap.interfaceInventory(from: String(decoding: output, as: UTF8.self))
+            case .error:
+                throw POSIXError(.EIO)
+            default:
                 continue
             }
         }
@@ -1501,6 +1549,12 @@ actor MacOSSidecarService {
             try MacOSGuestNetworkLeaseStore.remove(from: rootURL)
         }
         vmConfiguration.networkDevices = preparedNetwork.devices
+        log.info(
+            "prepared VM network devices",
+            metadata: [
+                "mac_addresses": "\(preparedNetwork.devices.compactMap { ($0 as? VZVirtioNetworkDeviceConfiguration)?.macAddress.description }.joined(separator: ","))"
+            ]
+        )
         vmConfiguration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         vmConfiguration.directorySharingDevices = try createDirectorySharingDevices(containerConfig: containerConfig)
         vmConfiguration.graphicsDevices = [createGraphicsDevice()]

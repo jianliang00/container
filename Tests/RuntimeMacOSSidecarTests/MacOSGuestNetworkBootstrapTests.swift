@@ -26,6 +26,19 @@ import Testing
 
 struct MacOSGuestNetworkBootstrapTests {
     @Test
+    func failureInventoryIncludesOnlyMACAndInterfaceName() {
+        let output = """
+            en0: flags=8863<UP,BROADCAST> mtu 1500
+            \tether F2:43:8C:68:07:12
+            \tinet 10.2.3.4 netmask 0xffffff00
+            en7: flags=8863<UP,BROADCAST> mtu 1500
+            \tether 02:42:ac:11:00:02
+            \tinet6 fd42::1 prefixlen 64
+            """
+        #expect(MacOSGuestNetworkBootstrap.interfaceInventory(from: output) == "en0=f2:43:8c:68:07:12,en7=02:42:ac:11:00:02")
+    }
+
+    @Test
     func vmnetSharedBuildsGuestNetworkRequest() throws {
         var config = makeConfiguration(backend: .vmnetShared)
         config.dns = .init(

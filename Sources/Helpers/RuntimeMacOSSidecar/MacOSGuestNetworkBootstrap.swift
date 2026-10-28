@@ -20,6 +20,22 @@ import Foundation
 import RuntimeMacOSSidecarShared
 
 enum MacOSGuestNetworkBootstrap {
+    static func interfaceInventory(from ifconfigOutput: String) -> String {
+        var currentInterface: String?
+        var interfaces: [String] = []
+        for rawLine in ifconfigOutput.prefix(16 * 1024).split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if !rawLine.hasPrefix("\t") && !rawLine.hasPrefix(" ") && line.contains(": flags=") {
+                currentInterface = String(line.split(separator: ":", maxSplits: 1)[0])
+            } else if let currentInterface, line.hasPrefix("ether "),
+                let mac = line.split(whereSeparator: \.isWhitespace).dropFirst().first
+            {
+                interfaces.append("\(currentInterface)=\(mac.lowercased())")
+            }
+        }
+        return interfaces.joined(separator: ",")
+    }
+
     static func makeRequest(
         containerConfig: ContainerConfiguration,
         lease: MacOSGuestNetworkLease?

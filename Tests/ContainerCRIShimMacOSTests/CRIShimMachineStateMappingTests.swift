@@ -170,6 +170,48 @@ struct CRIShimMachineStateMappingTests {
         }
     }
 
+    @Test(.enabled(if: geteuid() == 0, "Requires distinct CRI and runtime UIDs"), arguments: [false, true])
+    func mappingKeepsParentsTrustedForRestart(preexistingPrivateParents: Bool) throws {
+        let root = URL(fileURLWithPath: "/private/tmp/cms-owner-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o711])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storageParent = root.appendingPathComponent("storage", isDirectory: true)
+        let controlParent = root.appendingPathComponent("control", isDirectory: true)
+        let runtimeUID: UInt32 = 65534
+        let policy = MachineStateConfig(
+            enabled: true,
+            storageRoot: storageParent.appendingPathComponent("v1", isDirectory: true).path,
+            controlSocketRoot: controlParent.appendingPathComponent("v1", isDirectory: true).path,
+            runtimeOwnerUID: runtimeUID,
+            leaseRoot: root.appendingPathComponent("leases/v1", isDirectory: true).path
+        )
+        if preexistingPrivateParents {
+            for parent in [storageParent, controlParent] {
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            }
+            try CRIShimMachineStateDirectories.prepare(policy: policy)
+        }
+        let mapping = try makeCRIShimMachineStateMapping(
+            annotations: [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "retained-workload",
+                CRIShimMachineStateAnnotation.storageGeneration: "1",
+            ],
+            nodeConfig: policy
+        )
+        for parent in [storageParent, controlParent] {
+            #expect(try owner(parent) == 0)
+            #expect(try permissions(parent) == 0o711)
+        }
+        let state = URL(fileURLWithPath: try #require(mapping.machineState?.storageDirectory))
+        #expect(try owner(state) == runtimeUID)
+        #expect(try permissions(state) == 0o700)
+        let marker = state.appendingPathComponent("saved-state-marker")
+        try Data("preserved".utf8).write(to: marker)
+        try CRIShimMachineStateDirectories.prepare(policy: policy)
+        #expect(try Data(contentsOf: marker) == Data("preserved".utf8))
+    }
+
     @Test
     func rejectsInvalidEnablementAndMapsRestoreGenerations() throws {
         let roots = try MachineStateTestRoots()

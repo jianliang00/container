@@ -35,7 +35,7 @@ struct MacOSGuestNetworkBootstrapTests {
             \tether 02:42:ac:11:00:02
             \tinet6 fd42::1 prefixlen 64
             """
-        #expect(MacOSGuestNetworkBootstrap.interfaceInventory(from: output) == "en0=f2:43:8c:68:07:12,en7=02:42:ac:11:00:02")
+        #expect(MacOSGuestNetworkReadiness.inventorySummary(from: output) == "en0=f2:43:8c:68:07:12,en7=02:42:ac:11:00:02")
     }
 
     @Test

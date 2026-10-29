@@ -307,7 +307,9 @@ public final class MacOSSidecarLifecycleLock: @unchecked Sendable {
     }
 
     private static func openDirectoryWithoutSymbolicLinks(_ path: String) throws -> Int32 {
-        let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        // CRI-owned 0711 ancestors grant traversal without directory listing.
+        // Read access is required only on the private leaf that we fsync.
+        let flags = O_SEARCH | O_NOFOLLOW | O_CLOEXEC
         var descriptor = open("/", flags)
         guard descriptor >= 0 else { throw posixError() }
         for component in path.split(separator: "/") {
@@ -317,7 +319,11 @@ public final class MacOSSidecarLifecycleLock: @unchecked Sendable {
             guard child >= 0 else { throw posixError(savedErrno) }
             descriptor = child
         }
-        return descriptor
+        let directoryFD = openat(descriptor, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        let savedErrno = errno
+        Darwin.close(descriptor)
+        guard directoryFD >= 0 else { throw posixError(savedErrno) }
+        return directoryFD
     }
 
     private static func requireStableLockPath(

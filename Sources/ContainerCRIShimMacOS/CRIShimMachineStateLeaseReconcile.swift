@@ -102,6 +102,11 @@ func validateMachineStateLeaseCoverage(
         guard let runtimeMetadata else {
             continue
         }
+        guard snapshot.configuration?.id == runtimeMetadata.runtimeSandboxID else {
+            throw CRIShimError.unavailable(
+                "machine-state runtime identity does not match its durable lease metadata"
+            )
+        }
         metadataBySandboxID[runtimeMetadata.id] = runtimeMetadata
     }
 

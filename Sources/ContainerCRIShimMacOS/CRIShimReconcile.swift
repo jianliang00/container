@@ -622,7 +622,13 @@ private struct CRIShimReconcileExecutionContext {
 
 extension SandboxSnapshot {
     var criShimSandboxID: String? {
-        configuration?.id.trimmed.nonEmpty
+        if let configuration,
+            let metadata = decodeCRIShimCoreSandboxMetadataLabel(configuration.labels)
+        {
+            guard metadata.runtimeSandboxID == configuration.id else { return nil }
+            return metadata.id.trimmed.nonEmpty
+        }
+        return configuration?.id.trimmed.nonEmpty
             ?? containers.first?.id.trimmed.nonEmpty
     }
 }

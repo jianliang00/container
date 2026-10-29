@@ -495,7 +495,7 @@ jobs:
             /usr/bin/swift build --skip-update -c release
 
           test_filter='^('
-          test_filter+='ContainerCRIShimMacOSTests\.(CRIShimConfigTests|CRIShimPodNetworkStateTests|CRIShimMachineStateMappingTests|CRIShimMachineStateDirectoriesTests|CRIShimMachineStateLeaseTests)'
+          test_filter+='ContainerCRIShimMacOSTests\.(CRIShimConfigTests|CRIShimPodNetworkStateTests|CRIShimMachineStateMappingTests|CRIShimMachineStateDirectoriesTests|CRIShimMachineStateLeaseTests|CRIShimReconcileTests)'
           test_filter+='|ContainerCRIShimMacOSTests\.CRIShimCoreMappingTests/embedsSandboxMetadataInCoreLabelsForStartupReconcile\(\)'
           test_filter+='|ContainerCRIShimMacOSTests\.CRIShimRuntimeServerTests/(grpcServerServesVersionOnUnixDomainSocket|updateRuntimeConfigIgnoresPodCIDRsWhenPodNetworkingIsDisabled)\(\)'
           test_filter+='|ContainerK8sFlannelVXLANMacOSTests\.'

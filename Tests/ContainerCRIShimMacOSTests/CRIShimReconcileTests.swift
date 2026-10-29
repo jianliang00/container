@@ -22,6 +22,46 @@ import Testing
 @testable import ContainerResource
 
 struct CRIShimReconcileTests {
+    @Test(arguments: [false, true], [false, true])
+    func stableRuntimeIdentityKeepsCanonicalMetadataAndLeaseAcrossReconcile(mismatchedRuntimeIdentity: Bool, persistedMetadata: Bool) throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CRIShimMetadataStore(rootURL: root)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let metadata = CRIShimSandboxMetadata(
+            id: "cri-sandbox", runtimeSandboxID: "persistent-runtime", podUID: "pod-1",
+            runtimeHandler: "macos", sandboxImage: "image:v1",
+            annotations: [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "persistent-runtime",
+                CRIShimMachineStateAnnotation.storageGeneration: "1",
+            ], state: .stopped, createdAt: now, updatedAt: now
+        )
+        if persistedMetadata { try store.upsertSandbox(metadata) }
+        let configuration = try makeSandboxConfiguration(
+            id: mismatchedRuntimeIdentity ? "unrelated-runtime" : metadata.runtimeSandboxID,
+            labels: [CRIShimCoreLabel.sandboxMetadata: makeCRIShimCoreMetadataLabel(metadata)]
+        )
+        let snapshot = SandboxSnapshot(configuration: configuration, status: .stopped, networks: [], containers: [], workloads: [])
+        let lease = CRIShimMachineStateLease(
+            persistenceID: metadata.runtimeSandboxID, podUID: "pod-1", sandboxID: metadata.id,
+            runtimeSandboxID: metadata.runtimeSandboxID, storageGeneration: 1
+        )
+        if mismatchedRuntimeIdentity {
+            #expect(snapshot.criShimSandboxID == nil)
+            #expect(throws: CRIShimError.self) {
+                try validateMachineStateLeaseCoverage(metadataStore: store, runtimeSnapshots: [snapshot], leases: [lease])
+            }
+            return
+        }
+        for _ in 0..<2 {
+            try validateMachineStateLeaseCoverage(metadataStore: store, runtimeSnapshots: [snapshot], leases: [lease])
+            try CRIShimReconcileExecutor().execute(metadataStore: store, runtimeSnapshots: .init(sandboxes: [snapshot]), now: now)
+            #expect(try store.listSandboxes().map(\.id) == [metadata.id])
+            #expect(try store.sandbox(id: metadata.id)?.runtimeSandboxID == metadata.runtimeSandboxID)
+        }
+    }
+
     @Test
     func planIncludesCreateUpdateDeleteAndReleaseOperations() {
         let storedSandbox = CRIShimSandboxMetadata(

@@ -119,6 +119,8 @@ After failed bootstrap, a typed runtime `notFound` error, including one wrapped 
 
 External machine-state GC must confirm both an absent CRI sandbox and an absent durable lease before removing a persistence directory. With machine-state support enabled, verbose CRI `Status` reports `container.macos.machine-state.retention.v1` as `{"schemaVersion":1,"retainedPersistenceIDs":["workload-example"]}`. The list includes every durable lease, including reserved and deletion-confirmed leases, until release completes. An empty list is an explicit `[]`; the info key is omitted if the complete lease inventory cannot be read. An omitted, malformed, or unsupported response does not authorize GC. The directory's lifecycle lock and attestation must remain available throughout CRI removal.
 
+Startup reconciliation reads the kubelet-facing sandbox id from the runtime's embedded CRI metadata. The runtime id remains the stable persistence id. A runtime snapshot whose actual id disagrees with its embedded runtime binding is rejected before lease reconciliation. Repeated reconciliation preserves the original CRI id and does not create an additional record named after the persistence id.
+
 The generation annotation does not create, clone, revoke, or fence an NBD export. A trusted storage controller must make generation `N` immutable after the save point, create one writable successor, and expose that successor through the same configured Unix-socket path before restore. The CRI lease prevents conflicting sandbox ownership on the node, while the storage service remains responsible for preventing stale writers.
 
 ## CRI Pod recreation and durable workload adoption

@@ -1213,12 +1213,12 @@ actor MacOSSidecarService {
         try await presentGUIWindowOnMain(vm: vm, containerID: config.id)
     }
 
-    func connectVsock(port: UInt32) async throws -> Int32 {
+    func connectVsock(port: UInt32, timeoutSeconds: TimeInterval = 3) async throws -> Int32 {
         guard let vm else {
             throw ContainerizationError(.invalidState, message: "vm is not running")
         }
         log.info("sidecar connectVsock begin", metadata: ["port": "\(port)"])
-        let connection = try await connectSocketOnMainWithTimeout(vm, toPort: port, timeoutSeconds: 3)
+        let connection = try await connectSocketOnMainWithTimeout(vm, toPort: port, timeoutSeconds: timeoutSeconds)
         let duplicated = dup(connection.fileDescriptor)
         guard duplicated >= 0 else {
             throw makePOSIXError(errno)
@@ -1322,6 +1322,20 @@ actor MacOSSidecarService {
             return
         }
 
+        try await MacOSGuestNetworkReadiness.wait(
+            expectedMACAddresses: request.interfaces.map(\.macAddress),
+            observe: { [self] timeout in
+                try await validateNetworkAttachments()
+                return try await guestNetworkInventory(agentPort: agentPort, timeoutSeconds: timeout)
+            },
+            onNotReady: { [log] attempt, inventory in
+                log.info(
+                    "waiting for guest network interfaces",
+                    metadata: ["attempt": "\(attempt)", "observed_interfaces": "\(inventory)"]
+                )
+            }
+        )
+
         let fd = try await connectVsock(port: agentPort)
         defer {
             _ = Darwin.shutdown(fd, SHUT_RDWR)
@@ -1360,7 +1374,7 @@ actor MacOSSidecarService {
                     "guest network configuration failed",
                     metadata: [
                         "requested_macs": "\(request.interfaces.map(\.macAddress).joined(separator: ","))",
-                        "observed_interfaces": "\(inventory ?? "unavailable")",
+                        "observed_interfaces": "\(inventory.map(MacOSGuestNetworkReadiness.inventorySummary(from:)) ?? "unavailable")",
                     ]
                 )
                 throw ContainerizationError(
@@ -1380,16 +1394,17 @@ actor MacOSSidecarService {
         }
     }
 
-    // Capture MAC-to-BSD-name mappings while the failed VM is still available.
-    // Keep the original startup failure and omit guest IPs, routes, and DNS.
-    private func guestNetworkInventory(agentPort: UInt32) async throws -> String {
-        let fd = try await connectVsock(port: agentPort)
+    // Read-only inventory for interface readiness and startup diagnostics.
+    // Callers log only the bounded MAC-to-BSD-name summary.
+    private func guestNetworkInventory(agentPort: UInt32, timeoutSeconds: TimeInterval = 3) async throws -> String {
+        let deadline = sidecarReadDeadline(timeoutSeconds: timeoutSeconds)
+        let fd = try await connectVsock(port: agentPort, timeoutSeconds: min(3, timeoutSeconds))
         defer {
             _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)
         }
-        let deadline = sidecarReadDeadline(timeoutSeconds: 3)
-        try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: 1)
+        let remainingSeconds = Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000
+        try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: min(1, remainingSeconds))
         let id = "network-inventory-\(UUID().uuidString.lowercased())"
         try MacOSSidecarSocketIO.writeJSONFrame(
             SidecarGuestAgentFrame.exec(
@@ -1411,7 +1426,7 @@ actor MacOSSidecarService {
                 }
             case .exit:
                 guard frame.exitCode == 0 else { throw POSIXError(.EIO) }
-                return MacOSGuestNetworkBootstrap.interfaceInventory(from: String(decoding: output, as: UTF8.self))
+                return String(decoding: output, as: UTF8.self)
             case .error:
                 throw POSIXError(.EIO)
             default:

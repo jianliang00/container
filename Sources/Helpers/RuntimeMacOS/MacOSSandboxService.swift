@@ -2766,6 +2766,14 @@ extension MacOSSandboxService {
     }
 
     private func ensureTemplateArtifacts(for config: ContainerConfiguration, progressUpdate: ProgressUpdateHandler? = nil) async throws {
+        if let state = config.macosGuest?.machineState, let digest = state.diskBundleDigest {
+            guard config.macosGuest?.blockDevices.isEmpty == true, state.restoreStateID == nil, let generation = state.storageGeneration else {
+                throw ContainerizationError(.invalidArgument, message: "disk bundle import requires local disk and cold restore")
+            }
+            try MacOSLocalDiskBundle.install(
+                storageDirectory: state.storageDirectory, persistenceID: state.persistenceID, generation: generation, digest: digest, destination: root)
+            return
+        }
         let fm = FileManager.default
         if fm.fileExists(atPath: hardwareModelPath().path),
             fm.fileExists(atPath: auxiliaryStoragePath().path),

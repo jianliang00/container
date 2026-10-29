@@ -35,6 +35,8 @@ public enum CRIShimMachineStateAnnotation {
     public static let prefix = "io.container.runtime.macos.machine-state.v1/"
     public static let enabled = prefix + "enabled"
     public static let persistenceID = prefix + "persistence-id"
+    public static let storageKind = prefix + "storage-kind"
+    public static let diskBundleDigest = prefix + "disk-bundle-digest"
     public static let restoreStateID = prefix + "restore-state-id"
     public static let restoreStateGeneration = prefix + "restore-state-generation"
     public static let restorePairID = prefix + "restore-pair-id"
@@ -45,6 +47,8 @@ public enum CRIShimMachineStateAnnotation {
 
     static let companionKeys = [
         persistenceID,
+        storageKind,
+        diskBundleDigest,
         restoreStateID,
         restoreStateGeneration,
         restorePairID,
@@ -161,6 +165,19 @@ func makeCRIShimMachineStateMapping(
         throw CRIShimError.unsupported("machine-state annotations are disabled by the node runtime configuration")
     }
     let values = try decodeEnabledMachineStateAnnotationValues(annotations)
+    let storageKind = annotations[CRIShimMachineStateAnnotation.storageKind]
+    let diskBundleDigest = annotations[CRIShimMachineStateAnnotation.diskBundleDigest]
+    if storageKind == "local-disk" {
+        guard nodeConfig.localDiskEnabled,
+            annotations[CRIShimMachineStateAnnotation.blockDevices] == nil,
+            values.restoreStateID == nil
+        else { throw CRIShimError.unsupported("local disk requires node admission, no external devices, and cold restore") }
+        if let diskBundleDigest {
+            _ = try requireCanonicalSHA256(diskBundleDigest, annotation: CRIShimMachineStateAnnotation.diskBundleDigest)
+        }
+    } else if storageKind != nil && storageKind != "nbd" || diskBundleDigest != nil {
+        throw CRIShimError.invalidArgument("unsupported storage kind or misplaced disk bundle digest")
+    }
     let blockDevices = try decodeBlockDevices(
         annotations[CRIShimMachineStateAnnotation.blockDevices],
         allowedRoots: nodeConfig.nbdSocketAllowedRoots
@@ -208,7 +225,8 @@ func makeCRIShimMachineStateMapping(
             storageGeneration: values.storageGeneration,
             pairID: values.restorePairID,
             adoptionManifestDigest: values.restoreManifestDigest,
-            restoreRequestID: values.restoreRequestID
+            restoreRequestID: values.restoreRequestID,
+            diskBundleDigest: diskBundleDigest
         ),
         blockDevices: blockDevices
     )

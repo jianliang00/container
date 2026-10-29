@@ -267,6 +267,9 @@ public struct ContainerConfiguration: Sendable, Codable {
             public var adoptionManifestDigest: String?
             /// Stable control-plane identity for one restore attempt.
             public var restoreRequestID: String?
+            /// Digest of a cold disk bundle under the trusted storage directory.
+            /// It is independent of host-bound machine-state restoration.
+            public var diskBundleDigest: String?
             public var sidecarLifecycleBarrier: SidecarLifecycleBarrier?
 
             public init(
@@ -280,6 +283,7 @@ public struct ContainerConfiguration: Sendable, Codable {
                 pairID: String? = nil,
                 adoptionManifestDigest: String? = nil,
                 restoreRequestID: String? = nil,
+                diskBundleDigest: String? = nil,
                 sidecarLifecycleBarrier: SidecarLifecycleBarrier? = nil
             ) {
                 self.protocolVersion = protocolVersion
@@ -292,6 +296,7 @@ public struct ContainerConfiguration: Sendable, Codable {
                 self.pairID = pairID
                 self.adoptionManifestDigest = adoptionManifestDigest
                 self.restoreRequestID = restoreRequestID
+                self.diskBundleDigest = diskBundleDigest
                 self.sidecarLifecycleBarrier = sidecarLifecycleBarrier
             }
         }

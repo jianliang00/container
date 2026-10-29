@@ -590,13 +590,43 @@ extension MacOSSandboxService {
     func stopSandbox(stopOptions: ContainerStopOptions) async throws {
         let stopSignalName = stopOptions.signal ?? "SIGTERM"
         let stopSignal = try Signal(stopSignalName, from: Signal.platform).rawValue
-        let waitTimeout = Self.stopWaitTimeout(for: stopOptions)
         projectedVolumeTask?.cancel()
         projectedVolumeTask = nil
         projectedVolumeGenerations.removeAll()
         sandboxState = .stopping
         writeContainerLog(Data(("stop requested signal=\(stopSignalName) timeout=\(stopOptions.timeoutInSeconds)\n").utf8))
 
+        var lifecycleState: MacOSVMRuntimeState?
+        #if arch(arm64)
+        if let handle = sidecarHandle {
+            do {
+                lifecycleState = try handle.client.capabilities(timeoutSeconds: 1).lifecycleState
+            } catch {
+                writeContainerLog(Data(("stop: sidecar lifecycle unavailable; retaining guest shutdown: \(describeError(error))\n").utf8))
+            }
+        }
+        #endif
+        try await MacOSSandboxStopSequence.run(lifecycleState: lifecycleState) {
+            await self.stopGuestWorkloadsIfNeeded(stopOptions: stopOptions, signal: stopSignal)
+        } stopVirtualMachine: {
+            await self.stopSocketForwarders()
+            #if arch(arm64)
+            self.writeContainerLog(Data(("stop: sidecar shutdown start\n").utf8))
+            try await self.stopAndQuitSidecarIfPresent()
+            self.writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
+            #endif
+        }
+
+        await releaseSandboxNetworkStateIfNeeded()
+
+        closeAllSessions()
+        writeContainerLog(Data(("stop: sessions closed\n").utf8))
+        sandboxState = .stopped(0)
+    }
+
+    private func stopGuestWorkloadsIfNeeded(stopOptions: ContainerStopOptions, signal stopSignal: Int32) async {
+        let stopSignalName = stopOptions.signal ?? "SIGTERM"
+        let waitTimeout = Self.stopWaitTimeout(for: stopOptions)
         if let configuration {
             await stopAttachedWorkloadsIfNeeded(containerConfig: configuration, stopOptions: stopOptions)
         }
@@ -619,20 +649,6 @@ extension MacOSSandboxService {
         if let configuration {
             await cleanupGuestWorkloadsIfNeeded(containerConfig: configuration)
         }
-
-        await stopSocketForwarders()
-
-        #if arch(arm64)
-        writeContainerLog(Data(("stop: sidecar shutdown start\n").utf8))
-        try await stopAndQuitSidecarIfPresent()
-        writeContainerLog(Data(("stop: sidecar shutdown done\n").utf8))
-        #endif
-
-        await releaseSandboxNetworkStateIfNeeded()
-
-        closeAllSessions()
-        writeContainerLog(Data(("stop: sessions closed\n").utf8))
-        sandboxState = .stopped(0)
     }
 
     private func stopAttachedWorkloadsIfNeeded(

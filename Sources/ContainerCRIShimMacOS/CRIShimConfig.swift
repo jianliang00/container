@@ -187,6 +187,7 @@ public struct CRIShimConfig: Codable, Equatable, Sendable {
 
 public struct MachineStateConfig: Codable, Equatable, Sendable {
     public var enabled: Bool
+    public var localDiskEnabled: Bool
     public var storageRoot: String?
     public var controlSocketRoot: String?
     public var runtimeOwnerUID: UInt32?
@@ -196,6 +197,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
 
     public init(
         enabled: Bool = false,
+        localDiskEnabled: Bool = false,
         storageRoot: String? = nil,
         controlSocketRoot: String? = nil,
         runtimeOwnerUID: UInt32? = nil,
@@ -203,6 +205,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         leaseRoot: String? = nil
     ) {
         self.enabled = enabled
+        self.localDiskEnabled = localDiskEnabled
         self.storageRoot = storageRoot
         self.controlSocketRoot = controlSocketRoot
         self.runtimeOwnerUID = runtimeOwnerUID
@@ -212,6 +215,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case enabled
+        case localDiskEnabled
         case storageRoot
         case controlSocketRoot
         case runtimeOwnerUID
@@ -222,6 +226,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        localDiskEnabled = try container.decodeIfPresent(Bool.self, forKey: .localDiskEnabled) ?? false
         storageRoot = try container.decodeIfPresent(String.self, forKey: .storageRoot)
         controlSocketRoot = try container.decodeIfPresent(String.self, forKey: .controlSocketRoot)
         runtimeOwnerUID = try container.decodeIfPresent(UInt32.self, forKey: .runtimeOwnerUID)

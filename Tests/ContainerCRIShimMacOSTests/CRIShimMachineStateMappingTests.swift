@@ -475,3 +475,31 @@ private func owner(_ url: URL) throws -> uid_t {
     }
     return value.st_uid
 }
+
+extension CRIShimMachineStateMappingTests {
+    @Test
+    func localDiskRequiresNodePolicyAndRestoresWithoutNBD() throws {
+        let roots = try MachineStateTestRoots()
+        defer { roots.remove() }
+        var policy = roots.config
+        var annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "stable-local",
+            CRIShimMachineStateAnnotation.storageGeneration: "1",
+            CRIShimMachineStateAnnotation.storageKind: "local-disk",
+        ]
+        #expect(throws: (any Error).self) { try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy) }
+        policy.localDiskEnabled = true
+        let initial = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy)
+        #expect(initial.blockDevices.isEmpty)
+        #expect(initial.machineState?.diskBundleDigest == nil)
+        annotations[CRIShimMachineStateAnnotation.storageGeneration] = "2"
+        #expect(try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy).machineState?.diskBundleDigest == nil)
+        annotations[CRIShimMachineStateAnnotation.diskBundleDigest] = String(repeating: "a", count: 64)
+        let restored = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy)
+        #expect(restored.blockDevices.isEmpty)
+        #expect(restored.machineState?.diskBundleDigest == String(repeating: "a", count: 64))
+        annotations[CRIShimMachineStateAnnotation.blockDevices] = "[]"
+        #expect(throws: (any Error).self) { try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy) }
+    }
+}

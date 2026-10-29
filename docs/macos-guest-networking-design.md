@@ -31,7 +31,7 @@ Guest networking is applied by a dedicated guest network manager. It:
 
 The guest-agent control channel can become ready before macOS registers the virtual Ethernet interface. Before sending the network configuration request, the sidecar polls a read-only `/sbin/ifconfig -a` inventory until every requested lease MAC is present. This wait has a 30-second monotonic deadline and a one-second polling interval. Each probe has at most ten seconds, capped by the remaining overall time and shared across connection, agent readiness, and output reads. Cancellation and attachment or transport failures abort startup immediately; only a successful inventory missing a requested MAC is retried. Timeout diagnostics contain bounded interface names and MAC addresses.
 
-The configuration request is sent once after this readiness check. Network setup does not run through the generic exec path.
+The configuration request is sent once after this readiness check. Network setup does not run through the generic exec path. The guest then waits for the complete effective configuration, including the primary IPv6 route, against a 30-second monotonic deadline. Published addresses alone do not complete this wait. A timeout preserves the last state mismatch and rolls the preferences back through the existing transaction.
 
 ## 3. Lease Model
 

@@ -589,52 +589,68 @@ struct GuestSystemNetworkConfigurator {
             throw makeSystemConfigurationError("create dynamic store session")
         }
 
-        var lastMismatch = "active network state was not published"
-        for attempt in 0..<50 {
-            do {
-                let globalIPv6Properties = dynamicStoreDictionary(
+        return try waitForPublishedState {
+            let globalIPv6Properties = dynamicStoreDictionary(
+                store: store,
+                key: SCDynamicStoreKeyCreateNetworkGlobalEntity(
+                    nil,
+                    kSCDynamicStoreDomainState,
+                    kSCEntNetIPv6
+                ) as String
+            )
+            let appliedInterfaces = try configured.map {
+                let ipv4 = try readEffectiveIPv4($0, store: store)
+                let ipv6 = try readEffectiveIPv6(
+                    $0,
                     store: store,
-                    key: SCDynamicStoreKeyCreateNetworkGlobalEntity(
-                        nil,
-                        kSCDynamicStoreDomainState,
-                        kSCEntNetIPv6
-                    ) as String
+                    globalProperties: globalIPv6Properties
                 )
-                let appliedInterfaces = try configured.map {
-                    let ipv4 = try readEffectiveIPv4($0, store: store)
-                    let ipv6 = try readEffectiveIPv6(
-                        $0,
-                        store: store,
-                        globalProperties: globalIPv6Properties
-                    )
-                    return AppliedInterface(
-                        networkID: ipv4.networkID,
-                        interfaceName: ipv4.interfaceName,
-                        macAddress: ipv4.macAddress,
-                        ipv4Address: ipv4.ipv4Address,
-                        ipv6Address: ipv6
-                    )
+                return AppliedInterface(
+                    networkID: ipv4.networkID,
+                    interfaceName: ipv4.interfaceName,
+                    macAddress: ipv4.macAddress,
+                    ipv4Address: ipv4.ipv4Address,
+                    ipv6Address: ipv6
+                )
+            }
+            let effectiveDNS: MacOSGuestEffectiveDNSConfiguration?
+            if let dns {
+                effectiveDNS = try readEffectiveDNS(
+                    configured[primaryInterfaceIndex],
+                    requested: dns,
+                    store: store
+                )
+            } else {
+                effectiveDNS = nil
+            }
+            return Result(interfaces: appliedInterfaces, effectiveDNS: effectiveDNS)
+        }
+    }
+
+    // Address and default-route publication converge asynchronously during guest boot.
+    static func waitForPublishedState<Value>(
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        observe: () throws -> Value
+    ) throws -> Value {
+        let deadline = now() + 30
+        var lastMismatch = "active network state was not published"
+        while now() < deadline {
+            do {
+                let value = try observe()
+                guard now() < deadline else {
+                    lastMismatch = "active network state became ready after the convergence deadline"
+                    break
                 }
-                let effectiveDNS: MacOSGuestEffectiveDNSConfiguration?
-                if let dns {
-                    effectiveDNS = try readEffectiveDNS(
-                        configured[primaryInterfaceIndex],
-                        requested: dns,
-                        store: store
-                    )
-                } else {
-                    effectiveDNS = nil
-                }
-                return Result(interfaces: appliedInterfaces, effectiveDNS: effectiveDNS)
+                return value
             } catch {
                 lastMismatch = error.localizedDescription
             }
-
-            if attempt < 49 {
-                Thread.sleep(forTimeInterval: 0.1)
-            }
+            let remaining = deadline - now()
+            guard remaining > 0 else { break }
+            sleep(min(0.1, remaining))
         }
-        throw makeError("active SystemConfiguration state did not match the request: \(lastMismatch)")
+        throw makeError("active SystemConfiguration state did not match the request before the convergence deadline: \(lastMismatch)")
     }
 
     private static func readEffectiveIPv4(

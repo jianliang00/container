@@ -1404,7 +1404,8 @@ actor MacOSSidecarService {
             Darwin.close(fd)
         }
         let remainingSeconds = Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000
-        try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: min(1, remainingSeconds))
+        // Handshake and command output share the caller's bounded observation budget.
+        try waitForGuestAgentReadyWithTimeout(fd: fd, timeoutSeconds: remainingSeconds)
         let id = "network-inventory-\(UUID().uuidString.lowercased())"
         try MacOSSidecarSocketIO.writeJSONFrame(
             SidecarGuestAgentFrame.exec(

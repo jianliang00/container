@@ -50,6 +50,7 @@ public enum MacOSLocalDiskBundle {
                 guard lstat(file.path, &value) == 0, value.st_size > 0 else { throw CocoaError(.fileReadCorruptFile) }
                 try validateFile(file, size: value.st_size)
             }
+            try validateActiveIdentity(storage: URL(fileURLWithPath: storage), runtime: destination)
             return
         }
         let source = URL(fileURLWithPath: storage).appendingPathComponent("disks/g\(generation)")
@@ -66,6 +67,8 @@ public enum MacOSLocalDiskBundle {
         } else {
             guard fileNames.allSatisfy({ !fm.fileExists(atPath: destination.appendingPathComponent($0).path) }) else { throw CocoaError(.fileWriteFileExists) }
             try Data(digest.utf8).write(to: pending, options: .withoutOverwriting)
+            try synchronize(pending)
+            try synchronize(destination, directory: true)
         }
         for entry in manifest.files {
             let from = source.appendingPathComponent(entry.name)
@@ -73,12 +76,73 @@ public enum MacOSLocalDiskBundle {
             let to = destination.appendingPathComponent(entry.name)
             if fm.fileExists(atPath: to.path) {
                 try validateFile(to, size: entry.size)
+                try synchronize(to)
                 continue
             }
             guard clonefile(from.path, to.path, UInt32(CLONE_NOFOLLOW)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             try validateFile(to, size: entry.size)
+            try synchronize(to)
         }
+        try installActiveIdentity(storage: URL(fileURLWithPath: storage), runtime: destination)
         guard rename(pending.path, marker.path) == 0 else { throw POSIXError(.EIO) }
+        try synchronize(destination, directory: true)
+    }
+
+    // The sidecar uses the persistent Identity directory, rather than the
+    // runtime's template firmware. Include it in the import transaction before
+    // publishing the marker. A committed import must never rewind live firmware.
+    private static func installActiveIdentity(storage: URL, runtime: URL) throws {
+        try validateDirectory(storage)
+        let identity = storage.appendingPathComponent("Identity")
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: identity.path) {
+            try fm.createDirectory(at: identity, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try synchronize(storage, directory: true)
+        }
+        try validateDirectory(identity)
+        let machine = identity.appendingPathComponent("MachineIdentifier.bin")
+        let auxiliary = identity.appendingPathComponent("AuxiliaryStorage")
+        let incomingMachine = try readRegular(runtime.appendingPathComponent("MachineIdentifier.bin"), limit: 4096)
+        if fm.fileExists(atPath: machine.path) {
+            guard try readRegular(machine, limit: 4096) == incomingMachine else { throw CocoaError(.fileReadCorruptFile) }
+        } else if fm.fileExists(atPath: auxiliary.path) {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        if fm.fileExists(atPath: auxiliary.path) { try validateNonemptyFile(auxiliary) }
+        for name in ["MachineIdentifier.bin", "AuxiliaryStorage"] {
+            let staged = identity.appendingPathComponent(".import-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: staged) }
+            let from = runtime.appendingPathComponent(name)
+            try validateNonemptyFile(from)
+            guard clonefile(from.path, staged.path, UInt32(CLONE_NOFOLLOW)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            guard chmod(staged.path, 0o600) == 0 else { throw POSIXError(.EIO) }
+            try synchronize(staged)
+            guard rename(staged.path, identity.appendingPathComponent(name).path) == 0 else { throw POSIXError(.EIO) }
+            try synchronize(identity, directory: true)
+        }
+    }
+
+    private static func validateActiveIdentity(storage: URL, runtime: URL) throws {
+        let identity = storage.appendingPathComponent("Identity")
+        try validateDirectory(identity)
+        guard
+            try readRegular(identity.appendingPathComponent("MachineIdentifier.bin"), limit: 4096)
+                == readRegular(runtime.appendingPathComponent("MachineIdentifier.bin"), limit: 4096)
+        else { throw CocoaError(.fileReadCorruptFile) }
+        try validateNonemptyFile(identity.appendingPathComponent("AuxiliaryStorage"))
+    }
+
+    private static func validateNonemptyFile(_ url: URL) throws {
+        var value = stat()
+        guard lstat(url.path, &value) == 0, value.st_size > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        try validateFile(url, size: value.st_size)
+    }
+
+    private static func synchronize(_ url: URL, directory: Bool = false) throws {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (directory ? O_DIRECTORY : 0))
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
     private static func validateDirectory(_ url: URL) throws {

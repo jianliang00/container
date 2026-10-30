@@ -9,7 +9,7 @@ policy. The latter defaults to false. Keep node support enabled until all VMs
 using it have retired; admission rollout belongs to the storage controller.
 
 Verbose CRI Status advertises `container.macos.local-disk.v1` with
-`schemaVersion=1`, `bundleImport=true` and the effective `enabled` policy. A host
+`schemaVersion=1`, `bundleImport=true`, `activeIdentityImport=true` and the effective `enabled` policy. A host
 controller must check this capability before advertising local restore support.
 
 The existing annotation prefix is
@@ -63,6 +63,16 @@ writable by other users. The controller verifies download integrity and publishe
 the completed bundle atomically before providing its manifest digest.
 
 On APFS the runtime clones all four files into its separate VM directory. It
+also installs `MachineIdentifier.bin` and `AuxiliaryStorage` into
+`<machineState.storageRoot>/<persistence-id>/Identity/`, the active platform
+state used by the sidecar. A snapshot producer must capture these two active
+files, rather than the VM image's template firmware. An existing active machine
+identifier must match the incoming bundle; an unrelated identity is rejected.
+The import marker is committed only after both directories are synchronized.
+After that commit, restarts validate the active identity without replacing its
+firmware, preserving changes made by the running VM.
+
+The runtime
 does not overwrite an unrelated existing disk. An import marker binds retries
 to the same digest. Once startup and the controller's readiness checks succeed,
 the controller may remove the staging bundle. Subsequent runtime restarts use

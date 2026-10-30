@@ -34,5 +34,6 @@ struct CRIShimLocalDiskCapabilities: Encodable {
     static let infoKey = "container.macos.local-disk.v1"
     let schemaVersion = 1
     let bundleImport = true
+    let activeIdentityImport = true
     let enabled: Bool
 }

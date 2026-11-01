@@ -53,6 +53,7 @@ enum MacOSGuestClockBootstrap {
                     SidecarGuestAgentFrame.self, fd: fd,
                     timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
                 )
+                try Task.checkCancellation()
                 switch frame.type {
                 case .clockResult:
                     guard let data = frame.data else {

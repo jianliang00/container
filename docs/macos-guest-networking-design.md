@@ -57,7 +57,10 @@ The configuration request is sent once after this readiness check. Network setup
 When cold bootstrap fails and the runtime confirms sidecar and network cleanup,
 it reports the terminal `bootstrapFailed` sandbox failure. CRI persists the
 sandbox as NotReady before returning the startup error, so kubelet recreates the
-sandbox and obtains a new lifecycle binding. It does not retry a consumed
+sandbox and obtains a new lifecycle binding. When kubelet calls RunPodSandbox
+after StopPodSandbox, before its garbage collector sends RemovePodSandbox, CRI
+retires the confirmed failed binding through the normal removal and exit-proof
+checks before allocating its replacement. It does not retry a consumed
 machine-state launch attestation. An uncertain startup or failed cleanup retains
 its sidecar and persistence lease for reconciliation; a stopped snapshot without
 an explicit terminal failure does not trigger recreation.

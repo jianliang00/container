@@ -356,6 +356,32 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 podUID: request.config.metadata.uid,
                 proposedSandboxID: proposedSandboxID
             )
+            if !acquisition.created,
+                try metadataStore.sandbox(id: acquisition.lease.sandboxID)?.state == .stopped
+            {
+                let stoppedLease = acquisition.lease
+                let retired = try await withSandboxLifecycleLock(id: stoppedLease.sandboxID) {
+                    guard let current = try metadataStore.sandbox(id: stoppedLease.sandboxID),
+                        current.state == .stopped
+                    else { return false }
+                    // Kubelet can Run again after Stop, before its GC sends
+                    // Remove. Retire the stopped binding through the same exit
+                    // proof and cleanup checks as an explicit Remove request.
+                    _ = try await removePodSandboxResources(
+                        metadata: current, lease: stoppedLease, policy: policy, leaseIsActive: true
+                    )
+                    return true
+                }
+                if retired {
+                    acquisition = try CRIShimMachineStateLeaseStore.acquire(
+                        policy: policy, machineState: resolved,
+                        podUID: request.config.metadata.uid, proposedSandboxID: proposedSandboxID
+                    )
+                    guard acquisition.created else {
+                        throw CRIShimError.unavailable("machine-state binding changed while recreating a stopped sandbox")
+                    }
+                }
+            }
             if !acquisition.created, try metadataStore.sandbox(id: acquisition.lease.sandboxID) == nil {
                 let runtimeSnapshots = try await runtimeManager.listSandboxSnapshots()
                 let reconciliation = try CRIShimMachineStateLeaseReconciler().reconcile(

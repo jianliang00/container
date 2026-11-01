@@ -2073,8 +2073,15 @@ struct CRIShimRuntimeServerTests {
         await shutdown(group)
     }
 
-    @Test(arguments: [false, true])
-    func machineStateBindingLeaseMakesACKLossRetryIdempotentAndRefusesTakeover(bootstrapFails: Bool) async throws {
+    enum BootstrapRecoveryScenario: CaseIterable {
+        case indeterminateStart
+        case explicitRemoval
+        case kubeletRetry
+    }
+
+    @Test(arguments: BootstrapRecoveryScenario.allCases)
+    func machineStateBindingLeaseMakesACKLossRetryIdempotentAndRefusesTakeover(scenario: BootstrapRecoveryScenario) async throws {
+        let bootstrapFails = scenario != .indeterminateStart
         let socketPath = "/tmp/cri-shim-machine-lease-\(UUID().uuidString.prefix(8)).sock"
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("cri-ms-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -2247,6 +2254,50 @@ struct CRIShimRuntimeServerTests {
         #expect(try metadataStore.sandbox(id: first.podSandboxID)?.state == (bootstrapFails ? .stopped : .ready))
 
         runtimeManager.startSandboxHook = nil
+        if scenario == .kubeletRetry {
+            // Kubelet stops a failed sandbox before creating its replacement;
+            // RemovePodSandbox may arrive later through garbage collection.
+            var stop = Runtime_V1_StopPodSandboxRequest()
+            stop.podSandboxID = first.podSandboxID
+            _ = try await client.stopPodSandbox(stop)
+            let removalsBeforeRetry = runtimeManager.removeSandboxCalls.count
+            do {
+                _ = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 2))
+                Issue.record("a different owner retired the failed binding")
+            } catch let status as GRPCStatus {
+                #expect(status.code == .unavailable)
+            }
+            #expect(runtimeManager.removeSandboxCalls.count == removalsBeforeRetry)
+            runtimeManager.removeMachineStateSidecarError = CRIShimError.unavailable("sidecar cleanup is blocked")
+            do {
+                _ = try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1))
+                Issue.record("recreation bypassed blocked sidecar cleanup")
+            } catch let status as GRPCStatus {
+                #expect(status.code == .unavailable)
+            }
+            #expect(try CRIShimMachineStateLeaseStore.load(policy: machineStatePolicy, persistenceID: "workload-42") == launchStartedLease)
+            runtimeManager.removeMachineStateSidecarError = nil
+            let recreated = try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1))
+            let recreatedNonce = try #require(runtimeManager.createSandboxCalls.last?.macosGuest?.machineState?.sidecarLifecycleBarrier?.bootNonce)
+            #expect(recreated.podSandboxID != first.podSandboxID)
+            #expect(recreatedNonce != configuredBarrier.bootNonce)
+            #expect(try metadataStore.sandbox(id: first.podSandboxID) == nil)
+            #expect(try metadataStore.listContainers().allSatisfy { $0.sandboxID != first.podSandboxID })
+            #expect(try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1)).podSandboxID == recreated.podSandboxID)
+            var remove = Runtime_V1_RemovePodSandboxRequest()
+            remove.podSandboxID = first.podSandboxID
+            let removalsAfterRecreation = runtimeManager.removeSandboxCalls.count
+            _ = try await client.stopPodSandbox(stop)
+            _ = try await client.removePodSandbox(remove)
+            #expect(runtimeManager.removeSandboxCalls.count == removalsAfterRecreation)
+            remove.podSandboxID = recreated.podSandboxID
+            _ = try await client.removePodSandbox(remove)
+            try await channel.close().get()
+            await server.stop()
+            try await serverTask.value
+            await shutdown(group)
+            return
+        }
         if !bootstrapFails {
             _ = try await client.startContainer(startContainer)
         }

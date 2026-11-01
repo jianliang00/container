@@ -207,6 +207,38 @@ struct GuestAgentTCPConnectTests {
     }
 
     @Test
+    func initializationFailureClosesDescriptorAndIdentifiesSocketOption() throws {
+        let sourceFD = Darwin.open("/dev/null", O_RDONLY)
+        guard sourceFD >= 0 else { throw POSIXError.fromErrno() }
+        defer { closeTestFD(sourceFD) }
+        let ownedFD = Darwin.fcntl(sourceFD, F_DUPFD_CLOEXEC, try guestAgentHighDescriptorMinimum())
+        guard ownedFD >= 0 else { throw POSIXError.fromErrno() }
+        do {
+            _ = try AgentConnection(fd: ownedFD)
+            Issue.record("non-socket descriptor was accepted")
+        } catch {
+            let error = error as NSError
+            #expect(error.domain == NSPOSIXErrorDomain && error.code == Int(ENOTSOCK))
+            #expect(error.localizedDescription.contains("setsockopt(SO_NOSIGPIPE)"))
+        }
+        #expect(fcntl(ownedFD, F_GETFD) == -1 && errno == EBADF)
+    }
+
+    @Test
+    func failedClientInitializationDoesNotPreventNextReadyConnection() throws {
+        let invalidFD = Darwin.open("/dev/null", O_RDONLY)
+        guard invalidFD >= 0 else { throw POSIXError.fromErrno() }
+        serveGuestAgentConnection(fd: invalidFD)
+
+        var pair = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else { throw POSIXError.fromErrno() }
+        defer { closeTestFD(pair[1]) }
+        serveGuestAgentConnection(fd: pair[0])
+        let ready = try MacOSSidecarSocketIO.readJSONFrame(GuestAgentFrame.self, fd: pair[1], timeoutMilliseconds: 1_000)
+        #expect(ready.type == .ready)
+    }
+
+    @Test
     func listenerAndAcceptedSocketsAreCloseOnExec() throws {
         let listenFD = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard listenFD >= 0 else {

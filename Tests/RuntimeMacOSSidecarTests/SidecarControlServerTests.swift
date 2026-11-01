@@ -1285,6 +1285,84 @@ struct SidecarControlServerTests {
     }
 
     @Test
+    func processStartRecoversReadyStreamWithoutReplayingExec() throws {
+        let first = try makeSocketPair()
+        let second = try makeSocketPair()
+        let pending = LockedValue([first.server, second.server])
+        let calls = LockedValue(0)
+        let server = makeServer(processConnectionFactory: { _ in
+            calls.withLock { $0 += 1 }
+            return try #require(pending.withLock { values in values.isEmpty ? nil : values.removeFirst() })
+        })
+        let done = DispatchSemaphore(value: 0)
+        let guestError = LockedValue<Error?>(nil)
+        defer {
+            server._testCloseAllProcessSessions()
+            for fd in pending.withLock({ $0 }) { closeIfValid(fd) }
+            closeIfValid(first.peer)
+            closeIfValid(second.peer)
+        }
+        Thread.detachNewThread {
+            defer { done.signal() }
+            do {
+                try MacOSSidecarSocketIO.writeJSONFrame(
+                    SidecarGuestAgentFrame(type: .ready, capabilities: [MacOSGuestProcessProtocol.boundedProcessStartV1]), fd: second.peer
+                )
+                let request = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: second.peer, timeoutMilliseconds: 10_000)
+                #expect(request.type == .exec && request.id == "ready-retry")
+                // Retaining ready capabilities must also retain the extended ACK budget.
+                usleep(3_200_000)
+                try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.ack(id: "ready-retry"), fd: second.peer)
+            } catch { guestError.withLock { $0 = error } }
+        }
+        try server._testStartProcessStream(processID: "ready-retry", exec: .init(executable: "/bin/true"))
+        #expect(done.wait(timeout: .now() + 2) == .success)
+        if let error = guestError.withLock({ $0 }) { throw error }
+        #expect(calls.withLock { $0 } == 2)
+        try expectEOF(fd: first.peer)
+        #expect(server._testHasProcessSession(processID: "ready-retry"))
+    }
+
+    @Test
+    func processStartAckTimeoutDoesNotReconnectOrReplayExec() throws {
+        let pair = try makeSocketPair()
+        let pending = LockedValue<Int32?>(pair.server)
+        let calls = LockedValue(0)
+        let server = makeServer(processConnectionFactory: { _ in
+            calls.withLock { $0 += 1 }
+            return try #require(
+                pending.withLock { value in
+                    defer { value = nil }
+                    return value
+                })
+        })
+        let done = DispatchSemaphore(value: 0)
+        let guestError = LockedValue<Error?>(nil)
+        defer {
+            server._testCloseAllProcessSessions()
+            closeIfValid(pending.withLock { $0 })
+            closeIfValid(pair.peer)
+        }
+        Thread.detachNewThread {
+            defer { done.signal() }
+            do {
+                try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame(type: .ready), fd: pair.peer)
+                let request = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: pair.peer, timeoutMilliseconds: 5_000)
+                #expect(request.type == .exec && request.id == "unknown-ack")
+            } catch { guestError.withLock { $0 = error } }
+        }
+        do {
+            try server._testStartProcessStream(processID: "unknown-ack", exec: .init(executable: "/bin/true"))
+            Issue.record("missing ACK did not fail process start")
+        } catch let error as ContainerizationError { #expect(error.code == .timeout) }
+        #expect(done.wait(timeout: .now() + 2) == .success)
+        if let error = guestError.withLock({ $0 }) { throw error }
+        #expect(calls.withLock { $0 } == 1)
+        #expect(!server._testHasProcessSession(processID: "unknown-ack"))
+        try expectEOF(fd: pair.peer)
+    }
+
+    @Test
     func disconnectedStartupClientDoesNotLeaveLegacySession() throws {
         signal(SIGPIPE, SIG_IGN)
         let pair = try makeSocketPair()

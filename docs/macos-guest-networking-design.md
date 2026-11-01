@@ -32,6 +32,17 @@ attempt has at most three seconds. Guest protocol errors and cancellation abort
 startup. Once the clock request is sent, a missing or invalid result fails startup
 without reconnecting or replaying the request.
 
+Process startup uses the same ready-stream recovery before sending any process
+inspection or exec frame. Connection, ready, request write and ACK share its
+existing ten-second startup budget, including admission wait. Ready capabilities
+are preserved when selecting the ACK budget. Failed streams close before another
+opens. This readiness recovery ends before exec is sent; ACK failures return
+through the existing startup failure handling without replaying the request.
+
+The guest listener isolates accepted-client initialization failures. Socket setup
+errors close only that client's descriptors and identify the failing system call
+in the log; the listener and other process sessions remain active.
+
 Guest networking is applied by a dedicated guest network manager. It:
 
 - matches the NIC by MAC

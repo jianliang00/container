@@ -155,15 +155,25 @@ private final class VsockListener {
             let peerCID = clientAddr.svm_cid
             logAgentInfo("accepted vsock client fd=\(clientFD) cid=\(peerCID) port=\(peerPort)")
 
-            let connection = try AgentConnection(fd: clientFD)
-            Thread.detachNewThread {
-                do {
-                    try connection.run()
-                } catch {
-                    logAgentError("connection loop failed: \(describeError(error))")
-                }
+            serveGuestAgentConnection(fd: clientFD)
+        }
+    }
+}
+
+/// Takes ownership of the accepted descriptor, including initialization failures.
+/// A failed client must not terminate the listener or its other process sessions.
+func serveGuestAgentConnection(fd: Int32) {
+    do {
+        let connection = try AgentConnection(fd: fd)
+        Thread.detachNewThread {
+            do {
+                try connection.run()
+            } catch {
+                logAgentError("connection fd=\(fd): loop failed: \(describeError(error))")
             }
         }
+    } catch {
+        logAgentError("connection fd=\(fd): initialization failed: \(describeError(error))")
     }
 }
 
@@ -202,6 +212,11 @@ final class AgentConnection: @unchecked Sendable {
         socketWriteTimeout: TimeInterval = 5,
         processStartTraceSink: @escaping @Sendable (String) -> Void = { logAgentInfo($0) }
     ) throws {
+        var ownsFD = true
+        defer { if ownsFD { closeIfValid(fd) } }
+        // Configure the writer before handing the descriptor to FileHandle so
+        // exactly one owner closes it when socket setup fails.
+        let writer = try SocketFrameWriter(fd: fd, timeout: socketWriteTimeout)
         self.fd = fd
         self.processStartTraceSink = processStartTraceSink
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
@@ -211,9 +226,10 @@ final class AgentConnection: @unchecked Sendable {
             relayPeerStateCheckInterval.isFinite
             ? max(relayPeerStateCheckInterval, 0.01)
             : 1
-        self.writer = try SocketFrameWriter(fd: fd, timeout: socketWriteTimeout)
+        self.writer = writer
         self.outputBufferCapacity = max(outputBufferCapacity, 1)
         self.outputDrainTimeout = max(outputDrainTimeout, 0)
+        ownsFD = false
     }
 
     func run() throws {

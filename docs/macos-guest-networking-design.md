@@ -54,6 +54,14 @@ The guest-agent control channel can become ready before macOS registers the virt
 
 The configuration request is sent once after this readiness check. Network setup does not run through the generic exec path. The guest then waits for the complete effective configuration, including the primary IPv6 route, against a 30-second monotonic deadline. Published addresses alone do not complete this wait. A timeout preserves the last state mismatch and rolls the preferences back through the existing transaction.
 
+When cold bootstrap fails and the runtime confirms sidecar and network cleanup,
+it reports the terminal `bootstrapFailed` sandbox failure. CRI persists the
+sandbox as NotReady before returning the startup error, so kubelet recreates the
+sandbox and obtains a new lifecycle binding. It does not retry a consumed
+machine-state launch attestation. An uncertain startup or failed cleanup retains
+its sidecar and persistence lease for reconciliation; a stopped snapshot without
+an explicit terminal failure does not trigger recreation.
+
 ## 3. Lease Model
 
 Network state is owned by host control-plane code in helper or apiserver-managed components.

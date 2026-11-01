@@ -23,14 +23,14 @@ import Testing
 @testable import ContainerCRIShimMacOS
 
 struct CRIShimStatusMappingTests {
-    @Test
-    func networkInvalidationForcesReadySandboxToStopped() {
+    @Test(arguments: [SandboxFailureReason.networkInvalidated, .bootstrapFailed])
+    func terminalFailureForcesReadySandboxToStopped(reason: SandboxFailureReason) {
         let metadata = readyMetadata()
         let snapshot = SandboxSnapshot(
             status: .stopped,
             networks: [],
             containers: [],
-            failureReason: .networkInvalidated
+            failureReason: reason
         )
 
         #expect(metadata.applying(sandboxSnapshot: snapshot).state == .stopped)

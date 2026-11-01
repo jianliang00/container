@@ -1049,6 +1049,7 @@ extension MacOSSandboxService {
             }
             await releaseSandboxNetworkStateIfNeeded()
             discardWorkloadSession(workloadID: config.id)
+            recordTerminatedBootstrapFailure()
             throw error
         }
 
@@ -4622,6 +4623,16 @@ extension MacOSSandboxService {
             }
             sandboxState = .stopped(255)
         }
+    }
+
+    func recordTerminatedBootstrapFailure() {
+        // An attempted machine-state launch consumes its prepared lifecycle
+        // attestation. Recreate the CRI sandbox instead of retrying that launch
+        // with the old attestation. Unknown outcomes retain their resources
+        // above and must not enter this terminal path.
+        guard case .created = sandboxState, sidecarHandle == nil else { return }
+        sandboxFailureReason = sandboxFailureReason ?? .bootstrapFailed
+        sandboxState = .stopped(255)
     }
 
     private func currentSandboxFailureReason() -> SandboxFailureReason? {

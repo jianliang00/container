@@ -1143,7 +1143,22 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                             expected: expectedLease
                         )
                     }
-                    try await runtimeManager.startSandbox(id: sandbox.runtimeSandboxID, presentGUI: handler.guiEnabled)
+                    do {
+                        try await runtimeManager.startSandbox(id: sandbox.runtimeSandboxID, presentGUI: handler.guiEnabled)
+                    } catch {
+                        // Persist only an explicit terminal runtime failure.
+                        // A stopped snapshot alone also describes a sandbox
+                        // whose first VM launch has not started yet.
+                        if let snapshot = try? await runtimeManager.inspectSandbox(id: sandbox.runtimeSandboxID),
+                            snapshot.failureReason != nil
+                        {
+                            _ = try metadataStore.updateSandbox(id: sandbox.id) { current in
+                                current = current.applying(sandboxSnapshot: snapshot)
+                                current.updatedAt = Date()
+                            }
+                        }
+                        throw error
+                    }
                     _ = try metadataStore.updateSandbox(id: sandbox.id) { current in
                         if current.state == .ready {
                             current.state = .running

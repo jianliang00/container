@@ -35,6 +35,60 @@ import Darwin
 
 @Suite
 struct CRIShimRuntimeServerTests {
+    @Test(arguments: [false, true])
+    func failedVMStartPersistsOnlyExplicitTerminalFailure(terminal: Bool) async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CRIShimMetadataStore(rootURL: root)
+        try store.upsertSandbox(
+            CRIShimSandboxMetadata(
+                id: "sandbox-1", runtimeHandler: "macos", sandboxImage: "example.com/macos/sandbox:latest",
+                state: .ready, createdAt: Date(), updatedAt: Date()
+            )
+        )
+        try store.upsertContainer(
+            CRIShimContainerMetadata(
+                id: "container-1", sandboxID: "sandbox-1", name: "workload",
+                image: "example.com/macos/workload:latest", runtimeHandler: "macos",
+                state: .created, createdAt: Date()
+            )
+        )
+        let runtime = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()),
+            logRootURL: root,
+            sandboxSnapshots: ["sandbox-1": makeLifecycleSandboxSnapshot(status: .stopped)]
+        )
+        runtime.startSandboxFailureSnapshot = SandboxSnapshot(
+            status: .stopped, networks: [], containers: [],
+            failureReason: terminal ? .bootstrapFailed : nil
+        )
+        runtime.startSandboxHook = { throw CRIShimError.unavailable("injected VM start failure") }
+
+        try await withLifecycleRuntimeClient(stateDirectory: root, metadataStore: store, runtimeManager: runtime) { client in
+            var request = Runtime_V1_StartContainerRequest()
+            request.containerID = "container-1"
+            do {
+                _ = try await client.startContainer(request)
+                Issue.record("VM start failure was ignored")
+            } catch let status as GRPCStatus {
+                #expect(status.code == .unavailable)
+                #expect(status.message?.contains("injected VM start failure") == true)
+            }
+            let reloaded = try CRIShimMetadataStore(rootURL: root)
+            #expect(try reloaded.sandbox(id: "sandbox-1")?.state == (terminal ? .stopped : .ready))
+            #expect(runtime.startWorkloadCalls.isEmpty)
+            if terminal {
+                do {
+                    _ = try await client.startContainer(request)
+                    Issue.record("terminal VM launch was retried with its consumed lifecycle binding")
+                } catch let status as GRPCStatus {
+                    #expect(status.code == .invalidArgument)
+                }
+                #expect(runtime.startSandboxCalls.count == 1)
+            }
+        }
+    }
+
     @Test
     func runtimeSandboxDigestProtectsRetaggedImageAndMissingConfigurationBlocksRemoval() async throws {
         let root = makeTemporaryDirectory()
@@ -2170,6 +2224,11 @@ struct CRIShimRuntimeServerTests {
         runtimeManager.startSandboxHook = {
             throw CRIShimError.unavailable("injected failure at the sandbox start boundary")
         }
+        if bootstrapFails {
+            runtimeManager.startSandboxFailureSnapshot = SandboxSnapshot(
+                status: .stopped, networks: [], containers: [], failureReason: .bootstrapFailed
+            )
+        }
         do {
             _ = try await client.startContainer(startContainer)
             Issue.record("injected sandbox start boundary failure was ignored")
@@ -2185,6 +2244,7 @@ struct CRIShimRuntimeServerTests {
         )
         #expect(launchStartedLease.sidecarLifecycleBarrier?.launchMayHaveStarted == true)
         #expect(runtimeManager.startSandboxCalls.count == 1)
+        #expect(try metadataStore.sandbox(id: first.podSandboxID)?.state == (bootstrapFails ? .stopped : .ready))
 
         runtimeManager.startSandboxHook = nil
         if !bootstrapFails {
@@ -2256,15 +2316,26 @@ struct CRIShimRuntimeServerTests {
         runtimeManager.stopSandboxChangesState = true
         runtimeManager.removeSandboxError = nil
 
+        if bootstrapFails {
+            let recreated = try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1))
+            let recreatedBarrier = try #require(
+                runtimeManager.createSandboxCalls.last?.macosGuest?.machineState?.sidecarLifecycleBarrier
+            )
+            #expect(recreated.podSandboxID != first.podSandboxID)
+            #expect(recreatedBarrier.bootNonce != configuredBarrier.bootNonce)
+            remove.podSandboxID = recreated.podSandboxID
+            _ = try await client.removePodSandbox(remove)
+        }
+        let previousCreations = runtimeManager.createSandboxCalls.count
         let successor = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 2))
         #expect(successor.podSandboxID != first.podSandboxID)
-        #expect(runtimeManager.createSandboxCalls.count == 2)
+        #expect(runtimeManager.createSandboxCalls.count == previousCreations + 1)
         remove.podSandboxID = successor.podSandboxID
         _ = try await client.removePodSandbox(remove)
 
         let orphan = try await client.runPodSandbox(request(podUID: "pod-b", storageGeneration: 3))
         #expect(orphan.podSandboxID != successor.podSandboxID)
-        #expect(runtimeManager.createSandboxCalls.count == 3)
+        #expect(runtimeManager.createSandboxCalls.count == previousCreations + 2)
 
         try metadataStore.deleteSandbox(id: orphan.podSandboxID)
         remove.podSandboxID = orphan.podSandboxID
@@ -2281,7 +2352,7 @@ struct CRIShimRuntimeServerTests {
             #expect(status.code == .unavailable)
             #expect((status.message ?? "").contains("refusing automatic takeover"))
         }
-        #expect(runtimeManager.createSandboxCalls.count == 3)
+        #expect(runtimeManager.createSandboxCalls.count == previousCreations + 2)
 
         try await runtimeManager.removeSandbox(id: orphan.podSandboxID, force: true)
         do {
@@ -2291,7 +2362,7 @@ struct CRIShimRuntimeServerTests {
             #expect(status.code == .unavailable)
             #expect((status.message ?? "").contains("refusing automatic takeover"))
         }
-        #expect(runtimeManager.createSandboxCalls.count == 3)
+        #expect(runtimeManager.createSandboxCalls.count == previousCreations + 2)
 
         try await channel.close().get()
         await server.stop()
@@ -6595,6 +6666,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var streamExecRejectsResizeBeforeStart = false
     var createSandboxHook: (@Sendable () throws -> Void)?
     var startSandboxHook: (@Sendable () throws -> Void)?
+    var startSandboxFailureSnapshot: SandboxSnapshot?
     var stopAndQuitMachineStateSidecarHook: (@Sendable (String) throws -> Void)?
     var removeSandboxRuntimeServiceError: (any Error)?
     var confirmSandboxRuntimeRemovedError: (any Error)?
@@ -6703,7 +6775,14 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
             sandboxSnapshots[id] = snapshot
         }
         startSandboxCalls.append((id: id, presentGUI: presentGUI))
-        try startSandboxHook?()
+        do {
+            try startSandboxHook?()
+        } catch {
+            if let startSandboxFailureSnapshot {
+                sandboxSnapshots[id] = startSandboxFailureSnapshot
+            }
+            throw error
+        }
     }
 
     func stopSandbox(

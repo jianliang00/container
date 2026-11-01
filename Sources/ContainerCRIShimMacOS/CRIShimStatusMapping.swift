@@ -559,7 +559,7 @@ extension CRIShimSandboxMetadata {
         }
 
         var metadata = self
-        if sandboxSnapshot.failureReason == .networkInvalidated {
+        if sandboxSnapshot.failureReason != nil {
             if metadata.state.lifecycleRank < State.stopped.lifecycleRank {
                 metadata.state = .stopped
             }

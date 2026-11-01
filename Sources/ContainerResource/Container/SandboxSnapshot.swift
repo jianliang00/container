@@ -86,4 +86,5 @@ public struct SandboxSnapshot: Codable, Sendable {
 
 public enum SandboxFailureReason: String, Codable, Sendable, Equatable {
     case networkInvalidated
+    case bootstrapFailed
 }

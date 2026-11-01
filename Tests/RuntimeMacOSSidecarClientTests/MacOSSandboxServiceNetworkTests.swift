@@ -30,6 +30,48 @@ private typealias NetworkDNSConfiguration = ContainerResource.Attachment.DNSConf
 
 @Suite(.serialized)
 struct MacOSSandboxServiceNetworkTests {
+    @Test
+    func terminatedBootstrapRequiresSandboxRecreation() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-bootstrap-failure")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = makeService(root: root, recorder: RecordingSandboxNetworkControl())
+        try await service.testingPrepareSandbox(makeConfiguration(), state: "created")
+
+        await service.recordTerminatedBootstrapFailure()
+
+        let snapshot = try await service.testingStateSnapshot()
+        #expect(snapshot.status == .stopped)
+        #expect(snapshot.failureReason == .bootstrapFailed)
+    }
+
+    @Test
+    func retainedSidecarPreventsTerminalBootstrapFailure() async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-bootstrap-retained")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = makeService(root: root, recorder: RecordingSandboxNetworkControl())
+        try await service.testingPrepareSandbox(makeConfiguration(), state: "created")
+        await service.testingInstallSidecarClient(socketPath: root.appendingPathComponent("retained.sock").path)
+
+        await service.recordTerminatedBootstrapFailure()
+
+        let snapshot = try await service.testingStateSnapshot()
+        #expect(snapshot.failureReason == nil)
+    }
+
+    @Test(arguments: ["booted", "running"])
+    func bootstrapFailureCannotInvalidateAnAlreadyStartedSandbox(state: String) async throws {
+        let root = try makeTemporaryDirectory(prefix: "macos-sandbox-bootstrap-running")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = makeService(root: root, recorder: RecordingSandboxNetworkControl())
+        try await service.testingPrepareSandbox(makeConfiguration(), state: state)
+
+        await service.recordTerminatedBootstrapFailure()
+
+        let snapshot = try await service.testingStateSnapshot()
+        #expect(snapshot.status == .running)
+        #expect(snapshot.failureReason == nil)
+    }
+
     @Test(arguments: ["created", "booted", "running"])
     func stopSandboxRecoveryPersistsTerminalFailureAndStopsSandbox(initialState: String) async throws {
         let root = try makeTemporaryDirectory(prefix: "macos-sandbox-network-invalidation-\(initialState)")

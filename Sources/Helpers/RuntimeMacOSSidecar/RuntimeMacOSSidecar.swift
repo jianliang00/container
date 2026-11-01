@@ -3684,11 +3684,13 @@ final class SidecarControlServer: @unchecked Sendable {
 
     private func inspectExistingDurableProcess(
         fd: Int32,
-        executionID: String
+        executionID: String,
+        deadline: UInt64
     ) throws -> MacOSGuestProcessStatusPayload? {
         try MacOSSidecarSocketIO.writeJSONFrame(
             SidecarGuestAgentFrame(type: .processInspect, id: executionID),
-            fd: fd
+            fd: fd,
+            timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
         )
         do {
             guard
@@ -3696,7 +3698,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     fd: fd,
                     expectedExecutionID: executionID,
                     operation: "inspect",
-                    timeoutSeconds: 3
+                    timeoutSeconds: min(3, Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000)
                 )
             else {
                 throw ContainerizationError(
@@ -3807,7 +3809,19 @@ final class SidecarControlServer: @unchecked Sendable {
             )
         }
 
-        let fd = try connectProcessStream(port: port)
+        let readyConnection = try syncValue { [self] in
+            try await GuestAgentHandshake.connect(
+                timeoutSeconds: Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000,
+                connect: { [self] timeout in
+                    if exec.durableExecutionID == nil { try ensureProcessStartClientConnected(clientFD) }
+                    return try await openProcessStream(port: port, timeoutSeconds: timeout)
+                },
+                onRetry: { [log] attempt, error in
+                    log.warning("guest process handshake retry", metadata: ["attempt": "\(attempt)", "error": "\(error)"])
+                }
+            )
+        }
+        let fd = readyConnection.fd
         var unregisteredSession: ProcessStreamSession?
         let trace = MacOSProcessStartTrace(processID: exec.durableExecutionID ?? processID) { [log] message in
             log.info("\(message)")
@@ -3817,9 +3831,7 @@ final class SidecarControlServer: @unchecked Sendable {
             let durable = exec.durableExecutionID != nil
             let generationFenced = exec.storageGeneration != nil
             let identityFenced = exec.durableIncarnation != nil
-            let capabilities = try waitForGuestAgentReadyWithTimeout(
-                fd: fd, timeoutSeconds: min(3, Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000)
-            )
+            let capabilities = readyConnection.capabilities
             if durable, !capabilities.contains(MacOSGuestProcessProtocol.durableProcessV1) {
                 throw ContainerizationError(
                     .unsupported,
@@ -3851,7 +3863,7 @@ final class SidecarControlServer: @unchecked Sendable {
             let replayCursor = exec.replayCursor ?? 0
             let existingStatus: MacOSGuestProcessStatusPayload?
             if generationFenced {
-                existingStatus = try inspectExistingDurableProcess(fd: fd, executionID: guestProcessID)
+                existingStatus = try inspectExistingDurableProcess(fd: fd, executionID: guestProcessID, deadline: deadline)
             } else {
                 existingStatus = nil
             }
@@ -3976,12 +3988,16 @@ final class SidecarControlServer: @unchecked Sendable {
     }
 
     private func connectProcessStream(port: UInt32) throws -> Int32 {
+        try syncValue {
+            try await self.openProcessStream(port: port, timeoutSeconds: 3)
+        }
+    }
+
+    private func openProcessStream(port: UInt32, timeoutSeconds: TimeInterval) async throws -> Int32 {
         if let processConnectionFactory {
             return try processConnectionFactory(port)
         }
-        return try syncValue {
-            try await self.service.connectVsock(port: port)
-        }
+        return try await service.connectVsock(port: port, timeoutSeconds: timeoutSeconds)
     }
 
     private func ensureProcessStartClientConnected(_ fd: Int32?) throws {

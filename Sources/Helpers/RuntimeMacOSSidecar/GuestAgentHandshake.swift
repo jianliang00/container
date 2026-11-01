@@ -22,12 +22,17 @@ import RuntimeMacOSSidecarShared
 /// Opens a ready stream without dispatching a guest operation. Only transport
 /// failures before ready may be retried; the caller owns the successful fd.
 enum GuestAgentHandshake {
+    struct Connection: Sendable {
+        let fd: Int32
+        let capabilities: Set<String>
+    }
+
     static func connect(
         timeoutSeconds: TimeInterval,
         attemptTimeoutSeconds: TimeInterval = 3,
         connect: @Sendable (TimeInterval) async throws -> Int32,
         onRetry: @Sendable (Int, Error) -> Void = { _, _ in }
-    ) async throws -> Int32 {
+    ) async throws -> Connection {
         let deadline = DispatchTime.now() + max(0, timeoutSeconds)
         var attempt = 0
         while true {
@@ -39,9 +44,9 @@ enum GuestAgentHandshake {
             do {
                 fd = try await connect(try remainingSeconds(until: attemptDeadline))
                 try Task.checkCancellation()
-                try waitForReady(fd: fd, deadline: attemptDeadline)
+                let capabilities = try waitForReady(fd: fd, deadline: attemptDeadline)
                 try Task.checkCancellation()
-                return fd
+                return Connection(fd: fd, capabilities: capabilities)
             } catch {
                 if fd >= 0 {
                     _ = Darwin.shutdown(fd, SHUT_RDWR)
@@ -64,7 +69,7 @@ enum GuestAgentHandshake {
         return Double(deadline.uptimeNanoseconds - now) / 1_000_000_000
     }
 
-    private static func waitForReady(fd: Int32, deadline: DispatchTime) throws {
+    private static func waitForReady(fd: Int32, deadline: DispatchTime) throws -> Set<String> {
         while true {
             try Task.checkCancellation()
             let remaining = try remainingSeconds(until: deadline)
@@ -74,7 +79,7 @@ enum GuestAgentHandshake {
             )
             switch frame.type {
             case .ready:
-                return
+                return Set(frame.capabilities ?? [])
             case .error:
                 throw ContainerizationError(.internalError, message: "guest-agent error before ready: \(frame.message ?? "unknown error")")
             case .exit:
@@ -88,7 +93,9 @@ enum GuestAgentHandshake {
     private static func isRetryable(_ error: Error) -> Bool {
         if let error = error as? ContainerizationError { return error.code == .timeout }
         let error = error as NSError
+        // The shared framing reader represents peer EOF with this legacy error.
+        if error.domain == "RuntimeMacOSSidecarShared", error.code == 1, error.localizedDescription == "unexpected EOF" { return true }
         return error.domain == NSPOSIXErrorDomain
-            && [ETIMEDOUT, ECONNRESET, ECONNREFUSED, EPIPE].map(Int.init).contains(error.code)
+            && [ETIMEDOUT, ECONNRESET, ECONNREFUSED, ENOTCONN, EPIPE].map(Int.init).contains(error.code)
     }
 }

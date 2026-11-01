@@ -29,7 +29,7 @@ struct GuestAgentHandshakeTests {
     func retriesSilentOrPartialGreetingBeforeDispatch(prefix: Data) async throws {
         let fixture = Fixture()
         defer { fixture.closePeers() }
-        let fd = try await GuestAgentHandshake.connect(
+        let connection = try await GuestAgentHandshake.connect(
             timeoutSeconds: 1, attemptTimeoutSeconds: 0.05,
             connect: { _ in
                 let attempt = fixture.count
@@ -46,6 +46,7 @@ struct GuestAgentHandshakeTests {
                 return pair.client
             }
         )
+        let fd = connection.fd
         defer { Darwin.close(fd) }
         #expect(fixture.count == 2)
         #expect(fcntl(fd, F_GETFD) >= 0)
@@ -54,19 +55,38 @@ struct GuestAgentHandshakeTests {
         #expect(request.type == .clockSync)
     }
 
-    @Test
-    func retriesConnectionResetBeforeReady() async throws {
+    @Test(arguments: [POSIXErrorCode.ECONNRESET, .ENOTCONN])
+    func retriesDisconnectedTransportBeforeReady(code: POSIXErrorCode) async throws {
         let fixture = Fixture()
         defer { fixture.closePeers() }
         let calls = Counter()
-        let fd = try await GuestAgentHandshake.connect(timeoutSeconds: 1) { _ in
-            if calls.increment() == 1 { throw POSIXError(.ECONNRESET) }
+        let connection = try await GuestAgentHandshake.connect(timeoutSeconds: 1) { _ in
+            if calls.increment() == 1 { throw POSIXError(code) }
             let pair = try fixture.makePair()
             try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame(type: .ready), fd: pair.peer)
             return pair.client
         }
+        let fd = connection.fd
         defer { Darwin.close(fd) }
         #expect(calls.value == 2)
+    }
+
+    @Test
+    func retriesPeerEOFBeforeReady() async throws {
+        let fixture = Fixture()
+        defer { fixture.closePeers() }
+        let connection = try await GuestAgentHandshake.connect(timeoutSeconds: 1) { _ in
+            let pair = try fixture.makePair()
+            if fixture.count == 1 {
+                #expect(Darwin.shutdown(pair.peer, SHUT_WR) == 0)
+            } else {
+                fixture.expectClosedPeer(fixture.firstPeer)
+                try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame(type: .ready), fd: pair.peer)
+            }
+            return pair.client
+        }
+        defer { Darwin.close(connection.fd) }
+        #expect(fixture.count == 2)
     }
 
     @Test(arguments: [SidecarGuestAgentFrame(type: .error, message: "unsupported protocol"), SidecarGuestAgentFrame(type: .exit, exitCode: 1)])

@@ -28,7 +28,7 @@ public final class SocketFrameWriter: @unchecked Sendable {
 
     public init(fd: Int32, timeout: TimeInterval = 5) throws {
         let ownedFD = fcntl(fd, F_DUPFD_CLOEXEC, 0)
-        guard ownedFD >= 0 else { throw Self.posixError() }
+        guard ownedFD >= 0 else { throw Self.configurationError("fcntl(F_DUPFD_CLOEXEC)") }
         let timeout = max(timeout, 0.001)
         var noSigPipe: Int32 = 1
         guard
@@ -40,7 +40,7 @@ public final class SocketFrameWriter: @unchecked Sendable {
                 socklen_t(MemoryLayout<Int32>.size)
             ) == 0
         else {
-            let error = Self.posixError()
+            let error = Self.configurationError("setsockopt(SO_NOSIGPIPE)")
             Darwin.close(ownedFD)
             throw error
         }
@@ -131,8 +131,16 @@ public final class SocketFrameWriter: @unchecked Sendable {
                 socklen_t(MemoryLayout<timeval>.size)
             ) == 0
         else {
-            throw posixError()
+            throw configurationError("setsockopt(SO_SNDTIMEO)")
         }
+    }
+
+    private static func configurationError(_ operation: String) -> NSError {
+        let code = errno
+        return NSError(
+            domain: NSPOSIXErrorDomain, code: Int(code),
+            userInfo: [NSLocalizedDescriptionKey: "\(operation): \(String(cString: strerror(code))) (errno=\(code))"]
+        )
     }
 
     private static func posixError(_ code: Int32 = errno) -> POSIXError {

@@ -31,11 +31,12 @@ enum MacOSGuestClockBootstrap {
         // Connect, ready, write and result share one budget. Only opening the
         // ready stream can retry; an uncertain clockSync result is not replayed.
         let deadline = sidecarReadDeadline(timeoutSeconds: timeoutSeconds)
-        let fd = try await GuestAgentHandshake.connect(
+        let connection = try await GuestAgentHandshake.connect(
             timeoutSeconds: Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000,
             attemptTimeoutSeconds: handshakeAttemptTimeoutSeconds,
             connect: connect, onRetry: onHandshakeRetry
         )
+        let fd = connection.fd
         defer {
             _ = Darwin.shutdown(fd, SHUT_RDWR)
             Darwin.close(fd)

@@ -205,14 +205,14 @@ private final class GUIWindowDelegate: NSObject, NSWindowDelegate {
     }
 }
 
-private func sidecarReadDeadline(timeoutSeconds: TimeInterval) -> UInt64 {
+func sidecarReadDeadline(timeoutSeconds: TimeInterval) -> UInt64 {
     let timeoutNanoseconds = UInt64(max(timeoutSeconds, 0) * 1_000_000_000)
     let now = DispatchTime.now().uptimeNanoseconds
     let (deadline, overflow) = now.addingReportingOverflow(timeoutNanoseconds)
     return overflow ? UInt64.max : deadline
 }
 
-private func sidecarRemainingReadMilliseconds(until deadline: UInt64) throws -> Int32 {
+func sidecarRemainingReadMilliseconds(until deadline: UInt64) throws -> Int32 {
     let now = DispatchTime.now().uptimeNanoseconds
     guard now < deadline else {
         throw POSIXError(.ETIMEDOUT)
@@ -666,20 +666,31 @@ actor MacOSSidecarService {
             let agentPort = config.macosGuest?.agentPort ?? 27000
             try await startVirtualMachine(vm)
             for stage in MacOSGuestColdBootStage.orderedStages {
-                switch stage {
-                case .socketDeviceAvailable:
-                    try await validateSocketDeviceAvailable(on: vm)
-                case .guestAgentReady:
-                    try await waitForGuestAgentDuringBootstrap(port: agentPort)
-                case .networksActivated:
-                    try await activatePreparedNetworks()
-                case .guestClockSynchronized:
-                    try await synchronizeGuestClock(agentPort: agentPort)
-                case .guestNetworkingConfigured:
-                    try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
-                case .networkAttachmentsValidated:
-                    try await validateNetworkAttachments()
+                let stageStart = DispatchTime.now().uptimeNanoseconds
+                log.info("bootstrap stage started", metadata: ["stage": "\(stage)"])
+                do {
+                    switch stage {
+                    case .socketDeviceAvailable:
+                        try await validateSocketDeviceAvailable(on: vm)
+                    case .guestAgentReady:
+                        try await waitForGuestAgentDuringBootstrap(port: agentPort)
+                    case .networksActivated:
+                        try await activatePreparedNetworks()
+                    case .guestClockSynchronized:
+                        try await synchronizeGuestClock(agentPort: agentPort)
+                    case .guestNetworkingConfigured:
+                        try await configureGuestNetworkingIfNeeded(containerConfig: config, agentPort: agentPort)
+                    case .networkAttachmentsValidated:
+                        try await validateNetworkAttachments()
+                    }
+                } catch {
+                    log.error(
+                        "bootstrap stage failed",
+                        metadata: ["stage": "\(stage)", "elapsed_ms": "\((DispatchTime.now().uptimeNanoseconds - stageStart) / 1_000_000)", "error": "\(error)"]
+                    )
+                    throw error
                 }
+                log.info("bootstrap stage completed", metadata: ["stage": "\(stage)", "elapsed_ms": "\((DispatchTime.now().uptimeNanoseconds - stageStart) / 1_000_000)"])
             }
             lifecycle.complete(.start, succeeded: true)
             log.info("vm started", metadata: ["state": "\(state.rawValue)", "agent_port": "\(agentPort)"])
@@ -1437,55 +1448,13 @@ actor MacOSSidecarService {
     }
 
     private func synchronizeGuestClock(agentPort: UInt32) async throws {
-        let fd = try await connectVsock(port: agentPort)
-        defer {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
-            Darwin.close(fd)
-        }
-
-        try waitForGuestAgentReadyWithTimeout(
-            fd: fd,
-            timeoutSeconds: Self.bootstrapGuestAgentReadyTimeoutSeconds
-        )
-        let hostBefore = try MacOSGuestClockBootstrap.sampleHostTime()
-        try MacOSSidecarSocketIO.writeJSONFrame(SidecarGuestAgentFrame.clockSync(hostBefore), fd: fd)
-
-        while true {
-            let frame = try MacOSSidecarSocketIO.readJSONFrame(SidecarGuestAgentFrame.self, fd: fd)
-            switch frame.type {
-            case .clockResult:
-                guard let data = frame.data else {
-                    throw ContainerizationError(.internalError, message: "guest clock synchronization result is missing data")
-                }
-                let result = try JSONDecoder().decode(MacOSGuestClockSyncResult.self, from: data)
-                let hostAfter = try MacOSGuestClockBootstrap.sampleHostTime()
-                let offsetNanoseconds = try MacOSGuestClockBootstrap.validate(
-                    result: result,
-                    hostBefore: hostBefore,
-                    hostAfter: hostAfter
-                )
-                log.info(
-                    "guest clock synchronized",
-                    metadata: [
-                        "offset_milliseconds": "\(Double(offsetNanoseconds) / 1_000_000.0)"
-                    ])
-                return
-            case .error:
-                throw ContainerizationError(
-                    .internalError,
-                    message: "guest clock synchronization failed: \(frame.message ?? "unknown error")"
-                )
-            case .exit:
-                throw ContainerizationError(
-                    .internalError,
-                    message: "guest agent exited during clock synchronization (code=\(frame.exitCode ?? 1))"
-                )
-            case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
-                .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .fsBegin,
-                .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
-                continue
+        let offsetNanoseconds = try await MacOSGuestClockBootstrap.synchronize(
+            connect: { [self] timeout in try await connectVsock(port: agentPort, timeoutSeconds: timeout) },
+            onHandshakeRetry: { [log] attempt, error in
+                log.warning("guest clock handshake retry", metadata: ["attempt": "\(attempt)", "error": "\(error)"])
             }
-        }
+        )
+        log.info("guest clock synchronized", metadata: ["offset_milliseconds": "\(Double(offsetNanoseconds) / 1_000_000.0)"])
     }
 
     private func decodeGuestNetworkConfigurationResult(

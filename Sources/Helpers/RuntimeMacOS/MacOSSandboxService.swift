@@ -1285,44 +1285,56 @@ extension MacOSSandboxService {
         guard sandboxState == .booted || sandboxState == .running else {
             throw ContainerizationError(.invalidState, message: "sandbox not started")
         }
-        try await ensureImageBackedWorkloadInjectedIfNeeded(workloadID: workloadID, containerConfig: configuration)
-        if let record = workloads[workloadID] {
-            try validateWorkloadConfigurationForStart(record.configuration)
-        }
+        var stage = "payload_injection"
+        do {
+            try await ensureImageBackedWorkloadInjectedIfNeeded(workloadID: workloadID, containerConfig: configuration)
+            if let record = workloads[workloadID] {
+                try validateWorkloadConfigurationForStart(record.configuration)
+            }
 
-        let sessionID = try sessionID(forWorkload: workloadID)
-        guard var session = sessions[sessionID] else {
-            throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
-        }
-        if session.started {
-            return
-        }
+            let sessionID = try sessionID(forWorkload: workloadID)
+            guard var session = sessions[sessionID] else {
+                throw ContainerizationError(.notFound, message: "workload \(workloadID) not found")
+            }
+            if session.started {
+                return
+            }
 
-        #if arch(arm64)
-        try await prepareGuestMountsIfNeeded(containerConfig: configuration)
-        try await prepareReadOnlyInjectionsIfNeeded()
-        try await prepareWorkloadReadOnlyInjectionsIfNeeded(workloadID: workloadID)
-        try resetWorkloadExitStateForStart(workloadID: workloadID, session: &session)
-        try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
-        writeContainerLog(Data(("startWorkload using sidecar process stream path for \(workloadID) session=\(sessionID)\n").utf8))
-        #else
-        throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
-        #endif
+            #if arch(arm64)
+            stage = "guest_mounts"
+            try await prepareGuestMountsIfNeeded(containerConfig: configuration)
+            stage = "readonly_injection"
+            try await prepareReadOnlyInjectionsIfNeeded()
+            try await prepareWorkloadReadOnlyInjectionsIfNeeded(workloadID: workloadID)
+            try resetWorkloadExitStateForStart(workloadID: workloadID, session: &session)
+            stage = "process_start"
+            try await startSessionViaSidecarProcessStream(&session, containerConfig: configuration)
+            writeContainerLog(Data(("startWorkload using sidecar process stream path for \(workloadID) session=\(sessionID)\n").utf8))
+            #else
+            throw ContainerizationError(.unsupported, message: "macOS runtime requires an arm64 host")
+            #endif
 
-        let startedAt = session.startedAt ?? Date()
-        if var current = sessions[sessionID] {
-            current.started = true
-            current.startedAt = current.startedAt ?? startedAt
-            sessions[sessionID] = current
-        } else {
-            session.started = true
-            session.startedAt = startedAt
-            sessions[sessionID] = session
-        }
-        markWorkloadStarted(workloadID: workloadID, startedAt: startedAt)
+            let startedAt = session.startedAt ?? Date()
+            if var current = sessions[sessionID] {
+                current.started = true
+                current.startedAt = current.startedAt ?? startedAt
+                sessions[sessionID] = current
+            } else {
+                session.started = true
+                session.startedAt = startedAt
+                sessions[sessionID] = session
+            }
+            markWorkloadStarted(workloadID: workloadID, startedAt: startedAt)
 
-        if workloadID == configuration.id {
-            sandboxState = .running
+            if workloadID == configuration.id {
+                sandboxState = .running
+            }
+        } catch let error as ContainerizationError {
+            throw ContainerizationError(
+                error.code,
+                message: "workload start stage \(stage) failed for \(workloadID): \(error.message)",
+                cause: error
+            )
         }
     }
 

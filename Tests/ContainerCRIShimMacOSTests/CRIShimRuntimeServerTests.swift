@@ -35,6 +35,88 @@ import Darwin
 
 @Suite
 struct CRIShimRuntimeServerTests {
+    @Test
+    func machineStateContainerAttemptsRetireThePriorRuntimeSlotWithoutReplayingItsOwner() async throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CRIShimMetadataStore(rootURL: root)
+        let sandbox = CRIShimSandboxMetadata(
+            id: "sandbox-1", runtimeSandboxID: "workload-42", podUID: "pod-a",
+            runtimeHandler: "macos", sandboxImage: "example.com/macos/sandbox:latest",
+            annotations: [
+                CRIShimMachineStateAnnotation.enabled: "true",
+                CRIShimMachineStateAnnotation.persistenceID: "workload-42",
+                CRIShimMachineStateAnnotation.storageGeneration: "1",
+            ], state: .running, createdAt: Date(), updatedAt: Date()
+        )
+        try store.upsertSandbox(sandbox)
+        let runtime = RecordingRuntimeManager(
+            execSyncResult: ExecSyncResult(exitCode: 0, stdout: Data(), stderr: Data()), logRootURL: root
+        )
+        runtime.rejectDuplicateWorkloads = true
+        runtime.createWorkloadStatus = .stopped
+        let image = CRIShimImageRecord(
+            reference: "example.com/macos/workload:latest", digest: "sha256:workload", size: 1,
+            annotations: MacOSImageContract.annotations(for: .workload)
+        )
+        try await withLifecycleRuntimeClient(stateDirectory: root, metadataStore: store, runtimeManager: runtime, images: [image]) { client in
+            var request = Runtime_V1_CreateContainerRequest()
+            request.podSandboxID = sandbox.id
+            request.config.metadata.name = "validation"
+            request.config.image.image = image.reference
+            request.config.command = ["/bin/true"]
+            let first = try await client.createContainer(request)
+            let firstConfig = try #require(runtime.createWorkloadCalls.first?.configuration)
+            #expect(try await client.createContainer(request).containerID == first.containerID)
+            #expect(runtime.createWorkloadCalls.count == 1)
+            var changed = request
+            changed.config.command = ["/bin/false"]
+            do {
+                _ = try await client.createContainer(changed)
+                Issue.record("same-attempt replay changed the execution identity")
+            } catch let status as GRPCStatus { #expect(status.code == .invalidArgument) }
+
+            request.config.metadata.attempt = 1
+            runtime.removeWorkloadError = CRIShimError.unavailable("guest retirement is not confirmed")
+            do {
+                _ = try await client.createContainer(request)
+                Issue.record("a new attempt bypassed failed runtime cleanup")
+            } catch let status as GRPCStatus { #expect(status.code == .unavailable) }
+            #expect(try store.container(id: first.containerID) != nil)
+            #expect(runtime.createWorkloadCalls.count == 1)
+            runtime.removeWorkloadError = nil
+            let second = try await client.createContainer(request)
+            let secondConfig = try #require(runtime.createWorkloadCalls.last?.configuration)
+            #expect(second.containerID != first.containerID)
+            #expect(firstConfig.id == secondConfig.id)
+            #expect(firstConfig.executionIdentity?.executionID == secondConfig.executionIdentity?.executionID)
+            #expect(firstConfig.executionIdentity?.incarnation != secondConfig.executionIdentity?.incarnation)
+            #expect(try store.container(id: first.containerID) == nil)
+            #expect(try await client.createContainer(request).containerID == second.containerID)
+            var stale = request
+            stale.config.metadata.attempt = 0
+            do {
+                _ = try await client.createContainer(stale)
+                Issue.record("an older attempt replaced the current workload")
+            } catch let status as GRPCStatus { #expect(status.code == .invalidArgument) }
+            #expect(runtime.createWorkloadCalls.count == 2)
+            let removals = runtime.removeWorkloadCalls.count
+            var remove = Runtime_V1_RemoveContainerRequest()
+            remove.containerID = first.containerID
+            do { _ = try await client.removeContainer(remove) } catch let status as GRPCStatus { #expect(status.code == .notFound) }
+            #expect(runtime.removeWorkloadCalls.count == removals)
+            #expect(try store.container(id: second.containerID) != nil)
+
+            try await runtime.startWorkload(sandboxID: "workload-42", workloadID: secondConfig.id)
+            request.config.metadata.attempt = 2
+            do {
+                _ = try await client.createContainer(request)
+                Issue.record("a new attempt removed a running workload")
+            } catch let status as GRPCStatus { #expect(status.code == .invalidArgument) }
+            #expect(runtime.removeWorkloadCalls.count == removals)
+        }
+    }
+
     @Test(arguments: [false, true])
     func failedVMStartPersistsOnlyExplicitTerminalFailure(terminal: Bool) async throws {
         let root = makeTemporaryDirectory()
@@ -5830,6 +5912,7 @@ private func withLifecycleRuntimeClient<Result>(
     stateDirectory: URL,
     metadataStore: CRIShimMetadataStore,
     runtimeManager: RecordingRuntimeManager,
+    images: [CRIShimImageRecord] = [],
     _ operation: (Runtime_V1_RuntimeServiceAsyncClient) async throws -> Result
 ) async throws -> Result {
     let socketPath = "/tmp/cri-shim-lifecycle-\(UUID().uuidString.prefix(8)).sock"
@@ -5843,7 +5926,7 @@ private func withLifecycleRuntimeClient<Result>(
                 config: config,
                 metadataStore: metadataStore,
                 runtimeManager: runtimeManager,
-                imageManager: RecordingImageManager(images: []),
+                imageManager: RecordingImageManager(images: images),
                 cniManager: RecordingCNIManager()
             )
         ],
@@ -6708,6 +6791,8 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
     var stopWorkloadExitCode: Int32 = 42
     var stopWorkloadExitedAt: Date?
     var removeWorkloadError: (any Error)?
+    var rejectDuplicateWorkloads = false
+    var createWorkloadStatus: RuntimeStatus = .unknown
     var inspectSandboxError: (any Error)?
     var inspectSandboxResults: [String: [SandboxSnapshot?]] = [:]
     var inspectWorkloadError: (any Error)?
@@ -6962,6 +7047,9 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         sandboxID: String,
         configuration: WorkloadConfiguration
     ) async throws {
+        if rejectDuplicateWorkloads, workloadConfigurations[configuration.id] != nil {
+            throw ContainerizationError(.exists, message: "workload already exists")
+        }
         workloadConfigurations[configuration.id] = configuration
         let logDirectory = logRootURL.appendingPathComponent(configuration.id, isDirectory: true)
         try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
@@ -6975,7 +7063,7 @@ private final class RecordingRuntimeManager: CRIShimRuntimeManaging, @unchecked 
         }
         let snapshot = WorkloadSnapshot(
             configuration: configuration,
-            status: .unknown,
+            status: createWorkloadStatus,
             stdoutLogPath: stdoutLogURL.path,
             stderrLogPath: stderrLogURL.path
         )

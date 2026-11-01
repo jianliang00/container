@@ -1051,6 +1051,36 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     sandbox: sandbox
                 )
 
+                if let expected = workloadConfiguration.executionIdentity {
+                    let previous = try metadataStore.listContainers().filter {
+                        $0.sandboxID == sandbox.id && $0.runtimeWorkloadID == metadata.runtimeWorkloadID
+                    }
+                    guard previous.count <= 1 else {
+                        throw CRIShimError.unavailable("multiple CRI containers claim the same runtime workload")
+                    }
+                    if let previous = previous.first {
+                        if previous.attempt == metadata.attempt {
+                            let snapshot = try await runtimeManager.inspectWorkload(
+                                sandboxID: sandbox.runtimeSandboxID, workloadID: previous.runtimeWorkloadID
+                            )
+                            guard snapshot.configuration.executionIdentity == expected
+                            else {
+                                throw CRIShimError.invalidArgument("CreateContainer retry changed the workload execution identity")
+                            }
+                            var response = Runtime_V1_CreateContainerResponse()
+                            response.containerID = previous.id
+                            return response
+                        }
+                        guard previous.attempt < metadata.attempt else {
+                            throw CRIShimError.invalidArgument("CreateContainer cannot replay an older container attempt")
+                        }
+                        // The stable workload slot survives CRI attempts. Retire
+                        // the prior attempt before reusing it, including guest
+                        // incarnation deletion, so late GC cannot remove its successor.
+                        try await removeContainerResourcesLocked(previous)
+                    }
+                }
+
                 try await runtimeManager.createWorkload(
                     sandboxID: sandbox.runtimeSandboxID,
                     configuration: workloadConfiguration
@@ -1335,37 +1365,38 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                         id: request.containerID,
                         operation: "RemoveContainer"
                     )
-                    guard
-                        let reconciled = try await reconciledContainerMetadataLocked(
-                            storedMetadata,
-                            includeRuntimeDetailsForExitedContainer: false
-                        )
-                    else {
-                        throw CRIShimMetadataStoreError.notFound(kind: .container, id: storedMetadata.id)
-                    }
-                    let metadata = reconciled.metadata
-                    guard metadata.state != .running else {
-                        throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
-                    }
-
-                    if let sandbox = try metadataStore.sandbox(id: metadata.sandboxID),
-                        sandbox.state == .ready || sandbox.state == .running
-                    {
-                        do {
-                            try await runtimeManager.removeWorkload(
-                                sandboxID: sandbox.runtimeSandboxID,
-                                workloadID: metadata.runtimeWorkloadID
-                            )
-                        } catch {
-                            try throwUnlessNotFound(error)
-                        }
-                    }
-                    await logManager.stop(containerID: metadata.id, removeState: true)
-                    try metadataStore.deleteContainer(id: metadata.id)
+                    try await removeContainerResourcesLocked(storedMetadata)
                     return Runtime_V1_RemoveContainerResponse()
                 }
             }
         }
+    }
+
+    // Container lifecycle operations share the sandbox lifecycle lock. Callers
+    // already hold it; acquiring a container lock here would invert lock order.
+    private func removeContainerResourcesLocked(_ storedMetadata: CRIShimContainerMetadata) async throws {
+        guard
+            let reconciled = try await reconciledContainerMetadataLocked(
+                storedMetadata, includeRuntimeDetailsForExitedContainer: false
+            )
+        else {
+            throw CRIShimMetadataStoreError.notFound(kind: .container, id: storedMetadata.id)
+        }
+        let metadata = reconciled.metadata
+        guard metadata.state != .running else {
+            throw CRIShimError.invalidArgument("RemoveContainer requires a stopped container")
+        }
+        if let sandbox = try metadataStore.sandbox(id: metadata.sandboxID),
+            sandbox.state == .ready || sandbox.state == .running
+        {
+            do {
+                try await runtimeManager.removeWorkload(sandboxID: sandbox.runtimeSandboxID, workloadID: metadata.runtimeWorkloadID)
+            } catch {
+                try throwUnlessNotFound(error)
+            }
+        }
+        await logManager.stop(containerID: metadata.id, removeState: true)
+        try metadataStore.deleteContainer(id: metadata.id)
     }
 
     public func containerStatus(

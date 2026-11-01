@@ -226,9 +226,18 @@ struct GuestAgentTCPConnectTests {
 
     @Test
     func failedClientInitializationDoesNotPreventNextReadyConnection() throws {
-        let invalidFD = Darwin.open("/dev/null", O_RDONLY)
-        guard invalidFD >= 0 else { throw POSIXError.fromErrno() }
-        serveGuestAgentConnection(fd: invalidFD)
+        var closedPeer = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &closedPeer) == 0 else { throw POSIXError.fromErrno() }
+        closeTestFD(closedPeer[1])
+        do {
+            _ = try SocketFrameWriter(fd: closedPeer[0])
+            Issue.record("expected socket option setup to reject the closed connection")
+        } catch {
+            let error = error as NSError
+            #expect(error.domain == NSPOSIXErrorDomain && error.code == Int(EINVAL))
+            #expect(error.localizedDescription.contains("setsockopt(SO_NOSIGPIPE)"))
+        }
+        serveGuestAgentConnection(fd: closedPeer[0])
 
         var pair = [Int32](repeating: -1, count: 2)
         guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else { throw POSIXError.fromErrno() }

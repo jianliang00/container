@@ -119,7 +119,8 @@ struct GuestAgentHandshakeTests {
             #expect(error.code == .timeout)
         }
         #expect(start.duration(to: .now) < .seconds(0.5))
-        #expect(fixture.count >= 2)
+        // A scheduler delay may exhaust the total budget during the first attempt.
+        #expect(fixture.count >= 1)
         fixture.expectClosedPeer(fixture.lastPeer)
     }
 

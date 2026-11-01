@@ -22,6 +22,16 @@ If `vmnetShared` is selected and no explicit `ContainerConfiguration.networks` a
 
 ## 2. Guest Bring-Up
 
+Cold bootstrap logs each stage, its elapsed time, and any failure. Passing the
+initial guest-agent readiness probe does not establish readiness on later vsock
+connections. Clock synchronization therefore has a ten-second monotonic budget
+shared by connection setup, the ready frame, the request write, and its result.
+Before sending the request, a connection reset or a ready-frame timeout closes
+the failed stream and permits a new connection within that budget. Each handshake
+attempt has at most three seconds. Guest protocol errors and cancellation abort
+startup. Once the clock request is sent, a missing or invalid result fails startup
+without reconnecting or replaying the request.
+
 Guest networking is applied by a dedicated guest network manager. It:
 
 - matches the NIC by MAC

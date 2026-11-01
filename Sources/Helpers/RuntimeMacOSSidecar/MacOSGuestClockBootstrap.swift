@@ -22,6 +22,58 @@ import RuntimeMacOSSidecarShared
 enum MacOSGuestClockBootstrap {
     static let defaultToleranceNanoseconds: Int64 = 2_000_000_000
 
+    static func synchronize(
+        timeoutSeconds: TimeInterval = 10,
+        handshakeAttemptTimeoutSeconds: TimeInterval = 3,
+        connect: @Sendable (TimeInterval) async throws -> Int32,
+        onHandshakeRetry: @Sendable (Int, Error) -> Void = { _, _ in }
+    ) async throws -> Int64 {
+        // Connect, ready, write and result share one budget. Only opening the
+        // ready stream can retry; an uncertain clockSync result is not replayed.
+        let deadline = sidecarReadDeadline(timeoutSeconds: timeoutSeconds)
+        let fd = try await GuestAgentHandshake.connect(
+            timeoutSeconds: Double(try sidecarRemainingReadMilliseconds(until: deadline)) / 1_000,
+            attemptTimeoutSeconds: handshakeAttemptTimeoutSeconds,
+            connect: connect, onRetry: onHandshakeRetry
+        )
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+        try Task.checkCancellation()
+        let hostBefore = try sampleHostTime()
+        do {
+            try MacOSSidecarSocketIO.writeJSONFrame(
+                SidecarGuestAgentFrame.clockSync(hostBefore), fd: fd,
+                timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+            )
+            while true {
+                try Task.checkCancellation()
+                let frame = try MacOSSidecarSocketIO.readJSONFrame(
+                    SidecarGuestAgentFrame.self, fd: fd,
+                    timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+                )
+                switch frame.type {
+                case .clockResult:
+                    guard let data = frame.data else {
+                        throw ContainerizationError(.internalError, message: "guest clock synchronization result is missing data")
+                    }
+                    let result = try JSONDecoder().decode(MacOSGuestClockSyncResult.self, from: data)
+                    return try validate(result: result, hostBefore: hostBefore, hostAfter: sampleHostTime())
+                case .error:
+                    throw ContainerizationError(.internalError, message: "guest clock synchronization failed: \(frame.message ?? "unknown error")")
+                case .exit:
+                    throw ContainerizationError(.internalError, message: "guest agent exited during clock synchronization (code=\(frame.exitCode ?? 1))")
+                default:
+                    continue
+                }
+            }
+        } catch let error as POSIXError where error.code == .ETIMEDOUT {
+            try Task.checkCancellation()
+            throw ContainerizationError(.timeout, message: "timed out during guest clock synchronization")
+        }
+    }
+
     static func sampleHostTime() throws -> MacOSGuestClockSyncRequest {
         var value = timespec()
         guard clock_gettime(CLOCK_REALTIME, &value) == 0 else {

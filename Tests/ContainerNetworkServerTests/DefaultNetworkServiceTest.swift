@@ -469,9 +469,10 @@ private func waitForActivationCount(
     _ network: ControlledActivationNetwork,
     _ expected: Int
 ) async {
-    for _ in 0..<1_000 {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while ContinuousClock.now < deadline {
         if await network.activationCount >= expected { return }
-        await Task.yield()
+        try? await Task.sleep(for: .milliseconds(1))
     }
     Issue.record("network activation did not start")
 }

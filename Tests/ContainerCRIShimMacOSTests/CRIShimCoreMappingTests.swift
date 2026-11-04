@@ -148,7 +148,7 @@ struct CRIShimCoreMappingTests {
 
         #expect(configuration.labels["app"] == "demo")
         #expect(configuration.resources.cpus == 6)
-        #expect(configuration.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
+        #expect(configuration.resources.memoryInBytes == 1024 * 1024 * 1024)
         #expect(configuration.macosGuest?.networkBackend == .vmnetShared)
         #expect(configuration.macosGuest?.vmnetDisconnectRecovery == .stopSandbox)
         #expect(configuration.macosGuest?.snapshotEnabled == false)
@@ -413,7 +413,7 @@ struct CRIShimCoreMappingTests {
                 network: "default",
                 networkBackend: "virtualizationNAT",
                 guiEnabled: false,
-                resources: RuntimeResources(cpus: 4, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes)
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             sandboxImage: CRIShimImageRecord(
                 reference: "example.com/macos/sandbox:latest",
@@ -520,7 +520,7 @@ private let resolvedRuntimeHandler = ResolvedRuntimeHandler(
     networkBackend: "vmnetShared",
     networkMTU: 1_450,
     guiEnabled: false,
-    resources: RuntimeResources(cpus: 6, memoryInBytes: RuntimeResources.defaultMacOSMemoryInBytes)
+    resources: RuntimeResources(cpus: 6, memoryInBytes: 1024 * 1024 * 1024)
 )
 
 private let sandboxMetadata = CRIShimSandboxMetadata(

@@ -22,7 +22,7 @@ import Virtualization
 struct MacOSVirtualMachineResourcesTests {
     @Test
     func alignsMemoryWithoutClampingCapacity() throws {
-        let bytes: UInt64 = 16_384_000_000
+        let bytes: UInt64 = 64_000_001
         let result = try MacOSVirtualMachineResources(cpus: 8, memoryInBytes: bytes)
         #expect(result.cpus == 8)
         #expect(result.memoryInBytes >= bytes)
@@ -37,7 +37,7 @@ struct MacOSVirtualMachineResourcesTests {
         let maximum = Int(VZVirtualMachineConfiguration.maximumAllowedCPUCount)
         for cpu in [0, minimum - 1, maximum + 1, Int.max] {
             #expect(throws: MacOSVirtualMachineResources.ValidationError.self) {
-                try MacOSVirtualMachineResources(cpus: cpu, memoryInBytes: 8 * 1024 * 1024 * 1024)
+                try MacOSVirtualMachineResources(cpus: cpu, memoryInBytes: 1024 * 1024 * 1024)
             }
         }
         for memory: UInt64 in [

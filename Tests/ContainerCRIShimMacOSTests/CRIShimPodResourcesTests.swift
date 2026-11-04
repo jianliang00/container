@@ -17,23 +17,37 @@
 import ContainerCRI
 import ContainerResource
 import Testing
+import Virtualization
 
 @testable import ContainerCRIShimMacOS
 
 struct CRIShimPodResourcesTests {
-    private let defaults = RuntimeResources(cpus: 4, memoryInBytes: 8 * 1024 * 1024 * 1024)
+    private let defaults = RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
 
     @Test
     func absentResourcesPreserveHandlerDefaults() throws {
         let result = try resolveCRIShimPodResources(annotations: [:], defaults: defaults)
         #expect(result.cpus == 4)
-        #expect(result.memoryInBytes == 8 * 1024 * 1024 * 1024)
+        #expect(result.memoryInBytes == 1024 * 1024 * 1024)
         let legacy = try resolveCRIShimPodResources(annotations: [CRIShimPodResourceAnnotation.version: "v1alpha1"], defaults: defaults)
         #expect(legacy == result)
 
     }
 
-    @Test(arguments: ["16000000000", "16384000000", "17179869184"])
+    @Test
+    func absentResourcesValidateRuntimeDefaultsAgainstHostCapacity() throws {
+        if RuntimeResources.defaultMacOSMemoryInBytes > VZVirtualMachineConfiguration.maximumAllowedMemorySize {
+            #expect(throws: CRIShimError.self) {
+                try resolveCRIShimPodResources(annotations: [:], defaults: RuntimeResources())
+            }
+        } else {
+            let result = try resolveCRIShimPodResources(annotations: [:], defaults: RuntimeResources())
+            #expect(result.cpus == RuntimeResources.defaultMacOSCPUCount)
+            #expect(result.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
+        }
+    }
+
+    @Test(arguments: ["1600000000", "1638400000", "1717986918", "16000000000", "16384000000", "17179869184"])
     func mapsPodResourcesThroughSandboxCreation(memory: String) throws {
         var request = Runtime_V1_RunPodSandboxRequest()
         request.config.annotations = [
@@ -45,12 +59,21 @@ struct CRIShimPodResourcesTests {
             name: "macos", sandboxImage: "example.com/sandbox:latest",
             workloadPlatform: .init(os: "darwin", architecture: "arm64"), network: "default",
             networkBackend: "vmnetShared", networkMTU: nil, guiEnabled: false, resources: defaults)
+        let bytes = try #require(UInt64(memory))
+        let aligned = (bytes + 1_048_575) / 1_048_576 * 1_048_576
+        if aligned > VZVirtualMachineConfiguration.maximumAllowedMemorySize {
+            #expect(throws: CRIShimError.self) {
+                try makeCRIShimSandboxConfiguration(
+                    id: "test", request: request, handler: handler,
+                    sandboxImage: .init(reference: "example.com/sandbox:latest", digest: "sha256:test", size: 1))
+            }
+            return
+        }
         let configuration = try makeCRIShimSandboxConfiguration(
             id: "test", request: request, handler: handler,
             sandboxImage: .init(reference: "example.com/sandbox:latest", digest: "sha256:test", size: 1))
         #expect(configuration.resources.cpus == 8)
-        let bytes = try #require(UInt64(memory))
-        #expect(configuration.resources.memoryInBytes == (bytes + 1_048_575) / 1_048_576 * 1_048_576)
+        #expect(configuration.resources.memoryInBytes == aligned)
         let snapshot = SandboxSnapshot(configuration: .init(containerConfiguration: configuration), status: .running, networks: [], containers: [])
         let requested = try resolveCRIShimPodResources(annotations: request.config.annotations, defaults: defaults)
         try validateCRIShimReusedPodResources(requested: requested, snapshot: snapshot)
@@ -68,7 +91,7 @@ struct CRIShimPodResourcesTests {
         #expect(result.memoryInBytes == defaults.memoryInBytes)
         let memoryOnly = try resolveCRIShimPodResources(
             annotations: [
-                CRIShimPodResourceAnnotation.version: "v1alpha2", CRIShimPodResourceAnnotation.memoryBytes: "17179869184",
+                CRIShimPodResourceAnnotation.version: "v1alpha2", CRIShimPodResourceAnnotation.memoryBytes: "536870912",
             ], defaults: defaults)
         #expect(memoryOnly.cpus == 4)
     }
@@ -97,7 +120,7 @@ struct CRIShimPodResourcesTests {
 
     @Test
     func cannotReuseUnknownResources() throws {
-        let requested = try MacOSVirtualMachineResources(cpus: 4, memoryInBytes: 8 * 1024 * 1024 * 1024)
+        let requested = try MacOSVirtualMachineResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
         #expect(throws: CRIShimError.self) {
             try validateCRIShimReusedPodResources(
                 requested: requested,

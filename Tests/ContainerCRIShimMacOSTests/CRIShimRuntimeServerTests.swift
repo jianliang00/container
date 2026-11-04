@@ -953,7 +953,7 @@ struct CRIShimRuntimeServerTests {
         #expect(createSandboxCall.platform.architecture == "arm64")
         #expect(createSandboxCall.runtimeHandler == "container-runtime-macos")
         #expect(createSandboxCall.resources.cpus == 4)
-        #expect(createSandboxCall.resources.memoryInBytes == RuntimeResources.defaultMacOSMemoryInBytes)
+        #expect(createSandboxCall.resources.memoryInBytes == 1024 * 1024 * 1024)
         #expect(createSandboxCall.macosGuest?.networkBackend == .vmnetShared)
         #expect(createSandboxCall.networks.map(\.network) == ["default"])
         #expect(createSandboxCall.networks.map(\.options.hostname) == [runSandbox.podSandboxID])
@@ -1354,7 +1354,8 @@ struct CRIShimRuntimeServerTests {
                 workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
                 network: "default",
                 networkBackend: "virtualizationNAT",
-                guiEnabled: false
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             runtimeHandlers: [
                 "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
@@ -1423,7 +1424,7 @@ struct CRIShimRuntimeServerTests {
         runSandboxRequest.config.annotations = [
             CRIShimPodResourceAnnotation.version: "v1alpha2",
             CRIShimPodResourceAnnotation.cpuMillis: "8000",
-            CRIShimPodResourceAnnotation.memoryBytes: "16384000000",
+            CRIShimPodResourceAnnotation.memoryBytes: "1638400000",
         ]
         var invalidResources = runSandboxRequest
         invalidResources.config.annotations[CRIShimPodResourceAnnotation.memoryBytes] = "-1"
@@ -1442,7 +1443,7 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.createSandboxCalls.count == 1)
         let createSandboxCall = try #require(runtimeManager.createSandboxCalls.first)
         #expect(createSandboxCall.resources.cpus == 8)
-        #expect(createSandboxCall.resources.memoryInBytes == 16_384_000_000)
+        #expect(createSandboxCall.resources.memoryInBytes == 1_638_924_288)
         #expect(createSandboxCall.macosGuest?.networkBackend == .virtualizationNAT)
         #expect(createSandboxCall.networks.isEmpty)
         #expect(cniManager.addCalls.isEmpty)
@@ -1481,7 +1482,8 @@ struct CRIShimRuntimeServerTests {
                 workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
                 network: "default",
                 networkBackend: "virtualizationNAT",
-                guiEnabled: false
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             runtimeHandlers: [
                 "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
@@ -1598,7 +1600,8 @@ struct CRIShimRuntimeServerTests {
                 workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
                 network: "default",
                 networkBackend: "virtualizationNAT",
-                guiEnabled: false
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             runtimeHandlers: [
                 "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
@@ -2078,7 +2081,8 @@ struct CRIShimRuntimeServerTests {
                 workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
                 network: "default",
                 networkBackend: "virtualizationNAT",
-                guiEnabled: false
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             runtimeHandlers: [
                 "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
@@ -2230,7 +2234,8 @@ struct CRIShimRuntimeServerTests {
                 workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
                 network: "default",
                 networkBackend: "virtualizationNAT",
-                guiEnabled: false
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             runtimeHandlers: [
                 "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
@@ -2307,7 +2312,7 @@ struct CRIShimRuntimeServerTests {
         #expect(runtimeManager.createSandboxCalls.count == 1)
         var resized = request(podUID: "pod-a", storageGeneration: 1)
         resized.config.annotations[CRIShimPodResourceAnnotation.version] = "v1alpha2"
-        resized.config.annotations[CRIShimPodResourceAnnotation.memoryBytes] = "17179869184"
+        resized.config.annotations[CRIShimPodResourceAnnotation.memoryBytes] = "2147483648"
         do {
             _ = try await client.runPodSandbox(resized)
             Issue.record("reused a VM with different resources")
@@ -2560,7 +2565,8 @@ struct CRIShimRuntimeServerTests {
                 workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
                 network: "default",
                 networkBackend: "virtualizationNAT",
-                guiEnabled: false
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             runtimeHandlers: [
                 "macos-compat": RuntimeProfile(networkBackend: "virtualizationNAT")
@@ -2680,7 +2686,8 @@ struct CRIShimRuntimeServerTests {
                 workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
                 network: "default",
                 networkBackend: "virtualizationNAT",
-                guiEnabled: false
+                guiEnabled: false,
+                resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
             ),
             runtimeHandlers: [
                 "macos-15-2": RuntimeProfile(
@@ -7512,7 +7519,8 @@ private func runVMNetRecoveryAdmissionRejectionScenario(
             workloadPlatform: WorkloadPlatform(os: "darwin", architecture: "arm64"),
             network: "kubernetes-pod",
             networkBackend: "vmnetShared",
-            guiEnabled: false
+            guiEnabled: false,
+            resources: RuntimeResources(cpus: 4, memoryInBytes: 1024 * 1024 * 1024)
         ),
         runtimeHandlers: [
             "macos": RuntimeProfile(network: "kubernetes-pod", networkBackend: "vmnetShared")
@@ -9065,7 +9073,8 @@ private let validConfigJSON = """
         },
         "network": "default",
         "networkBackend": "vmnetShared",
-        "guiEnabled": false
+        "guiEnabled": false,
+        "resources": { "cpus": 4, "memoryInBytes": 1073741824 }
       },
       "runtimeHandlers": {
         "macos": {

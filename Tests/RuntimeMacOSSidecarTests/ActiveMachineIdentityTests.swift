@@ -26,7 +26,7 @@ import Virtualization
 @testable import container_runtime_macos_sidecar
 
 struct ActiveMachineIdentityTests {
-    @Test(arguments: ["hostIdentifier", "hostBuild", "configuration", "stateID", "pair"])
+    @Test(arguments: ["hostIdentifier", "hostBuild", "configuration", "cpu", "memory", "stateID", "pair"])
     func restorePreflightRejectsIncompatibilityWithoutChangingActiveFiles(kind: String) async throws {
         let fixture = try await Fixture.make()
         defer { fixture.remove() }
@@ -43,6 +43,10 @@ struct ActiveMachineIdentityTests {
             )
         } else if kind == "configuration" {
             config.macosGuest?.guiEnabled = true
+        } else if kind == "cpu" {
+            config.resources.cpus += 1
+        } else if kind == "memory" {
+            config.resources.memoryInBytes += 1024 * 1024
         } else if kind == "stateID" {
             config.macosGuest?.machineState?.restoreStateID = "different-state"
             expectedCode = "machineStateRequestMismatch"

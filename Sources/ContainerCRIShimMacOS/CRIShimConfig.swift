@@ -307,6 +307,7 @@ public struct RuntimeProfile: Codable, Equatable, Sendable {
 }
 
 public struct RuntimeResources: Codable, Equatable, Sendable {
+    public static let defaultMacOSCPUCount = 4
     public static let defaultMacOSMemoryInBytes: UInt64 = 8 * 1024 * 1024 * 1024
 
     public var cpus: Int?
@@ -318,7 +319,7 @@ public struct RuntimeResources: Codable, Equatable, Sendable {
     }
 
     public static var macOSDefault: RuntimeResources {
-        RuntimeResources(cpus: 4, memoryInBytes: defaultMacOSMemoryInBytes)
+        RuntimeResources(cpus: defaultMacOSCPUCount, memoryInBytes: defaultMacOSMemoryInBytes)
     }
 }
 

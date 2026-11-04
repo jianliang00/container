@@ -126,6 +126,60 @@ signals are:
 - the macOS node taint and matching toleration supplied by RuntimeClass
   scheduling
 
+## Pod CPU and Memory
+
+Pod resource sizing requires a Darwin kubelet that emits the macOS sandbox
+`v1alpha2` contract and a runtime that consumes it. Upgrade the runtime before
+the kubelet. A legacy kubelet continues to use the RuntimeHandler defaults.
+
+For each resource, an enabled Pod-level limit takes precedence over its request.
+Without a Pod-level declaration, each container's limit takes precedence over
+its request. Kubelet aggregates these capacities using Kubernetes' init-container
+and restartable-sidecar rules. If some containers declare a resource and others
+have neither a limit nor a request for it, sandbox creation fails rather than
+allocating only the declared portion. A resource absent from every container
+uses the RuntimeHandler default (4 vCPUs and 8 GiB when not configured).
+
+For example, a single-container Pod can declare:
+
+```yaml
+resources:
+  requests:
+    cpu: "8"
+    memory: "16384M"
+  limits:
+    cpu: "8"
+    memory: "16384M"
+```
+
+This creates an 8-vCPU VM with 16,384,000,000 bytes of guest RAM. `16G` and
+`16Gi` retain their decimal and binary meanings. Memory is rounded up to a
+multiple of 1 MiB; fractional CPU values are rounded up to whole vCPUs
+(`1500m` becomes 2 vCPUs). Unsupported hardware sizes fail instead of being
+silently clamped. vCPU sizing does not implement fractional CPU-time throttling.
+
+Guest RAM is shared by macOS and every container in the Pod; this contract does
+not enforce individual container memory limits. Pod overhead remains host-side
+resource accounting and is not added to the VM's guest RAM or vCPU count. Use
+explicit requests and limits, preferably equal for fixed-size VMs, so scheduler
+reservations reflect the intended capacity.
+
+Kubelet computes and overwrites these CRI annotations from the Pod specification;
+workload authors should configure `resources`, not set the annotations:
+
+| CRI annotation | Value |
+| --- | --- |
+| `io.kubernetes.cri.macos/pod-sandbox-config-version` | `v1alpha2` |
+| `io.kubernetes.cri.macos/cpu-millis` | Positive decimal integer in millicores; omitted for the default |
+| `io.kubernetes.cri.macos/memory-bytes` | Positive decimal integer in bytes; omitted for the default |
+
+Existing VMs retain their configured capacity. Changing CPU or memory requires
+recreating the Pod sandbox; both CRI resource-update RPCs reject in-place changes.
+An idempotent sandbox retry verifies the existing VM's capacity before reusing it.
+Saved machine states require matching CPU and memory; changing capacity does not
+permit bypassing snapshot compatibility checks. Inspect the VM configuration to
+verify effective capacity after creation.
+
 ## Sandbox Image Selection
 
 The default RuntimeClass for a joined node uses the sandbox image configured

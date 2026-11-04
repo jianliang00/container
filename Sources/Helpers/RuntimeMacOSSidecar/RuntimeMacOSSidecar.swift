@@ -1505,14 +1505,10 @@ actor MacOSSidecarService {
         let vmConfiguration = VZVirtualMachineConfiguration()
         vmConfiguration.bootLoader = VZMacOSBootLoader()
         vmConfiguration.platform = platform
-        vmConfiguration.cpuCount = max(
-            Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount),
-            min(Int(VZVirtualMachineConfiguration.maximumAllowedCPUCount), containerConfig.resources.cpus)
-        )
-        vmConfiguration.memorySize = max(
-            VZVirtualMachineConfiguration.minimumAllowedMemorySize,
-            min(VZVirtualMachineConfiguration.maximumAllowedMemorySize, containerConfig.resources.memoryInBytes)
-        )
+        let resources = try MacOSVirtualMachineResources(
+            cpus: containerConfig.resources.cpus, memoryInBytes: containerConfig.resources.memoryInBytes)
+        vmConfiguration.cpuCount = resources.cpus
+        vmConfiguration.memorySize = resources.memoryInBytes
         vmConfiguration.storageDevices = storage.devices
         nbdObservers = storage.observers
         let networkBackend = MacOSNetworkBackendFactory.backend(for: containerConfig)

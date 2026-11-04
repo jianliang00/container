@@ -1311,8 +1311,20 @@ struct CRIShimRuntimeServerTests {
         let sandboxMetrics = try await client.listPodSandboxMetrics(Runtime_V1_ListPodSandboxMetricsRequest())
         #expect(sandboxMetrics.podMetrics.isEmpty)
 
-        _ = try await client.updateContainerResources(Runtime_V1_UpdateContainerResourcesRequest())
-        _ = try await client.updatePodSandboxResources(Runtime_V1_UpdatePodSandboxResourcesRequest())
+        do {
+            _ = try await client.updateContainerResources(Runtime_V1_UpdateContainerResourcesRequest())
+            Issue.record("resource update unexpectedly succeeded")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .invalidArgument)
+            #expect(status.message?.contains("recreate the pod sandbox") == true)
+        }
+        do {
+            _ = try await client.updatePodSandboxResources(Runtime_V1_UpdatePodSandboxResourcesRequest())
+            Issue.record("sandbox resource update unexpectedly succeeded")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .invalidArgument)
+            #expect(status.message?.contains("recreate the pod sandbox") == true)
+        }
 
         var events: [Runtime_V1_ContainerEventResponse] = []
         for try await event in client.getContainerEvents(Runtime_V1_GetEventsRequest()) {
@@ -1408,11 +1420,29 @@ struct CRIShimRuntimeServerTests {
         runSandboxRequest.config.metadata.namespace = "default"
         runSandboxRequest.config.metadata.name = "nat-pod"
         runSandboxRequest.config.metadata.attempt = 1
+        runSandboxRequest.config.annotations = [
+            CRIShimPodResourceAnnotation.version: "v1alpha2",
+            CRIShimPodResourceAnnotation.cpuMillis: "8000",
+            CRIShimPodResourceAnnotation.memoryBytes: "16384000000",
+        ]
+        var invalidResources = runSandboxRequest
+        invalidResources.config.annotations[CRIShimPodResourceAnnotation.memoryBytes] = "-1"
+        do {
+            _ = try await client.runPodSandbox(invalidResources)
+            Issue.record("invalid resources were accepted")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .invalidArgument)
+        }
+        #expect(runtimeManager.createSandboxCalls.isEmpty)
+        #expect(cniManager.addCalls.isEmpty)
+
         let runSandbox = try await client.runPodSandbox(runSandboxRequest)
 
         #expect(!runSandbox.podSandboxID.isEmpty)
         #expect(runtimeManager.createSandboxCalls.count == 1)
         let createSandboxCall = try #require(runtimeManager.createSandboxCalls.first)
+        #expect(createSandboxCall.resources.cpus == 8)
+        #expect(createSandboxCall.resources.memoryInBytes == 16_384_000_000)
         #expect(createSandboxCall.macosGuest?.networkBackend == .virtualizationNAT)
         #expect(createSandboxCall.networks.isEmpty)
         #expect(cniManager.addCalls.isEmpty)
@@ -2274,6 +2304,17 @@ struct CRIShimRuntimeServerTests {
         let first = try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1))
         let retry = try await client.runPodSandbox(request(podUID: "pod-a", storageGeneration: 1))
         #expect(retry.podSandboxID == first.podSandboxID)
+        #expect(runtimeManager.createSandboxCalls.count == 1)
+        var resized = request(podUID: "pod-a", storageGeneration: 1)
+        resized.config.annotations[CRIShimPodResourceAnnotation.version] = "v1alpha2"
+        resized.config.annotations[CRIShimPodResourceAnnotation.memoryBytes] = "17179869184"
+        do {
+            _ = try await client.runPodSandbox(resized)
+            Issue.record("reused a VM with different resources")
+        } catch let status as GRPCStatus {
+            #expect(status.code == .invalidArgument)
+            #expect(status.message?.contains("recreate the pod sandbox") == true)
+        }
         #expect(runtimeManager.createSandboxCalls.count == 1)
 
         for fenced in [

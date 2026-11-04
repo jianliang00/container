@@ -783,14 +783,10 @@ enum MacOSCompatibilityDescriptionBuilder {
         networkDeviceMACAddresses: [String],
         storageDescriptions: [MacOSMachineStateStorageDescription]
     ) throws -> MacOSMachineStateCompatibilityDescription {
-        let cpuCount = max(
-            Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount),
-            min(Int(VZVirtualMachineConfiguration.maximumAllowedCPUCount), containerConfig.resources.cpus)
-        )
-        let memorySize = max(
-            VZVirtualMachineConfiguration.minimumAllowedMemorySize,
-            min(VZVirtualMachineConfiguration.maximumAllowedMemorySize, containerConfig.resources.memoryInBytes)
-        )
+        let resources = try MacOSVirtualMachineResources(
+            cpus: containerConfig.resources.cpus, memoryInBytes: containerConfig.resources.memoryInBytes)
+        let cpuCount = resources.cpus
+        let memorySize = resources.memoryInBytes
         let options = containerConfig.macosGuest
         let input = FingerprintInput(
             cpuCount: cpuCount,

@@ -279,6 +279,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
             try CRIShimUnsupportedFieldValidator.validate(request)
 
             var handler = try config.resolveRuntimeHandler(request.runtimeHandler)
+            // Validate before image pulls or any sandbox provisioning side effects.
+            _ = try resolveCRIShimPodResources(annotations: request.config.annotations, defaults: handler.resources)
             handler.sandboxImage = try sandboxImageReference(request: request, handler: handler)
             let resolvedHandler = handler
             return try await imageGCProtection.withProtectedImage(handler.sandboxImage) {
@@ -418,6 +420,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                     "machine-state persistence id \(leaseAcquisition.lease.persistenceID) has a lease without a completed sandbox; refusing automatic takeover"
                 )
             }
+            let requested = try resolveCRIShimPodResources(annotations: request.config.annotations, defaults: handler.resources)
+            let snapshot = try await runtimeManager.inspectSandbox(id: existing.runtimeSandboxID)
+            try validateCRIShimReusedPodResources(requested: requested, snapshot: snapshot)
             var response = Runtime_V1_RunPodSandboxResponse()
             response.podSandboxID = sandboxID
             return response
@@ -2399,7 +2404,7 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         try await CRIShimGRPCHandlerLogger.runtimeService().handle(
             operation: CRIRuntimeOperation.updateContainerResources.rawValue
         ) {
-            Runtime_V1_UpdateContainerResourcesResponse()
+            throw CRIShimError.invalidArgument("macOS VM resources cannot be updated in place; recreate the pod sandbox")
         }
     }
 
@@ -2505,6 +2510,8 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         }
     }
 
+    // Kubelet treats Unimplemented as a successful best-effort resize. Return
+    // InvalidArgument so it cannot record an unchanged VM as resized.
     public func updatePodSandboxResources(
         request: Runtime_V1_UpdatePodSandboxResourcesRequest,
         context: GRPCAsyncServerCallContext
@@ -2512,7 +2519,7 @@ extension Runtime_V1_RuntimeServiceAsyncProvider {
         try await CRIShimGRPCHandlerLogger.runtimeService().handle(
             operation: CRIRuntimeOperation.updatePodSandboxResources.rawValue
         ) {
-            Runtime_V1_UpdatePodSandboxResourcesResponse()
+            throw CRIShimError.invalidArgument("macOS VM resources cannot be updated in place; recreate the pod sandbox")
         }
     }
 }

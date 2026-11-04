@@ -120,12 +120,9 @@ func makeCRIShimSandboxConfiguration(
             )
         ]
     }
-    if let cpus = handler.resources.cpus {
-        configuration.resources.cpus = cpus
-    }
-    if let memoryInBytes = handler.resources.memoryInBytes {
-        configuration.resources.memoryInBytes = memoryInBytes
-    }
+    let resources = try resolveCRIShimPodResources(annotations: request.config.annotations, defaults: handler.resources)
+    configuration.resources.cpus = resources.cpus
+    configuration.resources.memoryInBytes = resources.memoryInBytes
     if let metadata {
         configuration.labels[CRIShimCoreLabel.sandboxMetadata] = try makeCRIShimCoreMetadataLabel(metadata)
     }

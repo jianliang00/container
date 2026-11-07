@@ -18,3 +18,17 @@ jobs:
           xcrun swiftc -target arm64-apple-macosx27.0 scripts/macos-native-overlay-probe/LayerMetadata.swift -o "$RUNNER_TEMP/layer-metadata"
           "$RUNNER_TEMP/layer-metadata"
           rm "$RUNNER_TEMP/layer-metadata"
+      - name: Inspect framework linkage for older hosts
+        run: |
+          set -euo pipefail
+          xcrun swiftc -target arm64-apple-macosx15.0 scripts/macos-native-overlay-probe/WeakLink.swift -o "$RUNNER_TEMP/weak-link"
+          "$RUNNER_TEMP/weak-link"
+          otool -l "$RUNNER_TEMP/weak-link" > "$RUNNER_TEMP/load-commands.txt"
+          python3 - <<'PYCODE'
+          import os,pathlib
+          value=pathlib.Path(os.environ['RUNNER_TEMP'],'load-commands.txt').read_text()
+          blocks=[v for v in value.split('Load command ') if 'DiskImageKit.framework/' in v]
+          print(''.join(blocks))
+          assert len(blocks)==1 and 'LC_LOAD_WEAK_DYLIB' in blocks[0]
+          PYCODE
+          rm "$RUNNER_TEMP/weak-link" "$RUNNER_TEMP/load-commands.txt"

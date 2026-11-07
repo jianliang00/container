@@ -613,6 +613,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOS", package: "containerization"),
                 "ContainerLog",
@@ -982,7 +983,7 @@ let package = Package(
         .target(
             name: "SocketForwarder",
             dependencies: [
-                .product(name: "Collections", package: "swift-collections"),
+                .product(name: "DequeModule", package: "swift-collections"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),

@@ -28,6 +28,7 @@ import ContainerizationOS
 import Darwin
 import Foundation
 import Logging
+import SystemPackage
 
 enum Variant: String, ExpressibleByArgument {
     case reserved

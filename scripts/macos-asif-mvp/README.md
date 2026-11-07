@@ -110,6 +110,40 @@ Host-side integrity tests:
 python3 -m unittest discover -s scripts/macos-asif-mvp -p 'test_*.py' -v
 ```
 
+## Restore comparison
+
+Compare three decoded-cache states independently: no cached disk, only the
+parent disk cached, and the complete target image cached. Keep OCI blobs local
+for this experiment and report transfer costs separately. A cold-versus-warm
+comparison of one backend does not measure a format speedup.
+
+`MacOSImageRestoreExperimentTests` is an opt-in timing harness for the production
+RAW `MacOSDiskRebuilder` and `FilesystemClone` path. Prepare a private, owned
+directory containing `layout.json`, verified OCI blobs under `oci/blobs/sha256`,
+the three VM identity files under `identity`, and `request.json` with distinct
+`sample` and `cache` directory names. The harness is disabled unless
+`MACOS_IMAGE_RESTORE_EXPERIMENT` points to that directory:
+
+```sh
+MACOS_IMAGE_RESTORE_EXPERIMENT="$EXPERIMENT_ROOT" \
+  swift test -c release --filter MacOSImageRestoreExperimentTests
+```
+
+The harness records disk reconstruction and clone times and creates a private
+RAW instance that the signed runner can boot. Use a fresh cache for the cold
+sample, the same cache for target-image hits, and a separate parent cache when
+measuring a new derived image. The existing RAW cache is keyed by the complete
+image, so a decoded parent does not avoid rebuilding a new target image.
+
+For each backend, also boot the prepared instance, run a command as the normal
+guest user, and verify restored files and executable output. Report disk
+preparation and preparation-to-first-user-command separately; neither metric
+includes scheduling, network download or desktop readiness. Include any import
+validation within the measured restore path. The ASIF MVP rechecks compressed
+blobs and serially decodes and hashes the full logical disk, whereas the RAW
+rebuilder processes sparse chunks in parallel after content-store verification.
+This difference is an implementation cost, not an inherent property of ASIF.
+
 Production adoption still requires runtime/OCI format negotiation, image ancestry
 and GC integration, bounded flattening, encrypted TOS archive integration, power
 failure testing and sustained guest workload acceptance. This experiment does

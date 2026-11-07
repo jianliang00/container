@@ -57,7 +57,7 @@ struct MachineStateSupportTests {
         #expect(try lifecycle.validateFilesystemCheckpointFinish(finish))
         #expect(try lifecycle.begin(.resume, checkpointID: finish.checkpointID))
         lifecycle.complete(.resume, succeeded: true)
-        lifecycle.completeFilesystemCheckpointFinish(finish)
+        try lifecycle.completeFilesystemCheckpointFinish(finish)
         #expect(try lifecycle.validateFilesystemCheckpointFinish(finish) == false)
         #expect(throws: SidecarRPCError.self) { try lifecycle.beginFilesystemCheckpoint(request) }
         #expect(throws: SidecarRPCError.self) {
@@ -65,6 +65,25 @@ struct MachineStateSupportTests {
         }
         #expect(try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: "snapshot-b")))
         #expect(throws: SidecarRPCError.self) { try lifecycle.validateFilesystemCheckpointFinish(finish) }
+        #expect(throws: SidecarRPCError.self) { try lifecycle.completeFilesystemCheckpointFinish(finish) }
+        lifecycle.completeFilesystemCheckpoint(succeeded: true)
+        #expect(try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: "snapshot-b")) == false)
+    }
+
+    @Test(arguments: [MacOSVMRuntimeState.stopped, .failed, .paused])
+    func failedPauseUsesObservedVMState(observed: MacOSVMRuntimeState) throws {
+        var lifecycle = MacOSVMLifecycleCoordinator()
+        _ = try lifecycle.begin(.start)
+        lifecycle.complete(.start, succeeded: true)
+        _ = try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: "failed-pause"))
+        lifecycle.completeFilesystemCheckpoint(succeeded: false, observedFailureState: observed)
+        #expect(lifecycle.state == observed)
+        #expect(throws: SidecarRPCError.self) { try lifecycle.begin(.resume) }
+        if observed == .paused {
+            #expect(try lifecycle.begin(.resume, checkpointID: "failed-pause"))
+        } else {
+            #expect(throws: SidecarRPCError.self) { try lifecycle.begin(.resume, checkpointID: "failed-pause") }
+        }
     }
 
     @Test
@@ -74,7 +93,7 @@ struct MachineStateSupportTests {
         lifecycle.complete(.start, succeeded: true)
         let request = MacOSFilesystemCheckpointRequest(checkpointID: "failed-sync")
         _ = try lifecycle.beginFilesystemCheckpoint(request)
-        lifecycle.completeFilesystemCheckpoint(succeeded: false)
+        lifecycle.completeFilesystemCheckpoint(succeeded: false, observedFailureState: .running)
         #expect(lifecycle.state == .running)
         do {
             _ = try lifecycle.beginFilesystemCheckpoint(request)
@@ -84,7 +103,7 @@ struct MachineStateSupportTests {
         let finish = MacOSFilesystemCheckpointFinishRequest(checkpointID: request.checkpointID, action: .resume)
         #expect(try lifecycle.validateFilesystemCheckpointFinish(finish))
         #expect(try lifecycle.begin(.resume, checkpointID: request.checkpointID) == false)
-        lifecycle.completeFilesystemCheckpointFinish(finish)
+        try lifecycle.completeFilesystemCheckpointFinish(finish)
         let admission = try lifecycle.acquireProcessStartAdmission()
         lifecycle.releaseProcessStartAdmission(admission)
     }
@@ -126,7 +145,7 @@ struct MachineStateSupportTests {
         #expect(try lifecycle.validateFilesystemCheckpointFinish(finish))
         _ = try lifecycle.begin(.stop, checkpointID: finish.checkpointID)
         lifecycle.complete(.stop, succeeded: true)
-        lifecycle.completeFilesystemCheckpointFinish(finish)
+        try lifecycle.completeFilesystemCheckpointFinish(finish)
         #expect(lifecycle.state == .stopped)
     }
 

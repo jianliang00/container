@@ -88,7 +88,11 @@ private func executeScript(_ fd: Int32, script: String, timeout: TimeInterval) t
     var outputBytes = 0
     while true {
         let response = try readFrame(fd, deadline: deadline)
-        guard response["id"] as? String == id else { continue }
+        // Legacy exec streams omit IDs. This connection owns exactly one exec;
+        // accept absent IDs, but never a response attributed to another request.
+        if let responseID = response["id"] as? String, responseID != id {
+            throw ProbeFailure(message: "guest response ID mismatch")
+        }
         switch response["type"] as? String {
         case "stdout", "stderr":
             guard let encoded = response["data"] as? String, let data = Data(base64Encoded: encoded) else {
@@ -96,7 +100,7 @@ private func executeScript(_ fd: Int32, script: String, timeout: TimeInterval) t
             }
             outputBytes += data.count
             guard outputBytes <= 8 << 20 else { throw ProbeFailure(message: "guest output exceeds 8 MiB") }
-            report(["stage": response["type"]!, "data": encoded])
+            report(["stage": response["type"]!, "data": encoded, "time": Date().timeIntervalSince1970])
         case "error": throw ProbeFailure(message: "guest rejected command: \(response["message"] ?? "unknown error")")
         case "exit":
             guard let code = response["exitCode"] as? Int else { throw ProbeFailure(message: "missing exit status") }

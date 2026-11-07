@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import io
 import json
+import plistlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -91,6 +92,14 @@ class ImageTests(unittest.TestCase):
         parent.symlink_to(copy)
         with self.assertRaisesRegex(ValueError, "symlink"):
             image.load(self.instance)
+
+    def test_host_attachment_rejected_before_lsof(self):
+        path = self.instance / "base.img"
+        mounts = plistlib.dumps({"images": [{"image-path": str(path)}]})
+        with patch.object(image.subprocess, "check_output", return_value=mounts), patch.object(image.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "attached"):
+                image.idle([path])
+            run.assert_not_called()
 
     def test_reordered_layers(self):
         layout = self.commit()

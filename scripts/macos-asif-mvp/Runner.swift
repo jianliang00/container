@@ -206,11 +206,16 @@ private func runVM(root: URL, config: Configuration, script: String) async throw
         if verified != 0 { throw ProbeFailure(message: "guest command failed with exit code \(verified)") }
         // The wrapper waits for guest sync before stopping this owned VM.
     } catch { result = error }
-    if vm.state != .stopped {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.stop { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+    if vm.canStop {
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                vm.stop { error in
+                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                }
             }
+        } catch {
+            report(["stage": "stopFailed", "error": String(describing: error)])
+            if result == nil { result = error }
         }
     }
     report(["stage": "vmStopped", "stopped": vm.state == .stopped])

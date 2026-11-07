@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import stat
@@ -74,6 +75,11 @@ def capacity(path):
 
 
 def idle(paths):
+    # Disk-image mounts can hold kernel references without a userspace lsof row.
+    attached = plistlib.loads(subprocess.check_output(["/usr/bin/hdiutil", "info", "-plist"]))
+    requested = {str(path) for path in paths}
+    require(not any(item.get("image-path") in requested for item in attached.get("images", [])),
+            "image is still attached to the host")
     result = subprocess.run(["/usr/sbin/lsof", "-t", "--", *map(str, paths)], capture_output=True)
     require(result.returncode == 1 and not result.stdout and not result.stderr,
             "image has an open handle, or lsof could not verify ownership")

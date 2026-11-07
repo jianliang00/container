@@ -57,15 +57,16 @@ private func readFrame(_ fd: Int32, deadline: Date) throws -> [String: Any] {
     return frame
 }
 
-private func executeMarker(_ fd: Int32, write: Bool, marker: String) throws -> String {
+private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true) throws -> String {
     let deadline = Date().addingTimeInterval(30)
     guard try readFrame(fd, deadline: deadline)["type"] as? String == "ready" else {
         throw ProbeFailure(message: "guest did not send ready frame")
     }
     let path = "/private/var/tmp/native-overlay-probe-" + marker
+    let value = marker + (afterSnapshot ? "-after" : "")
     let script =
         write
-        ? "umask 077; printf '%s' '" + marker + "' > '" + path + "'; sync; cat '" + path + "'"
+        ? "set -e; umask 077; printf '%s' '" + value + "' > '" + path + "'; " + (synchronize ? "sync; " : "") + "cat '" + path + "'"
         : "cat '" + path + "'"
     let frame: [String: Any] = [
         "type": "exec", "id": UUID().uuidString, "executable": "/bin/sh",
@@ -96,18 +97,54 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String) throws -> S
             output.append(data)
         case "error": throw ProbeFailure(message: "guest rejected fixed marker command")
         case "exit":
-            guard response["exitCode"] as? Int == 0, String(data: output, encoding: .utf8) == marker else {
+            guard response["exitCode"] as? Int == 0, String(data: output, encoding: .utf8) == value else {
                 throw ProbeFailure(message: "guest marker verification failed")
             }
-            return marker
+            return value
         default: continue
         }
     }
 }
 
+@MainActor
+private func guestMarker(_ vm: VZVirtualMachine, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true) async throws -> String {
+    guard let socket = vm.socketDevices.first as? VZVirtioSocketDevice else { throw ProbeFailure(message: "missing socket device") }
+    let deadline = Date().addingTimeInterval(180)
+    var connection: VZVirtioSocketConnection?
+    while connection == nil && Date() < deadline {
+        do {
+            connection = try await withCheckedThrowingContinuation { continuation in
+                socket.connect(toPort: 27000) { continuation.resume(with: $0) }
+            }
+        } catch { try await Task.sleep(nanoseconds: 1_000_000_000) }
+    }
+    guard let connection else { throw ProbeFailure(message: "guest agent connection timeout") }
+    defer { withExtendedLifetime(connection) {} }
+    let fd = dup(connection.fileDescriptor)
+    guard fd >= 0 else { throw ProbeFailure(message: "cannot duplicate guest connection") }
+    let verified = try await Task.detached {
+        defer { Darwin.close(fd) }
+        var enabled: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        return try executeMarker(fd, write: write, marker: marker, afterSnapshot: afterSnapshot, synchronize: synchronize)
+    }.value
+    return verified
+}
+
+private func clonePausedFixture(_ root: URL) throws {
+    let destination = root.appendingPathComponent("paused-checkpoint")
+    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    for name in ["base.img", "overlay.asif", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"] {
+        guard clonefile(root.appendingPathComponent(name).path, destination.appendingPathComponent(name).path, UInt32(CLONE_NOFOLLOW)) == 0 else {
+            throw ProbeFailure(message: "paused fixture clone failed; partial fixture retained for diagnosis")
+        }
+    }
+    report(["stage": "pausedFixtureCloned", "fixture": destination.path, "hostSourceFsync": false])
+}
+
 @available(macOS 27, *)
 @MainActor
-private func runVM(root: URL, write: Bool, marker: String) async throws {
+private func runVM(root: URL, mode: String, marker: String) async throws {
     let attributes = try FileManager.default.attributesOfFileSystem(forPath: root.path)
     guard let freeBytes = attributes[.systemFreeSize] as? NSNumber, freeBytes.uint64Value >= 20 << 30 else {
         throw ProbeFailure(message: "test VM requires at least 20 GiB of free disk space")
@@ -150,27 +187,21 @@ private func runVM(root: URL, write: Bool, marker: String) async throws {
             vm.start { continuation.resume(with: $0) }
         }
         report(["stage": "vmStarted", "cpuCount": 2, "memoryBytes": 4 << 30, "networkDevices": 0])
-        guard let socket = vm.socketDevices.first as? VZVirtioSocketDevice else { throw ProbeFailure(message: "missing socket device") }
-        let deadline = Date().addingTimeInterval(180)
-        var connection: VZVirtioSocketConnection?
-        while connection == nil && Date() < deadline {
-            do {
-                connection = try await withCheckedThrowingContinuation { continuation in
-                    socket.connect(toPort: 27000) { continuation.resume(with: $0) }
-                }
-            } catch { try await Task.sleep(nanoseconds: 1_000_000_000) }
-        }
-        guard let connection else { throw ProbeFailure(message: "guest agent connection timeout") }
-        defer { withExtendedLifetime(connection) {} }
-        let fd = dup(connection.fileDescriptor)
-        guard fd >= 0 else { throw ProbeFailure(message: "cannot duplicate guest connection") }
-        let verified = try await Task.detached {
-            defer { Darwin.close(fd) }
-            var enabled: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
-            return try executeMarker(fd, write: write, marker: marker)
-        }.value
+        let write = mode != "read"
+        let verified = try await guestMarker(vm, write: write, marker: marker, synchronize: mode != "pause-dirty")
         report(["stage": "guestMarkerVerified", "write": write, "marker": verified])
+        if mode == "pause" || mode == "pause-dirty" {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                vm.pause { continuation.resume(with: $0) }
+            }
+            guard vm.state == .paused else { throw ProbeFailure(message: "VM did not pause") }
+            try clonePausedFixture(root)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                vm.resume { continuation.resume(with: $0) }
+            }
+            let changed = try await guestMarker(vm, write: true, marker: marker, afterSnapshot: true)
+            report(["stage": "sourceAdvancedAfterSnapshot", "marker": changed])
+        }
     } catch { result = error }
     if vm.state != .stopped {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -184,8 +215,8 @@ private func runVM(root: URL, write: Bool, marker: String) async throws {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard arguments.count == 3, ["write", "read"].contains(arguments[1]), UUID(uuidString: arguments[2]) != nil else {
-    report(["error": "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read UUID"])
+guard arguments.count == 3, ["write", "read", "pause", "pause-dirty"].contains(arguments[1]), UUID(uuidString: arguments[2]) != nil else {
+    report(["error": "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty UUID"])
     exit(1)
 }
 let fixture = URL(fileURLWithPath: arguments[0]).standardizedFileURL
@@ -205,7 +236,7 @@ for name in ["base.img", "overlay.asif", "HardwareModel.bin", "MachineIdentifier
 Task { @MainActor in
     do {
         if #available(macOS 27, *) {
-            try await runVM(root: fixture, write: arguments[1] == "write", marker: arguments[2])
+            try await runVM(root: fixture, mode: arguments[1], marker: arguments[2])
             exit(0)
         }
         throw ProbeFailure(message: "macOS 27 or newer is required")

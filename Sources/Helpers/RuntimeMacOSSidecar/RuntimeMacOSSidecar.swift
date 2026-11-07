@@ -707,9 +707,11 @@ actor MacOSSidecarService {
         }
     }
 
-    func stopVM(checkpointID: String? = nil) async throws {
+    func stopVM(checkpointID: String? = nil, beforeStop: @Sendable () -> Void = {}) async throws {
         log.info("stopVM requested", metadata: ["state": "\(state.rawValue)", "has_window": "\(vmWindow != nil)"])
         let shouldStop = try lifecycle.begin(.stop, checkpointID: checkpointID)
+        // Closing sessions is destructive; run it only after lifecycle admission.
+        beforeStop()
         if !shouldStop {
             if state == .stopped {
                 await discardVirtualMachineResources()
@@ -1546,9 +1548,9 @@ actor MacOSSidecarService {
         return try JSONDecoder().decode(MacOSGuestNetworkConfigurationResult.self, from: data)
     }
 
-    func prepareForQuit() async throws {
+    func prepareForQuit(beforeStop: @Sendable () -> Void = {}) async throws {
         log.info("prepareForQuit requested", metadata: ["state": "\(state.rawValue)", "has_window": "\(vmWindow != nil)"])
-        try await stopVM()
+        try await stopVM(beforeStop: beforeStop)
     }
 
     private func configPath() -> URL { rootURL.appendingPathComponent("config.json") }
@@ -5756,21 +5758,24 @@ final class SidecarControlServer: @unchecked Sendable {
         case .vmStop:
             log.info("sidecar control vmStop request", metadata: ["request_id": "\(requestID)"])
             return try sync(requestID: requestID) {
-                self.closeAllProcessSessions()
-                self.closeAllFSSessions()
-                self.closeAllFSReadSessions()
-                try await service.stopVM()
+                try await service.stopVM {
+                    self.closeAllProcessSessions()
+                    self.closeAllFSSessions()
+                    self.closeAllFSReadSessions()
+                }
                 return .success(requestID: requestID)
             }
         case .sidecarQuit:
             log.info("sidecar control sidecarQuit request", metadata: ["request_id": "\(requestID)"])
             let response: MacOSSidecarResponse = try sync(requestID: requestID) {
-                self.closeAllProcessSessions()
-                self.closeAllFSSessions()
-                self.closeAllFSReadSessions()
-                try await service.prepareForQuit()
+                try await service.prepareForQuit {
+                    self.closeAllProcessSessions()
+                    self.closeAllFSSessions()
+                    self.closeAllFSReadSessions()
+                }
                 return .success(requestID: requestID)
             }
+            guard response.ok else { return response }
             DispatchQueue.main.async {
                 NSApplication.shared.terminate(nil)
             }

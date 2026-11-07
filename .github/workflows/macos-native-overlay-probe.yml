@@ -1,84 +1,20 @@
-name: macOS native overlay probe
-
+name: macOS native layer metadata diagnostic
 on:
   workflow_dispatch:
-  push:
-    branches: [p/wangjianliang/macos-r109-runtime-fixes]
-    paths:
-      - scripts/macos-native-overlay-probe/**
-      - .github/workflows/macos-native-overlay-probe.yml
-      - Sources/Helpers/MacOSGuestAgent/**
-      - Sources/Helpers/RuntimeMacOSSidecarShared/**
-
 permissions:
   contents: read
-
 jobs:
-  build:
+  inspect:
     runs-on: xcode-27
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Build probe
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Inspect layer metadata without starting a VM
         run: |
           set -euo pipefail
-          mkdir -p probe-artifact
-          {
-            git rev-parse HEAD
-            sw_vers
-            xcodebuild -version
-            xcrun --show-sdk-version
-          } > probe-artifact/build.txt
+          sw_vers
+          xcodebuild -version
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 27
-          xcrun swiftc -O -target arm64-apple-macosx27.0 \
-            scripts/macos-native-overlay-probe/Probe.swift \
-            -o probe-artifact/native-overlay-probe
-          xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 \
-            scripts/macos-native-overlay-probe/VMProbe.swift \
-            -o probe-artifact/native-overlay-vm-probe
-      - name: Build guest agent for isolated fixtures
-        run: |
-          set -euo pipefail
-          swift build -c release --product container-macos-guest-agent
-          cp "$(swift build -c release --show-bin-path)/container-macos-guest-agent" probe-artifact/
-      - name: Sign standalone diagnostic
-        env:
-          APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}
-          APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
-          APP_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
-        run: |
-          set -euo pipefail
-          test -n "$APP_CERTIFICATE"
-          test -n "$APP_CERTIFICATE_PASSWORD"
-          test -n "$APP_IDENTITY"
-          keychain_path="$RUNNER_TEMP/native-overlay-probe.keychain-db"
-          certificate_path="$RUNNER_TEMP/native-overlay-probe.p12"
-          keychain_password="$(openssl rand -hex 24)"
-          trap 'security delete-keychain "$keychain_path" >/dev/null 2>&1 || true; rm -f "$certificate_path"' EXIT
-          python3 -c 'import base64,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "native-overlay-probe.p12").write_bytes(base64.b64decode(os.environ["APP_CERTIFICATE"]))'
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security import "$certificate_path" -k "$keychain_path" -P "$APP_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path" >/dev/null
-          codesign --force --sign "$APP_IDENTITY" --keychain "$keychain_path" \
-            --timestamp --options runtime probe-artifact/native-overlay-probe
-          codesign --verify --strict probe-artifact/native-overlay-probe
-          codesign -dvv probe-artifact/native-overlay-probe 2> probe-artifact/signature.txt
-          codesign --force --sign "$APP_IDENTITY" --keychain "$keychain_path" \
-            --timestamp --options runtime --entitlements scripts/macos-native-overlay-probe/vm.entitlements \
-            probe-artifact/native-overlay-vm-probe
-          codesign --verify --strict probe-artifact/native-overlay-vm-probe
-          codesign --force --sign "$APP_IDENTITY" --keychain "$keychain_path" \
-            --timestamp --options runtime probe-artifact/container-macos-guest-agent
-          codesign --verify --strict probe-artifact/container-macos-guest-agent
-      - name: Check native API and package artifact
-        run: |
-          set -euo pipefail
-          probe-artifact/native-overlay-probe self-test | tee probe-artifact/api-test.json
-          shasum -a 256 probe-artifact/native-overlay-probe probe-artifact/native-overlay-vm-probe probe-artifact/container-macos-guest-agent > probe-artifact/SHA256SUMS
-          tar -czf native-overlay-probe.tar.gz probe-artifact
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: native-overlay-probe
-          path: native-overlay-probe.tar.gz
-          retention-days: 14
+          xcrun swiftc -target arm64-apple-macosx27.0 scripts/macos-native-overlay-probe/LayerMetadata.swift -o "$RUNNER_TEMP/layer-metadata"
+          "$RUNNER_TEMP/layer-metadata"
+          rm "$RUNNER_TEMP/layer-metadata"

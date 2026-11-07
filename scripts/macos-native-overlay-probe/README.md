@@ -105,3 +105,15 @@ also includes a guest agent for installation into private test fixtures only.
 Older guests are rejected before pausing. See
 [the synchronization protocol](../../docs/macos-guest-filesystem-sync.md) for
 its acknowledgement and timeout boundaries.
+
+`pause-wal-continuous-rpc` and `raw-pause-wal-continuous-rpc` keep
+FULL-synchronous SQLite transactions writing sequential records through sync and
+pause. At least ten records must exist before requesting sync. Use
+`read-wal-continuous` or `raw-read-wal-continuous` on a private copy of the
+checkpoint to require integrity, the pre-sync minimum, a gap-free sequence and
+matching record payloads. The last concurrent transaction is not assumed saved.
+
+`pause-wal-rollback-rpc` and `raw-pause-wal-rollback-rpc` inject an error after
+pause and before cloning, then resume the original VM and verify another write.
+They do not create a checkpoint. This tests the diagnostic caller's recovery
+path, not the production snapshot state machine.

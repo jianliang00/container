@@ -57,9 +57,12 @@ private func readFrame(_ fd: Int32, deadline: Date) throws -> [String: Any] {
     return frame
 }
 
-private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false) throws -> String {
+private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false, syncRPC: Bool = false) throws
+    -> String
+{
     let deadline = Date().addingTimeInterval(30)
-    guard try readFrame(fd, deadline: deadline)["type"] as? String == "ready" else {
+    let ready = try readFrame(fd, deadline: deadline)
+    guard ready["type"] as? String == "ready" else {
         throw ProbeFailure(message: "guest did not send ready frame")
     }
     let path = "/private/var/tmp/native-overlay-probe-" + marker
@@ -96,11 +99,18 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
             script = "set -e; " + verify
         }
     }
-    let frame: [String: Any] = [
+    var frame: [String: Any] = [
         "type": "exec", "id": UUID().uuidString, "executable": "/bin/sh",
         "arguments": ["-c", script], "environment": ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"],
         "workingDirectory": "/private/var/tmp", "terminal": false,
     ]
+    if syncRPC {
+        guard (ready["capabilities"] as? [String])?.contains("filesystemSyncV1") == true else {
+            throw ProbeFailure(message: "guest lacks filesystemSyncV1")
+        }
+        let request = try JSONSerialization.data(withJSONObject: ["requestID": marker, "timeoutSeconds": 30])
+        frame = ["type": "filesystemSync", "id": marker, "data": request.base64EncodedString()]
+    }
     let payload = try JSONSerialization.data(withJSONObject: frame)
     var length = UInt32(payload.count).bigEndian
     var bytes = withUnsafeBytes(of: &length) { Data($0) }
@@ -117,6 +127,16 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
     var output = Data()
     while true {
         let response = try readFrame(fd, deadline: deadline)
+        if syncRPC {
+            guard response["type"] as? String == "filesystemSyncResult", response["id"] as? String == marker,
+                let encoded = response["data"] as? String, let data = Data(base64Encoded: encoded),
+                let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                result["requestID"] as? String == marker
+            else {
+                throw ProbeFailure(message: "guest filesystem sync did not acknowledge the request")
+            }
+            return marker
+        }
         switch response["type"] as? String {
         case "stdout":
             guard let encoded = response["data"] as? String, let data = Data(base64Encoded: encoded), output.count + data.count <= 65536 else {
@@ -137,7 +157,7 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
 
 @MainActor
 private func guestMarker(
-    _ vm: VZVirtualMachine, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false,
+    _ vm: VZVirtualMachine, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false, syncRPC: Bool = false,
     retain: ((VZVirtioSocketConnection) -> Void)? = nil
 ) async throws -> String {
     guard let socket = vm.socketDevices.first as? VZVirtioSocketDevice else { throw ProbeFailure(message: "missing socket device") }
@@ -159,7 +179,7 @@ private func guestMarker(
         defer { Darwin.close(fd) }
         var enabled: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
-        return try executeMarker(fd, write: write, marker: marker, afterSnapshot: afterSnapshot, synchronize: synchronize, wal: wal)
+        return try executeMarker(fd, write: write, marker: marker, afterSnapshot: afterSnapshot, synchronize: synchronize, wal: wal, syncRPC: syncRPC)
     }.value
     return verified
 }
@@ -232,8 +252,13 @@ private func runVM(root: URL, mode requestedMode: String, marker: String) async 
         let write = !mode.hasPrefix("read")
         let wal = mode.contains("wal")
         let verified = try await guestMarker(
-            vm, write: write, marker: marker, synchronize: mode != "pause-dirty" && mode != "pause-wal", wal: wal, retain: wal && write ? { heldConnection = $0 } : nil)
+            vm, write: write, marker: marker, synchronize: mode != "pause-dirty" && mode != "pause-wal" && mode != "pause-wal-rpc", wal: wal,
+            retain: wal && write ? { heldConnection = $0 } : nil)
         report(["stage": "guestMarkerVerified", "write": write, "marker": verified])
+        if mode == "pause-wal-rpc" {
+            _ = try await guestMarker(vm, write: false, marker: marker, syncRPC: true)
+            report(["stage": "guestFilesystemSyncAcknowledged", "requestID": marker])
+        }
         if mode.hasPrefix("pause") {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 vm.pause { continuation.resume(with: $0) }
@@ -260,12 +285,15 @@ private func runVM(root: URL, mode requestedMode: String, marker: String) async 
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard arguments.count == 3,
-    ["write", "read", "pause", "pause-dirty", "pause-wal", "pause-wal-sync", "read-wal", "raw-pause-wal", "raw-pause-wal-sync", "raw-read-wal"].contains(arguments[1]),
+    [
+        "write", "read", "pause", "pause-dirty", "pause-wal", "pause-wal-sync", "read-wal", "raw-pause-wal", "raw-pause-wal-sync", "raw-read-wal", "pause-wal-rpc",
+        "raw-pause-wal-rpc",
+    ].contains(arguments[1]),
     UUID(uuidString: arguments[2]) != nil
 else {
     report([
         "error":
-            "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|pause-wal-sync|read-wal|raw-pause-wal|raw-pause-wal-sync|raw-read-wal UUID"
+            "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|pause-wal-sync|read-wal|raw-pause-wal|raw-pause-wal-sync|raw-read-wal|pause-wal-rpc|raw-pause-wal-rpc UUID"
     ])
     exit(1)
 }

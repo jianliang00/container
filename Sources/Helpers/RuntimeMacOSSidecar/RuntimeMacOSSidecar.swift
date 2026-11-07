@@ -241,6 +241,8 @@ struct SidecarGuestAgentFrame: Codable {
         case close
         case networkConfigure
         case networkResult
+        case filesystemSync
+        case filesystemSyncResult
         case clockSync
         case clockResult
         case fsBegin
@@ -766,6 +768,7 @@ actor MacOSSidecarService {
             machineState: capability,
             methods: [
                 MacOSSidecarMethod.vmCapabilities.rawValue,
+                MacOSSidecarMethod.fsSync.rawValue,
                 MacOSSidecarMethod.vmPause.rawValue,
                 MacOSSidecarMethod.vmResume.rawValue,
                 MacOSSidecarMethod.vmPrepareCheckpoint.rawValue,
@@ -796,6 +799,19 @@ actor MacOSSidecarService {
         if shouldStart {
             lifecycle.complete(.start, succeeded: true)
         }
+    }
+
+    func synchronizeGuestFilesystems(_ request: MacOSGuestFileSystemSyncRequest) async throws -> MacOSGuestFileSystemSyncResult {
+        guard state == .running else {
+            throw SidecarRPCError(code: "invalidLifecycleState", message: "guest filesystem sync requires a running VM")
+        }
+        let config = try loadContainerConfiguration()
+        let port = config.macosGuest?.agentPort ?? 27000
+        return try await MacOSGuestFileSystemSync.synchronize(
+            request,
+            connect: { [self] timeout in
+                try await connectVsock(port: port, timeoutSeconds: timeout)
+            })
     }
 
     func pauseVM(timeoutSeconds: Double? = nil) async throws -> MacOSMachineStateOperationResult {
@@ -1255,8 +1271,8 @@ actor MacOSSidecarService {
                 case .exit:
                     throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
                 case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
-                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync,
-                    .clockResult,
+                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .filesystemSync,
+                    .clockResult, .filesystemSyncResult,
                     .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
@@ -1398,7 +1414,7 @@ actor MacOSSidecarService {
                     message: "guest network configuration stream exited unexpectedly (code=\(frame.exitCode ?? 1))"
                 )
             case .ready, .ack, .stdout, .stderr, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
-                .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd,
+                .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .clockSync, .filesystemSync, .clockResult, .filesystemSyncResult, .fsBegin, .fsChunk, .fsEnd,
                 .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
@@ -1940,7 +1956,7 @@ actor MacOSSidecarService {
                     message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))"
                 )
             case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete,
-                .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd,
+                .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .filesystemSync, .clockResult, .filesystemSyncResult, .fsBegin, .fsChunk, .fsEnd,
                 .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                 continue
             }
@@ -4412,7 +4428,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 case .stdout, .stderr, .exit, .ready:
                     continue
                 case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
-                    .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
+                    .resize, .close, .networkConfigure, .networkResult, .clockSync, .filesystemSync, .clockResult, .filesystemSyncResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
                     .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
@@ -4638,7 +4654,7 @@ final class SidecarControlServer: @unchecked Sendable {
                 case .ready:
                     continue
                 case .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal,
-                    .resize, .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
+                    .resize, .close, .networkConfigure, .networkResult, .clockSync, .filesystemSync, .clockResult, .filesystemSyncResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin,
                     .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
@@ -4783,7 +4799,7 @@ final class SidecarControlServer: @unchecked Sendable {
             case .ready:
                 continue
             case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
-                .close, .networkConfigure, .networkResult, .clockSync, .clockResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
+                .close, .networkConfigure, .networkResult, .clockSync, .filesystemSync, .clockResult, .filesystemSyncResult, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk,
                 .fsReadEnd, .fsListDir:
                 continue
             }
@@ -4844,10 +4860,10 @@ final class SidecarControlServer: @unchecked Sendable {
                     .internalError,
                     message: "guest-agent filesystem stream exited for transaction \(expectedID) (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .stdout, .stderr, .networkResult, .clockResult:
+            case .ready, .stdout, .stderr, .networkResult, .clockResult, .filesystemSyncResult:
                 continue
             case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
-                .close, .networkConfigure, .clockSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                .close, .networkConfigure, .clockSync, .filesystemSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
                 .fsListDir:
                 continue
             }
@@ -4878,10 +4894,10 @@ final class SidecarControlServer: @unchecked Sendable {
                     .internalError,
                     message: "guest-agent filesystem stream exited for transaction \(expectedID) (code=\(frame.exitCode ?? 1))"
                 )
-            case .ready, .stdout, .stderr, .networkResult, .clockResult:
+            case .ready, .stdout, .stderr, .networkResult, .clockResult, .filesystemSyncResult:
                 continue
             case .exec, .processInspect, .processAttach, .processEventAck, .processStop, .processDelete, .stdin, .signal, .resize,
-                .close, .networkConfigure, .clockSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
+                .close, .networkConfigure, .clockSync, .filesystemSync, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
                 .fsListDir:
                 continue
             }
@@ -4927,8 +4943,8 @@ final class SidecarControlServer: @unchecked Sendable {
                 case .exit:
                     throw ContainerizationError(.internalError, message: "guest-agent exited before ready (code=\(frame.exitCode ?? 1))")
                 case .stdout, .stderr, .ack, .exec, .processInspect, .processAttach, .processEventAck, .processStop,
-                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync,
-                    .clockResult,
+                    .processDelete, .stdin, .signal, .resize, .close, .networkConfigure, .networkResult, .clockSync, .filesystemSync,
+                    .clockResult, .filesystemSyncResult,
                     .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
                     continue
                 }
@@ -5457,6 +5473,18 @@ final class SidecarControlServer: @unchecked Sendable {
                     protocolVersion: MacOSSidecarProtocolVersion.current
                 )
             }
+        case .fsSync:
+            guard let data = request.data else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem sync payload")
+            }
+            let payload = try JSONDecoder().decode(MacOSGuestFileSystemSyncRequest.self, from: data)
+            guard payload.requestID == requestID else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "filesystem sync request ID mismatch")
+            }
+            return try sync(requestID: requestID) {
+                let result = try await service.synchronizeGuestFilesystems(payload)
+                return .success(requestID: requestID, data: try JSONEncoder().encode(result), protocolVersion: MacOSSidecarProtocolVersion.current)
+            }
         case .vmPause:
             return try sync(requestID: requestID) {
                 let result = try await service.pauseVM(timeoutSeconds: request.machineState?.timeoutSeconds)
@@ -5726,7 +5754,7 @@ final class SidecarControlServer: @unchecked Sendable {
             }
         case .vmBootstrapStart, .vmShowGUI, .vmConnectVsock, .processStart, .processInspect, .processStdin, .processSignal,
             .processResize, .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd,
-            .fsListDir, .vmCapabilities, .vmStop, .sidecarQuit, .unknown:
+            .fsListDir, .fsSync, .vmCapabilities, .vmStop, .sidecarQuit, .unknown:
             break
         }
         return nil
@@ -5783,7 +5811,7 @@ extension MacOSSidecarMethod {
             true
         case .eventsSubscribe, .eventsAcknowledge, .vmConnectVsock, .processInspect, .processDelete, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
             .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmPrepareCheckpoint,
-            .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .vmStop, .sidecarQuit, .unknown:
+            .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .fsSync, .vmStop, .sidecarQuit, .unknown:
             false
         }
     }

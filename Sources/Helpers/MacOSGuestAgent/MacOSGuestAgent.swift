@@ -79,6 +79,7 @@ enum MacOSGuestAgentCapabilities {
         MacOSGuestProcessProtocol.durableProcessV3,
         MacOSGuestProcessProtocol.durableProcessV4,
         "projectedVolumeV1",
+        MacOSGuestFileSystemSyncRequest.capability,
     ]
 
     static func encodedJSON() throws -> Data {
@@ -189,6 +190,7 @@ final class AgentConnection: @unchecked Sendable {
     private let attachmentLock = NSLock()
     private let socketHandle: FileHandle
     private let processSupervisor: GuestProcessSupervisor
+    private let filesystemSynchronizer: GuestFileSystemSynchronizer
     private let relayHalfCloseIdleTimeout: TimeInterval?
     private let relayPeerStateCheckInterval: TimeInterval
     fileprivate let writer: SocketFrameWriter
@@ -204,6 +206,7 @@ final class AgentConnection: @unchecked Sendable {
     init(
         fd: Int32,
         processSupervisor: GuestProcessSupervisor = .shared,
+        filesystemSynchronizer: GuestFileSystemSynchronizer = .shared,
         // Raw relay EOF represents a TCP write-half-close, so no application idle deadline is imposed by default.
         relayHalfCloseIdleTimeout: TimeInterval? = nil,
         relayPeerStateCheckInterval: TimeInterval = 1,
@@ -221,6 +224,7 @@ final class AgentConnection: @unchecked Sendable {
         self.processStartTraceSink = processStartTraceSink
         self.socketHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         self.processSupervisor = processSupervisor
+        self.filesystemSynchronizer = filesystemSynchronizer
         self.relayHalfCloseIdleTimeout = relayHalfCloseIdleTimeout.map { max($0, 0) }
         self.relayPeerStateCheckInterval =
             relayPeerStateCheckInterval.isFinite
@@ -537,6 +541,17 @@ final class AgentConnection: @unchecked Sendable {
         case .networkConfigure:
             try configureNetwork(frame: frame)
             return .continueReading
+        case .filesystemSync:
+            guard let id = frame.id, let data = frame.data else { throw POSIXError(.EINVAL) }
+            let request = try JSONDecoder().decode(MacOSGuestFileSystemSyncRequest.self, from: data)
+            guard request.requestID == id else { throw POSIXError(.EINVAL) }
+            do {
+                let result = try filesystemSynchronizer.synchronize(request)
+                try send(frame: .init(type: .filesystemSyncResult, id: id, data: JSONEncoder().encode(result)))
+            } catch {
+                try send(frame: .error(id: id, message: "guest filesystem sync failed", errorCode: structuredPOSIXErrorCode(error)))
+            }
+            return .continueReading
         case .clockSync:
             try synchronizeClock(frame: frame)
             return .continueReading
@@ -561,7 +576,7 @@ final class AgentConnection: @unchecked Sendable {
         case .fsListDir:
             try handleFsListDir(frame: frame)
             return .continueReading
-        case .stdout, .stderr, .exit, .error, .ready, .ack, .networkResult, .clockResult:
+        case .stdout, .stderr, .exit, .error, .ready, .ack, .networkResult, .clockResult, .filesystemSyncResult:
             return .continueReading
         }
     }
@@ -2834,6 +2849,8 @@ struct GuestAgentFrame: Codable, Sendable {
         case tcpConnect
         case networkConfigure
         case networkResult
+        case filesystemSync
+        case filesystemSyncResult
         case clockSync
         case clockResult
         case fsBegin

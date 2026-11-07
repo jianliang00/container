@@ -34,6 +34,7 @@ struct GuestAgentTCPConnectTests {
             MacOSGuestProcessProtocol.durableProcessV3,
             MacOSGuestProcessProtocol.durableProcessV4,
             "projectedVolumeV1",
+            MacOSGuestFileSystemSyncRequest.capability,
         ]
         #expect(MacOSGuestAgentCapabilities.advertised == expected)
         #expect(try JSONDecoder().decode([String].self, from: MacOSGuestAgentCapabilities.encodedJSON()) == expected)

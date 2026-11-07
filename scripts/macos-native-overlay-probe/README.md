@@ -87,3 +87,8 @@ pausing and cloning. It updates the source row after resuming. `read-wal`
 checks `PRAGMA integrity_check` and the original row in the copied fixture.
 The guest needs `/usr/bin/sqlite3`; the held writer exits after 120 seconds or
 when the diagnostic stops its VM.
+
+`pause-wal-sync` adds a guest-wide `sync` after the WAL commit and before
+pausing. Compare it with `pause-wal` to distinguish the stronger pre-pause
+flush from SQLite's own commit synchronization. Preserve an untouched copy of
+each checkpoint before booting it; boot and WAL recovery can modify the files.

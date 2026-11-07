@@ -86,6 +86,7 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
                 done
                 /usr/bin/grep -qx ready '\(db).log'
                 test -s '\(db)-wal'
+                \(synchronize ? "sync" : ":")
                 printf '%s' '\(value)'
                 wait "$writer"
                 """
@@ -222,8 +223,9 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
         }
         report(["stage": "vmStarted", "cpuCount": 2, "memoryBytes": 4 << 30, "networkDevices": 0])
         let write = !mode.hasPrefix("read")
-        let wal = mode.hasSuffix("wal")
-        let verified = try await guestMarker(vm, write: write, marker: marker, synchronize: mode != "pause-dirty", wal: wal, retain: wal && write ? { heldConnection = $0 } : nil)
+        let wal = mode.contains("wal")
+        let verified = try await guestMarker(
+            vm, write: write, marker: marker, synchronize: mode != "pause-dirty" && mode != "pause-wal", wal: wal, retain: wal && write ? { heldConnection = $0 } : nil)
         report(["stage": "guestMarkerVerified", "write": write, "marker": verified])
         if mode.hasPrefix("pause") {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -250,8 +252,9 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard arguments.count == 3, ["write", "read", "pause", "pause-dirty", "pause-wal", "read-wal"].contains(arguments[1]), UUID(uuidString: arguments[2]) != nil else {
-    report(["error": "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|read-wal UUID"])
+guard arguments.count == 3, ["write", "read", "pause", "pause-dirty", "pause-wal", "pause-wal-sync", "read-wal"].contains(arguments[1]), UUID(uuidString: arguments[2]) != nil
+else {
+    report(["error": "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|pause-wal-sync|read-wal UUID"])
     exit(1)
 }
 let fixture = URL(fileURLWithPath: arguments[0]).standardizedFileURL

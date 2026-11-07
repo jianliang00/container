@@ -29,6 +29,108 @@ import Virtualization
 @Suite(.serialized)
 struct MachineStateSupportTests {
     @Test
+    func filesystemCheckpointFencesMutationsAcrossSyncPauseAndSeal() throws {
+        var lifecycle = MacOSVMLifecycleCoordinator()
+        _ = try lifecycle.begin(.start)
+        lifecycle.complete(.start, succeeded: true)
+        let request = MacOSFilesystemCheckpointRequest(checkpointID: "snapshot-a")
+        #expect(try lifecycle.beginFilesystemCheckpoint(request))
+        for operation in [MacOSVMLifecycleCoordinator.Operation.start, .pause, .resume, .save, .restore, .stop] {
+            #expect(throws: SidecarRPCError.self) { try lifecycle.begin(operation) }
+        }
+        #expect(throws: SidecarRPCError.self) { try lifecycle.acquireProcessStartAdmission() }
+        #expect(throws: SidecarRPCError.self) { try lifecycle.beginFilesystemCheckpoint(request) }
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.validateFilesystemCheckpointFinish(.init(checkpointID: "snapshot-a", action: .resume))
+        }
+        lifecycle.completeFilesystemCheckpoint(succeeded: true)
+        #expect(lifecycle.state == .paused)
+        #expect(try lifecycle.beginFilesystemCheckpoint(request) == false)
+        #expect(throws: SidecarRPCError.self) { try lifecycle.begin(.resume) }
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: "snapshot-b"))
+        }
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.validateFilesystemCheckpointFinish(.init(checkpointID: "snapshot-b", action: .stop))
+        }
+        let finish = MacOSFilesystemCheckpointFinishRequest(checkpointID: "snapshot-a", action: .resume)
+        #expect(try lifecycle.validateFilesystemCheckpointFinish(finish))
+        #expect(try lifecycle.begin(.resume, checkpointID: finish.checkpointID))
+        lifecycle.complete(.resume, succeeded: true)
+        lifecycle.completeFilesystemCheckpointFinish(finish)
+        #expect(try lifecycle.validateFilesystemCheckpointFinish(finish) == false)
+        #expect(throws: SidecarRPCError.self) { try lifecycle.beginFilesystemCheckpoint(request) }
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.validateFilesystemCheckpointFinish(.init(checkpointID: "snapshot-a", action: .stop))
+        }
+        #expect(try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: "snapshot-b")))
+        #expect(throws: SidecarRPCError.self) { try lifecycle.validateFilesystemCheckpointFinish(finish) }
+    }
+
+    @Test
+    func failedFilesystemCheckpointDoesNotReplayAndCanBeReleasedByOwner() throws {
+        var lifecycle = MacOSVMLifecycleCoordinator()
+        _ = try lifecycle.begin(.start)
+        lifecycle.complete(.start, succeeded: true)
+        let request = MacOSFilesystemCheckpointRequest(checkpointID: "failed-sync")
+        _ = try lifecycle.beginFilesystemCheckpoint(request)
+        lifecycle.completeFilesystemCheckpoint(succeeded: false)
+        #expect(lifecycle.state == .running)
+        do {
+            _ = try lifecycle.beginFilesystemCheckpoint(request)
+            Issue.record("failed sync was replayed")
+        } catch let error as SidecarRPCError { #expect(error.code == "checkpointUncertain") }
+        #expect(throws: SidecarRPCError.self) { try lifecycle.acquireProcessStartAdmission() }
+        let finish = MacOSFilesystemCheckpointFinishRequest(checkpointID: request.checkpointID, action: .resume)
+        #expect(try lifecycle.validateFilesystemCheckpointFinish(finish))
+        #expect(try lifecycle.begin(.resume, checkpointID: request.checkpointID) == false)
+        lifecycle.completeFilesystemCheckpointFinish(finish)
+        let admission = try lifecycle.acquireProcessStartAdmission()
+        lifecycle.releaseProcessStartAdmission(admission)
+    }
+
+    @Test
+    func filesystemCheckpointRejectsInvalidStateAndPendingProcessAdmission() throws {
+        var lifecycle = MacOSVMLifecycleCoordinator()
+        let request = MacOSFilesystemCheckpointRequest(checkpointID: "snapshot")
+        #expect(throws: SidecarRPCError.self) { try lifecycle.beginFilesystemCheckpoint(request) }
+        _ = try lifecycle.begin(.start)
+        lifecycle.complete(.start, succeeded: true)
+        for timeout in [0.0, Double.infinity, 121.0] {
+            #expect(throws: SidecarRPCError.self) {
+                try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: "snapshot", timeoutSeconds: timeout))
+            }
+        }
+        #expect(throws: SidecarRPCError.self) {
+            try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: ""))
+        }
+        let admission = try lifecycle.acquireProcessStartAdmission()
+        #expect(throws: SidecarRPCError.self) { try lifecycle.beginFilesystemCheckpoint(request) }
+        lifecycle.releaseProcessStartAdmission(admission)
+        #expect(try lifecycle.beginFilesystemCheckpoint(request))
+    }
+
+    @Test
+    func filesystemCheckpointRetainsOwnershipWhenFinishFails() throws {
+        var lifecycle = MacOSVMLifecycleCoordinator()
+        _ = try lifecycle.begin(.start)
+        lifecycle.complete(.start, succeeded: true)
+        _ = try lifecycle.beginFilesystemCheckpoint(.init(checkpointID: "snapshot"))
+        lifecycle.completeFilesystemCheckpoint(succeeded: true)
+        let finish = MacOSFilesystemCheckpointFinishRequest(checkpointID: "snapshot", action: .stop)
+        #expect(try lifecycle.validateFilesystemCheckpointFinish(finish))
+        _ = try lifecycle.begin(.stop, checkpointID: finish.checkpointID)
+        lifecycle.complete(.stop, succeeded: false)
+        #expect(lifecycle.state == .paused)
+        #expect(throws: SidecarRPCError.self) { try lifecycle.begin(.resume) }
+        #expect(try lifecycle.validateFilesystemCheckpointFinish(finish))
+        _ = try lifecycle.begin(.stop, checkpointID: finish.checkpointID)
+        lifecycle.complete(.stop, succeeded: true)
+        lifecycle.completeFilesystemCheckpointFinish(finish)
+        #expect(lifecycle.state == .stopped)
+    }
+
+    @Test
     func lifecycleEnforcesSaveStopExclusionAndIdempotency() throws {
         var lifecycle = MacOSVMLifecycleCoordinator()
         #expect(try lifecycle.begin(.start))

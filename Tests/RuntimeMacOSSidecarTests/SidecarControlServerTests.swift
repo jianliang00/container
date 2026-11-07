@@ -27,6 +27,44 @@ import Testing
 
 @Suite(.serialized)
 struct SidecarControlServerTests {
+    @Test
+    func filesystemCheckpointProtocolFailsClosedAndDoesNotClaimEvents() throws {
+        let socketPath = "/tmp/fs-checkpoint-\(UUID().uuidString).sock"
+        let server = makeServer(socketPath: socketPath)
+        try server.start()
+        defer { server.stop() }
+        let fd = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        defer { closeIfValid(fd) }
+        func call(_ method: MacOSSidecarMethod, version: Int, data: Data?) throws -> MacOSSidecarResponse {
+            try MacOSSidecarSocketIO.writeJSONFrame(
+                MacOSSidecarEnvelope.request(.init(requestID: "rpc", method: method, protocolVersion: version, data: data)), fd: fd)
+            return try responseFrame(fd: fd)
+        }
+        let prepare = try JSONEncoder().encode(MacOSFilesystemCheckpointRequest(checkpointID: "checkpoint"))
+        #expect(try call(.vmPrepareFilesystemCheckpoint, version: 2, data: prepare).error?.code == "protocolVersionMismatch")
+        #expect(try call(.vmFinishFilesystemCheckpoint, version: 2, data: nil).error?.code == "protocolVersionMismatch")
+        #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: nil).error?.code == "invalidArgument")
+        #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: prepare).error?.code == "invalidLifecycleState")
+        try server._testSetVMLifecycleRunning()
+        // The test has no VZ VM: prepare must retain ownership after this failure.
+        #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: prepare).error?.code == "invalidLifecycleState")
+        #expect(try call(.vmResume, version: 6, data: nil).error?.code == "checkpointConflict")
+        #expect(!server._testHasEventClient())
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(
+                .init(
+                    requestID: "fs", method: .fsBegin, protocolVersion: 6,
+                    fsBegin: .init(txID: "write", op: .writeFile, path: "/tmp/checkpoint-test", inlineData: Data([1])))), fd: fd)
+        #expect(try responseFrame(fd: fd).error?.code == "checkpointConflict")
+        #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: prepare).error?.code == "checkpointUncertain")
+        let wrongOwner = try JSONEncoder().encode(MacOSFilesystemCheckpointFinishRequest(checkpointID: "other", action: .resume))
+        #expect(try call(.vmFinishFilesystemCheckpoint, version: 6, data: wrongOwner).error?.code == "checkpointConflict")
+        let finish = try JSONEncoder().encode(MacOSFilesystemCheckpointFinishRequest(checkpointID: "checkpoint", action: .resume))
+        #expect(try call(.vmFinishFilesystemCheckpoint, version: 6, data: finish).error == nil)
+        #expect(try call(.vmFinishFilesystemCheckpoint, version: 6, data: finish).error == nil)
+        #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: prepare).error?.code == "checkpointAlreadyFinished")
+    }
+
     @Test(arguments: [Data(), Data([0, 0, 0, 4, 0x7b])])
     func responseFrameTimesOutForSilentOrPartialPeers(prefix: Data) throws {
         let pair = try makeSocketPair()

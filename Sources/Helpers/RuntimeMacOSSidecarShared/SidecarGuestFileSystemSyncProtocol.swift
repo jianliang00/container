@@ -39,3 +39,40 @@ public struct MacOSGuestFileSystemSyncResult: Codable, Sendable, Equatable {
 
     public init(requestID: String) { self.requestID = requestID }
 }
+
+/// A cold disk checkpoint. The caller must use a fresh ID for each attempt.
+/// Ownership lasts until finish succeeds or the sidecar process exits.
+public struct MacOSFilesystemCheckpointRequest: Codable, Sendable, Equatable {
+    public let checkpointID: String
+    public let timeoutSeconds: Double
+
+    public init(checkpointID: String, timeoutSeconds: Double = 30) {
+        self.checkpointID = checkpointID
+        self.timeoutSeconds = timeoutSeconds
+    }
+
+    public var syncRequest: MacOSGuestFileSystemSyncRequest {
+        .init(requestID: checkpointID, timeoutSeconds: timeoutSeconds)
+    }
+}
+
+public struct MacOSFilesystemCheckpointFinishRequest: Codable, Sendable, Equatable {
+    public enum Action: String, Codable, Sendable { case resume, stop }
+    public let checkpointID: String
+    public let action: Action
+
+    public init(checkpointID: String, action: Action) {
+        self.checkpointID = checkpointID
+        self.action = action
+    }
+}
+
+public struct MacOSFilesystemCheckpointResult: Codable, Sendable, Equatable {
+    public let checkpointID: String
+    public let lifecycleState: MacOSVMRuntimeState
+
+    public init(checkpointID: String, lifecycleState: MacOSVMRuntimeState) {
+        self.checkpointID = checkpointID
+        self.lifecycleState = lifecycleState
+    }
+}

@@ -14,7 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import Collections
+import DequeModule
 import Foundation
 import Logging
 import NIO

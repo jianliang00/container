@@ -103,34 +103,42 @@ public struct Builder: Sendable {
             throw Error.invalidContinuation
         }
 
+        var resizeTask: Task<Void, Never>?
         defer {
+            resizeTask?.cancel()
             continuation.finish()
         }
 
         if let terminal = config.terminal {
-            Task {
-                let winchHandler = AsyncSignalHandler.create(notify: [SIGWINCH])
-                let setWinch = { (rows: UInt16, cols: UInt16) in
-                    var winch = ClientStream()
-                    winch.command = .init()
-                    if let cmdString = try TerminalCommand(rows: rows, cols: cols).json() {
-                        winch.command.command = cmdString
-                        continuation.yield(winch)
+            resizeTask = Task {
+                do {
+                    let winchHandler = AsyncSignalHandler.create(notify: [SIGWINCH])
+                    let setWinch = { (rows: UInt16, cols: UInt16) in
+                        var winch = ClientStream()
+                        winch.command = .init()
+                        if let cmdString = try TerminalCommand(rows: rows, cols: cols).json() {
+                            winch.command.command = cmdString
+                            continuation.yield(winch)
+                        }
                     }
-                }
-                let size = try terminal.size
-                var width = size.width
-                var height = size.height
-                try setWinch(height, width)
-
-                for await _ in winchHandler.signals {
                     let size = try terminal.size
-                    let cols = size.width
-                    let rows = size.height
-                    if cols != width || rows != height {
-                        width = cols
-                        height = rows
-                        try setWinch(height, width)
+                    var width = size.width
+                    var height = size.height
+                    try setWinch(height, width)
+
+                    for await _ in winchHandler.signals {
+                        let size = try terminal.size
+                        let cols = size.width
+                        let rows = size.height
+                        if cols != width || rows != height {
+                            width = cols
+                            height = rows
+                            try setWinch(height, width)
+                        }
+                    }
+                } catch {
+                    if !Task.isCancelled {
+                        logger.warning("Terminal resize monitoring stopped: \(error)")
                     }
                 }
             }

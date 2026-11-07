@@ -59,10 +59,14 @@ extension MacOSBlockDeviceBuilder {
         if #available(macOS 27, *) {
             let base = try DiskImage(opening: .open(url: paths.base, mode: .readOnly))
             let overlay = try DiskImage(opening: .open(url: paths.overlay))
-            guard base.format == .raw, overlay.format == .asif, overlay.layerType == .overlay else {
-                throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF requires a RAW base and an ASIF overlay layer")
+            guard base.format == .raw, overlay.format == .asif else {
+                throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF requires a RAW base and an ASIF layer")
             }
             let stack = try base.appending(overlay)
+            // DiskImageKit resolves layer metadata when attaching it to a stack.
+            guard stack.layers.count == 2, stack.layers.last?.layerType == .overlay else {
+                throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF requires an overlay as the writable layer")
+            }
             return try VZDiskImageStorageDeviceAttachment(diskImage: stack, synchronizationMode: .full)
         }
         #endif

@@ -59,3 +59,24 @@ process and disk-handle cleanup check.
 This verifies cold boot persistence after stopping the test VM. It does not
 establish that cloning an overlay while a VM is paused provides a consistent
 snapshot, nor does it verify machine-state restoration or TOS durability.
+
+## Paused copy experiment
+
+`pause` writes and syncs a marker, pauses the VM, and uses APFS `clonefile` to
+copy the base, ASIF and identity files into a new `paused-checkpoint` directory.
+It then resumes the source, overwrites the same marker with a different value,
+and stops the VM. Run `read` against the checkpoint to verify that it retains
+the original value. The checkpoint directory must not already exist.
+
+`pause-dirty` omits the guest `sync` before pausing. Missing unsynced guest data
+is a separate observation from disk corruption: a cold disk snapshot does not
+preserve guest RAM. Neither mode issues a host fsync on the source image.
+
+```sh
+./native-overlay-vm-probe /absolute/private-fixture pause UUID
+./native-overlay-vm-probe /absolute/private-fixture/paused-checkpoint read UUID
+```
+
+These experiments measure the behavior of a specific host and guest combination.
+A successful marker check alone is not a guarantee of crash consistency under
+concurrent writes, database WAL activity or power failure.

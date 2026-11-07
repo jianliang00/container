@@ -92,3 +92,9 @@ when the diagnostic stops its VM.
 pausing. Compare it with `pause-wal` to distinguish the stronger pre-pause
 flush from SQLite's own commit synchronization. Preserve an untouched copy of
 each checkpoint before booting it; boot and WAL recovery can modify the files.
+
+For a matched RAW control, provide another private writable APFS clone named
+`raw.img` and use `raw-pause-wal`, `raw-pause-wal-sync` and `raw-read-wal`.
+These modes attach `raw.img` through the existing URL-based VZ API and clone
+it with the same pause procedure. The base and ASIF fixture files are retained
+for a consistent fixture layout but are not attached in RAW mode.

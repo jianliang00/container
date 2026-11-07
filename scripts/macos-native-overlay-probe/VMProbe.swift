@@ -164,10 +164,10 @@ private func guestMarker(
     return verified
 }
 
-private func clonePausedFixture(_ root: URL) throws {
+private func clonePausedFixture(_ root: URL, raw: Bool) throws {
     let destination = root.appendingPathComponent("paused-checkpoint")
     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-    for name in ["base.img", "overlay.asif", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"] {
+    for name in ["base.img", "overlay.asif", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"] + (raw ? ["raw.img"] : []) {
         guard clonefile(root.appendingPathComponent(name).path, destination.appendingPathComponent(name).path, UInt32(CLONE_NOFOLLOW)) == 0 else {
             throw ProbeFailure(message: "paused fixture clone failed; partial fixture retained for diagnosis")
         }
@@ -177,14 +177,21 @@ private func clonePausedFixture(_ root: URL) throws {
 
 @available(macOS 27, *)
 @MainActor
-private func runVM(root: URL, mode: String, marker: String) async throws {
+private func runVM(root: URL, mode requestedMode: String, marker: String) async throws {
+    let raw = requestedMode.hasPrefix("raw-")
+    let mode = raw ? String(requestedMode.dropFirst(4)) : requestedMode
     let attributes = try FileManager.default.attributesOfFileSystem(forPath: root.path)
     guard let freeBytes = attributes[.systemFreeSize] as? NSNumber, freeBytes.uint64Value >= 20 << 30 else {
         throw ProbeFailure(message: "test VM requires at least 20 GiB of free disk space")
     }
-    let base = try DiskImage(opening: .open(url: root.appendingPathComponent("base.img"), mode: .readOnly))
-    let layer = try DiskImage(opening: .open(url: root.appendingPathComponent("overlay.asif")))
-    let stacked = try base.appending(layer)
+    let attachment: VZDiskImageStorageDeviceAttachment
+    if raw {
+        attachment = try VZDiskImageStorageDeviceAttachment(url: root.appendingPathComponent("raw.img"), readOnly: false)
+    } else {
+        let base = try DiskImage(opening: .open(url: root.appendingPathComponent("base.img"), mode: .readOnly))
+        let layer = try DiskImage(opening: .open(url: root.appendingPathComponent("overlay.asif")))
+        attachment = try VZDiskImageStorageDeviceAttachment(diskImage: base.appending(layer))
+    }
     let platform = VZMacPlatformConfiguration()
     guard let hardware = VZMacHardwareModel(dataRepresentation: try Data(contentsOf: root.appendingPathComponent("HardwareModel.bin"))),
         let identifier = VZMacMachineIdentifier(dataRepresentation: try Data(contentsOf: root.appendingPathComponent("MachineIdentifier.bin")))
@@ -197,7 +204,7 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
     configuration.platform = platform
     configuration.cpuCount = 2
     configuration.memorySize = 4 << 30
-    configuration.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(diskImage: stacked))]
+    configuration.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
     configuration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
     let graphics = VZMacGraphicsDeviceConfiguration()
     graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1440, heightInPixels: 900, pixelsPerInch: 80)]
@@ -221,7 +228,7 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             vm.start { continuation.resume(with: $0) }
         }
-        report(["stage": "vmStarted", "cpuCount": 2, "memoryBytes": 4 << 30, "networkDevices": 0])
+        report(["stage": "vmStarted", "cpuCount": 2, "memoryBytes": 4 << 30, "networkDevices": 0, "diskBackend": raw ? "raw" : "asif"])
         let write = !mode.hasPrefix("read")
         let wal = mode.contains("wal")
         let verified = try await guestMarker(
@@ -232,7 +239,7 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
                 vm.pause { continuation.resume(with: $0) }
             }
             guard vm.state == .paused else { throw ProbeFailure(message: "VM did not pause") }
-            try clonePausedFixture(root)
+            try clonePausedFixture(root, raw: raw)
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 vm.resume { continuation.resume(with: $0) }
             }
@@ -252,9 +259,14 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard arguments.count == 3, ["write", "read", "pause", "pause-dirty", "pause-wal", "pause-wal-sync", "read-wal"].contains(arguments[1]), UUID(uuidString: arguments[2]) != nil
+guard arguments.count == 3,
+    ["write", "read", "pause", "pause-dirty", "pause-wal", "pause-wal-sync", "read-wal", "raw-pause-wal", "raw-pause-wal-sync", "raw-read-wal"].contains(arguments[1]),
+    UUID(uuidString: arguments[2]) != nil
 else {
-    report(["error": "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|pause-wal-sync|read-wal UUID"])
+    report([
+        "error":
+            "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|pause-wal-sync|read-wal|raw-pause-wal|raw-pause-wal-sync|raw-read-wal UUID"
+    ])
     exit(1)
 }
 let fixture = URL(fileURLWithPath: arguments[0]).standardizedFileURL
@@ -262,7 +274,7 @@ guard fixture.path == fixture.resolvingSymlinksInPath().path else {
     report(["error": "fixture path must be canonical"])
     exit(1)
 }
-for name in ["base.img", "overlay.asif", "HardwareModel.bin", "MachineIdentifier.bin", "AuxiliaryStorage"] {
+for name in ["base.img", "overlay.asif", "HardwareModel.bin", "MachineIdentifier.bin", "AuxiliaryStorage"] + (arguments[1].hasPrefix("raw-") ? ["raw.img"] : []) {
     let file = fixture.appendingPathComponent(name)
     guard file.path == file.resolvingSymlinksInPath().path,
         (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true

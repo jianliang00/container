@@ -113,6 +113,7 @@ def load(root):
         regular(root / name)
     require(set(state["immutable"]) == set(config["readOnly"]), "immutable inventory mismatch")
     for name, record in state["immutable"].items():
+        require(re.fullmatch(r"[0-9a-f]{64}", record["sha256"]), "invalid immutable checksum")
         require((root / name).stat().st_mode & 0o222 == 0, "immutable layer is writable")
         require(stamp(root / name) == record["stamp"], "immutable layer changed; re-import image")
     return state
@@ -207,9 +208,11 @@ def metadata(layout, value, media):
 def compress_cached(path, cache, raw_digest, kind):
     cached = cache / (raw_digest + ".json")
     if cached.exists():
-        record = json.loads(cached.read_bytes())
+        record = json.loads(regular(cached).read_bytes())
         compressed = cache / (raw_digest + ".zst")
+        check_descriptor(record["descriptor"])
         require(stamp(compressed) == record["stamp"], "compressed cache changed")
+        require(compressed.stat().st_size == record["descriptor"]["size"], "compressed cache size mismatch")
         require(record["descriptor"]["mediaType"] == MEDIA + "." + kind + "+zstd", "cache type mismatch")
         return compressed, record["descriptor"], True
     compressed = cache / (raw_digest + ".zst")
@@ -328,6 +331,7 @@ def restore(args):
                 receipt = json.loads(regular(cache_record).read_bytes())
                 require(receipt["sha256"] == record["sha256"] and receipt["stamp"] == stamp(cache_file)
                         and cache_file.stat().st_mode & 0o222 == 0, "decoded cache changed; re-import using a fresh cache")
+                require(cache_file.stat().st_size == record["bytes"], "decoded cache size mismatch")
                 clone(cache_file, target, 0o400)
                 reused_bytes += record["blob"]["size"]
             else:

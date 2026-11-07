@@ -128,6 +128,23 @@ class ImageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             image.blob(layout, desc)
 
+    def test_corrupt_compressed_cache_descriptor(self):
+        self.commit()
+        entry = next(self.cache.glob("*.json"))
+        record = json.loads(entry.read_bytes())
+        record["descriptor"]["digest"] = "sha256:../../escape"
+        image.write_json(entry, record)
+        with self.assertRaisesRegex(ValueError, "digest"):
+            image.compress_cached(self.instance / "base.img", self.cache, entry.stem, "raw")
+
+    def test_invalid_immutable_checksum(self):
+        path = self.instance / "instance.json"
+        state = json.loads(path.read_bytes())
+        state["immutable"]["base.img"]["sha256"] = "../../escape"
+        image.write_json(path, state)
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            image.load(self.instance)
+
     def test_decoded_digest_and_size_are_checked(self):
         layout = self.commit()
         record = image.image_config(layout)["files"][1]

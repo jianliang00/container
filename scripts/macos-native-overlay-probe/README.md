@@ -80,3 +80,10 @@ preserve guest RAM. Neither mode issues a host fsync on the source image.
 These experiments measure the behavior of a specific host and guest combination.
 A successful marker check alone is not a guarantee of crash consistency under
 concurrent writes, database WAL activity or power failure.
+
+`pause-wal` uses SQLite WAL mode with `synchronous=FULL`, commits a UUID row,
+checks that a nonempty WAL exists and keeps the SQLite connection open while
+pausing and cloning. It updates the source row after resuming. `read-wal`
+checks `PRAGMA integrity_check` and the original row in the copied fixture.
+The guest needs `/usr/bin/sqlite3`; the held writer exits after 120 seconds or
+when the diagnostic stops its VM.

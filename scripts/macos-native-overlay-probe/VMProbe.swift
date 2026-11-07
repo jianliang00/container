@@ -57,17 +57,44 @@ private func readFrame(_ fd: Int32, deadline: Date) throws -> [String: Any] {
     return frame
 }
 
-private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true) throws -> String {
+private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false) throws -> String {
     let deadline = Date().addingTimeInterval(30)
     guard try readFrame(fd, deadline: deadline)["type"] as? String == "ready" else {
         throw ProbeFailure(message: "guest did not send ready frame")
     }
     let path = "/private/var/tmp/native-overlay-probe-" + marker
     let value = marker + (afterSnapshot ? "-after" : "")
-    let script =
+    var script =
         write
         ? "set -e; umask 077; printf '%s' '" + value + "' > '" + path + "'; " + (synchronize ? "sync; " : "") + "cat '" + path + "'"
         : "cat '" + path + "'"
+    if wal {
+        let db = path + ".sqlite"
+        let query = "PRAGMA integrity_check; SELECT v FROM probe;"
+        let verify = "test \"$(/usr/bin/sqlite3 '\(db)' '\(query)')\" = \"$(printf 'ok\\n\(value)')\"; printf '%s' '\(value)'"
+        if write && !afterSnapshot {
+            // Keep SQLite's connection open after a FULL-synchronous commit so
+            // the checkpoint must recover a real WAL, not a closed database.
+            script = """
+                set -e
+                umask 077
+                { printf '%s\\n' "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=FULL;" "CREATE TABLE probe(v TEXT);" "INSERT INTO probe VALUES('\(value)');" ".print ready"; sleep 120; } | /usr/bin/sqlite3 '\(db)' > '\(db).log' 2>&1 &
+                writer=$!
+                for i in $(seq 1 100); do
+                    /usr/bin/grep -qx ready '\(db).log' && break
+                    sleep 0.1
+                done
+                /usr/bin/grep -qx ready '\(db).log'
+                test -s '\(db)-wal'
+                printf '%s' '\(value)'
+                wait "$writer"
+                """
+        } else if write {
+            script = "set -e; /usr/bin/sqlite3 '\(db)' \"PRAGMA synchronous=FULL; UPDATE probe SET v='\(value)';\"; " + verify
+        } else {
+            script = "set -e; " + verify
+        }
+    }
     let frame: [String: Any] = [
         "type": "exec", "id": UUID().uuidString, "executable": "/bin/sh",
         "arguments": ["-c", script], "environment": ["PATH=/usr/bin:/bin:/usr/sbin:/sbin"],
@@ -95,6 +122,7 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
                 throw ProbeFailure(message: "invalid guest output")
             }
             output.append(data)
+            if wal && write && !afterSnapshot && String(data: output, encoding: .utf8) == value { return value }
         case "error": throw ProbeFailure(message: "guest rejected fixed marker command")
         case "exit":
             guard response["exitCode"] as? Int == 0, String(data: output, encoding: .utf8) == value else {
@@ -107,7 +135,10 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
 }
 
 @MainActor
-private func guestMarker(_ vm: VZVirtualMachine, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true) async throws -> String {
+private func guestMarker(
+    _ vm: VZVirtualMachine, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false,
+    retain: ((VZVirtioSocketConnection) -> Void)? = nil
+) async throws -> String {
     guard let socket = vm.socketDevices.first as? VZVirtioSocketDevice else { throw ProbeFailure(message: "missing socket device") }
     let deadline = Date().addingTimeInterval(180)
     var connection: VZVirtioSocketConnection?
@@ -119,6 +150,7 @@ private func guestMarker(_ vm: VZVirtualMachine, write: Bool, marker: String, af
         } catch { try await Task.sleep(nanoseconds: 1_000_000_000) }
     }
     guard let connection else { throw ProbeFailure(message: "guest agent connection timeout") }
+    retain?(connection)
     defer { withExtendedLifetime(connection) {} }
     let fd = dup(connection.fileDescriptor)
     guard fd >= 0 else { throw ProbeFailure(message: "cannot duplicate guest connection") }
@@ -126,7 +158,7 @@ private func guestMarker(_ vm: VZVirtualMachine, write: Bool, marker: String, af
         defer { Darwin.close(fd) }
         var enabled: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
-        return try executeMarker(fd, write: write, marker: marker, afterSnapshot: afterSnapshot, synchronize: synchronize)
+        return try executeMarker(fd, write: write, marker: marker, afterSnapshot: afterSnapshot, synchronize: synchronize, wal: wal)
     }.value
     return verified
 }
@@ -181,16 +213,19 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
         exit(1)
     }
     defer { watchdog.cancel() }
+    var heldConnection: VZVirtioSocketConnection?
+    defer { heldConnection?.close() }
     var result: Error?
     do {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             vm.start { continuation.resume(with: $0) }
         }
         report(["stage": "vmStarted", "cpuCount": 2, "memoryBytes": 4 << 30, "networkDevices": 0])
-        let write = mode != "read"
-        let verified = try await guestMarker(vm, write: write, marker: marker, synchronize: mode != "pause-dirty")
+        let write = !mode.hasPrefix("read")
+        let wal = mode.hasSuffix("wal")
+        let verified = try await guestMarker(vm, write: write, marker: marker, synchronize: mode != "pause-dirty", wal: wal, retain: wal && write ? { heldConnection = $0 } : nil)
         report(["stage": "guestMarkerVerified", "write": write, "marker": verified])
-        if mode == "pause" || mode == "pause-dirty" {
+        if mode.hasPrefix("pause") {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 vm.pause { continuation.resume(with: $0) }
             }
@@ -199,7 +234,7 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 vm.resume { continuation.resume(with: $0) }
             }
-            let changed = try await guestMarker(vm, write: true, marker: marker, afterSnapshot: true)
+            let changed = try await guestMarker(vm, write: true, marker: marker, afterSnapshot: true, wal: wal)
             report(["stage": "sourceAdvancedAfterSnapshot", "marker": changed])
         }
     } catch { result = error }
@@ -215,8 +250,8 @@ private func runVM(root: URL, mode: String, marker: String) async throws {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard arguments.count == 3, ["write", "read", "pause", "pause-dirty"].contains(arguments[1]), UUID(uuidString: arguments[2]) != nil else {
-    report(["error": "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty UUID"])
+guard arguments.count == 3, ["write", "read", "pause", "pause-dirty", "pause-wal", "read-wal"].contains(arguments[1]), UUID(uuidString: arguments[2]) != nil else {
+    report(["error": "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|read-wal UUID"])
     exit(1)
 }
 let fixture = URL(fileURLWithPath: arguments[0]).standardizedFileURL

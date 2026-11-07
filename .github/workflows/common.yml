@@ -6,6 +6,10 @@ permissions:
 on:
   workflow_call:
     inputs:
+      native_asif_build:
+        type: boolean
+        description: "Build optional native ASIF support with the macOS 27 SDK"
+        default: false
       release:
         type: boolean
         description: "Publish this build for release"
@@ -43,7 +47,7 @@ jobs:
   buildAndTest:
     name: Build and test the project
     timeout-minutes: 75
-    runs-on: macos-26
+    runs-on: ${{ inputs.native_asif_build && 'xcode-27' || 'macos-26' }}
     env:
       INCLUDE_CRI_SHIM: ${{ inputs.include_cri_shim && 'true' || 'false' }}
     permissions:
@@ -60,6 +64,10 @@ jobs:
           developer_dir="$(/usr/bin/xcode-select -p)"
           echo "DEVELOPER_DIR=${developer_dir}" >> "$GITHUB_ENV"
           DEVELOPER_DIR="${developer_dir}" /usr/bin/xcodebuild -version
+
+      - name: Verify native storage SDK
+        if: ${{ inputs.native_asif_build }}
+        run: test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 27
 
       - name: Check formatting
         env:

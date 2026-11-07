@@ -142,6 +142,21 @@ struct ContainerConfigurationMacOSTests {
     }
 
     @Test
+    func nativeASIFConfigurationIsExplicitAndLegacyDiskStillDecodes() throws {
+        typealias Device = ContainerConfiguration.MacOSGuestOptions.BlockDevice
+        let native = Device(identifier: "root", kind: .nativeASIFOverlay, path: "active.asif", nativeBasePath: "base.img")
+        #expect(try JSONDecoder().decode(Device.self, from: JSONEncoder().encode(native)) == native)
+        let legacy = Device(identifier: "root", kind: .runtimeDiskImage, path: "Disk.img")
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
+        object.removeValue(forKey: "nativeBasePath")
+        let decoded = try JSONDecoder().decode(Device.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded == legacy)
+        object["kind"] = "unknownStorageFormat"
+        let unsupported = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(Device.self, from: unsupported) }
+    }
+
+    @Test
     func macOSGuestMachineStateConfigurationRoundTrips() throws {
         let options = ContainerConfiguration.MacOSGuestOptions(
             snapshotEnabled: true,

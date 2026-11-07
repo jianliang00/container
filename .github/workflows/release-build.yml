@@ -6,6 +6,10 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      native_asif_build:
+        description: "Build optional native ASIF support on the macOS 27 SDK runner"
+        type: boolean
+        default: false
       include_cri_shim:
         description: "Include the same-source signed CRI shim without kubelet or node configuration"
         type: boolean
@@ -16,6 +20,7 @@ jobs:
     name: Invoke build and release
     uses: ./.github/workflows/common.yml
     with:
+      native_asif_build: ${{ inputs.native_asif_build }}
       release: true
       sign_release_artifacts: true
       include_cri_shim: ${{ inputs.include_cri_shim }}

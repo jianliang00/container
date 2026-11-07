@@ -18,6 +18,9 @@
 import ContainerResource
 import CryptoKit
 import Darwin
+#if canImport(DiskImageKit)
+import DiskImageKit
+#endif
 import Foundation
 import Logging
 import RuntimeMacOSSidecarShared
@@ -484,6 +487,84 @@ struct MachineStateSupportTests {
             Issue.record("expected incomplete state to fail")
         } catch let error as SidecarRPCError {
             #expect(error.code == "machineStateIncomplete")
+        }
+    }
+
+    @Test
+    func nativeASIFRejectsUnsafeFilesAndMixedConfiguration() throws {
+        let root = temporaryDirectory()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = root.appendingPathComponent("base.img")
+        let overlay = root.appendingPathComponent("active.asif")
+        try Data([0]).write(to: base)
+        try Data([1]).write(to: overlay)
+        var device = ContainerConfiguration.MacOSGuestOptions.BlockDevice(
+            identifier: "root", kind: .nativeASIFOverlay, path: "active.asif", nativeBasePath: "base.img")
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: root, device: device) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: base.path)
+        _ = try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: root, device: device)
+        device.nativeBasePath = "../base.img"
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: root, device: device) }
+        device.nativeBasePath = "base.img"
+        device.path = "missing.asif"
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: root, device: device) }
+        device.path = "alias.asif"
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(device.path), withDestinationURL: overlay)
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: root, device: device) }
+        device.path = "active.asif"
+        device.synchronizationMode = .none
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: root, device: device) }
+        device.synchronizationMode = .full
+        var options = ContainerConfiguration.MacOSGuestOptions(snapshotEnabled: false, guiEnabled: false, agentPort: 27000, blockDevices: [device])
+        try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options)
+        options.blockDevices.append(.init(identifier: "extra", kind: .runtimeDiskImage, path: "base.img"))
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options) }
+        options.blockDevices = [device]
+        options.machineState = .init(persistenceID: "test", storageDirectory: root.path, controlSocketPath: root.appendingPathComponent("socket").path)
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options) }
+        options.machineState = nil
+        options.blockDevices[0].kind = .runtimeDiskImage
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options) }
+    }
+
+    @Test
+    func nativeASIFAttachmentUsesExplicitFormatOrRejectsUnavailableSDK() throws {
+        let root = temporaryDirectory()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let baseURL = root.appendingPathComponent("base.img")
+        let overlayURL = root.appendingPathComponent("active.asif")
+        #expect(FileManager.default.createFile(atPath: baseURL.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: baseURL)
+        try handle.truncate(atOffset: 64 << 20)
+        try handle.close()
+        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: baseURL.path)
+        let device = ContainerConfiguration.MacOSGuestOptions.BlockDevice(identifier: "root", kind: .nativeASIFOverlay, path: "active.asif", nativeBasePath: "base.img")
+        #if canImport(DiskImageKit)
+        if #available(macOS 27, *) {
+            do {
+                let base = try DiskImage(opening: .open(url: baseURL, mode: .readOnly))
+                _ = try base.appending(.asifLayer(url: overlayURL, type: .overlay))
+            }
+            let attachment = try MacOSBlockDeviceBuilder.nativeASIFAttachment(rootURL: root, device: device)
+            #expect(attachment.isReadOnly == false)
+            // A raw file with the expected filename is not an ASIF overlay.
+            let wrong = root.appendingPathComponent("wrong.asif")
+            try FileManager.default.copyItem(at: baseURL, to: wrong)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: wrong.path)
+            var invalid = device
+            invalid.path = "wrong.asif"
+            #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.nativeASIFAttachment(rootURL: root, device: invalid) }
+            return
+        }
+        #endif
+        try Data([1]).write(to: overlayURL)
+        do {
+            _ = try MacOSBlockDeviceBuilder.nativeASIFAttachment(rootURL: root, device: device)
+            Issue.record("native storage must be rejected without both host and SDK support")
+        } catch let error as SidecarRPCError {
+            #expect(error.code == "nativeStorageUnavailable")
         }
     }
 

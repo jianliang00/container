@@ -1,8 +1,9 @@
 # Native ASIF overlay probe
 
 This standalone diagnostic requires macOS 27 at runtime. Xcode 27 and the macOS
-27 SDK are required only on the build machine. The probe does not install a
-runtime, start a VM, change a cluster, or upgrade macOS.
+27 SDK are required only on the build machine. The basic `native-overlay-probe`
+does not start a VM. Neither diagnostic installs a runtime, changes a cluster,
+or upgrades macOS.
 
 Build on a machine with the SDK, then copy the signed executable to the test Mac:
 
@@ -30,3 +31,31 @@ archive manifests must independently bind its content digest to the overlay.
 Passing these checks establishes API availability and stack construction only.
 Guest writes, flush and pause consistency, crash recovery, data corruption,
 TOS archive round trips, and performance require separate VM validation.
+
+## Isolated guest write and cold boot check
+
+`native-overlay-vm-probe` boots one dedicated macOS test fixture with two CPUs,
+4 GiB RAM, a display and a virtio socket. It configures no networking. The fixture
+must contain a private RAW clone named `base.img`, its ASIF `overlay.asif`, and
+private copies of `HardwareModel.bin`, `MachineIdentifier.bin`, and
+`AuxiliaryStorage`. Never point it at a live runtime directory. Confirm available
+VM capacity and that no other process has the fixture open before starting.
+Reserve at least 20 GiB of free disk space before booting this small test; an
+APFS clone shares initial data but guest writes still allocate new blocks.
+
+The guest must run the container guest agent on virtio socket port 27000. The
+fixed command writes or checks a UUID marker in the guest's temporary directory;
+it cannot run an arbitrary supplied command. It stops its own VM after the check
+or an ordinary error. Host failure or forced termination requires an independent
+process and disk-handle cleanup check.
+
+```sh
+./native-overlay-vm-probe /absolute/private-fixture write UUID
+# After confirmed VM stop, preserve the overlay and AuxiliaryStorage together.
+# Copy them into another private fixture sharing the same immutable base.
+./native-overlay-vm-probe /absolute/restored-fixture read UUID
+```
+
+This verifies cold boot persistence after stopping the test VM. It does not
+establish that cloning an overlay while a VM is paused provides a consistent
+snapshot, nor does it verify machine-state restoration or TOS durability.

@@ -20,6 +20,7 @@ import Foundation
 import Virtualization
 
 private struct ProbeFailure: Error { let message: String }
+private enum CheckpointProbeFailure: Error { case injected }
 
 private func report(_ value: [String: Any]) {
     if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
@@ -57,7 +58,9 @@ private func readFrame(_ fd: Int32, deadline: Date) throws -> [String: Any] {
     return frame
 }
 
-private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false, syncRPC: Bool = false) throws
+private func executeMarker(
+    _ fd: Int32, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false, syncRPC: Bool = false, continuous: Bool = false
+) throws
     -> String
 {
     let deadline = Date().addingTimeInterval(30)
@@ -74,14 +77,28 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
     if wal {
         let db = path + ".sqlite"
         let query = "PRAGMA integrity_check; SELECT v FROM probe;"
-        let verify = "test \"$(/usr/bin/sqlite3 '\(db)' '\(query)')\" = \"$(printf 'ok\\n\(value)')\"; printf '%s' '\(value)'"
+        let sequenceCheck =
+            continuous
+            ? "test \"$(/usr/bin/sqlite3 -cmd '.timeout 5000' '\(db)' 'SELECT count(*) >= 10 AND min(n) = 1 AND max(n) = count(*) AND sum(v != n * 17) = 0 FROM ticks;')\" = 1; "
+            : ""
+        let verify = "test \"$(/usr/bin/sqlite3 -cmd '.timeout 5000' '\(db)' '\(query)')\" = \"$(printf 'ok\\n\(value)')\"; " + sequenceCheck + "printf '%s' '\(value)'"
         if write && !afterSnapshot {
             // Keep SQLite's connection open after a FULL-synchronous commit so
             // the checkpoint must recover a real WAL, not a closed database.
+            let tickSetup = continuous ? "\"CREATE TABLE ticks(n INTEGER PRIMARY KEY, v INTEGER);\"" : ""
+            let producer =
+                continuous
+                ? "for n in $(seq 1 10000); do printf 'INSERT INTO ticks VALUES(%s,%s * 17);\\n' \"$n\" \"$n\"; sleep 0.01; done"
+                : "sleep 120"
+            let waitForTicks =
+                continuous
+                ? "for i in $(seq 1 100); do test \"$(/usr/bin/sqlite3 -cmd '.timeout 5000' '\(db)' 'SELECT count(*) >= 10 FROM ticks;')\" = 1 && break; sleep 0.1; done; "
+                    + sequenceCheck
+                : ":"
             script = """
                 set -e
                 umask 077
-                { printf '%s\\n' "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=FULL;" "CREATE TABLE probe(v TEXT);" "INSERT INTO probe VALUES('\(value)');" ".print ready"; sleep 120; } | /usr/bin/sqlite3 '\(db)' > '\(db).log' 2>&1 &
+                { printf '%s\\n' "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=FULL;" "CREATE TABLE probe(v TEXT);" "INSERT INTO probe VALUES('\(value)');" \(tickSetup) ".print ready"; \(producer); } | /usr/bin/sqlite3 -bail -cmd '.timeout 5000' '\(db)' > '\(db).log' 2>&1 &
                 writer=$!
                 for i in $(seq 1 100); do
                     /usr/bin/grep -qx ready '\(db).log' && break
@@ -89,12 +106,13 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
                 done
                 /usr/bin/grep -qx ready '\(db).log'
                 test -s '\(db)-wal'
+                \(waitForTicks)
                 \(synchronize ? "sync" : ":")
                 printf '%s' '\(value)'
                 wait "$writer"
                 """
         } else if write {
-            script = "set -e; /usr/bin/sqlite3 '\(db)' \"PRAGMA synchronous=FULL; UPDATE probe SET v='\(value)';\"; " + verify
+            script = "set -e; /usr/bin/sqlite3 -cmd '.timeout 5000' '\(db)' \"PRAGMA synchronous=FULL; UPDATE probe SET v='\(value)';\"; " + verify
         } else {
             script = "set -e; " + verify
         }
@@ -157,7 +175,7 @@ private func executeMarker(_ fd: Int32, write: Bool, marker: String, afterSnapsh
 
 @MainActor
 private func guestMarker(
-    _ vm: VZVirtualMachine, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false, syncRPC: Bool = false,
+    _ vm: VZVirtualMachine, write: Bool, marker: String, afterSnapshot: Bool = false, synchronize: Bool = true, wal: Bool = false, syncRPC: Bool = false, continuous: Bool = false,
     retain: ((VZVirtioSocketConnection) -> Void)? = nil
 ) async throws -> String {
     guard let socket = vm.socketDevices.first as? VZVirtioSocketDevice else { throw ProbeFailure(message: "missing socket device") }
@@ -179,7 +197,7 @@ private func guestMarker(
         defer { Darwin.close(fd) }
         var enabled: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
-        return try executeMarker(fd, write: write, marker: marker, afterSnapshot: afterSnapshot, synchronize: synchronize, wal: wal, syncRPC: syncRPC)
+        return try executeMarker(fd, write: write, marker: marker, afterSnapshot: afterSnapshot, synchronize: synchronize, wal: wal, syncRPC: syncRPC, continuous: continuous)
     }.value
     return verified
 }
@@ -251,11 +269,13 @@ private func runVM(root: URL, mode requestedMode: String, marker: String) async 
         report(["stage": "vmStarted", "cpuCount": 2, "memoryBytes": 4 << 30, "networkDevices": 0, "diskBackend": raw ? "raw" : "asif"])
         let write = !mode.hasPrefix("read")
         let wal = mode.contains("wal")
+        let continuous = mode.contains("continuous")
+        let useSyncRPC = mode.hasSuffix("rpc")
         let verified = try await guestMarker(
-            vm, write: write, marker: marker, synchronize: mode != "pause-dirty" && mode != "pause-wal" && mode != "pause-wal-rpc", wal: wal,
+            vm, write: write, marker: marker, synchronize: mode != "pause-dirty" && mode != "pause-wal" && !useSyncRPC, wal: wal, continuous: continuous,
             retain: wal && write ? { heldConnection = $0 } : nil)
         report(["stage": "guestMarkerVerified", "write": write, "marker": verified])
-        if mode == "pause-wal-rpc" {
+        if useSyncRPC {
             _ = try await guestMarker(vm, write: false, marker: marker, syncRPC: true)
             report(["stage": "guestFilesystemSyncAcknowledged", "requestID": marker])
         }
@@ -264,12 +284,22 @@ private func runVM(root: URL, mode requestedMode: String, marker: String) async 
                 vm.pause { continuation.resume(with: $0) }
             }
             guard vm.state == .paused else { throw ProbeFailure(message: "VM did not pause") }
-            try clonePausedFixture(root, raw: raw)
+            var checkpointError: Error?
+            do {
+                if mode.contains("rollback") {
+                    report(["stage": "checkpointFailureInjected", "vmPaused": true])
+                    throw CheckpointProbeFailure.injected
+                }
+                try clonePausedFixture(root, raw: raw)
+            } catch {
+                checkpointError = error
+            }
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 vm.resume { continuation.resume(with: $0) }
             }
-            let changed = try await guestMarker(vm, write: true, marker: marker, afterSnapshot: true, wal: wal)
-            report(["stage": "sourceAdvancedAfterSnapshot", "marker": changed])
+            let changed = try await guestMarker(vm, write: true, marker: marker, afterSnapshot: true, wal: wal, continuous: continuous)
+            report(["stage": mode.contains("rollback") ? "rollbackGuestWritable" : "sourceAdvancedAfterSnapshot", "marker": changed])
+            if let checkpointError, !(checkpointError is CheckpointProbeFailure) { throw checkpointError }
         }
     } catch { result = error }
     if vm.state != .stopped {
@@ -288,12 +318,14 @@ guard arguments.count == 3,
     [
         "write", "read", "pause", "pause-dirty", "pause-wal", "pause-wal-sync", "read-wal", "raw-pause-wal", "raw-pause-wal-sync", "raw-read-wal", "pause-wal-rpc",
         "raw-pause-wal-rpc",
+        "pause-wal-continuous-rpc", "raw-pause-wal-continuous-rpc", "read-wal-continuous", "raw-read-wal-continuous",
+        "pause-wal-rollback-rpc", "raw-pause-wal-rollback-rpc",
     ].contains(arguments[1]),
     UUID(uuidString: arguments[2]) != nil
 else {
     report([
         "error":
-            "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR write|read|pause|pause-dirty|pause-wal|pause-wal-sync|read-wal|raw-pause-wal|raw-pause-wal-sync|raw-read-wal|pause-wal-rpc|raw-pause-wal-rpc UUID"
+            "usage: native-overlay-vm-probe PRIVATE_FIXTURE_DIR MODE UUID; see README for supported modes"
     ])
     exit(1)
 }

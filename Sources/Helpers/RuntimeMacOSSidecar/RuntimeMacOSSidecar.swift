@@ -707,9 +707,9 @@ actor MacOSSidecarService {
         }
     }
 
-    func stopVM() async throws {
+    func stopVM(checkpointID: String? = nil) async throws {
         log.info("stopVM requested", metadata: ["state": "\(state.rawValue)", "has_window": "\(vmWindow != nil)"])
-        let shouldStop = try lifecycle.begin(.stop)
+        let shouldStop = try lifecycle.begin(.stop, checkpointID: checkpointID)
         if !shouldStop {
             if state == .stopped {
                 await discardVirtualMachineResources()
@@ -770,6 +770,8 @@ actor MacOSSidecarService {
                 MacOSSidecarMethod.vmCapabilities.rawValue,
                 MacOSSidecarMethod.fsSync.rawValue,
                 MacOSSidecarMethod.vmPause.rawValue,
+                MacOSSidecarMethod.vmPrepareFilesystemCheckpoint.rawValue,
+                MacOSSidecarMethod.vmFinishFilesystemCheckpoint.rawValue,
                 MacOSSidecarMethod.vmResume.rawValue,
                 MacOSSidecarMethod.vmPrepareCheckpoint.rawValue,
                 MacOSSidecarMethod.vmSaveMachineState.rawValue,
@@ -801,7 +803,51 @@ actor MacOSSidecarService {
         }
     }
 
+    func reserveFilesystemCheckpoint(_ request: MacOSFilesystemCheckpointRequest) throws -> Bool {
+        try lifecycle.beginFilesystemCheckpoint(request)
+    }
+
+    func prepareReservedFilesystemCheckpoint(_ request: MacOSFilesystemCheckpointRequest) async throws -> MacOSFilesystemCheckpointResult {
+        do {
+            guard let vm else {
+                throw SidecarRPCError(code: "invalidLifecycleState", message: "VM instance is unavailable")
+            }
+            let config = try loadContainerConfiguration()
+            let port = config.macosGuest?.agentPort ?? 27000
+            _ = try await MacOSGuestFileSystemSync.synchronize(
+                request.syncRequest,
+                connect: { [self] timeout in
+                    try await connectVsock(port: port, timeoutSeconds: timeout)
+                })
+            try await pauseVirtualMachine(vm)
+            lifecycle.completeFilesystemCheckpoint(succeeded: true)
+            return .init(checkpointID: request.checkpointID, lifecycleState: state)
+        } catch {
+            lifecycle.completeFilesystemCheckpoint(succeeded: false)
+            throw error
+        }
+    }
+
+    func finishFilesystemCheckpoint(_ request: MacOSFilesystemCheckpointFinishRequest) async throws -> MacOSFilesystemCheckpointResult {
+        guard try lifecycle.validateFilesystemCheckpointFinish(request) else {
+            return .init(checkpointID: request.checkpointID, lifecycleState: state)
+        }
+        switch request.action {
+        case .resume:
+            _ = try await resumeVM(checkpointID: request.checkpointID)
+        case .stop:
+            try await stopVM(checkpointID: request.checkpointID)
+        }
+        lifecycle.completeFilesystemCheckpointFinish(request)
+        return .init(checkpointID: request.checkpointID, lifecycleState: state)
+    }
+
+    func ensureFilesystemCheckpointAllowsNewSession() throws {
+        try lifecycle.ensureNoOperationInProgress()
+    }
+
     func synchronizeGuestFilesystems(_ request: MacOSGuestFileSystemSyncRequest) async throws -> MacOSGuestFileSystemSyncResult {
+        try lifecycle.ensureNoOperationInProgress()
         guard state == .running else {
             throw SidecarRPCError(code: "invalidLifecycleState", message: "guest filesystem sync requires a running VM")
         }
@@ -832,9 +878,9 @@ actor MacOSSidecarService {
         }
     }
 
-    func resumeVM(timeoutSeconds: Double? = nil) async throws -> MacOSMachineStateOperationResult {
+    func resumeVM(timeoutSeconds: Double? = nil, checkpointID: String? = nil) async throws -> MacOSMachineStateOperationResult {
         try validateOperationTimeout(timeoutSeconds)
-        let shouldResume = try lifecycle.begin(.resume)
+        let shouldResume = try lifecycle.begin(.resume, checkpointID: checkpointID)
         guard shouldResume else {
             return .init(lifecycleState: state, stateID: lifecycle.activeStateID)
         }
@@ -4991,6 +5037,7 @@ final class SidecarControlServer: @unchecked Sendable {
     }
 
     private func ensureCheckpointAllowsNewSession() throws {
+        try syncValue { try await self.service.ensureFilesystemCheckpointAllowsNewSession() }
         processLock.lock()
         let checkpointInProgress = activeCheckpoint != nil
         processLock.unlock()
@@ -5026,6 +5073,35 @@ final class SidecarControlServer: @unchecked Sendable {
         return activeCheckpoint.result
     }
 
+    /// Establish the lifecycle reservation under the session admission lock, then
+    /// release that lock before guest I/O so competing requests fail promptly.
+    private func prepareFilesystemCheckpoint(_ payload: MacOSFilesystemCheckpointRequest) throws -> MacOSFilesystemCheckpointResult {
+        let shouldPrepare: Bool = try {
+            checkpointAdmissionLock.lock()
+            defer { checkpointAdmissionLock.unlock() }
+            processLock.lock()
+            let durableCheckpointActive = activeCheckpoint != nil
+            processLock.unlock()
+            guard !durableCheckpointActive else {
+                throw SidecarRPCError(code: "checkpointConflict", message: "a durable checkpoint already owns the VM")
+            }
+            fsLock.lock()
+            let writing = !fsSessions.isEmpty
+            fsLock.unlock()
+            fsReadLock.lock()
+            let reading = !fsReadSessions.isEmpty
+            fsReadLock.unlock()
+            guard !writing, !reading else {
+                throw SidecarRPCError(code: "checkpointTransientSessionActive", message: "filesystem transfer must finish before checkpoint preparation")
+            }
+            return try syncValue { try await self.service.reserveFilesystemCheckpoint(payload) }
+        }()
+        guard shouldPrepare else {
+            return .init(checkpointID: payload.checkpointID, lifecycleState: .paused)
+        }
+        return try syncValue { try await self.service.prepareReservedFilesystemCheckpoint(payload) }
+    }
+
     private func prepareCheckpoint(
         _ payload: MacOSMachineStateRequestPayload
     ) throws -> MacOSMachineStateCheckpointResult {
@@ -5042,6 +5118,7 @@ final class SidecarControlServer: @unchecked Sendable {
         checkpointAdmissionLock.lock()
         defer { checkpointAdmissionLock.unlock() }
 
+        try syncValue { try await self.service.ensureFilesystemCheckpointAllowsNewSession() }
         if let replay = try replayPreparedCheckpoint(
             checkpointID: checkpointID,
             persistenceID: persistenceID,
@@ -5485,6 +5562,26 @@ final class SidecarControlServer: @unchecked Sendable {
                 let result = try await service.synchronizeGuestFilesystems(payload)
                 return .success(requestID: requestID, data: try JSONEncoder().encode(result), protocolVersion: MacOSSidecarProtocolVersion.current)
             }
+        case .vmPrepareFilesystemCheckpoint:
+            guard let data = request.data else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem checkpoint payload")
+            }
+            let payload = try JSONDecoder().decode(MacOSFilesystemCheckpointRequest.self, from: data)
+            do {
+                let result = try prepareFilesystemCheckpoint(payload)
+                return .success(requestID: requestID, data: try JSONEncoder().encode(result), protocolVersion: MacOSSidecarProtocolVersion.current)
+            } catch {
+                return failureResponse(requestID: requestID, error: error)
+            }
+        case .vmFinishFilesystemCheckpoint:
+            guard let data = request.data else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem checkpoint finish payload")
+            }
+            let payload = try JSONDecoder().decode(MacOSFilesystemCheckpointFinishRequest.self, from: data)
+            return try sync(requestID: requestID) {
+                let result = try await service.finishFilesystemCheckpoint(payload)
+                return .success(requestID: requestID, data: try JSONEncoder().encode(result), protocolVersion: MacOSSidecarProtocolVersion.current)
+            }
         case .vmPause:
             return try sync(requestID: requestID) {
                 let result = try await service.pauseVM(timeoutSeconds: request.machineState?.timeoutSeconds)
@@ -5724,7 +5821,7 @@ final class SidecarControlServer: @unchecked Sendable {
                     ]
                 )
             }
-        case .vmPrepareCheckpoint, .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments:
+        case .vmPrepareCheckpoint, .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .vmPrepareFilesystemCheckpoint, .vmFinishFilesystemCheckpoint:
             guard request.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption else {
                 return SidecarRPCError(
                     code: "protocolVersionMismatch",
@@ -5810,7 +5907,7 @@ extension MacOSSidecarMethod {
             .processClose, .fsBegin, .fsChunk, .fsEnd, .fsReadBegin, .fsReadChunk, .fsReadEnd, .fsListDir:
             true
         case .eventsSubscribe, .eventsAcknowledge, .vmConnectVsock, .processInspect, .processDelete, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
-            .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmPrepareCheckpoint,
+            .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmPrepareCheckpoint, .vmPrepareFilesystemCheckpoint, .vmFinishFilesystemCheckpoint,
             .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .fsSync, .vmStop, .sidecarQuit, .unknown:
             false
         }

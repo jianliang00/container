@@ -51,10 +51,57 @@ struct MacOSVMLifecycleCoordinator: Sendable {
     private(set) var activeStateID: String?
     private var inFlight: (operation: Operation, previous: MacOSVMRuntimeState, stateID: String?)?
     private var processStartAdmissions: Set<UUID> = []
+    private var filesystemCheckpoint: (id: String, prepared: Bool)?
+    private var finishedFilesystemCheckpoint: MacOSFilesystemCheckpointFinishRequest?
+
+    /// Reserve the entire sync/pause/seal interval, including actor suspension points.
+    /// A failed prepare remains owned: a lost sync acknowledgement must not be replayed.
+    mutating func beginFilesystemCheckpoint(_ request: MacOSFilesystemCheckpointRequest) throws -> Bool {
+        guard request.syncRequest.isValid else {
+            throw SidecarRPCError(code: "invalidArgument", message: "invalid filesystem checkpoint request")
+        }
+        if let checkpoint = filesystemCheckpoint {
+            try ensureNoOperationInProgress(checkpointID: request.checkpointID)
+            guard checkpoint.prepared, state == .paused else {
+                throw SidecarRPCError(code: "checkpointUncertain", message: "finish the failed checkpoint before starting a new attempt")
+            }
+            return false
+        }
+        guard finishedFilesystemCheckpoint?.checkpointID != request.checkpointID else {
+            throw SidecarRPCError(code: "checkpointAlreadyFinished", message: "checkpoint IDs cannot be reused")
+        }
+        guard state == .running else {
+            throw SidecarRPCError(code: "invalidLifecycleState", message: "filesystem checkpoint requires a running VM")
+        }
+        _ = try begin(.pause)
+        filesystemCheckpoint = (request.checkpointID, false)
+        return true
+    }
+
+    mutating func completeFilesystemCheckpoint(succeeded: Bool) {
+        complete(.pause, succeeded: succeeded)
+        filesystemCheckpoint?.prepared = succeeded
+    }
+
+    func validateFilesystemCheckpointFinish(_ request: MacOSFilesystemCheckpointFinishRequest) throws -> Bool {
+        if filesystemCheckpoint == nil {
+            guard finishedFilesystemCheckpoint == request else {
+                throw SidecarRPCError(code: "checkpointConflict", message: "finish does not own an active checkpoint")
+            }
+            return false
+        }
+        try ensureNoOperationInProgress(checkpointID: request.checkpointID)
+        return true
+    }
+
+    mutating func completeFilesystemCheckpointFinish(_ request: MacOSFilesystemCheckpointFinishRequest) {
+        filesystemCheckpoint = nil
+        finishedFilesystemCheckpoint = request
+    }
 
     /// Returns false when the requested operation is already satisfied.
-    mutating func begin(_ operation: Operation, stateID: String? = nil) throws -> Bool {
-        try ensureNoOperationInProgress()
+    mutating func begin(_ operation: Operation, stateID: String? = nil, checkpointID: String? = nil) throws -> Bool {
+        try ensureNoOperationInProgress(checkpointID: checkpointID)
         guard processStartAdmissions.isEmpty else {
             throw SidecarRPCError(
                 code: "operationInProgress",
@@ -97,7 +144,10 @@ struct MacOSVMLifecycleCoordinator: Sendable {
         return true
     }
 
-    func ensureNoOperationInProgress() throws {
+    func ensureNoOperationInProgress(checkpointID: String? = nil) throws {
+        if let checkpoint = filesystemCheckpoint, checkpoint.id != checkpointID {
+            throw SidecarRPCError(code: "checkpointConflict", message: "filesystem checkpoint owns the VM lifecycle")
+        }
         if let inFlight {
             throw SidecarRPCError(
                 code: "operationInProgress",

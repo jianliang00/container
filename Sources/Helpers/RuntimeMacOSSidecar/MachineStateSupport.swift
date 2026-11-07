@@ -78,8 +78,12 @@ struct MacOSVMLifecycleCoordinator: Sendable {
         return true
     }
 
-    mutating func completeFilesystemCheckpoint(succeeded: Bool) {
+    mutating func completeFilesystemCheckpoint(succeeded: Bool, observedFailureState: MacOSVMRuntimeState = .failed) {
         complete(.pause, succeeded: succeeded)
+        if !succeeded {
+            // A failed VZ pause may mean that the VM stopped, not that it kept running.
+            state = observedFailureState
+        }
         filesystemCheckpoint?.prepared = succeeded
     }
 
@@ -94,7 +98,11 @@ struct MacOSVMLifecycleCoordinator: Sendable {
         return true
     }
 
-    mutating func completeFilesystemCheckpointFinish(_ request: MacOSFilesystemCheckpointFinishRequest) {
+    mutating func completeFilesystemCheckpointFinish(_ request: MacOSFilesystemCheckpointFinishRequest) throws {
+        guard filesystemCheckpoint?.id == request.checkpointID else {
+            if filesystemCheckpoint == nil, finishedFilesystemCheckpoint == request { return }
+            throw SidecarRPCError(code: "checkpointConflict", message: "finish completion no longer owns the checkpoint")
+        }
         filesystemCheckpoint = nil
         finishedFilesystemCheckpoint = request
     }

@@ -823,8 +823,26 @@ actor MacOSSidecarService {
             lifecycle.completeFilesystemCheckpoint(succeeded: true)
             return .init(checkpointID: request.checkpointID, lifecycleState: state)
         } catch {
-            lifecycle.completeFilesystemCheckpoint(succeeded: false)
+            let observedState = await filesystemCheckpointVMState()
+            lifecycle.completeFilesystemCheckpoint(succeeded: false, observedFailureState: observedState)
             throw error
+        }
+    }
+
+    private func filesystemCheckpointVMState() async -> MacOSVMRuntimeState {
+        guard let vm else { return .stopped }
+        let vmBox = UnsafeSendableBox(vm)
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                let observed: MacOSVMRuntimeState
+                switch vmBox.value.state {
+                case .running: observed = .running
+                case .paused: observed = .paused
+                case .stopped: observed = .stopped
+                default: observed = .failed
+                }
+                continuation.resume(returning: observed)
+            }
         }
     }
 
@@ -838,7 +856,7 @@ actor MacOSSidecarService {
         case .stop:
             try await stopVM(checkpointID: request.checkpointID)
         }
-        lifecycle.completeFilesystemCheckpointFinish(request)
+        try lifecycle.completeFilesystemCheckpointFinish(request)
         return .init(checkpointID: request.checkpointID, lifecycleState: state)
     }
 

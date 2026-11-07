@@ -958,7 +958,15 @@ enum MacOSBlockDeviceBuilder {
             guard !device.identifier.isEmpty, identifiers.insert(device.identifier).inserted else {
                 throw SidecarRPCError(code: "invalidStorageConfiguration", message: "block device identifiers must be non-empty and unique")
             }
+            if device.kind != .nativeASIFOverlay, device.nativeBasePath != nil {
+                throw SidecarRPCError(code: "invalidStorageConfiguration", message: "nativeBasePath requires a native ASIF device")
+            }
             switch device.kind {
+            case .nativeASIFOverlay:
+                guard options?.blockDevices.count == 1, options?.machineState == nil else {
+                    throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF currently requires a single cold-boot disk")
+                }
+                _ = try nativeASIFPaths(rootURL: rootURL, device: device)
             case .runtimeDiskImage:
                 _ = try managedDiskURL(rootURL: rootURL, relativePath: device.path)
             case .nbdUnixSocket:
@@ -992,6 +1000,10 @@ enum MacOSBlockDeviceBuilder {
         var observers: [MacOSNBDConnectionObserver] = []
         for device in configured {
             switch device.kind {
+            case .nativeASIFOverlay:
+                let attachment = try nativeASIFAttachment(rootURL: rootURL, device: device)
+                devices.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))
+                descriptions.append(.init(kind: device.kind.rawValue, identifier: device.identifier, readOnly: false))
             case .runtimeDiskImage:
                 let url = try managedDiskURL(rootURL: rootURL, relativePath: device.path)
                 let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: device.readOnly)

@@ -197,6 +197,8 @@ public struct ContainerConfiguration: Sendable, Codable {
                 case runtimeDiskImage
                 /// An NBD server reachable through a local Unix-domain socket.
                 case nbdUnixSocket
+                /// An existing writable ASIF overlay over an immutable RAW base.
+                case nativeASIFOverlay
             }
 
             public enum SynchronizationMode: String, Sendable, Codable, Equatable {
@@ -207,6 +209,8 @@ public struct ContainerConfiguration: Sendable, Codable {
             public var identifier: String
             public var kind: Kind
             public var path: String
+            /// Trusted runtime-relative RAW base path for nativeASIFOverlay only.
+            public var nativeBasePath: String?
             public var exportName: String?
             public var readOnly: Bool
             public var timeoutSeconds: Double
@@ -216,6 +220,7 @@ public struct ContainerConfiguration: Sendable, Codable {
                 identifier: String,
                 kind: Kind,
                 path: String,
+                nativeBasePath: String? = nil,
                 exportName: String? = nil,
                 readOnly: Bool = false,
                 timeoutSeconds: Double = 5,
@@ -224,6 +229,7 @@ public struct ContainerConfiguration: Sendable, Codable {
                 self.identifier = identifier
                 self.kind = kind
                 self.path = path
+                self.nativeBasePath = nativeBasePath
                 self.exportName = exportName
                 self.readOnly = readOnly
                 self.timeoutSeconds = timeoutSeconds

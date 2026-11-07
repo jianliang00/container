@@ -1,0 +1,63 @@
+name: macOS ASIF image MVP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [p/wangjianliang/macos-r109-runtime-fixes]
+    paths:
+      - scripts/macos-asif-mvp/**
+      - .github/workflows/macos-asif-mvp.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Build probe
+        run: |
+          set -euo pipefail
+          mkdir -p probe-artifact
+          {
+            git rev-parse HEAD
+            sw_vers
+            xcodebuild -version
+            xcrun --show-sdk-version
+          } > probe-artifact/build.txt
+          test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 27
+          xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 \
+            scripts/macos-asif-mvp/Runner.swift -o probe-artifact/macos-asif-runner
+      - name: Sign standalone diagnostic
+        env:
+          APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}
+          APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          APP_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+        run: |
+          set -euo pipefail
+          test -n "$APP_CERTIFICATE"
+          test -n "$APP_CERTIFICATE_PASSWORD"
+          test -n "$APP_IDENTITY"
+          keychain_path="$RUNNER_TEMP/macos-asif-mvp.keychain-db"
+          certificate_path="$RUNNER_TEMP/macos-asif-mvp.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          trap 'security delete-keychain "$keychain_path" >/dev/null 2>&1 || true; rm -f "$certificate_path"' EXIT
+          python3 -c 'import base64,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "macos-asif-mvp.p12").write_bytes(base64.b64decode(os.environ["APP_CERTIFICATE"]))'
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APP_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path" >/dev/null
+          codesign --force --sign "$APP_IDENTITY" --keychain "$keychain_path" \
+            --timestamp --options runtime --entitlements scripts/macos-asif-mvp/vm.entitlements \
+            probe-artifact/macos-asif-runner
+          codesign --verify --strict probe-artifact/macos-asif-runner
+          codesign -dvv probe-artifact/macos-asif-runner 2> probe-artifact/signature.txt
+          shasum -a 256 probe-artifact/macos-asif-runner > probe-artifact/SHA256SUMS
+          tar -czf macos-asif-mvp.tar.gz probe-artifact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-asif-mvp
+          path: macos-asif-mvp.tar.gz
+          retention-days: 14

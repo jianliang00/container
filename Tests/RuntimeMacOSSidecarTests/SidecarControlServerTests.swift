@@ -46,9 +46,18 @@ struct SidecarControlServerTests {
         #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: nil).error?.code == "invalidArgument")
         #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: prepare).error?.code == "invalidLifecycleState")
         try server._testSetVMLifecycleRunning()
+        let guest = try makeSocketPair()
+        defer { closeIfValid(guest.peer) }
+        try server._testRegisterProcessSession(
+            processID: "existing-command", guestProcessID: "existing-command", durable: false,
+            exec: .init(executable: "/bin/true"), replayCursor: 0, fd: guest.server)
         // The test has no VZ VM: prepare must retain ownership after this failure.
         #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: prepare).error?.code == "invalidLifecycleState")
         #expect(try call(.vmResume, version: 6, data: nil).error?.code == "checkpointConflict")
+        #expect(try call(.vmStop, version: 6, data: nil).error?.code == "checkpointConflict")
+        #expect(server._testHasProcessSession(processID: "existing-command"))
+        #expect(try call(.sidecarQuit, version: 6, data: nil).error?.code == "checkpointConflict")
+        #expect(server._testHasProcessSession(processID: "existing-command"))
         #expect(!server._testHasEventClient())
         try MacOSSidecarSocketIO.writeJSONFrame(
             MacOSSidecarEnvelope.request(
@@ -65,6 +74,8 @@ struct SidecarControlServerTests {
         #expect(try call(.vmFinishFilesystemCheckpoint, version: 6, data: finish).error == nil)
         #expect(try call(.vmFinishFilesystemCheckpoint, version: 6, data: finish).error == nil)
         #expect(try call(.vmPrepareFilesystemCheckpoint, version: 6, data: prepare).error?.code == "checkpointAlreadyFinished")
+        #expect(try call(.vmStop, version: 6, data: nil).ok)
+        #expect(!server._testHasProcessSession(processID: "existing-command"))
     }
 
     @Test(arguments: [Data(), Data([0, 0, 0, 4, 0x7b])])

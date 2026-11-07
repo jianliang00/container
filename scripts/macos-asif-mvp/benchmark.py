@@ -57,7 +57,7 @@ def main():
     ROOT.mkdir(mode=0o700, exist_ok=True)
     result = {"operation": args.operation, "sample": args.sample, "sourceRevision": REVISION}
     if args.operation == "prepare":
-        archive = Path("/Volumes/MVPInput/zstd-1.5.7.tar.gz")
+        archive = Path("/Users/admin/MVPInput/zstd-1.5.7.tar.gz")
         assert sha(archive) == SOURCE_SHA256 and not SOURCE.exists()
         SOURCE.parent.mkdir()
         with tarfile.open(archive) as data:

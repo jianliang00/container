@@ -68,6 +68,30 @@ class ImageTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             image.blob(layout, config["files"][1]["blob"])
 
+    def test_corrupt_decoded_cache_blocks_restore(self):
+        layout = self.commit()
+        args = argparse.Namespace(image=layout, instance=self.root / "restored", cache=self.cache,
+                                  runner="unused", new_identity=False)
+        with patch.object(image, "finish_instance"), patch.object(image, "capacity"):
+            image.restore(args)
+        cached = next(self.cache.glob("*.decoded"))
+        cached.chmod(0o600)
+        cached.write_bytes(b"bad cache")
+        cached.chmod(0o400)
+        args.instance = self.root / "second"
+        with patch.object(image, "finish_instance") as finish, patch.object(image, "capacity"):
+            with self.assertRaisesRegex(ValueError, "cache changed"):
+                image.restore(args)
+            finish.assert_not_called()
+
+    def test_symlink_parent_rejected(self):
+        parent = self.instance / "base.img"
+        copy = self.root / "real-base"
+        parent.rename(copy)
+        parent.symlink_to(copy)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            image.load(self.instance)
+
     def test_reordered_layers(self):
         layout = self.commit()
         self.rewrite_config(layout, lambda c: c["files"].reverse())

@@ -42,14 +42,13 @@ and compressed blobs. A large source image can require considerably more.
 mkdir -m 700 /private/var/tmp/image-cache
 python3 image.py init /absolute/stopped-source /absolute/raw --backend raw
 python3 image.py init /absolute/stopped-source /absolute/asif --backend asif
-python3 image.py run /absolute/asif /absolute/build.sh --inputs /absolute/inputs
+python3 image.py run /absolute/asif /absolute/build.sh
 python3 image.py commit /absolute/asif /absolute/oci-image --cache /private/var/tmp/image-cache
 python3 image.py restore /absolute/oci-image /absolute/restored --cache /private/var/tmp/image-cache
-python3 image.py run /absolute/restored /absolute/verify.sh --inputs /absolute/inputs
+python3 image.py run /absolute/restored /absolute/verify.sh
 ```
 
-`run` starts one VM with four CPUs, 8 GiB memory and no networking. Optional inputs
-are exposed through a readonly virtiofs share tagged `mvp-input`. The script runs
+`run` starts one VM with four CPUs, 8 GiB memory and no networking. Build inputs must already be present in the dedicated test image. The script runs
 as root through the existing guest-agent protocol on vsock port 27000; use `su`
 inside the script for an ordinary build user. Only trusted local scripts are
 supported. Output is retained as framed JSON in the private instance directory.
@@ -87,14 +86,15 @@ archive checksum, generates an Xcode project, and records clean, incremental and
 no-change build times. It also verifies compression/decompression with the built
 binary. No network is used to fetch dependencies during measurement.
 
-Place the pinned source tarball at `inputs/zstd-1.5.7.tar.gz`, alongside
-`benchmark.py`. A guest script mounts the share and invokes the benchmark:
+Before cloning the two test instances, place the pinned source tarball and
+`benchmark.py` in `/Users/admin/MVPInput` in the private, stopped source image.
+Use the existing image build workflow or mount only that private source copy,
+copy the files to its Data volume, and unmount it before cloning. The files must
+be readable by the guest admin user. A guest script invokes the benchmark:
 
 ```sh
 set -eu
-mkdir -p /Volumes/MVPInput
-mount -t virtiofs mvp-input /Volumes/MVPInput
-su -l admin -c '/opt/homebrew/bin/python3 /Volumes/MVPInput/benchmark.py prepare'
+su -l admin -c '/opt/homebrew/opt/python@3.13/libexec/bin/python3 /Users/admin/MVPInput/benchmark.py prepare'
 ```
 
 Run `prepare` once on each backend, then alternate RAW/ASIF boots running

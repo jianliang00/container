@@ -155,10 +155,6 @@ def run(args):
         write_json(root / "instance.json", state)
         write_json(root / "runtime.json", config)
         command = [args.runner, "run", str(root), str(regular(args.script))]
-        if args.inputs:
-            require(args.inputs.is_dir() and args.inputs.absolute() == args.inputs.resolve(),
-                    "input directory must be canonical")
-            command.append(str(args.inputs))
         started = time.monotonic()
         # Preserve the complete bounded guest output and stop acknowledgement.
         log = root / ("run-" + str(time.time_ns()) + ".jsonl")
@@ -357,7 +353,6 @@ def main():
     p = commands.add_parser("run")
     p.add_argument("instance", type=Path)
     p.add_argument("script", type=Path)
-    p.add_argument("--inputs", type=Path)
     p = commands.add_parser("commit")
     p.add_argument("instance", type=Path)
     p.add_argument("image", type=Path)

@@ -142,7 +142,7 @@ private func attachment(root: URL, config: Configuration, create: Bool) throws -
 
 @available(macOS 27, *)
 @MainActor
-private func runVM(root: URL, config: Configuration, script: String, input: URL?) async throws {
+private func runVM(root: URL, config: Configuration, script: String) async throws {
     let attributes = try FileManager.default.attributesOfFileSystem(forPath: root.path)
     guard let freeBytes = attributes[.systemFreeSize] as? NSNumber, freeBytes.uint64Value >= 20 << 30 else {
         throw ProbeFailure(message: "test VM requires at least 20 GiB of free disk space")
@@ -166,11 +166,6 @@ private func runVM(root: URL, config: Configuration, script: String, input: URL?
     configuration.graphicsDevices = [graphics]
     configuration.keyboards = [VZUSBKeyboardConfiguration()]
     configuration.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
-    if let input {
-        let device = VZVirtioFileSystemDeviceConfiguration(tag: "mvp-input")
-        device.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: input, readOnly: true))
-        configuration.directorySharingDevices = [device]
-    }
     try configuration.validate()
     let vm = VZVirtualMachine(configuration: configuration)
     // Bound the standalone diagnostic even if a framework callback never arrives.
@@ -224,7 +219,7 @@ private func runVM(root: URL, config: Configuration, script: String, input: URL?
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard arguments.count >= 2, ["create-overlay", "run", "new-identity"].contains(arguments[0]) else {
-    report(["error": "usage: macos-asif-runner create-overlay|new-identity INSTANCE | run INSTANCE SCRIPT [INPUT_DIR]"])
+    report(["error": "usage: macos-asif-runner create-overlay|new-identity INSTANCE | run INSTANCE SCRIPT"])
     exit(1)
 }
 let root = URL(fileURLWithPath: arguments[1]).standardizedFileURL
@@ -242,11 +237,10 @@ Task { @MainActor in
                 _ = try attachment(root: root, config: config, create: true)
                 report(["stage": "overlayCreated"])
             } else {
-                guard (3...4).contains(arguments.count) else { throw ProbeFailure(message: "run requires a script") }
+                guard arguments.count == 3 else { throw ProbeFailure(message: "run requires a script") }
                 let script = try String(contentsOfFile: arguments[2], encoding: .utf8)
-                let input = arguments.count == 4 ? URL(fileURLWithPath: arguments[3]) : nil
                 report(["stage": "starting", "time": Date().timeIntervalSince1970])
-                try await runVM(root: root, config: config, script: script, input: input)
+                try await runVM(root: root, config: config, script: script)
             }
         }
         exit(0)

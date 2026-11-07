@@ -556,6 +556,19 @@ struct MachineStateSupportTests {
             var invalid = device
             invalid.path = "wrong.asif"
             #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.nativeASIFAttachment(rootURL: root, device: invalid) }
+            // Cache layers are ASIF too, but must not serve as the writable disk.
+            let cacheURL = root.appendingPathComponent("cache.asif")
+            do {
+                let base = try DiskImage(opening: .open(url: baseURL, mode: .readOnly))
+                _ = try base.appending(.asifLayer(url: cacheURL, type: .cache))
+            }
+            invalid.path = "cache.asif"
+            do {
+                _ = try MacOSBlockDeviceBuilder.nativeASIFAttachment(rootURL: root, device: invalid)
+                Issue.record("cache layers must be rejected as writable overlays")
+            } catch let error as SidecarRPCError {
+                #expect(error.code == "invalidStorageConfiguration")
+            }
             return
         }
         #endif

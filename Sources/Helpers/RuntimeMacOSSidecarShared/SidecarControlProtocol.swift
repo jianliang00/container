@@ -37,6 +37,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
     case fsReadChunk
     case fsReadEnd
     case fsListDir
+    case fsSync
     case vmCapabilities
     case vmPause
     case vmResume
@@ -73,6 +74,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         case .fsReadChunk: "fs.read.chunk"
         case .fsReadEnd: "fs.read.end"
         case .fsListDir: "fs.listdir"
+        case .fsSync: "fs.sync"
         case .vmCapabilities: "vm.capabilities"
         case .vmPause: "vm.pause"
         case .vmResume: "vm.resume"
@@ -125,6 +127,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         Self.fsReadChunk.rawValue: .fsReadChunk,
         Self.fsReadEnd.rawValue: .fsReadEnd,
         Self.fsListDir.rawValue: .fsListDir,
+        Self.fsSync.rawValue: .fsSync,
         Self.vmCapabilities.rawValue: .vmCapabilities,
         Self.vmPause.rawValue: .vmPause,
         Self.vmResume.rawValue: .vmResume,

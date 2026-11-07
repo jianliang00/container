@@ -98,3 +98,10 @@ For a matched RAW control, provide another private writable APFS clone named
 These modes attach `raw.img` through the existing URL-based VZ API and clone
 it with the same pause procedure. The base and ASIF fixture files are retained
 for a consistent fixture layout but are not attached in RAW mode.
+
+`pause-wal-rpc` and `raw-pause-wal-rpc` use the guest `filesystemSyncV1` RPC
+instead of executing guest `sync` in a shell. The signed diagnostic artifact
+also includes a guest agent for installation into private test fixtures only.
+Older guests are rejected before pausing. See
+[the synchronization protocol](../../docs/macos-guest-filesystem-sync.md) for
+its acknowledgement and timeout boundaries.

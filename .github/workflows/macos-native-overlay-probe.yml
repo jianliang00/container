@@ -31,6 +31,9 @@ jobs:
           xcrun swiftc -O -target arm64-apple-macosx27.0 \
             scripts/macos-native-overlay-probe/Probe.swift \
             -o probe-artifact/native-overlay-probe
+          xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 \
+            scripts/macos-native-overlay-probe/VMProbe.swift \
+            -o probe-artifact/native-overlay-vm-probe
       - name: Sign standalone diagnostic
         env:
           APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}
@@ -54,11 +57,15 @@ jobs:
             --timestamp --options runtime probe-artifact/native-overlay-probe
           codesign --verify --strict probe-artifact/native-overlay-probe
           codesign -dvv probe-artifact/native-overlay-probe 2> probe-artifact/signature.txt
+          codesign --force --sign "$APP_IDENTITY" --keychain "$keychain_path" \
+            --timestamp --options runtime --entitlements scripts/macos-native-overlay-probe/vm.entitlements \
+            probe-artifact/native-overlay-vm-probe
+          codesign --verify --strict probe-artifact/native-overlay-vm-probe
       - name: Check native API and package artifact
         run: |
           set -euo pipefail
           probe-artifact/native-overlay-probe self-test | tee probe-artifact/api-test.json
-          shasum -a 256 probe-artifact/native-overlay-probe > probe-artifact/SHA256SUMS
+          shasum -a 256 probe-artifact/native-overlay-probe probe-artifact/native-overlay-vm-probe > probe-artifact/SHA256SUMS
           tar -czf native-overlay-probe.tar.gz probe-artifact
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

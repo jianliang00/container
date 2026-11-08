@@ -503,3 +503,98 @@ extension CRIShimMachineStateMappingTests {
         #expect(throws: (any Error).self) { try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy) }
     }
 }
+
+extension CRIShimMachineStateMappingTests {
+    @Test
+    func nativeASIFAdmissionRejectsBeforeCreatingStateDirectories() throws {
+        let roots = try MachineStateTestRoots()
+        defer { roots.remove() }
+        var policy = roots.config
+        policy.localDiskEnabled = true
+        var annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "native-restore",
+            CRIShimMachineStateAnnotation.storageGeneration: "2",
+            CRIShimMachineStateAnnotation.storageKind: "native-asif",
+            CRIShimMachineStateAnnotation.diskBundleDigest: String(repeating: "a", count: 64),
+        ]
+        // RAW admission never opts a node into native storage.
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        }
+        policy.nativeASIFEnabled = true
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: false)
+        }
+        annotations.removeValue(forKey: CRIShimMachineStateAnnotation.diskBundleDigest)
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        }
+        #expect(!FileManager.default.fileExists(atPath: roots.storageRoot.path))
+        #expect(!FileManager.default.fileExists(atPath: roots.controlRoot.path))
+    }
+
+    @Test
+    func nativeASIFRestoreDerivesPathsAndRejectsExternalDevices() throws {
+        let roots = try MachineStateTestRoots()
+        defer { roots.remove() }
+        var policy = roots.config
+        policy.localDiskEnabled = true
+        policy.nativeASIFEnabled = true
+        var annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "native-restore",
+            CRIShimMachineStateAnnotation.storageGeneration: "2",
+            CRIShimMachineStateAnnotation.storageKind: "native-asif",
+            CRIShimMachineStateAnnotation.diskBundleDigest: String(repeating: "a", count: 64),
+        ]
+        let mapping = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        #expect(mapping.machineState?.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption)
+        #expect(mapping.machineState?.diskBundleDigest == annotations[CRIShimMachineStateAnnotation.diskBundleDigest])
+        #expect(mapping.blockDevices.count == 1)
+        let device = try #require(mapping.blockDevices.first)
+        #expect(device.kind == .nativeASIFOverlay)
+        #expect(device.path == "active.asif")
+        #expect(device.nativeBasePath == "base.img")
+        #expect(!device.readOnly)
+        #expect(device.synchronizationMode == .full)
+        annotations[CRIShimMachineStateAnnotation.blockDevices] = "[]"
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        }
+        annotations.removeValue(forKey: CRIShimMachineStateAnnotation.blockDevices)
+        var warm = annotations
+        warm[CRIShimMachineStateAnnotation.restoreStateID] = "saved-state"
+        warm[CRIShimMachineStateAnnotation.restoreStateGeneration] = "1"
+        warm[CRIShimMachineStateAnnotation.restorePairID] = String(repeating: "b", count: 64)
+        warm[CRIShimMachineStateAnnotation.restoreManifestDigest] = String(repeating: "c", count: 64)
+        warm[CRIShimMachineStateAnnotation.restoreRequestID] = "restore-request"
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: warm, nodeConfig: policy, nativeASIFAvailable: true)
+        }
+        annotations[CRIShimMachineStateAnnotation.diskBundleDigest] = "invalid"
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        }
+    }
+
+    @Test
+    func nativeASIFCapabilityRequiresEveryAdmissionCondition() throws {
+        var policy = MachineStateConfig(enabled: true, localDiskEnabled: true, nativeASIFEnabled: true)
+        #expect(CRIShimNativeASIFCapabilities(policy: policy, hostSupported: true).enabled)
+        #expect(!CRIShimNativeASIFCapabilities(policy: policy, hostSupported: false).enabled)
+        #expect(!CRIShimNativeASIFCapabilities(policy: nil, hostSupported: true).enabled)
+        policy.nativeASIFEnabled = false
+        #expect(!CRIShimNativeASIFCapabilities(policy: policy, hostSupported: true).enabled)
+        policy.nativeASIFEnabled = true
+        policy.localDiskEnabled = false
+        #expect(!CRIShimNativeASIFCapabilities(policy: policy, hostSupported: true).enabled)
+        policy.localDiskEnabled = true
+        policy.enabled = false
+        #expect(!CRIShimNativeASIFCapabilities(policy: policy, hostSupported: true).enabled)
+        let advertised = CRIShimNativeASIFCapabilities(policy: policy)
+        #expect(!advertised.initialCreation)
+        #expect(!advertised.memoryRestore)
+        #expect(advertised.hostSupported == CRIShimNativeASIFCapabilities.hostSupported)
+    }
+}

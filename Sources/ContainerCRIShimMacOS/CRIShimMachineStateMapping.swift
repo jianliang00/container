@@ -126,7 +126,8 @@ private struct CRIShimAnyCodingKey: CodingKey {
 
 func makeCRIShimMachineStateMapping(
     annotations: [String: String],
-    nodeConfig: MachineStateConfig?
+    nodeConfig: MachineStateConfig?,
+    nativeASIFAvailable: Bool = CRIShimNativeASIFCapabilities.hostSupported
 ) throws -> CRIShimMachineStateMapping {
     let enabledValue = annotations[CRIShimMachineStateAnnotation.enabled]
     let presentCompanionKeys = CRIShimMachineStateAnnotation.companionKeys.filter { annotations[$0] != nil }
@@ -167,21 +168,33 @@ func makeCRIShimMachineStateMapping(
     let values = try decodeEnabledMachineStateAnnotationValues(annotations)
     let storageKind = annotations[CRIShimMachineStateAnnotation.storageKind]
     let diskBundleDigest = annotations[CRIShimMachineStateAnnotation.diskBundleDigest]
-    if storageKind == "local-disk" {
+    let native = storageKind == "native-asif"
+    if storageKind == "local-disk" || native {
         guard nodeConfig.localDiskEnabled,
             annotations[CRIShimMachineStateAnnotation.blockDevices] == nil,
             values.restoreStateID == nil
         else { throw CRIShimError.unsupported("local disk requires node admission, no external devices, and cold restore") }
+        if native {
+            guard nodeConfig.nativeASIFEnabled, nativeASIFAvailable else {
+                throw CRIShimError.unsupported("native ASIF requires explicit node admission, macOS 27 and an SDK 27 runtime")
+            }
+            guard diskBundleDigest != nil else {
+                throw CRIShimError.unsupported("native ASIF requires a materialized cold disk bundle")
+            }
+        }
         if let diskBundleDigest {
             _ = try requireCanonicalSHA256(diskBundleDigest, annotation: CRIShimMachineStateAnnotation.diskBundleDigest)
         }
     } else if storageKind != nil && storageKind != "nbd" || diskBundleDigest != nil {
         throw CRIShimError.invalidArgument("unsupported storage kind or misplaced disk bundle digest")
     }
-    let blockDevices = try decodeBlockDevices(
-        annotations[CRIShimMachineStateAnnotation.blockDevices],
-        allowedRoots: nodeConfig.nbdSocketAllowedRoots
-    )
+    let blockDevices: [ContainerConfiguration.MacOSGuestOptions.BlockDevice] =
+        native
+        ? [.init(identifier: "root", kind: .nativeASIFOverlay, path: "active.asif", nativeBasePath: "base.img")]
+        : try decodeBlockDevices(
+            annotations[CRIShimMachineStateAnnotation.blockDevices],
+            allowedRoots: nodeConfig.nbdSocketAllowedRoots
+        )
 
     let storageRoot = try managedPathURL(nodeConfig.normalizedStorageRoot)
     let socketRoot = try managedPathURL(nodeConfig.normalizedControlSocketRoot)
@@ -214,7 +227,7 @@ func makeCRIShimMachineStateMapping(
     return CRIShimMachineStateMapping(
         machineState: .init(
             protocolVersion:
-                values.restoreStateID == nil
+                values.restoreStateID == nil && !native
                 ? MacOSSidecarProtocolVersion.machineState
                 : MacOSSidecarProtocolVersion.durableCheckpointAdoption,
             persistenceID: values.persistenceID,

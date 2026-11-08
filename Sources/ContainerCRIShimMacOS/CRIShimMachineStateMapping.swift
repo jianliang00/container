@@ -178,9 +178,6 @@ func makeCRIShimMachineStateMapping(
             guard nodeConfig.nativeASIFEnabled, nativeASIFAvailable else {
                 throw CRIShimError.unsupported("native ASIF requires explicit node admission, macOS 27 and an SDK 27 runtime")
             }
-            guard diskBundleDigest != nil else {
-                throw CRIShimError.unsupported("native ASIF requires a materialized cold disk bundle")
-            }
         }
         if let diskBundleDigest {
             _ = try requireCanonicalSHA256(diskBundleDigest, annotation: CRIShimMachineStateAnnotation.diskBundleDigest)

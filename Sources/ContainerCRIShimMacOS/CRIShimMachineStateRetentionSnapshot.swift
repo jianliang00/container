@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import RuntimeMacOSSidecarShared
 
 // ListPodSandbox may become empty before RemovePodSandbox releases its durable
 // lease. External state GC must also observe that the lease no longer retains
@@ -41,16 +42,11 @@ struct CRIShimLocalDiskCapabilities: Encodable {
 /// Native selection is admitted independently from the existing RAW disk path.
 struct CRIShimNativeASIFCapabilities: Encodable {
     static let infoKey = "container.macos.native-asif.v1"
-    static var hostSupported: Bool {
-        #if os(macOS) && canImport(DiskImageKit)
-        if #available(macOS 27, *) { return true }
-        #endif
-        return false
-    }
+    static var hostSupported: Bool { MacOSNativeDisk.available }
 
     let schemaVersion = 1
     let bundleImport = true
-    let initialCreation = false
+    let initialCreation = true
     let memoryRestore = false
     let hostSupported: Bool
     let enabled: Bool

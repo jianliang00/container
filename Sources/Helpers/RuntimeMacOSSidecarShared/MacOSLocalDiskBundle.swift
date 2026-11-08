@@ -158,7 +158,7 @@ public enum MacOSLocalDiskBundle {
         guard lstat(url.path, &value) == 0, value.st_mode & 0o222 == 0 else { throw CocoaError(.fileReadCorruptFile) }
     }
 
-    private static func cloneMember(_ source: URL, to destination: URL) throws {
+    static func cloneMember(_ source: URL, to destination: URL) throws {
         let fd = open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(fd) }
@@ -219,20 +219,20 @@ public enum MacOSLocalDiskBundle {
         try validateNonemptyFile(identity.appendingPathComponent("AuxiliaryStorage"))
     }
 
-    private static func validateNonemptyFile(_ url: URL) throws {
+    static func validateNonemptyFile(_ url: URL) throws {
         var value = stat()
         guard lstat(url.path, &value) == 0, value.st_size > 0 else { throw CocoaError(.fileReadCorruptFile) }
         try validateFile(url, size: value.st_size)
     }
 
-    private static func synchronize(_ url: URL, directory: Bool = false) throws {
+    static func synchronize(_ url: URL, directory: Bool = false) throws {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (directory ? O_DIRECTORY : 0))
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(fd) }
         guard fsync(fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
-    private static func validateDirectory(_ url: URL) throws {
+    static func validateDirectory(_ url: URL) throws {
         guard var path = MacOSManagedPath.canonicalPath(url.path) else { throw CocoaError(.fileReadNoPermission) }
         while path != "/" {
             var value = stat()
@@ -252,7 +252,7 @@ public enum MacOSLocalDiskBundle {
         else { throw CocoaError(.fileReadCorruptFile) }
     }
 
-    private static func readRegular(_ url: URL, limit: Int) throws -> Data {
+    static func readRegular(_ url: URL, limit: Int) throws -> Data {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw CocoaError(.fileReadNoPermission) }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)

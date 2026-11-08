@@ -2792,8 +2792,22 @@ extension MacOSSandboxService {
                 format: native ? .nativeASIF : .raw)
             return
         }
-        guard config.macosGuest?.blockDevices.contains(where: { $0.kind == .nativeASIFOverlay }) != true else {
-            throw ContainerizationError(.invalidArgument, message: "native ASIF runtime requires a materialized cold disk bundle")
+        if config.macosGuest?.blockDevices.contains(where: { $0.kind == .nativeASIFOverlay }) == true {
+            let devices = config.macosGuest?.blockDevices ?? []
+            guard MacOSNativeDisk.available, devices.count == 1,
+                devices[0].path == "active.asif", devices[0].nativeBasePath == "base.img",
+                !devices[0].readOnly, devices[0].exportName == nil, devices[0].synchronizationMode == .full,
+                let state = config.macosGuest?.machineState, state.restoreStateID == nil,
+                let generation = state.storageGeneration, generation > 0
+            else {
+                throw ContainerizationError(.invalidArgument, message: "native initial disk requires SDK 27, macOS 27 and a managed cold lifecycle")
+            }
+            if try MacOSNativeDisk.isPrepared(destination: root, imageDigest: config.image.digest) { return }
+            let layers = try await resolveTemplateLayers(containerConfig: config, progressUpdate: progressUpdate)
+            try MacOSNativeDisk.prepare(
+                destination: root, imageDigest: config.image.digest, base: layers.diskImage,
+                hardware: layers.hardwareModel, auxiliary: layers.auxiliaryStorage, createOverlay: createNativeASIFOverlay)
+            return
         }
         let fm = FileManager.default
         if fm.fileExists(atPath: hardwareModelPath().path),

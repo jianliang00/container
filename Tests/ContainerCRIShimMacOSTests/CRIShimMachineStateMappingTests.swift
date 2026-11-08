@@ -526,7 +526,7 @@ extension CRIShimMachineStateMappingTests {
         #expect(throws: (any Error).self) {
             try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: false)
         }
-        annotations.removeValue(forKey: CRIShimMachineStateAnnotation.diskBundleDigest)
+        annotations[CRIShimMachineStateAnnotation.diskBundleDigest] = "invalid"
         #expect(throws: (any Error).self) {
             try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
         }
@@ -558,6 +558,11 @@ extension CRIShimMachineStateMappingTests {
         #expect(device.nativeBasePath == "base.img")
         #expect(!device.readOnly)
         #expect(device.synchronizationMode == .full)
+        var initialAnnotations = annotations
+        initialAnnotations.removeValue(forKey: CRIShimMachineStateAnnotation.diskBundleDigest)
+        let initial = try makeCRIShimMachineStateMapping(annotations: initialAnnotations, nodeConfig: policy, nativeASIFAvailable: true)
+        #expect(initial.machineState?.diskBundleDigest == nil)
+        #expect(initial.blockDevices == mapping.blockDevices)
         annotations[CRIShimMachineStateAnnotation.blockDevices] = "[]"
         #expect(throws: (any Error).self) {
             try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
@@ -593,7 +598,7 @@ extension CRIShimMachineStateMappingTests {
         policy.enabled = false
         #expect(!CRIShimNativeASIFCapabilities(policy: policy, hostSupported: true).enabled)
         let advertised = CRIShimNativeASIFCapabilities(policy: policy)
-        #expect(!advertised.initialCreation)
+        #expect(advertised.initialCreation)
         #expect(!advertised.memoryRestore)
         #expect(advertised.hostSupported == CRIShimNativeASIFCapabilities.hostSupported)
     }

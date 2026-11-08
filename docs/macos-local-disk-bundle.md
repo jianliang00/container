@@ -84,7 +84,7 @@ responsibility. A manifest hash by itself is not proof that the source VM has
 stopped or that downloaded file contents were authenticated.
 
 
-## Native ASIF cold restore
+## Native ASIF disks
 
 `storage-kind=native-asif` selects a native ASIF overlay and an immutable RAW
 base. It requires `machineState.nativeASIFEnabled=true` in addition to both
@@ -94,10 +94,19 @@ persistence directories; the runtime never substitutes a RAW disk.
 
 Verbose Status publishes `container.macos.native-asif.v1`. Its effective
 `enabled` value includes node policy and host/build support. `bundleImport=true`,
-`initialCreation=false`, and `memoryRestore=false` describe the supported entry
-point: a controller must provide `disk-bundle-digest` for a prepared version 3
-bundle. Initial creation from an OCI image is not admitted through this entry
-point.
+`initialCreation=true`, and `memoryRestore=false` describe the supported entry
+points. With `disk-bundle-digest`, the controller supplies a prepared version 3
+bundle. Without it, the runtime clones its trusted OCI template as a read-only
+RAW base and creates a new ASIF overlay.
+
+Initial creation records the exact OCI image digest in a durable intent before
+publishing files. An exclusive local lock serializes initialization. The runtime
+commits its completion marker only after the base, overlay and platform files
+are synchronized. Interrupted creation may resume the same intent; it cannot
+overwrite unrelated disks or accept a different image. After commit, restart
+uses the existing files even when the image cache has been removed, preserving
+guest writes and firmware. The snapshot controller must still authenticate the
+base against its retained catalog before archiving it.
 
 The runtime derives `base.img` and `active.asif` below its managed VM directory.
 Pod annotations cannot choose host paths or add external block devices. The

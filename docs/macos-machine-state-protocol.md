@@ -210,12 +210,44 @@ For CRI-managed external disks, the saved manifest's storage generation must equ
 
 `macosGuest.blockDevices` is an ordered, vendor-neutral list. An absent or empty list preserves the existing writable `Disk.img` root device.
 
-Two backing kinds are supported:
+Three backing kinds are supported:
 
 - `runtimeDiskImage`: `path` must be relative to the runtime directory and cannot escape it or traverse a symbolic link.
 - `nbdUnixSocket`: `path` must be an absolute local Unix-domain socket. TCP NBD endpoints and relative paths are not accepted. `exportName`, read-only mode, timeout, and full or no synchronization are explicit configuration fields.
+- `nativeASIFOverlay`: one immutable RAW base selected by `nativeBasePath` and one writable ASIF overlay selected by `path`. Both paths are relative to the runtime directory. This kind requires macOS 27, a runtime built with the macOS 27 SDK, a single root device, and full synchronization.
 
 For an NBD Unix socket, the sidecar checks the final object with `lstat`, requires it to be a socket, performs a connection probe, validates the generated `nbd+unix` URL, and constructs `VZNetworkBlockDeviceStorageDeviceAttachment`. The framework owns the NBD protocol connection and transparent reconnection behavior. A retained attachment delegate records first connection, subsequent reconnections, and terminal errors. Duplicate or empty device identifiers, invalid timeouts, non-socket paths, and failed connection probes are rejected before VM creation.
+
+## Native cold disk bundles
+
+A trusted host storage controller materializes a native bundle in the binding's
+`disks/g<storageGeneration>` directory. Its `disk-bundle.json` uses version 3,
+contains the binding's `persistenceID` and `storageGeneration`, and lists
+`active.asif`, `AuxiliaryStorage`, `HardwareModel.bin`, and
+`MachineIdentifier.bin` in that order. Each entry has a positive `size` and a
+lowercase SHA-256 `sha256`. `nativeBase` identifies the immutable base using
+`reference`, `sha256`, and `size`. The materializer supplies a separate read-only
+`base.img`; it authenticates the base contents against its retained catalog
+before publishing the bundle. The runtime never fetches `reference` or selects
+an alternate base.
+
+For import, configure `diskBundleDigest` with the SHA-256 of the exact manifest
+bytes and one `nativeASIFOverlay` device with `path=active.asif` and
+`nativeBasePath=base.img`. Import clones the base and overlay without flattening,
+checks the archived member checksums, installs the active platform identity, and
+publishes its completion marker only after synchronization. The private base
+clone remains usable when the source staging directory is removed. A committed
+retry validates the retained manifest and file layout without replacing a live
+overlay or rewinding firmware. Incomplete imports retain their operation digest
+and validate existing members before continuing.
+
+The native path permits persistent lifecycle configuration, generation tracking,
+and owned filesystem checkpoints. Machine-state save/restore is rejected with
+`nativeMachineStateUnsupported`; native snapshots restore by cold boot. Native
+storage cannot be substituted for an existing RAW bundle. Version 1 RAW imports
+and unconfigured `Disk.img` roots retain their existing behavior. Creation of the
+initial native bundle, storage retention, archive transport, and scheduling onto
+compatible hosts are responsibilities of the host controller.
 
 ## Errors
 

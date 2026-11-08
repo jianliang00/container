@@ -738,6 +738,7 @@ actor MacOSSidecarService {
         let capability: MacOSMachineStateCapability
         #if arch(arm64)
         do {
+            try MacOSBlockDeviceBuilder.validateMachineStateSupport(options: loadContainerConfiguration().macosGuest)
             let configuration = try await ensurePreparedConfiguration()
             try configuration.validateSaveRestoreSupport()
             capability = .init(supported: true)
@@ -925,6 +926,7 @@ actor MacOSSidecarService {
         pair: MacOSMachineStateDurablePair? = nil
     ) async throws -> MacOSMachineStateOperationResult {
         try validateOperationTimeout(timeoutSeconds)
+        try MacOSBlockDeviceBuilder.validateMachineStateSupport(options: loadContainerConfiguration().macosGuest)
         let store = try machineStateStore()
         try MacOSMachineStateStore.validateStateID(stateID)
         guard (adoption == nil) == (pair == nil) else {
@@ -1035,6 +1037,7 @@ actor MacOSSidecarService {
 
     func restoreMachineState(stateID: String, timeoutSeconds: Double?) async throws -> MacOSMachineStateOperationResult {
         try validateOperationTimeout(timeoutSeconds)
+        try MacOSBlockDeviceBuilder.validateMachineStateSupport(options: loadContainerConfiguration().macosGuest)
         #if arch(arm64)
         let config = try loadContainerConfiguration()
         if let requested = config.macosGuest?.machineState {

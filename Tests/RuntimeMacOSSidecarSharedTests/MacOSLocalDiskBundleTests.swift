@@ -99,13 +99,63 @@ struct MacOSLocalDiskBundleTests {
         #expect(!FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("disk-bundle-imported").path))
     }
 
+    @Test
+    func nativeImportKeepsTwoLayersAndDoesNotRewindAfterStagingGC() throws {
+        let f = try Fixture(format: .nativeASIF)
+        defer { f.remove() }
+        try f.install()
+        let overlay = f.destination.appendingPathComponent("active.asif")
+        let base = f.destination.appendingPathComponent("base.img")
+        #expect(try Data(contentsOf: base) == Data("immutable-base".utf8))
+        #expect(!FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("Disk.img").path))
+        var st = stat()
+        #expect(lstat(base.path, &st) == 0 && st.st_mode & 0o222 == 0)
+        #expect(lstat(overlay.path, &st) == 0 && st.st_mode & 0o200 != 0)
+        try Data("guest-writes-grow-the-overlay".utf8).write(to: overlay)
+        try Data("live-firmware".utf8).write(to: f.identity.appendingPathComponent("AuxiliaryStorage"))
+        try FileManager.default.removeItem(at: f.source)
+        try f.install()
+        #expect(try Data(contentsOf: overlay) == Data("guest-writes-grow-the-overlay".utf8))
+        #expect(try Data(contentsOf: f.identity.appendingPathComponent("AuxiliaryStorage")) == Data("live-firmware".utf8))
+        #expect(try Data(contentsOf: base) == Data("immutable-base".utf8))
+    }
+
+    @Test(arguments: ["format", "checksum", "writable-base", "partial", "manifest"])
+    func nativeImportRejectsMismatchWithoutPublishing(mode: String) throws {
+        let f = try Fixture(format: .nativeASIF)
+        defer { f.remove() }
+        let fm = FileManager.default
+        if mode == "format" {
+            #expect(throws: (any Error).self) {
+                try MacOSLocalDiskBundle.install(
+                    storageDirectory: f.root.appendingPathComponent("state").path,
+                    persistenceID: "vm-test", generation: 2, digest: f.digest, destination: f.destination)
+            }
+            return
+        }
+        if mode == "writable-base" { try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.source.appendingPathComponent("base.img").path) }
+        if mode == "checksum" || mode == "partial" {
+            let whereToWrite = mode == "checksum" ? f.source : f.destination
+            if mode == "partial" { try Data(f.digest.utf8).write(to: f.destination.appendingPathComponent("disk-bundle-importing")) }
+            try Data(repeating: 0, count: "active.asif".utf8.count).write(to: whereToWrite.appendingPathComponent("active.asif"))
+        }
+        if mode == "manifest" {
+            try f.install()
+            try Data("tampered".utf8).write(to: f.destination.appendingPathComponent("disk-bundle-manifest.json"))
+        }
+        #expect(throws: (any Error).self) { try f.install() }
+        if mode != "manifest" { #expect(!fm.fileExists(atPath: f.destination.appendingPathComponent("disk-bundle-imported").path)) }
+    }
+
     private struct Fixture {
         let root: URL
         let source: URL
         let destination: URL
         let identity: URL
         let digest: String
-        init() throws {
+        let format: MacOSLocalDiskBundle.Format
+        init(format: MacOSLocalDiskBundle.Format = .raw) throws {
+            self.format = format
             root = URL(fileURLWithPath: NSTemporaryDirectory()).resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
             source = root.appendingPathComponent("state/disks/g2")
             destination = root.appendingPathComponent("runtime")
@@ -113,17 +163,30 @@ struct MacOSLocalDiskBundleTests {
             let fm = FileManager.default
             try fm.createDirectory(at: source, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try fm.createDirectory(at: destination, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let files = MacOSLocalDiskBundle.fileNames.map { ["name": $0, "size": $0.utf8.count] as [String: Any] }
-            let manifest: [String: Any] = ["version": 1, "persistenceID": "vm-test", "storageGeneration": 2, "files": files]
+            let names = format == .raw ? MacOSLocalDiskBundle.fileNames : ["active.asif", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"]
+            let files = names.map { name -> [String: Any] in
+                var entry: [String: Any] = ["name": name, "size": name.utf8.count]
+                if format == .nativeASIF { entry["sha256"] = SHA256.hash(data: Data(name.utf8)).map { String(format: "%02x", $0) }.joined() }
+                return entry
+            }
+            var manifest: [String: Any] = ["version": format == .raw ? 1 : 3, "persistenceID": "vm-test", "storageGeneration": 2, "files": files]
+            if format == .nativeASIF {
+                let bytes = Data("immutable-base".utf8)
+                let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                manifest["nativeBase"] = ["reference": "fixture.invalid/base@sha256:" + hash, "sha256": hash, "size": bytes.count]
+                let base = source.appendingPathComponent("base.img")
+                try bytes.write(to: base)
+                try fm.setAttributes([.posixPermissions: 0o400], ofItemAtPath: base.path)
+            }
             let data = try JSONSerialization.data(withJSONObject: manifest, options: .sortedKeys)
             digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             try data.write(to: source.appendingPathComponent("disk-bundle.json"))
-            for name in MacOSLocalDiskBundle.fileNames { try Data(name.utf8).write(to: source.appendingPathComponent(name)) }
+            for name in names { try Data(name.utf8).write(to: source.appendingPathComponent(name)) }
         }
         func install(digest: String? = nil, generation: UInt64 = 2) throws {
             try MacOSLocalDiskBundle.install(
                 storageDirectory: root.appendingPathComponent("state").path, persistenceID: "vm-test", generation: generation, digest: digest ?? self.digest,
-                destination: destination)
+                destination: destination, format: format)
         }
         func remove() { try? FileManager.default.removeItem(at: root) }
     }

@@ -949,6 +949,12 @@ struct MacOSBlockDeviceBuildResult {
 }
 
 enum MacOSBlockDeviceBuilder {
+    static func validateMachineStateSupport(options: ContainerConfiguration.MacOSGuestOptions?) throws {
+        guard options?.blockDevices.contains(where: { $0.kind == .nativeASIFOverlay }) != true else {
+            throw SidecarRPCError(code: "nativeMachineStateUnsupported", message: "native ASIF supports cold disk checkpoints only")
+        }
+    }
+
     static func validateConfiguration(
         rootURL: URL,
         options: ContainerConfiguration.MacOSGuestOptions?
@@ -963,8 +969,15 @@ enum MacOSBlockDeviceBuilder {
             }
             switch device.kind {
             case .nativeASIFOverlay:
-                guard options?.blockDevices.count == 1, options?.machineState == nil else {
-                    throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF currently requires a single cold-boot disk")
+                guard options?.blockDevices.count == 1 else {
+                    throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF requires a single cold-boot disk")
+                }
+                if let state = options?.machineState {
+                    guard state.restoreStateID == nil, state.restoreStateGeneration == nil,
+                        state.pairID == nil, state.adoptionManifestDigest == nil, state.restoreRequestID == nil
+                    else {
+                        throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF supports persistent cold lifecycle, not machine-state restore")
+                    }
                 }
                 _ = try nativeASIFPaths(rootURL: rootURL, device: device)
             case .runtimeDiskImage:

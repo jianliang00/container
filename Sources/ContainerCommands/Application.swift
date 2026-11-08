@@ -121,7 +121,7 @@ public struct Application: AsyncLoggableCommand {
         FileHandle.standardError.write(warningData)
         #endif
 
-        let fullArgs = CommandLine.arguments
+        let fullArgs = ProcessInfo.processInfo.arguments
         let args = Array(fullArgs.dropFirst())
 
         do {

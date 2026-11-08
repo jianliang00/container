@@ -82,3 +82,28 @@ The bundle contains no memory state. Guest processes restart on cold boot.
 Node compatibility, source-VM retirement and scheduling remain the controller's
 responsibility. A manifest hash by itself is not proof that the source VM has
 stopped or that downloaded file contents were authenticated.
+
+
+## Native ASIF cold restore
+
+`storage-kind=native-asif` selects a native ASIF overlay and an immutable RAW
+base. It requires `machineState.nativeASIFEnabled=true` in addition to both
+local-disk policy switches, macOS 27, and a runtime built with SDK 27. All
+switches default to false. Unsupported nodes reject the request before creating
+persistence directories; the runtime never substitutes a RAW disk.
+
+Verbose Status publishes `container.macos.native-asif.v1`. Its effective
+`enabled` value includes node policy and host/build support. `bundleImport=true`,
+`initialCreation=false`, and `memoryRestore=false` describe the supported entry
+point: a controller must provide `disk-bundle-digest` for a prepared version 3
+bundle. Initial creation from an OCI image is not admitted through this entry
+point.
+
+The runtime derives `base.img` and `active.asif` below its managed VM directory.
+Pod annotations cannot choose host paths or add external block devices. The
+version 3 manifest contains `nativeBase` with `reference`, `sha256`, and `size`,
+and checksummed entries for `active.asif`, `AuxiliaryStorage`,
+`HardwareModel.bin`, and `MachineIdentifier.bin`. The trusted materializer
+provides the verified read-only `base.img` alongside the manifest. Native
+imports retain their manifest and active identity for restart after staging GC;
+retries never replace the live writable overlay or firmware.

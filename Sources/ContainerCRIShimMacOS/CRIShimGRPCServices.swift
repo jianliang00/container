@@ -185,6 +185,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 response.info[CRIShimLocalDiskCapabilities.infoKey] = makeCRIStatusJSONString(
                     CRIShimLocalDiskCapabilities(enabled: config.machineState?.enabled == true && config.machineState?.localDiskEnabled == true)
                 )
+                response.info[CRIShimNativeASIFCapabilities.infoKey] = makeCRIStatusJSONString(
+                    CRIShimNativeASIFCapabilities(policy: config.machineState)
+                )
                 response.info[CRIShimRestoreInfoKey.capabilities] = makeCRIStatusJSONString(
                     CRIShimRestoreCapabilities()
                 )

@@ -37,3 +37,26 @@ struct CRIShimLocalDiskCapabilities: Encodable {
     let activeIdentityImport = true
     let enabled: Bool
 }
+
+/// Native selection is admitted independently from the existing RAW disk path.
+struct CRIShimNativeASIFCapabilities: Encodable {
+    static let infoKey = "container.macos.native-asif.v1"
+    static var hostSupported: Bool {
+        #if os(macOS) && canImport(DiskImageKit)
+        if #available(macOS 27, *) { return true }
+        #endif
+        return false
+    }
+
+    let schemaVersion = 1
+    let bundleImport = true
+    let initialCreation = false
+    let memoryRestore = false
+    let hostSupported: Bool
+    let enabled: Bool
+
+    init(policy: MachineStateConfig?, hostSupported: Bool = Self.hostSupported) {
+        self.hostSupported = hostSupported
+        enabled = hostSupported && policy?.enabled == true && policy?.localDiskEnabled == true && policy?.nativeASIFEnabled == true
+    }
+}

@@ -58,6 +58,8 @@ struct CRIShimConfigTests {
     func machineStateConfigDefaultsRemainDisabledAndExplicitRootsRoundTrip() throws {
         let defaults = try JSONDecoder().decode(MachineStateConfig.self, from: Data("{}".utf8))
         #expect(!defaults.enabled)
+        #expect(!defaults.localDiskEnabled)
+        #expect(!defaults.nativeASIFEnabled)
         #expect(defaults.normalizedStorageRoot == CRIShimConfigDefaults.machineStateStorageRootURL.path)
         #expect(defaults.normalizedControlSocketRoot == CRIShimConfigDefaults.machineStateControlSocketRootURL.path)
         #expect(defaults.runtimeOwnerUID == nil)
@@ -66,6 +68,8 @@ struct CRIShimConfigTests {
 
         let configured = MachineStateConfig(
             enabled: true,
+            localDiskEnabled: true,
+            nativeASIFEnabled: true,
             storageRoot: "/var/lib/container/machine-state/v1",
             controlSocketRoot: "/var/run/container/machine-state/v1",
             runtimeOwnerUID: 501,

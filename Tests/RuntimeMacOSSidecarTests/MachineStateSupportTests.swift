@@ -682,7 +682,10 @@ struct MachineStateSupportTests {
             log: Logger(label: "MachineStateSupportTests")
         )
 
-        #expect(listenerStarted.wait(timeout: .now()) == .success)
+        // listen() makes the socket connectable before the publisher returns
+        // from its initializer and signals this semaphore. Allow that thread to
+        // finish instead of assuming the kernel probe orders Swift scheduling.
+        #expect(listenerStarted.wait(timeout: .now() + 5) == .success)
     }
 
     @Test

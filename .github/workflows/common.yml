@@ -191,7 +191,25 @@ jobs:
       - name: Verify signed installer package
         if: ${{ inputs.sign_release_artifacts }}
         run: |
-          pkgutil --check-signature "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
+          set -euo pipefail
+          package="bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
+          pkgutil --check-signature "${package}"
+
+          inspect_root="$(mktemp -d "${RUNNER_TEMP}/signed-cli.XXXXXX")"
+          trap 'rm -rf "${inspect_root}"' EXIT
+          pkgutil --expand-full "${package}" "${inspect_root}/expanded"
+          cli="${inspect_root}/expanded/Payload/bin/container"
+          codesign --verify --strict "${cli}"
+          cli_version="$("${cli}" --version)"
+          if [[ "${cli_version}" != "container CLI version "* ]]; then
+            echo "signed container CLI did not report its version" >&2
+            exit 1
+          fi
+          list_help="$("${cli}" list --help)"
+          if [[ "${list_help}" != *"USAGE: container list "* ]]; then
+            echo "signed container CLI did not dispatch the list subcommand" >&2
+            exit 1
+          fi
 
       - name: Verify optional CRI payload
         if: ${{ inputs.include_cri_shim }}

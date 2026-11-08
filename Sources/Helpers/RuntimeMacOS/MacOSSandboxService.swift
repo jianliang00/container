@@ -2780,12 +2780,20 @@ extension MacOSSandboxService {
 
     private func ensureTemplateArtifacts(for config: ContainerConfiguration, progressUpdate: ProgressUpdateHandler? = nil) async throws {
         if let state = config.macosGuest?.machineState, let digest = state.diskBundleDigest {
-            guard config.macosGuest?.blockDevices.isEmpty == true, state.restoreStateID == nil, let generation = state.storageGeneration else {
+            let devices = config.macosGuest?.blockDevices ?? []
+            let native = devices.count == 1 && devices[0].kind == .nativeASIFOverlay
+            guard devices.isEmpty || (native && devices[0].path == "active.asif" && devices[0].nativeBasePath == "base.img"),
+                state.restoreStateID == nil, let generation = state.storageGeneration
+            else {
                 throw ContainerizationError(.invalidArgument, message: "disk bundle import requires local disk and cold restore")
             }
             try MacOSLocalDiskBundle.install(
-                storageDirectory: state.storageDirectory, persistenceID: state.persistenceID, generation: generation, digest: digest, destination: root)
+                storageDirectory: state.storageDirectory, persistenceID: state.persistenceID, generation: generation, digest: digest, destination: root,
+                format: native ? .nativeASIF : .raw)
             return
+        }
+        guard config.macosGuest?.blockDevices.contains(where: { $0.kind == .nativeASIFOverlay }) != true else {
+            throw ContainerizationError(.invalidArgument, message: "native ASIF runtime requires a materialized cold disk bundle")
         }
         let fm = FileManager.default
         if fm.fileExists(atPath: hardwareModelPath().path),

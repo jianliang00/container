@@ -522,6 +522,15 @@ struct MachineStateSupportTests {
         #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options) }
         options.blockDevices = [device]
         options.machineState = .init(persistenceID: "test", storageDirectory: root.path, controlSocketPath: root.appendingPathComponent("socket").path)
+        try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options)
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateMachineStateSupport(options: options) }
+        options.machineState?.restoreStateID = "warm"
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options) }
+        options.machineState?.restoreStateID = nil
+        options.machineState?.restoreStateGeneration = 1
+        #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options) }
+        options.machineState?.restoreStateGeneration = nil
+        options.machineState?.pairID = "pair"
         #expect(throws: SidecarRPCError.self) { try MacOSBlockDeviceBuilder.validateConfiguration(rootURL: root, options: options) }
         options.machineState = nil
         options.blockDevices[0].kind = .runtimeDiskImage

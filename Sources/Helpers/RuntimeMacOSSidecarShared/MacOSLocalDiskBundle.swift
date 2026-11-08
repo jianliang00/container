@@ -23,18 +23,35 @@ import Foundation
 public enum MacOSLocalDiskBundle {
     public static let fileNames = ["Disk.img", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"]
 
+    public enum Format: Sendable {
+        case raw
+        case nativeASIF
+
+        fileprivate var version: Int { self == .raw ? 1 : 3 }
+        fileprivate var names: [String] {
+            self == .raw ? fileNames : ["active.asif", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"]
+        }
+    }
+
     public struct Manifest: Codable, Sendable {
         public struct File: Codable, Sendable {
             public var name: String
+            public var size: Int64
+            public var sha256: String?
+        }
+        public struct NativeBase: Codable, Sendable {
+            public var reference: String
+            public var sha256: String
             public var size: Int64
         }
         public var version: Int
         public var persistenceID: String
         public var storageGeneration: UInt64
         public var files: [File]
+        public var nativeBase: NativeBase?
     }
 
-    public static func install(storageDirectory: String, persistenceID: String, generation: UInt64, digest: String, destination: URL) throws {
+    public static func install(storageDirectory: String, persistenceID: String, generation: UInt64, digest: String, destination: URL, format: Format = .raw) throws {
         guard let storage = MacOSManagedPath.canonicalPath(storageDirectory), generation > 0,
             digest.count == 64, digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
         else { throw CocoaError(.fileReadCorruptFile) }
@@ -42,9 +59,18 @@ public enum MacOSLocalDiskBundle {
         let fm = FileManager.default
         let marker = destination.appendingPathComponent("disk-bundle-imported")
         let pending = destination.appendingPathComponent("disk-bundle-importing")
+        let retainedManifest = destination.appendingPathComponent("disk-bundle-manifest.json")
+        if format == .nativeASIF, fm.fileExists(atPath: destination.appendingPathComponent("Disk.img").path) {
+            throw CocoaError(.fileWriteFileExists)
+        }
         if fm.fileExists(atPath: marker.path) {
             guard try readRegular(marker, limit: 64) == Data(digest.utf8) else { throw CocoaError(.fileReadCorruptFile) }
-            for name in fileNames {
+            if format == .nativeASIF {
+                let manifest = try readManifest(retainedManifest, digest: digest, persistenceID: persistenceID, generation: generation, format: format)
+                guard let base = manifest.nativeBase else { throw CocoaError(.fileReadCorruptFile) }
+                try validateBase(destination.appendingPathComponent("base.img"), base: base)
+            }
+            for name in format.names {
                 let file = destination.appendingPathComponent(name)
                 var value = stat()
                 guard lstat(file.path, &value) == 0, value.st_size > 0 else { throw CocoaError(.fileReadCorruptFile) }
@@ -55,37 +81,98 @@ public enum MacOSLocalDiskBundle {
         }
         let source = URL(fileURLWithPath: storage).appendingPathComponent("disks/g\(generation)")
         try validateDirectory(source)
-        let manifestData = try readRegular(source.appendingPathComponent("disk-bundle.json"), limit: 65536)
-        guard SHA256.hash(data: manifestData).map({ String(format: "%02x", $0) }).joined() == digest else { throw CocoaError(.fileReadCorruptFile) }
-        let manifest = try JSONDecoder().decode(Manifest.self, from: manifestData)
-        guard manifest.version == 1, manifest.persistenceID == persistenceID,
-            manifest.storageGeneration == generation, manifest.files.map(\.name) == fileNames,
-            manifest.files.allSatisfy({ $0.size > 0 && $0.size <= 1 << 40 })
-        else { throw CocoaError(.fileReadCorruptFile) }
+        let manifestURL = source.appendingPathComponent("disk-bundle.json")
+        let manifest = try readManifest(manifestURL, digest: digest, persistenceID: persistenceID, generation: generation, format: format)
         if fm.fileExists(atPath: pending.path) {
             guard try readRegular(pending, limit: 64) == Data(digest.utf8) else { throw CocoaError(.fileReadCorruptFile) }
         } else {
-            guard fileNames.allSatisfy({ !fm.fileExists(atPath: destination.appendingPathComponent($0).path) }) else { throw CocoaError(.fileWriteFileExists) }
+            let requiredNames = format.names + (format == .nativeASIF ? ["base.img", "disk-bundle-manifest.json"] : [])
+            guard requiredNames.allSatisfy({ !fm.fileExists(atPath: destination.appendingPathComponent($0).path) }) else { throw CocoaError(.fileWriteFileExists) }
             try Data(digest.utf8).write(to: pending, options: .withoutOverwriting)
             try synchronize(pending)
             try synchronize(destination, directory: true)
+        }
+        if let base = manifest.nativeBase {
+            let from = source.appendingPathComponent("base.img")
+            let to = destination.appendingPathComponent("base.img")
+            try validateBase(from, base: base)
+            if !fm.fileExists(atPath: to.path) { try cloneMember(from, to: to) }
+            try validateBase(to, base: base)
+            try synchronize(to)
         }
         for entry in manifest.files {
             let from = source.appendingPathComponent(entry.name)
             try validateFile(from, size: entry.size)
             let to = destination.appendingPathComponent(entry.name)
-            if fm.fileExists(atPath: to.path) {
-                try validateFile(to, size: entry.size)
-                try synchronize(to)
-                continue
-            }
-            guard clonefile(from.path, to.path, UInt32(CLONE_NOFOLLOW)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            if let expected = entry.sha256, format == .nativeASIF { try verifyDigest(from, expected: expected) }
+            if !fm.fileExists(atPath: to.path) { try cloneMember(from, to: to) }
             try validateFile(to, size: entry.size)
+            if let expected = entry.sha256, format == .nativeASIF { try verifyDigest(to, expected: expected) }
+            if format == .nativeASIF, chmod(to.path, 0o600) != 0 { throw POSIXError(.EIO) }
             try synchronize(to)
+        }
+        if format == .nativeASIF {
+            let data = try readRegular(manifestURL, limit: 65536)
+            if fm.fileExists(atPath: retainedManifest.path) {
+                guard try readRegular(retainedManifest, limit: 65536) == data else { throw CocoaError(.fileReadCorruptFile) }
+            } else {
+                try cloneMember(manifestURL, to: retainedManifest)
+            }
+            _ = try readManifest(retainedManifest, digest: digest, persistenceID: persistenceID, generation: generation, format: format)
+            try synchronize(retainedManifest)
         }
         try installActiveIdentity(storage: URL(fileURLWithPath: storage), runtime: destination)
         guard rename(pending.path, marker.path) == 0 else { throw POSIXError(.EIO) }
         try synchronize(destination, directory: true)
+    }
+
+    private static func readManifest(_ url: URL, digest: String, persistenceID: String, generation: UInt64, format: Format) throws -> Manifest {
+        let data = try readRegular(url, limit: 65536)
+        guard SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == digest else { throw CocoaError(.fileReadCorruptFile) }
+        let manifest = try JSONDecoder().decode(Manifest.self, from: data)
+        guard manifest.version == format.version, manifest.persistenceID == persistenceID,
+            manifest.storageGeneration == generation, manifest.files.map(\.name) == format.names,
+            manifest.files.allSatisfy({ $0.size > 0 && $0.size <= 1 << 40 })
+        else { throw CocoaError(.fileReadCorruptFile) }
+        switch format {
+        case .raw:
+            guard manifest.nativeBase == nil else { throw CocoaError(.fileReadCorruptFile) }
+        case .nativeASIF:
+            guard let base = manifest.nativeBase, !base.reference.isEmpty, validDigest(base.sha256),
+                base.size > 0, base.size <= 1 << 40, manifest.files.allSatisfy({ validDigest($0.sha256 ?? "") })
+            else { throw CocoaError(.fileReadCorruptFile) }
+        }
+        return manifest
+    }
+
+    private static func validDigest(_ value: String) -> Bool {
+        value.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    // The trusted host materializer authenticates the base against its retained
+    // catalog before publishing this bundle. Import pins that immutable inode;
+    // it never downloads a base or follows an archive-controlled location.
+    private static func validateBase(_ url: URL, base: Manifest.NativeBase) throws {
+        try validateFile(url, size: base.size)
+        var value = stat()
+        guard lstat(url.path, &value) == 0, value.st_mode & 0o222 == 0 else { throw CocoaError(.fileReadCorruptFile) }
+    }
+
+    private static func cloneMember(_ source: URL, to destination: URL) throws {
+        let fd = open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        guard fclonefileat(fd, AT_FDCWD, destination.path, 0) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    private static func verifyDigest(_ url: URL, expected: String) throws {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw CocoaError(.fileReadNoPermission) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var digest = SHA256()
+        while let data = try handle.read(upToCount: 4 << 20), !data.isEmpty { digest.update(data: data) }
+        guard digest.finalize().map({ String(format: "%02x", $0) }).joined() == expected else { throw CocoaError(.fileReadCorruptFile) }
     }
 
     // The sidecar uses the persistent Identity directory, rather than the

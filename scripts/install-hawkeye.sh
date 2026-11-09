@@ -39,7 +39,14 @@ tarball="${workdir}/${ARTIFACT}"
 
 # Download the tarball, verify it against the pinned checksum (aborts on
 # mismatch), then extract just the hawkeye binary into .local/bin.
-curl --proto '=https' --tlsv1.2 -LsSf "${ARTIFACT_URL}" -o "${tarball}"
+if ! curl --proto '=https' --tlsv1.2 -LsSf "${ARTIFACT_URL}" -o "${tarball}"; then
+    # The release asset API serves the same pinned tarball when the download URL is unavailable.
+    asset_id="$(gh api "repos/korandoru/hawkeye/releases/tags/${VERSION}" \
+        --jq ".assets[] | select(.name == \"${ARTIFACT}\") | .id")"
+    [[ "${asset_id}" =~ ^[0-9]+$ ]]
+    gh api -H 'Accept: application/octet-stream' \
+        "repos/korandoru/hawkeye/releases/assets/${asset_id}" > "${tarball}"
+fi
 echo "${EXPECTED_SHA256}  ${tarball}" | shasum -a 256 -c -
 
 tar -xf "${tarball}" --strip-components 1 -C "${workdir}"

@@ -28,7 +28,6 @@ fi
 
 VERSION=v6.5.1
 ARTIFACT="hawkeye-aarch64-apple-darwin.tar.xz"
-ARTIFACT_URL="https://github.com/korandoru/hawkeye/releases/download/${VERSION}/${ARTIFACT}"
 # Pinned SHA-256 of ${ARTIFACT} for ${VERSION}; update when bumping VERSION.
 EXPECTED_SHA256="99777f21e4e56c9946ed93621885532c6a0476377f497565c583f5911f2cbb1f"
 
@@ -39,14 +38,7 @@ tarball="${workdir}/${ARTIFACT}"
 
 # Download the tarball, verify it against the pinned checksum (aborts on
 # mismatch), then extract just the hawkeye binary into .local/bin.
-if ! curl --proto '=https' --tlsv1.2 -LsSf "${ARTIFACT_URL}" -o "${tarball}"; then
-    # The release asset API serves the same pinned tarball when the download URL is unavailable.
-    asset_id="$(gh api "repos/korandoru/hawkeye/releases/tags/${VERSION}" \
-        --jq ".assets[] | select(.name == \"${ARTIFACT}\") | .id")"
-    [[ "${asset_id}" =~ ^[0-9]+$ ]]
-    gh api -H 'Accept: application/octet-stream' \
-        "repos/korandoru/hawkeye/releases/assets/${asset_id}" > "${tarball}"
-fi
+bash "$(dirname "$0")/download-github-release-asset.sh" korandoru/hawkeye "${VERSION}" "${ARTIFACT}" "${tarball}"
 echo "${EXPECTED_SHA256}  ${tarball}" | shasum -a 256 -c -
 
 tar -xf "${tarball}" --strip-components 1 -C "${workdir}"

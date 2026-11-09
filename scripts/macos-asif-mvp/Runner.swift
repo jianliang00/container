@@ -117,32 +117,42 @@ private struct Configuration: Decodable {
 }
 
 @available(macOS 27, *)
-private func attachment(root: URL, config: Configuration, create: Bool) throws -> VZDiskImageStorageDeviceAttachment {
+private func attachment(root: URL, config: Configuration, create: Bool, depthExperiment: Bool = false) throws -> VZDiskImageStorageDeviceAttachment {
+    if depthExperiment && config.backend != "asif" {
+        throw ProbeFailure(message: "layer-depth experiments require ASIF")
+    }
     if config.backend == "raw" {
         return try VZDiskImageStorageDeviceAttachment(url: root.appendingPathComponent(config.writable), readOnly: false)
     }
-    guard config.backend == "asif", (1...2).contains(config.readOnly.count) else {
-        throw ProbeFailure(message: "ASIF MVP requires one or two read-only layers")
+    let maximumParents = depthExperiment ? 8 : 2
+    guard config.backend == "asif", (1...maximumParents).contains(config.readOnly.count) else {
+        throw ProbeFailure(message: "unsupported ASIF experiment layer count")
     }
-    let base = try DiskImage(opening: .open(url: root.appendingPathComponent(config.readOnly[0]), mode: .readOnly))
-    let top = root.appendingPathComponent(config.writable)
-    if config.readOnly.count == 1 {
-        if create {
-            return try VZDiskImageStorageDeviceAttachment(diskImage: base.appending(.asifLayer(url: top, type: .overlay)))
+    let names = config.readOnly + [config.writable]
+    guard Set(names).count == names.count else { throw ProbeFailure(message: "duplicate disk layer") }
+    for name in names {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw ProbeFailure(message: "disk layers must be filenames within the instance")
         }
-        return try VZDiskImageStorageDeviceAttachment(diskImage: base.appending(DiskImage(opening: .open(url: top))))
+        let url = root.appendingPathComponent(name)
+        guard url == url.resolvingSymlinksInPath() else { throw ProbeFailure(message: "symlink disk layer") }
     }
-    let middle = try DiskImage(opening: .open(url: root.appendingPathComponent(config.readOnly[1]), mode: .readOnly))
-    let parent = try base.appending(middle)
+    var disk: DiskImage = try DiskImage(opening: .open(url: root.appendingPathComponent(config.readOnly[0]), mode: .readOnly))
+    for name in config.readOnly.dropFirst() {
+        disk = try disk.appending(DiskImage(opening: .open(url: root.appendingPathComponent(name), mode: .readOnly)))
+    }
+    let top = root.appendingPathComponent(config.writable)
     if create {
-        return try VZDiskImageStorageDeviceAttachment(diskImage: parent.appending(.asifLayer(url: top, type: .overlay)))
+        disk = try disk.appending(.asifLayer(url: top, type: .overlay))
+    } else {
+        disk = try disk.appending(DiskImage(opening: .open(url: top)))
     }
-    return try VZDiskImageStorageDeviceAttachment(diskImage: parent.appending(DiskImage(opening: .open(url: top))))
+    return try VZDiskImageStorageDeviceAttachment(diskImage: disk, cachingMode: depthExperiment ? .uncached : .automatic)
 }
 
 @available(macOS 27, *)
 @MainActor
-private func runVM(root: URL, config: Configuration, script: String) async throws {
+private func runVM(root: URL, config: Configuration, script: String, depthExperiment: Bool = false) async throws {
     let attributes = try FileManager.default.attributesOfFileSystem(forPath: root.path)
     guard let freeBytes = attributes[.systemFreeSize] as? NSNumber, freeBytes.uint64Value >= 20 << 30 else {
         throw ProbeFailure(message: "test VM requires at least 20 GiB of free disk space")
@@ -159,7 +169,9 @@ private func runVM(root: URL, config: Configuration, script: String) async throw
     configuration.platform = platform
     configuration.cpuCount = 4
     configuration.memorySize = 8 << 30
-    configuration.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: try attachment(root: root, config: config, create: false))]
+    configuration.storageDevices = [
+        VZVirtioBlockDeviceConfiguration(attachment: try attachment(root: root, config: config, create: false, depthExperiment: depthExperiment))
+    ]
     configuration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
     let graphics = VZMacGraphicsDeviceConfiguration()
     graphics.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 1440, heightInPixels: 900, pixelsPerInch: 80)]
@@ -181,7 +193,10 @@ private func runVM(root: URL, config: Configuration, script: String) async throw
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             vm.start { continuation.resume(with: $0) }
         }
-        report(["stage": "vmStarted", "cpuCount": 4, "memoryBytes": 8 << 30, "networkDevices": 0, "time": Date().timeIntervalSince1970])
+        report([
+            "stage": "vmStarted", "cpuCount": 4, "memoryBytes": 8 << 30, "networkDevices": 0,
+            "layerCount": config.readOnly.count + 1, "hostCaching": depthExperiment ? "uncached" : "automatic", "time": Date().timeIntervalSince1970,
+        ])
         guard let socket = vm.socketDevices.first as? VZVirtioSocketDevice else { throw ProbeFailure(message: "missing socket device") }
         let deadline = Date().addingTimeInterval(180)
         var connection: VZVirtioSocketConnection?
@@ -223,8 +238,8 @@ private func runVM(root: URL, config: Configuration, script: String) async throw
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard arguments.count >= 2, ["create-overlay", "run", "new-identity"].contains(arguments[0]) else {
-    report(["error": "usage: macos-asif-runner create-overlay|new-identity INSTANCE | run INSTANCE SCRIPT"])
+guard arguments.count >= 2, ["create-overlay", "run", "new-identity", "inspect-depth", "run-depth"].contains(arguments[0]) else {
+    report(["error": "usage: macos-asif-runner create-overlay|new-identity|inspect-depth INSTANCE | run|run-depth INSTANCE SCRIPT"])
     exit(1)
 }
 let root = URL(fileURLWithPath: arguments[1]).standardizedFileURL
@@ -235,7 +250,10 @@ Task { @MainActor in
             try VZMacMachineIdentifier().dataRepresentation.write(to: root.appendingPathComponent("MachineIdentifier.bin"), options: .atomic)
         } else {
             let config = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: root.appendingPathComponent("runtime.json")))
-            if arguments[0] == "create-overlay" {
+            if arguments[0] == "inspect-depth" {
+                _ = try attachment(root: root, config: config, create: false, depthExperiment: true)
+                report(["stage": "depthValidated", "layerCount": config.readOnly.count + 1, "vmStarted": false])
+            } else if arguments[0] == "create-overlay" {
                 guard !FileManager.default.fileExists(atPath: root.appendingPathComponent(config.writable).path) else {
                     throw ProbeFailure(message: "writable image already exists")
                 }
@@ -245,7 +263,7 @@ Task { @MainActor in
                 guard arguments.count == 3 else { throw ProbeFailure(message: "run requires a script") }
                 let script = try String(contentsOfFile: arguments[2], encoding: .utf8)
                 report(["stage": "starting", "time": Date().timeIntervalSince1970])
-                try await runVM(root: root, config: config, script: script)
+                try await runVM(root: root, config: config, script: script, depthExperiment: arguments[0] == "run-depth")
             }
         }
         exit(0)

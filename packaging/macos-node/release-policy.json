@@ -8,7 +8,8 @@
       "durableProcessV2",
       "durableProcessV3",
       "durableProcessV4",
-      "projectedVolumeV1"
+      "projectedVolumeV1",
+      "filesystemSyncV1"
     ]
   },
   "deploymentPairing": {

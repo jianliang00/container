@@ -106,7 +106,7 @@ public struct Application: AsyncLoggableCommand {
         defaultSubcommand: DefaultCommand.self
     )
 
-    public static func main() async throws {
+    public static func runCLI() async {
         restoreCursorAtExit()
 
         #if DEBUG
@@ -121,7 +121,7 @@ public struct Application: AsyncLoggableCommand {
         FileHandle.standardError.write(warningData)
         #endif
 
-        let fullArgs = ProcessInfo.processInfo.arguments
+        let fullArgs = CommandLine.arguments
         let args = Array(fullArgs.dropFirst())
 
         do {

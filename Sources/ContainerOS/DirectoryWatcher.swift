@@ -83,18 +83,11 @@ public actor DirectoryWatcher {
     }
 
     private func _startWatching(
-        handler: @escaping ([FilePath]) throws -> Void
+        handler: @escaping @Sendable ([FilePath]) throws -> Void
     ) throws {
         let descriptor = open(directoryPath.string, O_EVTONLY)
         guard descriptor > 0 else {
             throw ContainerizationError(.internalError, message: "cannot open \(directoryPath.string), descriptor=\(descriptor)")
-        }
-
-        do {
-            let files = try FileManager.default.contentsOfDirectory(atPath: directoryPath.string)
-            try handler(files.map { directoryPath.appending($0) })
-        } catch {
-            throw ContainerizationError(.internalError, message: "failed to run handler for \(directoryPath.string)")
         }
 
         log?.info("starting directory watcher", metadata: ["path": "\(directoryPath.string)"])
@@ -109,8 +102,25 @@ public actor DirectoryWatcher {
             close(descriptor)
         }
 
+        let notify: @Sendable () throws -> Void = { [directoryPath] in
+            let files = try FileManager.default.contentsOfDirectory(atPath: directoryPath.string)
+            try handler(files.map { directoryPath.appending($0) })
+        }
+
+        // Install the watch before the initial scan so a concurrent change is observed by at least one of them.
+        dispatchSource.setRegistrationHandler { [weak self] in
+            guard let self, !dispatchSource.isCancelled else { return }
+            do {
+                try notify()
+            } catch {
+                self.log?.error("failed to start watching", metadata: ["error": "\(error)", "path": "\(self.directoryPath.string)"])
+                dispatchSource.cancel()
+                self.source.withLock { $0 = nil }
+            }
+        }
+
         dispatchSource.setEventHandler { [weak self] in
-            guard let self else { return }
+            guard let self, !dispatchSource.isCancelled else { return }
 
             guard !dispatchSource.data.contains(.delete) else {
                 dispatchSource.cancel()
@@ -119,8 +129,7 @@ public actor DirectoryWatcher {
             }
 
             do {
-                let files = try FileManager.default.contentsOfDirectory(atPath: directoryPath.string)
-                try handler(files.map { directoryPath.appending($0) })
+                try notify()
             } catch {
                 self.log?.error(
                     "failed to run watch handler",

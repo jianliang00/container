@@ -25,9 +25,11 @@ flowchart LR
 
 ## Build and run
 
-The `macOS ASIF image MVP` workflow produces a Developer ID signed
-`macos-asif-runner`, its checksum, signing details and compiler provenance.
-It is an experimental executable, not a notarized node release. Keep the runner
+The `macOS ASIF image MVP` workflow produces Developer ID signed
+`macos-asif-runner` and `macos-asif-raw-import` binaries, checksums, signing details
+and compiler provenance. The runner uses SDK 27; the RAW adapter uses Xcode 26.3
+and the existing RAW import library. These are experimental executables, not a
+notarized node release. Keep the runner
 beside `image.py` or supply `--runner /absolute/path/macos-asif-runner`.
 Python 3 and `zstd` must be installed on the host. Use absolute canonical paths.
 

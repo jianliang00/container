@@ -47,10 +47,12 @@ public enum MacOSNativeDisk {
 
     /// The runtime supplies its platform overlay creator; this transaction layer
     /// does not link DiskImageKit into guest-agent or CRI binaries.
+    @discardableResult
     public static func prepare(
         destination: URL, imageDigest: String, base: URL, hardware: URL, auxiliary: URL,
+        imageReference: String? = nil,
         createOverlay: (URL, URL) throws -> Void
-    ) throws {
+    ) throws -> (@Sendable () -> Void)? {
         try checkDigest(imageDigest)
         try MacOSLocalDiskBundle.validateDirectory(destination)
         let lock = destination.appendingPathComponent("native-disk.lock")
@@ -62,7 +64,7 @@ public enum MacOSNativeDisk {
             value.st_uid == geteuid(), value.st_mode & 0o077 == 0
         else { throw CocoaError(.fileReadNoPermission) }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw POSIXError(.EBUSY) }
-        if try isPrepared(destination: destination, imageDigest: imageDigest) { return }
+        if try isPrepared(destination: destination, imageDigest: imageDigest) { return nil }
         // Imported disk bundles and initial OCI disks have separate ownership.
         for name in ["Disk.img", "disk-bundle-imported", "disk-bundle-importing"] {
             guard try !exists(destination.appendingPathComponent(name)) else { throw CocoaError(.fileWriteFileExists) }
@@ -79,18 +81,23 @@ public enum MacOSNativeDisk {
             try MacOSLocalDiskBundle.synchronize(intent)
             try MacOSLocalDiskBundle.synchronize(destination, directory: true)
         }
+        var preverification: MacOSNativeBaseReceipt.Clone?
         for (name, source) in [("base.img", base), ("HardwareModel.bin", hardware), ("AuxiliaryStorage", auxiliary)] {
             let output = destination.appendingPathComponent(name)
             if try !exists(output) {
                 try MacOSLocalDiskBundle.validateDirectory(source.deletingLastPathComponent())
                 try MacOSLocalDiskBundle.validateNonemptyFile(source)
-                let temporary = destination.appendingPathComponent(".native-template-" + UUID().uuidString)
-                defer { try? FileManager.default.removeItem(at: temporary) }
-                try MacOSLocalDiskBundle.cloneMember(source, to: temporary)
-                try MacOSLocalDiskBundle.validateNonemptyFile(temporary)
-                guard chmod(temporary.path, name == "base.img" ? 0o400 : 0o600) == 0 else { throw POSIXError(.EIO) }
-                try MacOSLocalDiskBundle.synchronize(temporary)
-                guard renamex_np(temporary.path, output.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(.EIO) }
+                if name == "base.img" {
+                    preverification = try MacOSNativeBaseReceipt.clone(source, to: output, immutableSource: false)
+                } else {
+                    let temporary = destination.appendingPathComponent(".native-template-" + UUID().uuidString)
+                    defer { try? FileManager.default.removeItem(at: temporary) }
+                    try MacOSLocalDiskBundle.cloneMember(source, to: temporary)
+                    try MacOSLocalDiskBundle.validateNonemptyFile(temporary)
+                    guard chmod(temporary.path, 0o600) == 0 else { throw POSIXError(.EIO) }
+                    try MacOSLocalDiskBundle.synchronize(temporary)
+                    guard renamex_np(temporary.path, output.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(.EIO) }
+                }
             }
             try MacOSLocalDiskBundle.validateNonemptyFile(output)
             if name == "base.img" { try validateBase(output) }
@@ -113,6 +120,10 @@ public enum MacOSNativeDisk {
         try MacOSLocalDiskBundle.synchronize(destination, directory: true)
         guard renamex_np(intent.path, destination.appendingPathComponent(marker).path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(.EIO) }
         try MacOSLocalDiskBundle.synchronize(destination, directory: true)
+        guard let reference = imageReference, reference.hasSuffix("@" + imageDigest), base.lastPathComponent == "Disk.img",
+            let preverification, !preverification.inherit(reference: reference)
+        else { return nil }
+        return { preverification.preverify(reference: reference) }
     }
 
     private static func checkDigest(_ digest: String) throws {

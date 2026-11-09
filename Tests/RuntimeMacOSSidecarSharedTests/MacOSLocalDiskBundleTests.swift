@@ -103,9 +103,17 @@ struct MacOSLocalDiskBundleTests {
     func nativeImportKeepsTwoLayersAndDoesNotRewindAfterStagingGC() throws {
         let f = try Fixture(format: .nativeASIF)
         defer { f.remove() }
+        let sourceBase = f.source.appendingPathComponent("base.img")
+        let manifest = try JSONDecoder().decode(MacOSLocalDiskBundle.Manifest.self, from: Data(contentsOf: f.source.appendingPathComponent("disk-bundle.json")))
+        let expected = try #require(manifest.nativeBase)
+        let seed = try #require(try MacOSNativeBaseReceipt.clone(sourceBase, to: f.root.appendingPathComponent("seed.img"), immutableSource: true))
+        try seed.verify(reference: expected.reference)
         try f.install()
         let overlay = f.destination.appendingPathComponent("active.asif")
         let base = f.destination.appendingPathComponent("base.img")
+        let receipt = try MacOSNativeBaseReceipt.read(base)
+        #expect(receipt.base == expected)
+        #expect(receipt.stamp.inode != (try MacOSNativeBaseReceipt.read(sourceBase)).stamp.inode)
         #expect(try Data(contentsOf: base) == Data("immutable-base".utf8))
         #expect(!FileManager.default.fileExists(atPath: f.destination.appendingPathComponent("Disk.img").path))
         var st = stat()

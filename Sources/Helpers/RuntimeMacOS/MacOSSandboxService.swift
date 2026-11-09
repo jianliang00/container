@@ -255,6 +255,7 @@ public actor MacOSSandboxService {
     var configuration: ContainerConfiguration?
     private var sandboxImageConfig: ContainerizationOCI.Image?
     private var sandboxImageConfigResolved = false
+    private var preverifyNativeBase: (@Sendable () -> Void)?
     var sessions: [String: Session] = [:]
     private var workloads: [String: WorkloadRecord] = [:]
     private var workloadSessions: [String: String] = [:]
@@ -1054,6 +1055,8 @@ extension MacOSSandboxService {
         }
 
         sandboxState = .booted
+        preverifyNativeBase?()
+        preverifyNativeBase = nil
     }
 
     private func prepareBootMountConfiguration(containerConfig: ContainerConfiguration) throws -> ContainerConfiguration {
@@ -2804,9 +2807,10 @@ extension MacOSSandboxService {
             }
             if try MacOSNativeDisk.isPrepared(destination: root, imageDigest: config.image.digest) { return }
             let layers = try await resolveTemplateLayers(containerConfig: config, progressUpdate: progressUpdate)
-            try MacOSNativeDisk.prepare(
+            preverifyNativeBase = try MacOSNativeDisk.prepare(
                 destination: root, imageDigest: config.image.digest, base: layers.diskImage,
-                hardware: layers.hardwareModel, auxiliary: layers.auxiliaryStorage, createOverlay: createNativeASIFOverlay)
+                hardware: layers.hardwareModel, auxiliary: layers.auxiliaryStorage,
+                imageReference: config.image.reference, createOverlay: createNativeASIFOverlay)
             return
         }
         let fm = FileManager.default

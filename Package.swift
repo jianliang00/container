@@ -96,11 +96,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "container",
-            dependencies: [
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                "ContainerAPIClient",
-                "ContainerCommands",
-            ],
+            dependencies: ["ContainerCommands"],
             path: "Sources/CLI"
         ),
         .testTarget(

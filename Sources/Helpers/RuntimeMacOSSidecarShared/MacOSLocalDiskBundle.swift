@@ -39,7 +39,7 @@ public enum MacOSLocalDiskBundle {
             public var size: Int64
             public var sha256: String?
         }
-        public struct NativeBase: Codable, Sendable {
+        public struct NativeBase: Codable, Equatable, Sendable {
             public var reference: String
             public var sha256: String
             public var size: Int64
@@ -96,7 +96,10 @@ public enum MacOSLocalDiskBundle {
             let from = source.appendingPathComponent("base.img")
             let to = destination.appendingPathComponent("base.img")
             try validateBase(from, base: base)
-            if !fm.fileExists(atPath: to.path) { try cloneMember(from, to: to) }
+            if !fm.fileExists(atPath: to.path) {
+                let clone = try MacOSNativeBaseReceipt.clone(from, to: to, immutableSource: true)
+                clone?.inherit(reference: base.reference, expected: base)
+            }
             try validateBase(to, base: base)
             try synchronize(to)
         }

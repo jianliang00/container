@@ -241,6 +241,16 @@ retry validates the retained manifest and file layout without replacing a live
 overlay or rewinding firmware. Incomplete imports retain their operation digest
 and validate existing members before continuing.
 
+The host can retain a local `base.img.verified.json` receipt alongside a
+verified base. The receipt binds the image reference, disk SHA-256, and length
+to the file's device, inode, ownership, permissions, and modification and
+change times. A new base receives a receipt only from a successful clone of
+the verified source file descriptor. For first-use OCI rebuilds, the runtime
+can compute and save the base digest in the background after boot. The
+snapshot agent compares the digest with its catalog and verifies the whole
+base when the receipt is missing or stale. Receipts are local metadata and
+are excluded from the archive.
+
 The native path permits persistent lifecycle configuration, generation tracking,
 and owned filesystem checkpoints. Machine-state save/restore is rejected with
 `nativeMachineStateUnsupported`; native snapshots restore by cold boot. Native

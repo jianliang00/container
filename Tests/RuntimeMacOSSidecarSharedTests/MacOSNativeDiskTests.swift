@@ -22,6 +22,37 @@ import Testing
 
 struct MacOSNativeDiskTests {
     @Test
+    func verifiedSourceProducesSeparateReceiptsAndRejectsChangedFiles() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let source = f.source.appendingPathComponent("base.img")
+        let first = f.runtime.appendingPathComponent("first.img")
+        let reference = "registry.example/mac/base@" + f.digest
+        let initial = try #require(try MacOSNativeBaseReceipt.clone(source, to: first, immutableSource: false))
+        try initial.verify(reference: reference)
+        let cache = try MacOSNativeBaseReceipt.read(source)
+        let firstReceipt = try MacOSNativeBaseReceipt.read(first)
+        #expect(firstReceipt.base == cache.base)
+        #expect(firstReceipt.stamp.inode != cache.stamp.inode)
+
+        let second = f.runtime.appendingPathComponent("second.img")
+        let clone = try #require(try MacOSNativeBaseReceipt.clone(source, to: second, immutableSource: false))
+        #expect(!clone.inherit(reference: reference, expected: .init(reference: reference, sha256: String(repeating: "0", count: 64), size: cache.base.size)))
+        #expect(clone.inherit(reference: reference, expected: cache.base))
+        let secondReceipt = try MacOSNativeBaseReceipt.read(second)
+        #expect(secondReceipt.base == firstReceipt.base)
+        #expect(secondReceipt.stamp.inode != firstReceipt.stamp.inode)
+        try Data("replaced".utf8).write(to: second, options: .atomic)
+        #expect(!clone.inherit(reference: reference, expected: cache.base))
+
+        try Data("new.img".utf8).write(to: source, options: .atomic)
+        let third = f.runtime.appendingPathComponent("third.img")
+        let changed = try #require(try MacOSNativeBaseReceipt.clone(source, to: third, immutableSource: false))
+        #expect(!changed.inherit(reference: reference))
+        #expect(!FileManager.default.fileExists(atPath: third.appendingPathExtension("verified.json").path))
+    }
+
+    @Test
     func committedDiskSurvivesImageCacheGCAndKeepsGuestWrites() throws {
         let f = try Fixture()
         defer { f.remove() }

@@ -58,12 +58,23 @@ memory, running processes or GUI sessions.
 
 ## Image and cache contract
 
-The OCI artifact binds the ordered RAW base, ASIF layer and VM identity files by
-SHA-256 and size. Every compressed and decoded file is verified during a cold
-import. Missing, reordered, corrupted or unsupported entries prevent a runnable
-instance from being finalized. Filenames are fixed, with no archive extraction
-paths. This custom format is read only by this MVP; installed `container` versions
-do not understand it yet. OCI registry upload is separate from local layout tests.
+The v1 OCI artifact binds the ordered RAW base, ASIF layer and VM identity files
+by SHA-256 and size. The v2 experiment retains the existing RAW disk-layout and
+sparse tar+zstd chunks for the base, with ASIF only for changed disk blocks. The
+manifest includes every base chunk; the decoded base cache is keyed by the bound
+layout digest, not a caller-supplied base label. Both versions reject missing,
+reordered or changed content before finalizing an instance. Installed image
+clients do not yet read either experimental format.
+
+Content acquisition verifies compressed blobs once. A private content-store
+receipt binds each immutable blob to its validated inode, size and modification
+metadata; changed or foreign content falls back to SHA-256 validation. Cold
+reconstruction reuses that acquisition result, matching the current RAW import
+boundary. Copying an artifact to another machine invalidates these receipts and
+requires content verification there. Cold imports reserve the recorded base allocation,
+four parallel chunk temporaries and 20 GiB of headroom before creating an instance.
+Decoded caches are independent of content
+verification: an empty decoded cache still reconstructs the base.
 
 The private cache stores immutable files and their validated inode, size, mode
 and modification metadata. Cache hits avoid a full base scan at every boot.
@@ -139,10 +150,52 @@ For each backend, also boot the prepared instance, run a command as the normal
 guest user, and verify restored files and executable output. Report disk
 preparation and preparation-to-first-user-command separately; neither metric
 includes scheduling, network download or desktop readiness. Include any import
-validation within the measured restore path. The ASIF MVP rechecks compressed
-blobs and serially decodes and hashes the full logical disk, whereas the RAW
-rebuilder processes sparse chunks in parallel after content-store verification.
-This difference is an implementation cost, not an inherent property of ASIF.
+validation within the measured restore path. The legacy v1 ASIF cold importer rechecks compressed blobs and serially decodes
+and hashes the full logical disk. The v2 importer uses the same parallel sparse
+`MacOSDiskRebuilder` as RAW. Keep content acquisition verification outside the
+materialization comparison for both backends; a real network measurement must
+include it.
+
+## Chunked RAW base experiment
+
+Build the experimental adapter with the repository toolchain (SDK 27 is not
+required for this disk-only helper):
+
+```sh
+swift build -c release --product macos-asif-raw-import
+```
+
+Prepare an owned, mode-0700 directory with an immutable, idle `Disk.img` clone.
+The opt-in `MacOSChunkExportExperimentTests` calls the existing RAW chunker and
+writes `chunks/layout.json` and `chunks/blobs/sha256`. Set
+`MACOS_CHUNK_EXPORT_EXPERIMENT` to that directory to run it. An optional
+`MACOS_CHUNK_PARENT_EXPERIMENT` points to a previously verified chunks directory
+and exercises the existing parent-blob reuse path.
+
+Before using the export, verify the source clone stayed unchanged and its full
+SHA-256 matches the immutable base in the instance. Verify each exported blob's
+filename digest, make it readonly, then write `chunks/binding.json` containing
+`sha256` (the verified base digest), `layoutStamp` (`image.stamp(layout.json)`),
+and `blobs` (a map from `sha256:<digest>` to `image.stamp(blob)`). This receipt is
+created by the trusted fixture exporter; arbitrary caller-authored bindings are
+not a production image trust mechanism. Do not remove the source while verifying.
+
+```sh
+python3 image.py commit /absolute/asif /absolute/oci-v2 \
+  --cache /absolute/publication-cache --base-chunks /absolute/export/chunks
+python3 image.py restore /absolute/oci-v2 /absolute/restored \
+  --cache /absolute/decoded-cache \
+  --raw-importer /absolute/repository/.build/release/macos-asif-raw-import
+```
+
+A cold v2 import verifies the bound layout and its chunk inventory, invokes the
+production RAW rebuilder, and decodes only the small ASIF/identity files through
+the experimental decoder. Target-cache hits clone the validated base and layer;
+parent-cache hits reconstruct only the new ASIF layer. A failed reconstruction
+cannot finalize a runnable instance or a validated base-cache receipt. A failed
+instance directory remains available for inspection; retry into a fresh private
+directory. The adapter and exporter are validation tools and are not installed
+by the node release packaging.
 
 Production adoption still requires runtime/OCI format negotiation, image ancestry
 and GC integration, bounded flattening, encrypted TOS archive integration, power

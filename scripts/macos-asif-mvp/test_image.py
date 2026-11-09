@@ -179,5 +179,120 @@ class ImageTests(unittest.TestCase):
             self.commit()
 
 
+class ChunkedBaseTests(unittest.TestCase):
+    tearDown = ImageTests.tearDown
+    rewrite_config = ImageTests.rewrite_config
+    def setUp(self):
+        ImageTests.setUp(self)
+        self.chunked = self.root / "chunked"
+        image.private_dir(self.chunked)
+        (self.chunked / "blobs/sha256").mkdir(parents=True)
+        raw = self.instance / "base.img"
+        chunk = self.chunked / "content"
+        chunk.write_bytes(b"compressed sparse chunk fixture")
+        desc = image.descriptor(chunk, image.MEDIA + ".raw-chunk+tar+zstd")
+        chunk.rename(self.chunked / "blobs/sha256" / desc["digest"][7:])
+        path = self.chunked / "blobs/sha256" / desc["digest"][7:]
+        path.chmod(0o400)
+        disk = {"version": 1, "logicalSize": raw.stat().st_size, "chunkSize": 1 << 30,
+                "chunkCount": 1, "compression": {"type": "zstd", "level": 3},
+                "tar": {"format": "pax", "sparse": True},
+                "chunks": [{"index": 0, "offset": 0, "length": raw.stat().st_size,
+                            "rawLength": raw.stat().st_size, "rawDigest": image.digest(raw),
+                            "layerDigest": desc["digest"], "layerSize": desc["size"]}]}
+        image.write_json(self.chunked / "layout.json", disk)
+        image.write_json(self.chunked / "binding.json", {
+            "sha256": image.digest(raw), "layoutStamp": image.stamp(self.chunked / "layout.json"),
+            "blobs": {desc["digest"]: image.stamp(path)}})
+
+    def commit(self):
+        layout = self.root / "image"
+        args = argparse.Namespace(instance=self.instance, image=layout, cache=self.cache, base_chunks=self.chunked)
+        with patch.object(image, "idle"), patch.object(image, "capacity"), contextlib.redirect_stdout(io.StringIO()):
+            image.commit(args)
+        return layout
+
+    def test_chunked_base_cold_and_warm_restore(self):
+        layout = self.commit()
+        config = image.image_config(layout)
+        self.assertEqual(config["format"], image.CHUNKED_FORMAT)
+        actual_run = image.subprocess.run
+        calls = []
+        def run(command, **kwargs):
+            if command[0] != "raw-import":
+                return actual_run(command, **kwargs)
+            calls.append(command)
+            Path(command[-1]).write_bytes((self.instance / "base.img").read_bytes())
+        with patch.object(image.subprocess, "run", side_effect=run):
+            for i in range(2):
+                args = argparse.Namespace(image=layout, instance=self.root / str(i), cache=self.cache,
+                                          runner="unused", new_identity=False, raw_importer="raw-import")
+                with patch.object(image, "finish_instance"), patch.object(image, "capacity"):
+                    image.restore(args)
+                self.assertEqual((args.instance / "base.img").read_bytes(), (self.instance / "base.img").read_bytes())
+        self.assertEqual(len(calls), 1)
+
+    def test_wrong_parent_binding(self):
+        path = self.chunked / "binding.json"
+        data = json.loads(path.read_bytes()); data["sha256"] = "0" * 64
+        image.write_json(path, data)
+        with self.assertRaisesRegex(ValueError, "binding mismatch"):
+            self.commit()
+
+    def test_changed_export_chunk(self):
+        path = next((self.chunked / "blobs/sha256").iterdir())
+        path.chmod(0o600); path.write_bytes(b"bad"); path.chmod(0o400)
+        with self.assertRaisesRegex(ValueError, "changed after export"):
+            self.commit()
+
+    def test_changed_layout_binding(self):
+        path = self.chunked / "layout.json"
+        path.write_bytes(path.read_bytes() + b" ")
+        with self.assertRaisesRegex(ValueError, "binding mismatch"):
+            self.commit()
+
+    def test_chunk_inventory_mismatch(self):
+        layout = self.commit()
+        self.rewrite_config(layout, lambda c: c["files"][0]["chunks"][0].update(size=1),
+                            lambda m: m["layers"][1].update(size=1))
+        with self.assertRaisesRegex(ValueError, "chunk inventory"):
+            image.image_config(layout)
+
+    def test_failed_import_does_not_finalize_or_cache_base(self):
+        layout = self.commit()
+        args = argparse.Namespace(image=layout, instance=self.root / "failed", cache=self.cache,
+                                  runner="unused", new_identity=False, raw_importer="raw-import")
+        with patch.object(image, "finish_instance") as finish, patch.object(image, "capacity"), \
+             patch.object(image.subprocess, "run", side_effect=RuntimeError("interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                image.restore(args)
+            finish.assert_not_called()
+        self.assertFalse(list(self.cache.glob("chunks-*.decoded.json")))
+
+
+    def test_rebuild_capacity_checked_before_instance_creation(self):
+        layout = self.commit()
+        args = argparse.Namespace(image=layout, instance=self.root / "no-space", cache=self.cache,
+                                  runner="unused", new_identity=False, raw_importer="unused")
+        usage = __import__("collections").namedtuple("Usage", "total used free")(100 << 30, 79 << 30, 21 << 30)
+        with patch.object(image.shutil, "disk_usage", return_value=usage), patch.object(image.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "requires"):
+                image.restore(args)
+            run.assert_not_called()
+        self.assertFalse(args.instance.exists())
+
+    def test_changed_acquired_chunk_rejected_before_importer(self):
+        layout = self.commit()
+        cfg = image.image_config(layout)
+        path = layout / "blobs/sha256" / cfg["files"][0]["chunks"][0]["digest"][7:]
+        path.chmod(0o600);path.write_bytes(b"corrupt" * 4);path.chmod(0o400)
+        args = argparse.Namespace(image=layout, instance=self.root / "corrupt", cache=self.cache,
+                                  runner="unused", new_identity=False, raw_importer="unused")
+        with patch.object(image, "capacity"), patch.object(image.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                image.restore(args)
+            run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ permissions:
 jobs:
   build:
     runs-on: xcode-27
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Test image lifecycle and integrity checks
@@ -35,6 +35,8 @@ jobs:
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 27
           xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 \
             scripts/macos-asif-mvp/Runner.swift -o probe-artifact/macos-asif-runner
+          swift build -c release --product macos-asif-raw-import
+          cp .build/release/macos-asif-raw-import probe-artifact/
           cp scripts/macos-asif-mvp/image.py scripts/macos-asif-mvp/benchmark.py scripts/macos-asif-mvp/README.md probe-artifact/
       - name: Sign standalone diagnostic
         env:
@@ -58,9 +60,12 @@ jobs:
           codesign --force --sign "$APP_IDENTITY" --keychain "$keychain_path" \
             --timestamp --options runtime --entitlements scripts/macos-asif-mvp/vm.entitlements \
             probe-artifact/macos-asif-runner
+          codesign --force --sign "$APP_IDENTITY" --keychain "$keychain_path" \
+            --timestamp --options runtime probe-artifact/macos-asif-raw-import
+          codesign --verify --strict probe-artifact/macos-asif-raw-import
           codesign --verify --strict probe-artifact/macos-asif-runner
           codesign -dvv probe-artifact/macos-asif-runner 2> probe-artifact/signature.txt
-          shasum -a 256 probe-artifact/macos-asif-runner > probe-artifact/SHA256SUMS
+          shasum -a 256 probe-artifact/macos-asif-runner probe-artifact/macos-asif-raw-import > probe-artifact/SHA256SUMS
           tar -czf macos-asif-mvp.tar.gz probe-artifact
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

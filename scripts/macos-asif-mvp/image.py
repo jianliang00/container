@@ -17,6 +17,7 @@ import tempfile
 import time
 
 FORMAT = "container.macos.asif-mvp.v1"
+CHUNKED_FORMAT = "container.macos.asif-mvp.v2"
 MEDIA = "application/vnd.container.macos.asif-mvp"
 IDENTITY = ["HardwareModel.bin", "MachineIdentifier.bin", "AuxiliaryStorage"]
 MAX_IMAGE_BYTES = 300 << 30
@@ -70,8 +71,9 @@ def private_dir(path):
     path.mkdir(mode=0o700)
 
 
-def capacity(path):
-    require(shutil.disk_usage(path).free >= 20 << 30, "requires 20 GiB free before operation")
+def capacity(path, required_bytes=20 << 30):
+    require(shutil.disk_usage(path).free >= required_bytes,
+            f"requires {(required_bytes + (1 << 30) - 1) >> 30} GiB free before operation")
 
 
 def idle(paths):
@@ -188,10 +190,22 @@ def check_descriptor(value):
             "invalid OCI object size")
 
 
+def content_verified(layout, path, expected):
+    receipt = layout / ".verified-blobs.json"
+    if receipt.exists():
+        owner = layout.stat()
+        require(owner.st_uid == os.getuid() and owner.st_mode & 0o077 == 0,
+                "verified content store must be private and owned")
+        records = json.loads(regular(receipt).read_bytes())
+        if records.get(expected) == stamp(path) and path.stat().st_mode & 0o222 == 0:
+            return True
+    return digest(path) == expected
+
+
 def blob(layout, value):
     check_descriptor(value)
     path = regular(layout / "blobs/sha256" / value["digest"][7:])
-    require(path.stat().st_size == value["size"] and digest(path) == value["digest"][7:],
+    require(path.stat().st_size == value["size"] and content_verified(layout, path, value["digest"][7:]),
             "OCI blob checksum mismatch")
     return path
 
@@ -227,6 +241,33 @@ def compress_cached(path, cache, raw_digest, kind):
     return compressed, desc, False
 
 
+def layer_descriptors(files):
+    return [desc for record in files for desc in [record["blob"], *record.get("chunks", [])]]
+
+
+def import_chunked_base(source, layout, expected_sha, expected_bytes, allocated_bytes):
+    binding = json.loads(regular(source / "binding.json").read_bytes())
+    layout_file = regular(source / "layout.json")
+    require(binding["sha256"] == expected_sha and binding["layoutStamp"] == stamp(layout_file),
+            "chunked base binding mismatch")
+    disk = json.loads(layout_file.read_bytes())
+    require(disk["logicalSize"] == expected_bytes, "base size mismatch")
+    chunks = []
+    copied = set()
+    for chunk in disk["chunks"]:
+        desc = {"mediaType": MEDIA + ".raw-chunk+tar+zstd", "digest": chunk["layerDigest"], "size": chunk["layerSize"]}
+        check_descriptor(desc)
+        path = regular(source / "blobs/sha256" / desc["digest"][7:])
+        require(binding["blobs"].get(desc["digest"]) == stamp(path), "chunk changed after export")
+        if desc["digest"] not in copied:
+            clone(path, layout / "blobs/sha256" / desc["digest"][7:], 0o400)
+            copied.add(desc["digest"])
+        chunks.append(desc)
+    desc = metadata(layout, disk, MEDIA + ".raw-chunks.v1+json")
+    return {"name": "base.img", "kind": "raw-chunks", "sha256": expected_sha,
+            "bytes": expected_bytes, "allocatedBytes": allocated_bytes, "blob": desc, "chunks": chunks}
+
+
 def commit(args):
     root, layout, cache = args.instance, args.image, args.cache
     with locked(root), locked(cache):
@@ -246,6 +287,13 @@ def commit(args):
             before = stamp(path)
             raw_digest = state["immutable"].get(name, {}).get("sha256") or digest(path)
             kind = "identity" if name in IDENTITY else "raw" if i == 0 else "asif"
+            if i == 0 and getattr(args, "base_chunks", None) is not None:
+                require(config["backend"] == "asif", "chunked base requires ASIF backend")
+                record = import_chunked_base(args.base_chunks, layout, raw_digest, path.stat().st_size, path.stat().st_blocks * 512)
+                records.append(record)
+                reused_bytes += sum({d["digest"]: d["size"] for d in record["chunks"]}.values())
+                require(stamp(path) == before, "base changed while sealing")
+                continue
             compressed, desc, reused = compress_cached(path, cache, raw_digest, kind)
             destination = layout / "blobs/sha256" / desc["digest"][7:]
             if not destination.exists():
@@ -257,14 +305,22 @@ def commit(args):
                 reused_bytes += desc["size"]
             else:
                 new_bytes += desc["size"]
-        image_config = {"format": FORMAT, "backend": config["backend"], "files": records}
-        desc = metadata(layout, image_config, MEDIA + ".config.v1+json")
+        version = "v2" if records[0]["kind"] == "raw-chunks" else "v1"
+        image_config = {"format": CHUNKED_FORMAT if version == "v2" else FORMAT, "backend": config["backend"], "files": records}
+        desc = metadata(layout, image_config, MEDIA + ".config." + version + "+json")
         manifest = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "artifactType": MEDIA + ".v1", "config": desc,
-                    "layers": [record["blob"] for record in records]}
+                    "artifactType": MEDIA + "." + version, "config": desc,
+                    "layers": layer_descriptors(records)}
         manifest_desc = metadata(layout, manifest, manifest["mediaType"])
         write_json(layout / "index.json", {"schemaVersion": 2, "manifests": [manifest_desc]})
         write_json(layout / "oci-layout", {"imageLayoutVersion": "1.0.0"})
+        # Content-store verification belongs to acquisition/publication, not each decode.
+        # Files remain private and immutable; any inode/metadata change triggers hashing.
+        verified = {}
+        for file in (layout / "blobs/sha256").iterdir():
+            file.chmod(0o400)
+            verified[file.name] = stamp(file)
+        write_json(layout / ".verified-blobs.json", verified)
         print(json.dumps({"seconds": time.monotonic() - started, "newBlobBytes": new_bytes,
                           "reusedBlobBytes": reused_bytes, "manifest": manifest_desc["digest"]}), flush=True)
 
@@ -274,19 +330,32 @@ def image_config(layout):
     index = json.loads(regular(layout / "index.json").read_bytes())
     require(index["schemaVersion"] == 2 and len(index["manifests"]) == 1, "expected exactly one OCI manifest")
     manifest = json.loads(blob(layout, index["manifests"][0]).read_bytes())
-    require(manifest.get("artifactType") == MEDIA + ".v1", "unknown image artifact type")
+    require(manifest.get("artifactType") in (MEDIA + ".v1", MEDIA + ".v2"), "unknown image artifact type")
     config = json.loads(blob(layout, manifest["config"]).read_bytes())
-    require(config.get("format") == FORMAT and config.get("backend") in ("raw", "asif"), "unknown image format")
+    require(config.get("format") in (FORMAT, CHUNKED_FORMAT) and config.get("backend") in ("raw", "asif"), "unknown image format")
     files = config["files"]
-    kinds = ["raw"] + (["asif"] if config["backend"] == "asif" else []) + ["identity"] * 3
+    chunked = config["format"] == CHUNKED_FORMAT
+    require(not chunked or config["backend"] == "asif", "chunked format requires ASIF")
+    require(manifest["artifactType"] == MEDIA + (".v2" if chunked else ".v1"), "format version mismatch")
+    kinds = ["raw-chunks" if chunked else "raw"] + (["asif"] if config["backend"] == "asif" else []) + ["identity"] * 3
     names = (["base.img", "writable.asif"] if config["backend"] == "asif" else ["Disk.img"]) + IDENTITY
     require([r["kind"] for r in files] == kinds and [r["name"] for r in files] == names,
             "invalid image layer order, depth or identity inventory")
-    require([r["blob"] for r in files] == manifest["layers"], "config and manifest layer order differ")
+    require(layer_descriptors(files) == manifest["layers"], "config and manifest layer order differ")
     for record in files:
         require(re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) and type(record["bytes"]) is int
                 and 0 < record["bytes"] <= MAX_IMAGE_BYTES, "invalid decoded layer size or checksum")
-        require(record["blob"]["mediaType"] == MEDIA + "." + record["kind"] + "+zstd", "wrong layer media type")
+        media = MEDIA + (".raw-chunks.v1+json" if record["kind"] == "raw-chunks" else "." + record["kind"] + "+zstd")
+        require(record["blob"]["mediaType"] == media, "wrong layer media type")
+        if record["kind"] == "raw-chunks":
+            disk = json.loads(blob(layout, record["blob"]).read_bytes())
+            require(disk["logicalSize"] == record["bytes"], "base size mismatch")
+            expected = [{"mediaType": MEDIA + ".raw-chunk+tar+zstd", "digest": c["layerDigest"], "size": c["layerSize"]} for c in disk["chunks"]]
+            require(record["chunks"] == expected, "base chunk inventory mismatch")
+            for desc in expected:
+                check_descriptor(desc)
+        else:
+            require("chunks" not in record, "unexpected chunk inventory")
     return config
 
 
@@ -319,13 +388,22 @@ def restore(args):
     with locked(args.cache):
         config = image_config(args.image)
         capacity(args.instance.parent)
+        base = config["files"][0]
+        if base["kind"] == "raw-chunks":
+            base_cache = args.cache / ("chunks-" + base["blob"]["digest"][7:] + ".decoded.json")
+            if not base_cache.exists():
+                allocated = base.get("allocatedBytes", base["bytes"])
+                require(type(allocated) is int and 0 < allocated <= base["bytes"], "invalid base allocation budget")
+                # Reserve four parallel chunk temporaries plus 20 GiB for other writes.
+                capacity(args.instance.parent, allocated + (24 << 30))
         private_dir(args.instance)
         verified, reused_bytes = {}, 0
         for record in config["files"]:
             name = "parent.asif" if record["name"] == "writable.asif" else record["name"]
             target = args.instance / name
-            cache_file = args.cache / (record["sha256"] + ".decoded")
-            cache_record = args.cache / (record["sha256"] + ".decoded.json")
+            key = "chunks-" + record["blob"]["digest"][7:] if record["kind"] == "raw-chunks" else record["sha256"]
+            cache_file = args.cache / (key + ".decoded")
+            cache_record = args.cache / (key + ".decoded.json")
             immutable = name in ("base.img", "parent.asif")
             if immutable and cache_record.exists():
                 receipt = json.loads(regular(cache_record).read_bytes())
@@ -333,10 +411,18 @@ def restore(args):
                         and cache_file.stat().st_mode & 0o222 == 0, "decoded cache changed; re-import using a fresh cache")
                 require(cache_file.stat().st_size == record["bytes"], "decoded cache size mismatch")
                 clone(cache_file, target, 0o400)
-                reused_bytes += record["blob"]["size"]
+                reused_bytes += sum({d["digest"]: d["size"] for d in [record["blob"], *record.get("chunks", [])]}.values())
             else:
                 source = blob(args.image, record["blob"])
-                decompress(source, target, record)
+                if record["kind"] == "raw-chunks":
+                    helper = getattr(args, "raw_importer", None)
+                    require(helper, "chunked base requires --raw-importer")
+                    for desc in {d["digest"]: d for d in record["chunks"]}.values():
+                        blob(args.image, desc)
+                    subprocess.run([str(helper), str(source), str(args.image / "blobs/sha256"), str(target)], check=True)
+                    require(target.stat().st_size == record["bytes"], "reconstructed base size mismatch")
+                else:
+                    decompress(source, target, record)
                 target.chmod(0o400 if immutable else 0o600)
                 if immutable:
                     clone(target, cache_file, 0o400)
@@ -367,10 +453,12 @@ def main():
     p.add_argument("instance", type=Path)
     p.add_argument("image", type=Path)
     p.add_argument("--cache", type=Path, required=True)
+    p.add_argument("--base-chunks", type=Path)
     p = commands.add_parser("restore")
     p.add_argument("image", type=Path)
     p.add_argument("instance", type=Path)
     p.add_argument("--new-identity", action="store_true")
+    p.add_argument("--raw-importer", type=Path)
     p.add_argument("--cache", type=Path, required=True)
     args = parser.parse_args()
     {"init": initialize, "run": run, "commit": commit, "restore": restore}[args.command](args)

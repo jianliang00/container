@@ -95,6 +95,11 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
+            name: "macos-asif-raw-import",
+            dependencies: ["ContainerResource"],
+            path: "scripts/macos-asif-mvp/raw-import"
+        ),
+        .executableTarget(
             name: "container",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),

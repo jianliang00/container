@@ -41,21 +41,63 @@ public struct MacOSASIFCompaction: Sendable {
     }
     private var segmentCount: Int { (blockCount + Self.batch - 1) / Self.batch }
 
-    public init(layers: [URL], logicalBytes: UInt64) throws {
+    public init(layers: [URL], logicalBytes: UInt64, sparseBase: URL? = nil) throws {
         guard (1...4).contains(layers.count), logicalBytes > 0, logicalBytes <= 1 << 40, logicalBytes % 512 == 0 else {
             throw Failure.invalidInput
         }
         self.logicalBytes = logicalBytes
         var candidates: Set<UInt64> = []
+        var fullDiscards: Set<UInt64> = []
         var known = true
         for layer in layers {
-            if let index = try MacOSASIFLayerIndex.candidates(in: layer, logicalBytes: logicalBytes) {
-                candidates.formUnion(index)
+            if let changes = try MacOSASIFLayerIndex.changes(in: layer, logicalBytes: logicalBytes) {
+                candidates.formUnion(changes.data)
+                fullDiscards.formUnion(changes.fullDiscards)
             } else {
                 known = false
             }
         }
-        offsets = known ? candidates.sorted() : nil
+        guard known else {
+            offsets = nil
+            return
+        }
+        fullDiscards.subtract(candidates)
+        if let sparseBase, !fullDiscards.isEmpty {
+            fullDiscards = try Self.discardsWithBaseData(fullDiscards, base: sparseBase, logicalBytes: logicalBytes)
+        }
+        offsets = candidates.union(fullDiscards).sorted()
+    }
+
+    /// If every overlay either inherits or discards a block, a hole in the
+    /// RAW base proves the native source and target both read as zero.
+    private static func discardsWithBaseData(_ offsets: Set<UInt64>, base: URL, logicalBytes: UInt64) throws -> Set<UInt64> {
+        let fd = open(base.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        var value = stat()
+        guard fstat(fd, &value) == 0, value.st_mode & S_IFMT == S_IFREG, value.st_mode & 0o222 == 0,
+            value.st_size == off_t(logicalBytes)
+        else { throw Failure.invalidInput }
+        var withData: Set<UInt64> = []
+        var nextData: UInt64 = 0
+        for offset in offsets.sorted() {
+            if offset >= nextData {
+                let start = lseek(fd, off_t(offset), SEEK_DATA)
+                if start == -1 {
+                    switch errno {
+                    case ENXIO: return withData
+                    case EINVAL, ENOTSUP, ENOSYS: return offsets
+                    default: throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                }
+                guard start >= off_t(offset) else { throw Failure.invalidInput }
+                nextData = UInt64(start)
+            }
+            if nextData < min(offset + UInt64(Self.block), logicalBytes) {
+                withData.insert(offset)
+            }
+        }
+        return withData
     }
 
     /// The caller also binds the journal to the immutable input generation.

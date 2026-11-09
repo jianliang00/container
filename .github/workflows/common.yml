@@ -72,6 +72,7 @@ jobs:
       - name: Check formatting
         env:
           HAWKEYE_AUTO_INSTALL: "1"
+          GH_TOKEN: ${{ github.token }}
         run: |
           ./scripts/install-hawkeye.sh
           make fmt

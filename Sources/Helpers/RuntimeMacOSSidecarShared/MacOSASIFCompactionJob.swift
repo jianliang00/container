@@ -71,7 +71,7 @@ public enum MacOSASIFCompactionJob {
         let size = UInt64(inputs[0].size)
         try recover(base: base, size: size)
         try recover(base: targetBase, size: size)
-        let plan = try MacOSASIFCompaction(layers: layers, logicalBytes: size)
+        let plan = try MacOSASIFCompaction(layers: layers, logicalBytes: size, sparseBase: base)
         var journal = Journal(inputs: inputs, plan: plan.planDigest, completed: [], targetBase: nil, verified: nil)
         let fm = FileManager.default
         if fm.fileExists(atPath: receipt.path) {

@@ -35,9 +35,14 @@ public enum MacOSASIFLayerIndex {
         case malformed
     }
 
+    struct Changes {
+        var data: Set<UInt64> = []
+        var fullDiscards: Set<UInt64> = []
+    }
+
     /// `nil` means the layout is unknown. An invalid known layout throws.
     /// This must be called only on an immutable, detached layer.
-    public static func candidates(in url: URL, logicalBytes: UInt64) throws -> Set<UInt64>? {
+    static func changes(in url: URL, logicalBytes: UInt64) throws -> Changes? {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(fd) }
@@ -84,7 +89,7 @@ public enum MacOSASIFLayerIndex {
         }
 
         let limit = ceiling(logicalBytes, UInt64(blockBytes))
-        var offsets: Set<UInt64> = []
+        var changes = Changes()
         for (tableIndex, table) in tables.prefix(Int(ceiling(limit, UInt64(blocksPerTable)))).enumerated() where table != 0 {
             let data = try read(table * UInt64(blockBytes), blockBytes)
             for group in 0..<groupsPerTable {
@@ -114,11 +119,21 @@ public enum MacOSASIFLayerIndex {
                         throw IndexError.malformed
                     }
                     if physical != 0, !used.insert(physical).inserted { throw IndexError.malformed }
-                    offsets.insert((start + UInt64(index)) * UInt64(blockBytes))
+                    let offset = (start + UInt64(index)) * UInt64(blockBytes)
+                    if entry >> 62 == 2 {
+                        changes.fullDiscards.insert(offset)
+                    } else {
+                        changes.data.insert(offset)
+                    }
                 }
             }
         }
-        return offsets
+        return changes
+    }
+
+    public static func candidates(in url: URL, logicalBytes: UInt64) throws -> Set<UInt64>? {
+        guard let changes = try changes(in: url, logicalBytes: logicalBytes) else { return nil }
+        return changes.data.union(changes.fullDiscards)
     }
 
     private static func validChunk(_ index: UInt64, length: UInt64) -> Bool {

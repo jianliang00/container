@@ -44,7 +44,9 @@ five total layers. The version 1 RAW and version 3 native imports remain valid.
 
 `container-runtime-macos compact-asif` processes detached clones in a private
 job. It uses the observed ASIF v1 index to select ranges and macOS native disk
-devices to resolve data. An unrecognized input layout uses a native full scan.
+devices to resolve data. For full-discards-only regions, it skips blocks that
+are holes in the RAW base. It keeps partial discards and any block with data
+in the chain. An unrecognized input layout uses a native full scan.
 The job revalidates checkpoints and publishes only a verified cumulative ASIF.
 The storage controller can use it before publishing a derived restore bundle
 when the next start would reach four layers. It does not replace the disk of an

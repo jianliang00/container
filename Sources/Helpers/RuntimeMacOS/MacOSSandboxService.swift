@@ -2784,16 +2784,29 @@ extension MacOSSandboxService {
     private func ensureTemplateArtifacts(for config: ContainerConfiguration, progressUpdate: ProgressUpdateHandler? = nil) async throws {
         if let state = config.macosGuest?.machineState, let digest = state.diskBundleDigest {
             let devices = config.macosGuest?.blockDevices ?? []
-            let native = devices.count == 1 && devices[0].kind == .nativeASIFOverlay
+            let native = devices.count == 1 && devices[0].kind.isNativeASIF
             guard devices.isEmpty || (native && devices[0].path == "active.asif" && devices[0].nativeBasePath == "base.img"),
                 state.restoreStateID == nil, let generation = state.storageGeneration
             else {
                 throw ContainerizationError(.invalidArgument, message: "disk bundle import requires local disk and cold restore")
             }
+            let format: MacOSLocalDiskBundle.Format
+            if native && devices[0].kind == .nativeASIFChain {
+                let parents = devices[0].nativeParentPaths ?? []
+                guard MacOSNativeDisk.available, !parents.isEmpty, parents == MacOSLocalDiskBundle.parentNames(count: parents.count) else {
+                    throw ContainerizationError(.invalidArgument, message: "native derived bundle requires ordered parent layers and SDK 27")
+                }
+                format = .nativeASIFChain(parentCount: parents.count)
+            } else {
+                format = native ? .nativeASIF : .raw
+            }
             try MacOSLocalDiskBundle.install(
                 storageDirectory: state.storageDirectory, persistenceID: state.persistenceID, generation: generation, digest: digest, destination: root,
-                format: native ? .nativeASIF : .raw)
+                format: format, createOverlay: createNativeASIFOverlay(base:parents:output:))
             return
+        }
+        if config.macosGuest?.blockDevices.contains(where: { $0.kind == .nativeASIFChain }) == true {
+            throw ContainerizationError(.invalidArgument, message: "native ASIF chain requires an authenticated disk bundle")
         }
         if config.macosGuest?.blockDevices.contains(where: { $0.kind == .nativeASIFOverlay }) == true {
             let devices = config.macosGuest?.blockDevices ?? []

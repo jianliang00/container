@@ -950,7 +950,7 @@ struct MacOSBlockDeviceBuildResult {
 
 enum MacOSBlockDeviceBuilder {
     static func validateMachineStateSupport(options: ContainerConfiguration.MacOSGuestOptions?) throws {
-        guard options?.blockDevices.contains(where: { $0.kind == .nativeASIFOverlay }) != true else {
+        guard options?.blockDevices.contains(where: { $0.kind.isNativeASIF }) != true else {
             throw SidecarRPCError(code: "nativeMachineStateUnsupported", message: "native ASIF supports cold disk checkpoints only")
         }
     }
@@ -964,11 +964,11 @@ enum MacOSBlockDeviceBuilder {
             guard !device.identifier.isEmpty, identifiers.insert(device.identifier).inserted else {
                 throw SidecarRPCError(code: "invalidStorageConfiguration", message: "block device identifiers must be non-empty and unique")
             }
-            if device.kind != .nativeASIFOverlay, device.nativeBasePath != nil {
+            if !device.kind.isNativeASIF, device.nativeBasePath != nil || device.nativeParentPaths != nil {
                 throw SidecarRPCError(code: "invalidStorageConfiguration", message: "nativeBasePath requires a native ASIF device")
             }
             switch device.kind {
-            case .nativeASIFOverlay:
+            case .nativeASIFOverlay, .nativeASIFChain:
                 guard options?.blockDevices.count == 1 else {
                     throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF requires a single cold-boot disk")
                 }
@@ -1013,7 +1013,7 @@ enum MacOSBlockDeviceBuilder {
         var observers: [MacOSNBDConnectionObserver] = []
         for device in configured {
             switch device.kind {
-            case .nativeASIFOverlay:
+            case .nativeASIFOverlay, .nativeASIFChain:
                 let attachment = try nativeASIFAttachment(rootURL: rootURL, device: device)
                 devices.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))
                 descriptions.append(.init(kind: device.kind.rawValue, identifier: device.identifier, readOnly: false))

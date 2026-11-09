@@ -91,6 +91,43 @@ flattening path is implemented. Default restoration preserves VM identity for
 an offline checkpoint. `restore --new-identity` creates a new machine identifier
 for a separate test instance; this is not a general image sanitization workflow.
 
+## Layer-depth experiment
+
+The separate `run-depth` diagnostic accepts 2 through 9 total disk layers and
+uses explicit uncached host storage. The image import/commit commands retain
+their three-layer limit. Every measurement starts a fresh, networkless guest
+with 4 vCPUs and 8 GiB. No global host cache purge is needed.
+
+Prepare two dedicated, stopped RAW inputs of equal size: a baseline and a final
+reference containing the fixed project and random-read dataset. `layer_depth.py`
+compares every logical byte, records differing 1 MiB blocks, and distributes those
+same blocks across each stack's ASIF layers. It attaches only private cloned
+images with `diskutil image attach --noMount`, verifies the returned virtual
+device's identity and size before writing, and ejects that device afterward.
+Each completed stack must match the final reference's full-disk SHA-256.
+
+```sh
+python3 layer_depth.py scan /private/base.img /private/final.img /private/diff.json
+python3 layer_depth.py build /private/base.img /private/final.img /private/diff.json 9 /private/chain-9
+./macos-asif-runner inspect-depth /private/chain-9
+python3 layer_depth.py measure /private/chain-9 /private/identity /private/sample-9 \
+  /absolute/macos-asif-runner /private/measure.sh
+```
+
+Build `random-read.c` inside the reference guest. `prepare FILE BYTES` exclusively
+creates deterministic data; `read FILE THREADS OPERATIONS SEED` performs verified
+4 KiB reads using `F_NOCACHE` and reports IOPS and latency percentiles. Repeat the
+same seeds and operation counts for each layer depth. Host caching is explicitly
+uncached; controller caches and metadata caches are not globally flushed.
+
+Clone a completed chain and identical VM identity files for each sample. Rotate
+depth order and record first admin output, two random-read passes at queue depths
+1 and 16, and the fixed Xcode clean/incremental/reuse workload. The constructor's
+full-disk scan and all OCI transfer are outside this runtime comparison. Keep
+failed fixtures and logs; remove successful sample disk clones only after the
+VM stopped acknowledgement and closed-handle checks. `measure` retains its
+instance for this explicit cleanup.
+
 ## Guest build measurement
 
 `benchmark.py` runs as `admin` inside the test guest. It verifies zstd revision

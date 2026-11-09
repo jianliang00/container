@@ -522,12 +522,20 @@ jobs:
           /usr/bin/swift test --skip-update --filter "${test_filter}"
 
       - name: Download and verify kubelet artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          curl --fail --location --retry 5 --retry-delay 5 \
-            --output "${KUBELET_ARTIFACT_PATH}" \
-            "${KUBELET_ARTIFACT_URL}"
+          github_asset='^https://github\.com/([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)/releases/download/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)$'
+          if [[ "${KUBELET_ARTIFACT_URL}" =~ ${github_asset} ]]; then
+            bash scripts/download-github-release-asset.sh \
+              "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${KUBELET_ARTIFACT_PATH}"
+          else
+            curl --fail --location --retry 5 --retry-delay 5 \
+              --output "${KUBELET_ARTIFACT_PATH}" \
+              "${KUBELET_ARTIFACT_URL}"
+          fi
           actual_sha256="$(shasum -a 256 "${KUBELET_ARTIFACT_PATH}" | awk '{print $1}')"
           if [[ "${actual_sha256}" != "${KUBELET_ARTIFACT_SHA256}" ]]; then
             echo "::error::Kubelet artifact SHA-256 mismatch: expected ${KUBELET_ARTIFACT_SHA256}, got ${actual_sha256}"

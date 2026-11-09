@@ -42,6 +42,9 @@ struct MacOSNativeDiskTests {
         let secondReceipt = try MacOSNativeBaseReceipt.read(second)
         #expect(secondReceipt.base == firstReceipt.base)
         #expect(secondReceipt.stamp.inode != firstReceipt.stamp.inode)
+        let alias = "registry.example/alias@" + f.digest
+        #expect(clone.inherit(reference: alias))
+        #expect(try MacOSNativeBaseReceipt.read(second).base.reference == alias)
         try Data("replaced".utf8).write(to: second, options: .atomic)
         #expect(!clone.inherit(reference: reference, expected: cache.base))
 

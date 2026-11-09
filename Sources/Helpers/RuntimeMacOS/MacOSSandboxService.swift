@@ -2810,7 +2810,7 @@ extension MacOSSandboxService {
             preverifyNativeBase = try MacOSNativeDisk.prepare(
                 destination: root, imageDigest: config.image.digest, base: layers.diskImage,
                 hardware: layers.hardwareModel, auxiliary: layers.auxiliaryStorage,
-                imageReference: config.image.reference, createOverlay: createNativeASIFOverlay)
+                imageReference: requestedSandboxImageReference(for: config), createOverlay: createNativeASIFOverlay)
             return
         }
         let fm = FileManager.default
@@ -2825,6 +2825,20 @@ extension MacOSSandboxService {
         try copyTemplateArtifactIfNeeded(from: layers.hardwareModel, to: hardwareModelPath())
         try copyTemplateArtifactIfNeeded(from: layers.auxiliaryStorage, to: auxiliaryStoragePath())
         try copyTemplateArtifactIfNeeded(from: layers.diskImage, to: diskImagePath())
+    }
+
+    private func requestedSandboxImageReference(for config: ContainerConfiguration) -> String {
+        struct SandboxImageMetadata: Decodable {
+            let sandboxImage: String
+        }
+        // CRI may resolve a cached image through another alias. Match the
+        // digest-pinned reference used by the snapshot catalog.
+        if let label = config.labels["org.apple.container.cri.macos.sandbox-metadata"],
+            let metadata = try? JSONDecoder().decode(SandboxImageMetadata.self, from: Data(label.utf8))
+        {
+            return metadata.sandboxImage
+        }
+        return config.image.reference
     }
 
     private func copyTemplateArtifactIfNeeded(from source: URL, to destination: URL) throws {

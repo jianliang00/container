@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+from itertools import groupby
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import tempfile
 import time
 import uuid
 
+import asif_index
 import image
 import layer_depth as disks
 
@@ -164,8 +166,12 @@ def artifact(store, name, manifest):
     image.require(ready['sha256'] == hashlib.sha256(image.encoded(result)).hexdigest()
                   and result['sourceManifest'] == ready['sourceManifest'], 'compaction publication mismatch')
     image.require([r['name'] for r in result['disks']] == ['base.img', 'merged.asif']
-                  and result['logicalBytes'] == manifest['logicalBytes']
-                  and re.fullmatch(r'[0-9a-f]{64}', result['logicalSHA256']), 'invalid compacted layout')
+                  and result['logicalBytes'] == manifest['logicalBytes'], 'invalid compacted layout')
+    if result.get('mode', 'full') == 'full':
+        image.require(valid_hash(result.get('logicalSHA256')), 'invalid logical disk digest')
+    else:
+        image.require(result['mode'] == 'sparse-v1' and valid_hash(result.get('planSHA256'))
+                      and valid_hash(result.get('rangeSHA256')), 'invalid sparse verification receipt')
     inventory(root / 'output', result['disks'])
     return root / 'output', result['disks']
 
@@ -255,22 +261,63 @@ def checkpoint(job, progress):
     print(json.dumps({'stage': 'checkpoint', 'job': job.name, 'segments': len(progress['hashes'])}), flush=True)
 
 
-def copy_blocks(base, source, target, size, progress, save, after_segment):
+def valid_hash(value):
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def segments_for(size, offsets=None):
+    if offsets is None:
+        return [range(start, min(size, start + SEGMENT), BLOCK) for start in range(0, size, SEGMENT)]
+    return [list(batch) for _, batch in groupby(offsets, key=lambda offset: offset // SEGMENT)]
+
+
+def merge_plan(paths, size, progress, full_scan):
+    if progress is not None:
+        mode = progress.get('mode', 'full')  # Old journals were always full scans.
+        image.require(mode in ('full', 'sparse-v1'), 'invalid compaction mode')
+        if mode == 'full':
+            return None, {'mode': 'full'}
+        image.require(not full_scan, 'cannot change mode of an interrupted sparse job')
+    elif full_scan:
+        return None, {'mode': 'full', 'fallbackReason': 'explicit full scan'}
+
+    offsets = set()
+    unsupported = None
+    for path in paths:
+        try:
+            offsets.update(asif_index.candidates(path, size))
+        except asif_index.UnsupportedLayout as error:
+            unsupported = str(error)
+    if unsupported:
+        image.require(progress is None, 'sparse checkpoint input layout changed')
+        return None, {'mode': 'full', 'fallbackReason': unsupported}
+    offsets = sorted(offsets)
+    plan = {'mode': 'sparse-v1', 'planSHA256': hashlib.sha256(image.encoded(offsets)).hexdigest(),
+            'candidateBytes': len(offsets) * BLOCK}
+    if progress is not None:
+        image.require(all(progress.get(key) == value for key, value in plan.items()), 'sparse checkpoint plan changed')
+    return offsets, plan
+
+
+def copy_blocks(base, source, target, size, progress, save, after_segment, segments=None):
     """Resume only verified segments. Newer source layers and zero writes win."""
+    if segments is None:
+        segments = segments_for(size)
     hashes = progress['hashes']
-    image.require(len(hashes) <= (size + SEGMENT - 1) // SEGMENT
-                  and all(re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes), 'invalid checkpoint journal')
-    full = hashlib.sha256()
+    image.require(isinstance(hashes, list) and len(hashes) <= len(segments)
+                  and all(valid_hash(h) for h in hashes), 'invalid checkpoint journal')
+    digest = hashlib.sha256()
     resumed = len(hashes)
-    for index, start in enumerate(range(0, size, SEGMENT)):
-        end = min(size, start + SEGMENT)
+    completed_bytes = 0
+    for index, offsets in enumerate(segments):
         expected = hashlib.sha256()
-        for offset in range(start, end, BLOCK):
-            count = min(BLOCK, end - offset)
+        for offset in offsets:
+            count = min(BLOCK, size - offset)
+            completed_bytes += count
             data = os.pread(source, count, offset)
             image.require(len(data) == count, 'short source read')
             expected.update(data)
-            full.update(data)
+            digest.update(data)
             if index >= resumed:
                 original = os.pread(base, count, offset)
                 image.require(len(original) == count, 'short base read')
@@ -279,35 +326,41 @@ def copy_blocks(base, source, target, size, progress, save, after_segment):
         if index >= resumed:
             os.fsync(target)
         actual = hashlib.sha256()
-        for offset in range(start, end, BLOCK):
-            data = os.pread(target, min(BLOCK, end - offset), offset)
-            image.require(len(data) == min(BLOCK, end - offset), 'short compacted read')
+        for offset in offsets:
+            count = min(BLOCK, size - offset)
+            data = os.pread(target, count, offset)
+            image.require(len(data) == count, 'short compacted read')
             actual.update(data)
         image.require(actual.hexdigest() == expected.hexdigest(), 'compacted segment mismatch; preserve job and reset explicitly')
         if index < resumed:
             image.require(hashes[index] == expected.hexdigest(), 'checkpoint input mismatch')
         else:
             hashes.append(expected.hexdigest())
+            if progress.get('mode') == 'sparse-v1':
+                progress['completedBytes'] = completed_bytes
             save(progress)
             after_segment()
-    return full.hexdigest(), resumed
+    return digest.hexdigest(), resumed
 
 
-def verify_blocks(fd, size, hashes):
-    full = hashlib.sha256()
-    for index, start in enumerate(range(0, size, SEGMENT)):
+def verify_blocks(fd, size, hashes, segments=None):
+    if segments is None:
+        segments = segments_for(size)
+    image.require(len(hashes) == len(segments), 'incomplete verification journal')
+    digest = hashlib.sha256()
+    for offsets, expected in zip(segments, hashes):
         part = hashlib.sha256()
-        for offset in range(start, min(size, start + SEGMENT), BLOCK):
+        for offset in offsets:
             count = min(BLOCK, size - offset)
             data = os.pread(fd, count, offset)
             image.require(len(data) == count, 'short verification read')
             part.update(data)
-            full.update(data)
-        image.require(part.hexdigest() == hashes[index], 'final compaction verification mismatch')
-    return full.hexdigest()
+            digest.update(data)
+        image.require(part.hexdigest() == expected, 'final compaction verification mismatch')
+    return digest.hexdigest()
 
 
-def compact(store, name, failpoint=None):
+def compact(store, name, failpoint=None, full_scan=False):
     parent, manifest = generation(store, name)
     job = store / 'jobs' / name
     source_hash = hashlib.sha256(image.encoded(manifest)).hexdigest()
@@ -338,11 +391,22 @@ def compact(store, name, failpoint=None):
     image.require(binding['outputBase'] == image.stamp(job / 'output/base.img'), 'output base changed')
     started = time.monotonic()
     if not (job / 'result.json').exists():
-        progress = read(job / 'progress.json') if (job / 'progress.json').exists() else {'sourceManifest': source_hash, 'hashes': []}
-        image.require(progress['sourceManifest'] == source_hash, 'checkpoint generation mismatch')
-        durable(job / 'status.json', {'phase': 'COPYING', 'startedAt': time.time()})
         source_layers = [job / 'input' / r['name'] for r in binding['disks']]
         target = job / 'output/merged.asif'
+        progress_path = job / 'progress.json'
+        progress = read(progress_path) if progress_path.exists() else None
+        if progress is not None:
+            image.require(progress['sourceManifest'] == source_hash, 'checkpoint generation mismatch')
+        # A pre-upgrade worker may have attached an output before writing its first checkpoint.
+        offsets, plan = merge_plan(source_layers[1:], size, progress, full_scan or (progress is None and target.exists()))
+        segments = segments_for(size, offsets)
+        if progress is None:
+            progress = {'sourceManifest': source_hash, 'hashes': [], **plan}
+            durable(progress_path, progress)
+        if 'fallbackReason' in progress:
+            plan['fallbackReason'] = progress['fallbackReason']
+        durable(job / 'status.json', {'phase': 'COPYING', 'startedAt': time.time(), **plan})
+        print(json.dumps({'stage': 'plan', 'job': name, **plan}), flush=True)
         if target.exists():
             image.regular(target).chmod(0o600)
         with contextlib.ExitStack() as stack:
@@ -354,16 +418,25 @@ def compact(store, name, failpoint=None):
                     with target.open('rb') as file:
                         fcntl.fcntl(file.fileno(), fcntl.F_FULLFSYNC)
                     checkpoint(job, value)
-                logical_sha, resumed = copy_blocks(base.fileno(), source.fileno(), output.fileno(), size, progress, save,
-                                                   lambda: crash('checkpoint', failpoint))
-                durable(job / 'status.json', {'phase': 'VERIFYING'})
-                image.require(verify_blocks(output.fileno(), size, progress['hashes']) == logical_sha, 'logical disk digest mismatch')
+                digest, resumed = copy_blocks(base.fileno(), source.fileno(), output.fileno(), size, progress, save,
+                                              lambda: crash('checkpoint', failpoint), segments)
+                durable(job / 'status.json', {'phase': 'VERIFYING', **plan})
+                if offsets is None:
+                    image.require(verify_blocks(output.fileno(), size, progress['hashes'], segments) == digest,
+                                  'logical disk digest mismatch')
+        if offsets is not None:
+            image.require(asif_index.candidates(target, size).issubset(offsets), 'unexpected changes outside the sparse plan')
+            with disks.attached(job / 'output/base.img', [target], size, readonly=True) as device:
+                with open(device, 'rb', buffering=0) as output:
+                    image.require(verify_blocks(output.fileno(), size, progress['hashes'], segments) == digest,
+                                  'sparse range digest mismatch')
         inventory(parent, manifest['disks'] + manifest['identity'])
         inventory(job / 'input', binding['disks'])
         target.chmod(0o400)
         records = [{'name': 'base.img', 'sha256': manifest['disks'][0]['sha256'], 'stamp': image.stamp(job / 'output/base.img')},
                    {'name': 'merged.asif', 'sha256': image.digest(target), 'stamp': image.stamp(target)}]
-        result = {'sourceManifest': source_hash, 'logicalSHA256': logical_sha, 'logicalBytes': size,
+        digest_key = 'logicalSHA256' if offsets is None else 'rangeSHA256'
+        result = {**plan, 'sourceManifest': source_hash, digest_key: digest, 'logicalBytes': size,
                   'seconds': time.monotonic() - started, 'resumedSegments': resumed, 'disks': records}
         durable(job / 'result.json', result)
     result = read(job / 'result.json')
@@ -374,11 +447,11 @@ def compact(store, name, failpoint=None):
                                   'sha256': hashlib.sha256(image.encoded(result)).hexdigest()})
     crash('published', failpoint)
     durable(job / 'status.json', {'phase': 'READY'})
-    return {'generation': name, 'phase': 'READY', 'logicalSHA256': result['logicalSHA256'],
-            'seconds': result['seconds'], 'resumedSegments': result['resumedSegments']}
+    fields = ('mode', 'logicalSHA256', 'rangeSHA256', 'candidateBytes', 'fallbackReason', 'seconds', 'resumedSegments')
+    return {'generation': name, 'phase': 'READY', **{k: result[k] for k in fields if k in result}}
 
 
-def work(store, only=None, failpoint=None):
+def work(store, only=None, failpoint=None, full_scan=False):
     store_path(store)
     os.nice(10)
     fd = os.open(store / '.worker.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -391,7 +464,7 @@ def work(store, only=None, failpoint=None):
             if len(manifest['disks']) + 1 < TRIGGER:
                 continue
             try:
-                results.append(compact(store, name, failpoint))
+                results.append(compact(store, name, failpoint, full_scan))
             except Exception as error:
                 job = store / 'jobs' / name
                 if job.is_dir():
@@ -433,8 +506,9 @@ def status(store, name):
     job = store / 'jobs' / name
     state = read(job / 'status.json') if (job / 'status.json').exists() else {'phase': 'QUEUED' if runtime_layers >= TRIGGER else 'NOT_REQUIRED'}
     progress = read(job / 'progress.json') if (job / 'progress.json').exists() else {'hashes': []}
-    return {**state, 'generation': name, 'runtimeLayers': runtime_layers,
-            'completedBytes': min(len(progress['hashes']) * SEGMENT, manifest['logicalBytes']),
+    completed = (progress.get('completedBytes', 0) if progress.get('mode') == 'sparse-v1'
+                 else min(len(progress['hashes']) * SEGMENT, manifest['logicalBytes']))
+    return {**state, 'generation': name, 'runtimeLayers': runtime_layers, 'completedBytes': completed,
             'logicalBytes': manifest['logicalBytes']}
 
 
@@ -459,6 +533,7 @@ def main():
                 p.add_argument('instance', type=Path)
         elif command == 'work':
             p.add_argument('--generation')
+            p.add_argument('--full-scan', action='store_true', help='use the native full-scan path for a new job')
             p.add_argument('--crash-at', choices=['checkpoint', 'verified', 'published'],
                            help='isolated fault injection: SIGKILL this worker')
     args = parser.parse_args()
@@ -468,7 +543,7 @@ def main():
     if args.command == 'init': result = initialize(args.store)
     elif args.command == 'ingest': result = ingest(args.store, args.source, args.generation, not args.no_start)
     elif args.command == 'checkout': result = checkout(args.store, args.generation, args.instance)
-    elif args.command == 'work': result = work(args.store, args.generation, args.crash_at)
+    elif args.command == 'work': result = work(args.store, args.generation, args.crash_at, args.full_scan)
     elif args.command == 'reset': result = reset(args.store, args.generation)
     elif args.command == 'status': result = status(args.store, args.generation)
     else: result = run(args.instance, args.runner, args.script)

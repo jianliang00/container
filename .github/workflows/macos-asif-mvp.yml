@@ -67,7 +67,7 @@ jobs:
           test "$(xcrun --show-sdk-version | cut -d. -f1)" -ge 27
           xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx27.0 \
             scripts/macos-asif-mvp/Runner.swift -o probe-artifact/macos-asif-runner
-          cp scripts/macos-asif-mvp/{image.py,benchmark.py,layer_depth.py,layers.py,validate_layers.py,random-read.c,README.md} probe-artifact/
+          cp scripts/macos-asif-mvp/{image.py,benchmark.py,layer_depth.py,layers.py,asif_index.py,validate_layers.py,discard-test.c,random-read.c,README.md} probe-artifact/
       - name: Sign standalone diagnostic
         env:
           APP_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_P12_BASE64 }}

@@ -271,11 +271,22 @@ RAW base again. A generation ID is immutable and binds ordered inputs; reuse
 with different inputs is rejected.
 
 A serialized, lower-priority worker reads private clones of the sealed image.
-It compares the composed view with the original RAW in 1 MiB blocks and writes
-differences to a new cumulative ASIF, including explicit zero writes. It flushes
-and verifies every 256 MiB segment before recording progress, then independently
-verifies the complete output. Only afterward does it atomically publish the
-compacted result. New checkouts then use RAW + cumulative readonly ASIF + a new
+For the supported ASIF v1 geometry, a read-only index enumerates candidate
+logical chunks across the overlays, including explicit discard and partial
+entries. The native disk image driver resolves the composed reads and writes a
+new cumulative ASIF, including zero overrides where the RAW base is nonzero.
+The worker compares 1 MiB candidates against the original RAW and flushes and
+verifies touched segments before recording progress. Before publication, it
+checks the output index for writes outside the plan and reopens the composed
+output read-only to verify the candidate ranges. The result records the plan
+and range digests. A full-disk SHA-256 requires a separate native logical read.
+
+Unrecognized input layouts use the native full scan and receive a full logical
+digest. Malformed indices in supported layouts fail closed. A sparse output
+must pass the same index checks before publication. The reader uses an observed
+binary layout, so validate new host versions before relying on the sparse path.
+Compaction results are atomically published. New checkouts
+then use RAW + cumulative readonly ASIF + a new
 writable ASIF, totaling three layers. Existing VMs and old generations keep
 their original disk chains.
 
@@ -284,25 +295,30 @@ checkout also start a worker when needed. A process lock serializes workers.
 After a worker crash, restart recovers only its exact private, unmounted image
 attachments and rechecks completed segments before continuing. A verified result
 can be published without copying again; a published result is idempotently reused.
-Corrupt completed segments stop the job and cannot become a ready generation.
+The journal binds the input manifest, mode and sparse plan digest. Legacy full
+checkpoints resume in full mode. Corrupt completed segments stop the job and
+cannot become a ready generation.
 
 ```sh
 python3 layers.py work /private/layer-store --generation image-v2
+# To run the full-scan control on a fresh job:
+python3 layers.py work /private/layer-store --generation image-v3 --full-scan
 # For an unpublished failed job only; retains the old job under .failed-*.
 python3 layers.py reset /private/layer-store image-v2
 python3 layers.py work /private/layer-store --generation image-v2
 ```
 
 No automatic generation deletion is implemented: old image/VM references must
-be retained. The worker still scans the full logical disk and is intended for
-isolated build resources, not an unbounded task on a business VM host. It reserves
-40 GiB headroom and checks capacity at each checkpoint; this is a preflight, not
+be retained. The worker is intended for isolated build resources. It checks for
+40 GiB headroom at startup and at each checkpoint; this is a preflight, not
 a filesystem reservation. Hardware power-loss durability, OCI distribution,
 TOS integration, cross-host restore and production lifecycle integration require
 separate acceptance.
 
 `validate_layers.py OUTPUT IDENTITY_DIRECTORY` creates only new private 512 MiB
-images, tests overlapping changes and zero restoration, automatic triggering,
+images and uses the host C compiler for a native discard fixture. It tests
+overlapping and partial writes, zero restoration, full and partial discard,
+unknown-layout fallback, automatic triggering,
 SIGKILL at copy/verification/publication boundaries, corrupt-checkpoint rejection
 and explicit fresh retry. It never starts a VM. Run it only on an isolated host;
 logs and failed images remain in OUTPUT. `work --crash-at` exists solely for these

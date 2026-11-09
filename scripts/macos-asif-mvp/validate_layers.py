@@ -11,6 +11,7 @@ import sys
 import time
 from unittest.mock import patch
 
+import asif_index
 import image
 import layer_depth as disks
 import layers
@@ -27,7 +28,7 @@ def worker(store, name, failpoint=None):
     return log
 
 
-def prepare(root, identity):
+def prepare(root, identity, discard):
     size = 512 << 20
     work = root / 'fixture'
     image.private_dir(work)
@@ -35,6 +36,9 @@ def prepare(root, identity):
     with base.open('xb') as stream:
         stream.truncate(size)
         stream.write(b'a' * disks.BLOCK)
+        for offset in (2 << 20, 3 << 20, 4 << 20, 256 << 20, 288 << 20):
+            stream.seek(offset)
+            stream.write(b'p' * disks.BLOCK)
     base.chmod(0o400)
     image.clone(base, work / 'expected.img')
     changes = [[(0, b'b'), (64 << 20, b'c')], [(0, b'\0'), (256 << 20, b'd')],
@@ -51,6 +55,17 @@ def prepare(root, identity):
                         assert os.pwrite(fd, data, offset) == disks.BLOCK
                         reference.seek(offset)
                         reference.write(data)
+                    if index == 4:
+                        partial = [(2 * disks.BLOCK + 512, b'P' * 512), (4 * disks.BLOCK + 512, bytes(512))]
+                        for offset, data in partial:
+                            assert os.pwrite(fd, data, offset) == len(data)
+                            reference.seek(offset)
+                            reference.write(data)
+                        for offset, length in ((288 * disks.BLOCK + 512, 512), (288 * disks.BLOCK, 512),
+                                               (3 * disks.BLOCK, disks.BLOCK)):
+                            subprocess.run([str(discard), device, str(offset), str(length)], check=True, timeout=15)
+                            reference.seek(offset)
+                            reference.write(bytes(length))
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -68,11 +83,15 @@ def prepare(root, identity):
     return expected
 
 
-def check_result(store, name, expected):
+def check_result(store, name, expected, mode='sparse-v1'):
     parent, manifest = layers.generation(store, name)
     layers.artifact(store, name, manifest)
     result = layers.read(store / 'jobs' / name / 'result.json')
-    assert result['logicalSHA256'] == expected
+    assert result['mode'] == mode
+    if mode == 'full':
+        assert result['logicalSHA256'] == expected
+    else:
+        assert layers.valid_hash(result['rangeSHA256']) and 'logicalSHA256' not in result
     target = store / 'restored'
     assert layers.checkout(store, name, target)['layers'] == 3
     config = layers.read(target / 'runtime.json')
@@ -93,7 +112,10 @@ def check_result(store, name, expected):
 def validate(root, identity):
     image.capacity(root.parent, layers.RESERVE)
     image.private_dir(root)
-    expected = prepare(root, identity)
+    discard = root / 'discard-test'
+    subprocess.run(['xcrun', 'clang', '-Wall', '-Wextra', '-Werror', str(Path(__file__).with_name('discard-test.c')),
+                    '-o', str(discard)], check=True, timeout=60)
+    expected = prepare(root, identity, discard)
     results = []
     # Three sealed layers plus a future writable layer triggers at exactly four.
     auto = root / 'automatic'
@@ -176,6 +198,30 @@ def validate(root, identity):
     worker(store, 'g5')
     check_result(store, 'g5', expected[5])
     results.append({'case': 'corrupt-checkpoint-fail-closed-and-reset', 'passed': True, **retained})
+    store = root / 'unexpected-output-range'
+    layers.initialize(store)
+    layers.ingest(store, root / 'source-5', 'g5', background=False)
+    worker(store, 'g5', 'checkpoint')
+    job = store / 'jobs/g5'
+    layers.recover_attachments(job, 512 << 20)
+    with disks.attached(job / 'output/base.img', [job / 'output/merged.asif'], 512 << 20) as device:
+        with open(device, 'r+b', buffering=0) as disk:
+            assert os.pwrite(disk.fileno(), b'!' * 512, 32 << 20) == 512
+            os.fsync(disk.fileno())
+    failed = subprocess.run([sys.executable, str(Path(layers.__file__).resolve()), 'work', str(store), '--generation', 'g5'],
+                            capture_output=True, text=True, timeout=180)
+    assert failed.returncode != 0 and 'outside the sparse plan' in failed.stderr
+    assert not (store / 'generations/g5/ready.json').exists()
+    results.append({'case': 'unexpected-output-range-rejected', 'passed': True})
+    store = root / 'layout-fallback'
+    layers.initialize(store)
+    layers.ingest(store, root / 'source-5', 'g5', background=False)
+    # Emulate an older reader encountering a native-readable future layout.
+    with patch.object(asif_index, 'candidates', side_effect=asif_index.UnsupportedLayout('test layout')):
+        fallback = layers.work(store, 'g5')[0]
+    assert fallback['mode'] == 'full' and fallback['fallbackReason'] == 'test layout'
+    check_result(store, 'g5', expected[5], mode='full')
+    results.append({'case': 'unsupported-layout-native-full-scan', 'passed': True})
     image.write_json(root / 'results.json', results)
     print(json.dumps(results), flush=True)
 

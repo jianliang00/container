@@ -245,6 +245,15 @@ jobs:
           xcrun stapler staple "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
           spctl -a -vv --type install "bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}"
 
+      - name: Save signed PPE candidate
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.native_asif_build && inputs.include_cri_shim && inputs.sign_release_artifacts && inputs.notarize_release_artifacts }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-signed-ppe-candidate
+          path: bin/${{ env.BUILD_CONFIGURATION }}/${{ env.PACKAGE_ARTIFACT_NAME }}
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Verify SwiftPM consumer integration
         if: ${{ inputs.verify_swiftpm_consumer }}
         run: ./scripts/verify-swiftpm-consumer.sh

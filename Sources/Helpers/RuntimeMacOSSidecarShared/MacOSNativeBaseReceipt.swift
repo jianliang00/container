@@ -73,10 +73,15 @@ struct MacOSNativeBaseReceipt: Codable, Sendable {
 
         @discardableResult
         func inherit(reference: String, expected: Base? = nil) -> Bool {
+            guard let base = cachedBase(reference: reference, expected: expected) else { return false }
+            return (try? publish(base)) == true
+        }
+
+        private func cachedBase(reference: String, expected: Base? = nil) -> Base? {
             guard let receipt = try? MacOSNativeBaseReceipt.read(source), receipt.stamp == sourceStamp,
-                receipt.base.reference == reference, expected == nil || receipt.base == expected
-            else { return false }
-            return (try? publish(receipt.base)) == true
+                expected == nil || receipt.base == expected
+            else { return nil }
+            return Base(reference: reference, sha256: receipt.base.sha256, size: receipt.base.size)
         }
 
         /// Scan the OCI cache in the background. Limit a rebuild cache to one
@@ -98,8 +103,8 @@ struct MacOSNativeBaseReceipt: Codable, Sendable {
                 value.st_uid == geteuid(), value.st_mode & 0o077 == 0,
                 flock(lockFD, LOCK_EX | LOCK_NB) == 0
             else { return }
-            if let receipt = try? MacOSNativeBaseReceipt.read(source), receipt.stamp == sourceStamp, receipt.base.reference == reference {
-                _ = try publish(receipt.base)
+            if let cached = cachedBase(reference: reference) {
+                _ = try publish(cached)
                 return
             }
             let fd = try MacOSNativeBaseReceipt.openDisk(source)

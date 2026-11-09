@@ -152,20 +152,19 @@ struct DirectoryWatcherTest {
             let watcher = DirectoryWatcher(directoryPath: childPath, log: nil)
             let createdPaths = CreatedPaths()
             let name = "newFile"
+            let newFile = childPath.appending(name)
 
             await watcher.startWatching { paths in
-                for path in paths where path.lastComponent?.string == name {
+                if let path = paths.first(where: { $0 == newFile }) {
                     createdPaths.append(path)
+                } else {
+                    // A write during the initial notification must be picked up by the registered watch.
+                    try Data().write(to: URL(fileURLWithPath: newFile.string), options: .withoutOverwriting)
                 }
             }
 
-            try await Task.sleep(for: .milliseconds(100))
             try FileManager.default.createDirectory(atPath: childPath.string, withIntermediateDirectories: true)
 
-            try await Task.sleep(for: DirectoryWatcher.watchPeriod)
-
-            let newFile = childPath.appending(name)
-            FileManager.default.createFile(atPath: newFile.string, contents: nil)
             try await waitForPaths([name], in: createdPaths)
 
             #expect(!createdPaths.paths.isEmpty, "directory watcher failed to detect parent directory")

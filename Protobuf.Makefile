@@ -28,15 +28,17 @@ CRI_API_LOCAL_DIR := $(LOCAL_DIR)/cri-api-$(CRI_API_VERSION)
 
 # Protoc binary installation
 PROTOC_ZIP := protoc-$(PROTOC_VERSION)-osx-universal_binary.zip
+PROTOC_ZIP_SHA256 := 15e7f530f3cb05e8a2751a8e3c5bff4ab88379ee0debc4be582c64ee88fe7ac4
 PROTOC := $(LOCAL_BIN_DIR)/protoc@$(PROTOC_VERSION)/protoc
 $(PROTOC):
 	@echo Downloading protocol buffers...
-	@mkdir -p $(LOCAL_DIR)
-	@curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/$(PROTOC_ZIP)
-	@mkdir -p $(dir $@)
-	@unzip -jo $(PROTOC_ZIP) bin/protoc -d $(dir $@)
-	@unzip -o $(PROTOC_ZIP) 'include/*' -d $(dir $@)
-	@rm -f $(PROTOC_ZIP)
+	@set -e; workdir=$$(mktemp -d); trap 'rm -rf "$$workdir"' EXIT; \
+	  archive="$$workdir/$(PROTOC_ZIP)"; \
+	  bash scripts/download-github-release-asset.sh protocolbuffers/protobuf v$(PROTOC_VERSION) $(PROTOC_ZIP) "$$archive"; \
+	  printf '%s  %s\n' '$(PROTOC_ZIP_SHA256)' "$$archive" | shasum -a 256 -c -; \
+	  mkdir -p '$(dir $@)'; \
+	  unzip -o "$$archive" 'include/*' -d '$(dir $@)'; \
+	  unzip -jo "$$archive" bin/protoc -d '$(dir $@)'
 
 .PHONY: protoc-gen-swift
 protoc-gen-swift:

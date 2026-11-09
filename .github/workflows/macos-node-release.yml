@@ -519,7 +519,8 @@ jobs:
           test_filter+='|RuntimeMacOSSidecarSharedTests\.SidecarGuestNetworkingProtocolTests'
           test_filter+='|RuntimeMacOSSidecarTests\.MacOSGuestNetworkBootstrapTests'
           test_filter+=')'
-          /usr/bin/swift test --skip-update --filter "${test_filter}"
+          # The native backend preserves the debug-only C test hooks with SDK 27.
+          /usr/bin/swift test --build-system native --skip-update --filter "${test_filter}"
 
       - name: Download and verify kubelet artifact
         env:

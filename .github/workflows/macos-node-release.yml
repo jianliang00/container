@@ -58,7 +58,7 @@ jobs:
   build-sign-notarize-release:
     name: Build, sign, notarize, and publish macOS node installer
     timeout-minutes: 90
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions:
       contents: write
       id-token: write
@@ -76,6 +76,12 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+
+      - name: Verify native storage SDK
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          test "$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)" -ge 27
 
       - name: Materialize private release pairing
         env:
@@ -705,6 +711,13 @@ jobs:
           for payload_path in "${required_payload_paths[@]}"; do
             test -e "${work_dir}/pkg/Payload/${payload_path}"
           done
+
+          runtime_sidecar="${work_dir}/pkg/Payload/usr/local/libexec/container/plugins/container-runtime-macos/bin/container-runtime-macos-sidecar"
+          otool -l "${runtime_sidecar}" | awk '
+            $1 == "cmd" { weak = ($2 == "LC_LOAD_WEAK_DYLIB") }
+            $1 == "name" && $2 ~ /\/DiskImageKit\.framework\// { found = 1; if (!weak) exit 1 }
+            END { if (!found) exit 1 }
+          '
 
           forbidden_payload_paths=(
             "etc/kubernetes/kubelet-config.yaml"

@@ -189,6 +189,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var localDiskEnabled: Bool
     public var nativeASIFEnabled: Bool
+    public var nativeASIFChainEnabled: Bool
     public var storageRoot: String?
     public var controlSocketRoot: String?
     public var runtimeOwnerUID: UInt32?
@@ -200,6 +201,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         enabled: Bool = false,
         localDiskEnabled: Bool = false,
         nativeASIFEnabled: Bool = false,
+        nativeASIFChainEnabled: Bool = false,
         storageRoot: String? = nil,
         controlSocketRoot: String? = nil,
         runtimeOwnerUID: UInt32? = nil,
@@ -209,6 +211,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         self.enabled = enabled
         self.localDiskEnabled = localDiskEnabled
         self.nativeASIFEnabled = nativeASIFEnabled
+        self.nativeASIFChainEnabled = nativeASIFChainEnabled
         self.storageRoot = storageRoot
         self.controlSocketRoot = controlSocketRoot
         self.runtimeOwnerUID = runtimeOwnerUID
@@ -220,6 +223,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         case enabled
         case localDiskEnabled
         case nativeASIFEnabled
+        case nativeASIFChainEnabled
         case storageRoot
         case controlSocketRoot
         case runtimeOwnerUID
@@ -232,6 +236,7 @@ public struct MachineStateConfig: Codable, Equatable, Sendable {
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         localDiskEnabled = try container.decodeIfPresent(Bool.self, forKey: .localDiskEnabled) ?? false
         nativeASIFEnabled = try container.decodeIfPresent(Bool.self, forKey: .nativeASIFEnabled) ?? false
+        nativeASIFChainEnabled = try container.decodeIfPresent(Bool.self, forKey: .nativeASIFChainEnabled) ?? false
         storageRoot = try container.decodeIfPresent(String.self, forKey: .storageRoot)
         controlSocketRoot = try container.decodeIfPresent(String.self, forKey: .controlSocketRoot)
         runtimeOwnerUID = try container.decodeIfPresent(UInt32.self, forKey: .runtimeOwnerUID)

@@ -31,3 +31,21 @@ For a cold restore, clone the sealed cumulative overlay into a new writable file
 The manual signed build workflow accepts `native_asif_build=true` to select the macOS 27 SDK runner. The default remains the existing runner. Dispatch against a branch for isolated validation; a branch build does not publish a release tag.
 
 Tests cover legacy configuration decoding, explicit storage kinds, managed paths, immutable base permissions, missing layers, mixed storage rejection and unsupported SDK handling. A macOS 27 SDK build additionally opens a real two-layer attachment and rejects a RAW file supplied as the overlay. Real guest pause/seal/restore, corrupted base handling, TOS reconstruction and sustained workload validation remain separate acceptance requirements.
+
+## Derived cold restore
+
+The optional `machineState.nativeASIFChainEnabled` CRI setting defaults to false.
+It also requires the existing native ASIF policy. A trusted storage controller
+supplies `native-parent-count` only for an authenticated version 4 cold bundle.
+The bundle pins the RAW base and contains ordered, digest-bound `parent-NN.asif`
+members plus VM identity. The runtime creates a fresh writable `active.asif`
+and attaches the immutable parents oldest first. A running chain is limited to
+five total layers. The version 1 RAW and version 3 native imports remain valid.
+
+`container-runtime-macos compact-asif` processes detached clones in a private
+job. It uses the observed ASIF v1 index to select ranges and macOS native disk
+devices to resolve data. An unrecognized input layout uses a native full scan.
+The job revalidates checkpoints and publishes only a verified cumulative ASIF.
+The storage controller can use it before publishing a derived restore bundle
+when the next start would reach four layers. It does not replace the disk of an
+active VM.

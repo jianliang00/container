@@ -23,14 +23,32 @@ import Foundation
 public enum MacOSLocalDiskBundle {
     public static let fileNames = ["Disk.img", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"]
 
-    public enum Format: Sendable {
+    public enum Format: Sendable, Equatable {
         case raw
         case nativeASIF
+        case nativeASIFChain(parentCount: Int)
 
-        fileprivate var version: Int { self == .raw ? 1 : 3 }
-        fileprivate var names: [String] {
-            self == .raw ? fileNames : ["active.asif", "AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"]
+        fileprivate var version: Int {
+            switch self {
+            case .raw: 1
+            case .nativeASIF: 3
+            case .nativeASIFChain: 4
+            }
         }
+        fileprivate var parents: [String] {
+            guard case .nativeASIFChain(let count) = self else { return [] }
+            return MacOSLocalDiskBundle.parentNames(count: count)
+        }
+        fileprivate var names: [String] {
+            if self == .raw { return fileNames }
+            let disks = self == .nativeASIF ? ["active.asif"] : parents
+            return disks + ["AuxiliaryStorage", "HardwareModel.bin", "MachineIdentifier.bin"]
+        }
+    }
+
+    public static func parentNames(count: Int) -> [String] {
+        guard (1...3).contains(count) else { return [] }
+        return (1...count).map { String(format: "parent-%02d.asif", $0) }
     }
 
     public struct Manifest: Codable, Sendable {
@@ -51,25 +69,37 @@ public enum MacOSLocalDiskBundle {
         public var nativeBase: NativeBase?
     }
 
-    public static func install(storageDirectory: String, persistenceID: String, generation: UInt64, digest: String, destination: URL, format: Format = .raw) throws {
+    public static func install(
+        storageDirectory: String, persistenceID: String, generation: UInt64, digest: String,
+        destination: URL, format: Format = .raw, createOverlay: ((URL, [URL], URL) throws -> Void)? = nil
+    ) throws {
         guard let storage = MacOSManagedPath.canonicalPath(storageDirectory), generation > 0,
             digest.count == 64, digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
         else { throw CocoaError(.fileReadCorruptFile) }
+        if case .nativeASIFChain = format, format.parents.isEmpty || createOverlay == nil {
+            throw CocoaError(.fileReadCorruptFile)
+        }
         try validateDirectory(destination)
         let fm = FileManager.default
         let marker = destination.appendingPathComponent("disk-bundle-imported")
         let pending = destination.appendingPathComponent("disk-bundle-importing")
         let retainedManifest = destination.appendingPathComponent("disk-bundle-manifest.json")
-        if format == .nativeASIF, fm.fileExists(atPath: destination.appendingPathComponent("Disk.img").path) {
+        let native = format != .raw
+        let active = destination.appendingPathComponent("active.asif")
+        if native, fm.fileExists(atPath: destination.appendingPathComponent("Disk.img").path) {
             throw CocoaError(.fileWriteFileExists)
         }
         if fm.fileExists(atPath: marker.path) {
             guard try readRegular(marker, limit: 64) == Data(digest.utf8) else { throw CocoaError(.fileReadCorruptFile) }
-            if format == .nativeASIF {
+            if native {
                 let manifest = try readManifest(retainedManifest, digest: digest, persistenceID: persistenceID, generation: generation, format: format)
                 guard let base = manifest.nativeBase else { throw CocoaError(.fileReadCorruptFile) }
                 try validateBase(destination.appendingPathComponent("base.img"), base: base)
+                for entry in manifest.files where format.parents.contains(entry.name) {
+                    try validateImmutable(destination.appendingPathComponent(entry.name), size: entry.size)
+                }
             }
+            if !format.parents.isEmpty { try validateNonemptyFile(active) }
             for name in format.names {
                 let file = destination.appendingPathComponent(name)
                 var value = stat()
@@ -86,7 +116,8 @@ public enum MacOSLocalDiskBundle {
         if fm.fileExists(atPath: pending.path) {
             guard try readRegular(pending, limit: 64) == Data(digest.utf8) else { throw CocoaError(.fileReadCorruptFile) }
         } else {
-            let requiredNames = format.names + (format == .nativeASIF ? ["base.img", "disk-bundle-manifest.json"] : [])
+            var requiredNames = format.names + (native ? ["base.img", "disk-bundle-manifest.json"] : [])
+            if !format.parents.isEmpty { requiredNames.append("active.asif") }
             guard requiredNames.allSatisfy({ !fm.fileExists(atPath: destination.appendingPathComponent($0).path) }) else { throw CocoaError(.fileWriteFileExists) }
             try Data(digest.utf8).write(to: pending, options: .withoutOverwriting)
             try synchronize(pending)
@@ -107,14 +138,24 @@ public enum MacOSLocalDiskBundle {
             let from = source.appendingPathComponent(entry.name)
             try validateFile(from, size: entry.size)
             let to = destination.appendingPathComponent(entry.name)
-            if let expected = entry.sha256, format == .nativeASIF { try verifyDigest(from, expected: expected) }
+            if let expected = entry.sha256, native { try verifyDigest(from, expected: expected) }
             if !fm.fileExists(atPath: to.path) { try cloneMember(from, to: to) }
             try validateFile(to, size: entry.size)
-            if let expected = entry.sha256, format == .nativeASIF { try verifyDigest(to, expected: expected) }
-            if format == .nativeASIF, chmod(to.path, 0o600) != 0 { throw POSIXError(.EIO) }
+            if let expected = entry.sha256, native { try verifyDigest(to, expected: expected) }
+            if native, chmod(to.path, format.parents.contains(entry.name) ? 0o400 : 0o600) != 0 { throw POSIXError(.EIO) }
             try synchronize(to)
         }
-        if format == .nativeASIF {
+        if !format.parents.isEmpty, let createOverlay, !fm.fileExists(atPath: active.path) {
+            let temporary = destination.appendingPathComponent(".bundle-overlay-" + UUID().uuidString)
+            defer { try? fm.removeItem(at: temporary) }
+            try createOverlay(destination.appendingPathComponent("base.img"), format.parents.map { destination.appendingPathComponent($0) }, temporary)
+            try validateNonemptyFile(temporary)
+            guard chmod(temporary.path, 0o600) == 0 else { throw POSIXError(.EIO) }
+            try synchronize(temporary)
+            guard renamex_np(temporary.path, active.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(.EIO) }
+        }
+        if !format.parents.isEmpty { try validateNonemptyFile(active) }
+        if native {
             let data = try readRegular(manifestURL, limit: 65536)
             if fm.fileExists(atPath: retainedManifest.path) {
                 guard try readRegular(retainedManifest, limit: 65536) == data else { throw CocoaError(.fileReadCorruptFile) }
@@ -140,7 +181,7 @@ public enum MacOSLocalDiskBundle {
         switch format {
         case .raw:
             guard manifest.nativeBase == nil else { throw CocoaError(.fileReadCorruptFile) }
-        case .nativeASIF:
+        case .nativeASIF, .nativeASIFChain:
             guard let base = manifest.nativeBase, !base.reference.isEmpty, validDigest(base.sha256),
                 base.size > 0, base.size <= 1 << 40, manifest.files.allSatisfy({ validDigest($0.sha256 ?? "") })
             else { throw CocoaError(.fileReadCorruptFile) }
@@ -156,7 +197,11 @@ public enum MacOSLocalDiskBundle {
     // catalog before publishing this bundle. Import pins that immutable inode;
     // it never downloads a base or follows an archive-controlled location.
     private static func validateBase(_ url: URL, base: Manifest.NativeBase) throws {
-        try validateFile(url, size: base.size)
+        try validateImmutable(url, size: base.size)
+    }
+
+    private static func validateImmutable(_ url: URL, size: Int64) throws {
+        try validateFile(url, size: size)
         var value = stat()
         guard lstat(url.path, &value) == 0, value.st_mode & 0o222 == 0 else { throw CocoaError(.fileReadCorruptFile) }
     }

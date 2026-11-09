@@ -17,8 +17,10 @@
 import ArgumentParser
 import ContainerLog
 import ContainerVersion
+import Foundation
 import Logging
 import OSLog
+import RuntimeMacOSSidecarShared
 
 @main
 struct RuntimeMacOSHelper: AsyncParsableCommand {
@@ -27,9 +29,25 @@ struct RuntimeMacOSHelper: AsyncParsableCommand {
         abstract: "XPC service for managing a macOS guest sandbox",
         version: ReleaseVersion.singleLine(appName: "container-runtime-macos"),
         subcommands: [
-            Start.self
+            Start.self,
+            CompactASIF.self,
         ]
     )
+
+    struct CompactASIF: ParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "compact-asif", abstract: "Compact a private, detached ASIF disk chain")
+
+        @Option(help: "Canonical private job directory containing immutable base.img and parent-NN.asif files")
+        var directory: String
+
+        @Option(help: "Number of sealed ASIF parents in the job")
+        var parentCount: Int
+
+        func run() throws {
+            guard MacOSNativeDisk.available else { throw ValidationError("ASIF compaction requires macOS 27 and the SDK 27 runtime") }
+            try MacOSASIFCompactionJob.run(directory: URL(fileURLWithPath: directory, isDirectory: true), parentCount: parentCount)
+        }
+    }
 
     package static func setupLogger(debug: Bool, metadata: [String: Logging.Logger.Metadata.Value] = [:]) -> Logging.Logger {
         LoggingSystem.bootstrap { label in

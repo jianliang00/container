@@ -584,6 +584,34 @@ extension CRIShimMachineStateMappingTests {
     }
 
     @Test
+    func nativeDerivedAdmissionIsIndependentAndDefaultsOff() throws {
+        let roots = try MachineStateTestRoots()
+        defer { roots.remove() }
+        var policy = roots.config
+        policy.localDiskEnabled = true
+        policy.nativeASIFEnabled = true
+        var annotations = [
+            CRIShimMachineStateAnnotation.enabled: "true",
+            CRIShimMachineStateAnnotation.persistenceID: "native-chain",
+            CRIShimMachineStateAnnotation.storageGeneration: "2",
+            CRIShimMachineStateAnnotation.storageKind: "native-asif",
+            CRIShimMachineStateAnnotation.diskBundleDigest: String(repeating: "a", count: 64),
+            CRIShimMachineStateAnnotation.nativeParentCount: "2",
+        ]
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        }
+        policy.nativeASIFChainEnabled = true
+        let device = try #require(makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true).blockDevices.first)
+        #expect(device.kind == .nativeASIFChain)
+        #expect(device.nativeParentPaths == ["parent-01.asif", "parent-02.asif"])
+        annotations[CRIShimMachineStateAnnotation.nativeParentCount] = "4"
+        #expect(throws: (any Error).self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        }
+    }
+
+    @Test
     func nativeASIFCapabilityRequiresEveryAdmissionCondition() throws {
         var policy = MachineStateConfig(enabled: true, localDiskEnabled: true, nativeASIFEnabled: true)
         #expect(CRIShimNativeASIFCapabilities(policy: policy, hostSupported: true).enabled)

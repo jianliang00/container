@@ -22,14 +22,27 @@ import DiskImageKit
 #endif
 
 func createNativeASIFOverlay(base: URL, output: URL) throws {
+    try createNativeASIFOverlay(base: base, parents: [], output: output)
+}
+
+func createNativeASIFOverlay(base: URL, parents: [URL], output: URL) throws {
     #if canImport(DiskImageKit)
     if #available(macOS 27, *) {
         var value = stat()
         guard lstat(output.path, &value) != 0, errno == ENOENT else { throw CocoaError(.fileWriteFileExists) }
         let disk = try DiskImage(opening: .open(url: base, mode: .readOnly))
         guard disk.format == .raw else { throw CocoaError(.fileReadCorruptFile) }
-        let stack = try disk.appending(.asifLayer(url: output, type: .overlay))
-        guard stack.layers.count == 2, stack.layers.last?.layerType == .overlay, stack.size == disk.size else {
+        var input = disk
+        for url in parents {
+            let layer = try DiskImage(opening: .open(url: url, mode: .readOnly))
+            let stacked = try input.appending(layer)
+            guard layer.format == .asif, stacked.layers.last?.layerType == .overlay, stacked.size == disk.size else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            input = stacked
+        }
+        let stack = try input.appending(.asifLayer(url: output, type: .overlay))
+        guard stack.layers.count == parents.count + 2, stack.layers.last?.layerType == .overlay, stack.size == disk.size else {
             throw CocoaError(.fileReadCorruptFile)
         }
         return

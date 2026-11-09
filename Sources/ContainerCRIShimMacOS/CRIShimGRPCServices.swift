@@ -188,6 +188,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 response.info[CRIShimNativeASIFCapabilities.infoKey] = makeCRIStatusJSONString(
                     CRIShimNativeASIFCapabilities(policy: config.machineState)
                 )
+                let chainEnabled = CRIShimNativeASIFCapabilities(policy: config.machineState).enabled && config.machineState?.nativeASIFChainEnabled == true
+                response.info["container.macos.native-asif-chain.v1"] = makeCRIStatusJSONString(["enabled": chainEnabled])
                 response.info[CRIShimRestoreInfoKey.capabilities] = makeCRIStatusJSONString(
                     CRIShimRestoreCapabilities()
                 )

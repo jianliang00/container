@@ -240,3 +240,70 @@ Production adoption still requires runtime/OCI format negotiation, image ancestr
 and GC integration, bounded flattening, encrypted TOS archive integration, power
 failure testing and sustained guest workload acceptance. This experiment does
 not change Suspend, Resume or the production image format.
+
+## Local background compaction
+
+`layers.py` is an opt-in local generation store for isolated macOS experiments.
+It does not install a runtime, change Kross, publish OCI images or upload TOS data.
+The existing `image.py` v1/v2 format and its lifecycle limits remain compatible.
+
+The store counts RAW, sealed ASIF parents and the next writable ASIF toward a
+five-layer runtime limit. A sealed two-layer image restores as three layers
+without compaction. Three sealed layers would restore as four, so ingestion
+starts a background job. Four sealed layers may still restore as five while
+that job runs. Five sealed layers cannot restore as six: checkout reports
+compaction pending until a verified compacted result is available.
+
+```sh
+python3 layers.py init /private/layer-store
+python3 layers.py ingest /private/layer-store /private/stopped-instance image-v1
+python3 layers.py status /private/layer-store image-v1
+python3 layers.py checkout /private/layer-store image-v1 /private/new-instance
+python3 layers.py run /private/new-instance /absolute/macos-asif-runner /private/check.sh
+python3 layers.py ingest /private/layer-store /private/new-instance image-v2
+```
+
+Ingestion accepts only private, idle ASIF instances with a RAW base and the
+three VM identity files. It clones a stopped image under its operation lock,
+then releases that lock before hashing the private immutable copies. Checkouts
+carry verified parent digest receipts so later publication does not hash the
+RAW base again. A generation ID is immutable and binds ordered inputs; reuse
+with different inputs is rejected.
+
+A serialized, lower-priority worker reads private clones of the sealed image.
+It compares the composed view with the original RAW in 1 MiB blocks and writes
+differences to a new cumulative ASIF, including explicit zero writes. It flushes
+and verifies every 256 MiB segment before recording progress, then independently
+verifies the complete output. Only afterward does it atomically publish the
+compacted result. New checkouts then use RAW + cumulative readonly ASIF + a new
+writable ASIF, totaling three layers. Existing VMs and old generations keep
+their original disk chains.
+
+`status` is read-only. `work STORE` drains queued/interrupted jobs; ingestion and
+checkout also start a worker when needed. A process lock serializes workers.
+After a worker crash, restart recovers only its exact private, unmounted image
+attachments and rechecks completed segments before continuing. A verified result
+can be published without copying again; a published result is idempotently reused.
+Corrupt completed segments stop the job and cannot become a ready generation.
+
+```sh
+python3 layers.py work /private/layer-store --generation image-v2
+# For an unpublished failed job only; retains the old job under .failed-*.
+python3 layers.py reset /private/layer-store image-v2
+python3 layers.py work /private/layer-store --generation image-v2
+```
+
+No automatic generation deletion is implemented: old image/VM references must
+be retained. The worker still scans the full logical disk and is intended for
+isolated build resources, not an unbounded task on a business VM host. It reserves
+40 GiB headroom and checks capacity at each checkpoint; this is a preflight, not
+a filesystem reservation. Hardware power-loss durability, OCI distribution,
+TOS integration, cross-host restore and production lifecycle integration require
+separate acceptance.
+
+`validate_layers.py OUTPUT IDENTITY_DIRECTORY` creates only new private 512 MiB
+images, tests overlapping changes and zero restoration, automatic triggering,
+SIGKILL at copy/verification/publication boundaries, corrupt-checkpoint rejection
+and explicit fresh retry. It never starts a VM. Run it only on an isolated host;
+logs and failed images remain in OUTPUT. `work --crash-at` exists solely for these
+explicit isolated failure tests.

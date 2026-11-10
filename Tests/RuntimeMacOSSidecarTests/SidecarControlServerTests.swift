@@ -78,6 +78,26 @@ struct SidecarControlServerTests {
         #expect(!server._testHasProcessSession(processID: "existing-command"))
     }
 
+    @Test
+    func nativeSealPrepareFailureReleasesItsCheckpoint() throws {
+        let socketPath = "/tmp/native-seal-\(UUID().uuidString).sock"
+        let server = makeServer(socketPath: socketPath)
+        try server.start()
+        defer { server.stop() }
+        let fd = try MacOSSidecarSocketIO.connectUnixSocket(path: socketPath)
+        defer { closeIfValid(fd) }
+        try server._testSetVMLifecycleRunning()
+
+        let id = UUID().uuidString
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(.init(requestID: id, method: .vmSealNativeDisk, protocolVersion: 6)), fd: fd)
+        // The test sidecar lacks a VZ VM, so the reservation succeeds and preparation fails.
+        #expect(try responseFrame(fd: fd).error?.code == "invalidLifecycleState")
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            MacOSSidecarEnvelope.request(.init(method: .vmStop, protocolVersion: 6)), fd: fd)
+        #expect(try responseFrame(fd: fd).ok)
+    }
+
     @Test(arguments: [Data(), Data([0, 0, 0, 4, 0x7b])])
     func responseFrameTimesOutForSilentOrPartialPeers(prefix: Data) throws {
         let pair = try makeSocketPair()

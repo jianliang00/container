@@ -2790,40 +2790,59 @@ extension MacOSSandboxService {
             else {
                 throw ContainerizationError(.invalidArgument, message: "disk bundle import requires local disk and cold restore")
             }
-            let format: MacOSLocalDiskBundle.Format
-            if native && devices[0].kind == .nativeASIFChain {
+            var format: MacOSLocalDiskBundle.Format = native ? .nativeASIF : .raw
+            if native, devices[0].kind == .nativeASIFChain {
                 let parents = devices[0].nativeParentPaths ?? []
-                guard MacOSNativeDisk.available, !parents.isEmpty, parents == MacOSLocalDiskBundle.parentNames(count: parents.count) else {
-                    throw ContainerizationError(.invalidArgument, message: "native derived bundle requires ordered parent layers and SDK 27")
+                guard MacOSNativeDisk.available, !parents.isEmpty, parents == MacOSNativeDisk.parentNames(count: parents.count) else {
+                    throw ContainerizationError(.invalidArgument, message: "invalid native ASIF archive parent list")
                 }
-                format = .nativeASIFChain(parentCount: parents.count)
-            } else {
-                format = native ? .nativeASIF : .raw
+                format = .nativeASIFOCIChain(parentCount: parents.count)
             }
             try MacOSLocalDiskBundle.install(
                 storageDirectory: state.storageDirectory, persistenceID: state.persistenceID, generation: generation, digest: digest, destination: root,
-                format: format, createOverlay: createNativeASIFOverlay(base:parents:output:))
+                format: format, allowLegacyASIFChain: state.legacyASIFChainAllowed ?? true,
+                createOverlay: createNativeASIFOverlay(base:parents:output:))
             return
         }
-        if config.macosGuest?.blockDevices.contains(where: { $0.kind == .nativeASIFChain }) == true {
-            throw ContainerizationError(.invalidArgument, message: "native ASIF chain requires an authenticated disk bundle")
-        }
-        if config.macosGuest?.blockDevices.contains(where: { $0.kind == .nativeASIFOverlay }) == true {
+        if config.macosGuest?.blockDevices.contains(where: { $0.kind.isNativeASIF }) == true {
             let devices = config.macosGuest?.blockDevices ?? []
             guard MacOSNativeDisk.available, devices.count == 1,
                 devices[0].path == "active.asif", devices[0].nativeBasePath == "base.img",
-                !devices[0].readOnly, devices[0].exportName == nil, devices[0].synchronizationMode == .full,
-                let state = config.macosGuest?.machineState, state.restoreStateID == nil,
-                let generation = state.storageGeneration, generation > 0
+                !devices[0].readOnly, devices[0].exportName == nil, devices[0].synchronizationMode == .full
             else {
-                throw ContainerizationError(.invalidArgument, message: "native initial disk requires SDK 27, macOS 27 and a managed cold lifecycle")
+                throw ContainerizationError(.invalidArgument, message: "native initial disk requires SDK 27 and macOS 27")
             }
-            if try MacOSNativeDisk.isPrepared(destination: root, imageDigest: config.image.digest) { return }
+            if let state = config.macosGuest?.machineState {
+                guard state.restoreStateID == nil, let generation = state.storageGeneration, generation > 0 else {
+                    throw ContainerizationError(.invalidArgument, message: "native initial disk requires a cold lifecycle")
+                }
+            }
+            let parentNames = devices[0].nativeParentPaths ?? []
+            if try MacOSNativeDisk.isPrepared(destination: root, imageDigest: config.image.digest, parentNames: parentNames) { return }
             let layers = try await resolveTemplateLayers(containerConfig: config, progressUpdate: progressUpdate)
+            guard layers.parents.isEmpty ? devices[0].kind == .nativeASIFOverlay : devices[0].kind == .nativeASIFChain,
+                parentNames == MacOSNativeDisk.parentNames(count: layers.parents.count)
+            else {
+                throw ContainerizationError(.invalidArgument, message: "native disk configuration does not match the OCI disk chain")
+            }
+            let needsMerge = layers.parents.count + 2 >= MacOSDiskChain.mergeThreshold
+            let merged = needsMerge ? try? MacOSASIFMergeCache.ready(manifestDigest: layers.manifestDigest) : nil
             preverifyNativeBase = try MacOSNativeDisk.prepare(
-                destination: root, imageDigest: config.image.digest, base: layers.diskImage,
+                destination: root, imageDigest: config.image.digest, base: layers.diskImage, parents: layers.parents,
                 hardware: layers.hardwareModel, auxiliary: layers.auxiliaryStorage,
-                imageReference: requestedSandboxImageReference(for: config), createOverlay: createNativeASIFOverlay)
+                imageReference: requestedSandboxImageReference(for: config), compactedParent: merged,
+                createOverlay: createNativeASIFOverlay(base:parents:output:))
+            if needsMerge, merged == nil, let size = layers.logicalSize {
+                Task.detached(priority: .background) { [log] in
+                    do {
+                        try MacOSASIFMergeCache.compact(
+                            manifestDigest: layers.manifestDigest, base: layers.diskImage,
+                            parents: layers.parents, logicalSize: size)
+                    } catch {
+                        log.warning("native ASIF merge deferred", metadata: ["manifest": "\(layers.manifestDigest)", "error": "\(error)"])
+                    }
+                }
+            }
             return
         }
         let fm = FileManager.default
@@ -2861,10 +2880,13 @@ extension MacOSSandboxService {
         _ = try FilesystemClone.cloneOrCopyItem(at: source, to: destination)
     }
 
-    private struct LayerPaths {
+    private struct LayerPaths: Sendable {
+        let manifestDigest: String
+        let logicalSize: Int64?
         let hardwareModel: URL
         let auxiliaryStorage: URL
         let diskImage: URL
+        let parents: [URL]
     }
 
     private struct ResolvedSandboxImage {
@@ -2921,6 +2943,8 @@ extension MacOSSandboxService {
         }
 
         let diskImagePath: URL
+        var parents: [URL] = []
+        var logicalSize: Int64?
         switch layers {
         case .v0(_, _, let diskImage):
             guard let diskContent: Content = try await contentStore.get(digest: diskImage.digest) else {
@@ -2936,12 +2960,23 @@ extension MacOSSandboxService {
                 diskChunks: diskChunks,
                 progressUpdate: progressUpdate
             )
+        case .derived(_, _, let chain):
+            guard containerConfig.macosGuest?.blockDevices.first?.kind == .nativeASIFChain, MacOSNativeDisk.available else {
+                throw ContainerizationError(.unsupported, message: "ASIF derived images require explicit admission and an SDK 27 runtime on macOS 27")
+            }
+            let resolved = try await chain.resolve(in: contentStore)
+            diskImagePath = resolved.base
+            parents = resolved.overlays
+            logicalSize = chain.logicalSize
         }
 
         return LayerPaths(
+            manifestDigest: resolvedImage.manifestDescriptor.digest,
+            logicalSize: logicalSize,
             hardwareModel: hardwareContent.path,
             auxiliaryStorage: auxiliaryContent.path,
-            diskImage: diskImagePath
+            diskImage: diskImagePath,
+            parents: parents
         )
     }
 

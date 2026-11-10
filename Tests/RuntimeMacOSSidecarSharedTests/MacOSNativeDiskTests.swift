@@ -93,6 +93,49 @@ struct MacOSNativeDiskTests {
     }
 
     @Test
+    func interruptedPreparationKeepsOriginalParentsAfterCachePublication() throws {
+        let f = try Fixture()
+        defer { f.remove() }
+        let fm = FileManager.default
+        let parents = ["first.asif", "second.asif"].map { f.source.appendingPathComponent($0) }
+        let merged = f.source.appendingPathComponent("merged.asif")
+        for url in parents + [merged] {
+            try Data(url.lastPathComponent.utf8).write(to: url)
+        }
+        let originalNames = MacOSNativeDisk.parentNames(count: 2)
+        func prepare(compactedParent: URL?, failing: Bool = false) throws {
+            try MacOSNativeDisk.prepare(
+                destination: f.runtime, imageDigest: f.digest, base: f.source.appendingPathComponent("base.img"),
+                parents: parents, hardware: f.source.appendingPathComponent("HardwareModel.bin"),
+                auxiliary: f.source.appendingPathComponent("AuxiliaryStorage"), compactedParent: compactedParent
+            ) { _, actual, output in
+                #expect(actual.map(\.lastPathComponent) == originalNames)
+                if failing { throw POSIXError(.EIO) }
+                try Data("active".utf8).write(to: output)
+            }
+        }
+        #expect(throws: POSIXError.self) { try prepare(compactedParent: nil, failing: true) }
+        try prepare(compactedParent: merged)
+        #expect(try MacOSNativeDisk.effectiveParentNames(in: f.runtime, configured: originalNames) == originalNames)
+        #expect(try Data(contentsOf: f.runtime.appendingPathComponent(originalNames[0])) == Data("first.asif".utf8))
+        #expect(fm.fileExists(atPath: f.runtime.appendingPathComponent(originalNames[1]).path))
+
+        let newRuntime = f.runtime.deletingLastPathComponent().appendingPathComponent("compacted-runtime")
+        try fm.createDirectory(at: newRuntime, withIntermediateDirectories: false)
+        try MacOSNativeDisk.prepare(
+            destination: newRuntime, imageDigest: f.digest, base: f.source.appendingPathComponent("base.img"),
+            parents: parents, hardware: f.source.appendingPathComponent("HardwareModel.bin"),
+            auxiliary: f.source.appendingPathComponent("AuxiliaryStorage"), compactedParent: merged
+        ) { _, actual, output in
+            #expect(actual.map(\.lastPathComponent) == [originalNames[0]])
+            try Data("new top".utf8).write(to: output)
+        }
+        #expect(try MacOSNativeDisk.isPrepared(destination: newRuntime, imageDigest: f.digest, parentNames: originalNames))
+        #expect(try Data(contentsOf: newRuntime.appendingPathComponent(originalNames[0])) == Data("merged.asif".utf8))
+        #expect(!fm.fileExists(atPath: newRuntime.appendingPathComponent(originalNames[1]).path))
+    }
+
+    @Test
     func publishedOverlayIsNotRecreatedWhenCommitWasInterrupted() throws {
         let f = try Fixture()
         defer { f.remove() }

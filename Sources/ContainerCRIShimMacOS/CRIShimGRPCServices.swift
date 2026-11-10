@@ -188,8 +188,9 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
                 response.info[CRIShimNativeASIFCapabilities.infoKey] = makeCRIStatusJSONString(
                     CRIShimNativeASIFCapabilities(policy: config.machineState)
                 )
-                let chainEnabled = CRIShimNativeASIFCapabilities(policy: config.machineState).enabled && config.machineState?.nativeASIFChainEnabled == true
-                response.info["container.macos.native-asif-chain.v1"] = makeCRIStatusJSONString(["enabled": chainEnabled])
+                let chain = CRIShimNativeASIFChainCapabilities(policy: config.machineState)
+                response.info["container.macos.native-asif-chain.v1"] = makeCRIStatusJSONString(["enabled": chain.admissionEnabled])
+                response.info[CRIShimNativeASIFChainCapabilities.infoKey] = makeCRIStatusJSONString(chain)
                 response.info[CRIShimRestoreInfoKey.capabilities] = makeCRIStatusJSONString(
                     CRIShimRestoreCapabilities()
                 )
@@ -308,7 +309,8 @@ public final class CRIShimRuntimeServiceProvider: Runtime_V1_RuntimeServiceAsync
         let networkMTUOverride = try await resolvePodNetworkMTUOverride(handler: handler)
         let machineState = try makeCRIShimMachineStateMapping(
             annotations: request.config.annotations,
-            nodeConfig: config.machineState
+            nodeConfig: config.machineState,
+            imageParentCount: sandboxImage.nativeASIFParentCount
         )
         let provision = {
             try await self.provisionPodSandbox(

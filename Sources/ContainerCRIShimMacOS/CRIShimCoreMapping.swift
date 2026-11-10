@@ -79,7 +79,8 @@ func makeCRIShimSandboxConfiguration(
     }
     let machineState = try makeCRIShimMachineStateMapping(
         annotations: request.config.annotations,
-        nodeConfig: machineStateConfig
+        nodeConfig: machineStateConfig,
+        imageParentCount: sandboxImage.nativeASIFParentCount
     )
 
     var configuration = ContainerConfiguration(

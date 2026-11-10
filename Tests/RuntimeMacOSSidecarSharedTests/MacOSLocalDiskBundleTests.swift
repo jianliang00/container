@@ -144,15 +144,31 @@ struct MacOSLocalDiskBundleTests {
             }
             try Data("blank-overlay".utf8).write(to: output)
         }
-        try f.install(createOverlay: createOverlay)
+        #expect(throws: (any Error).self) {
+            try f.install(as: .nativeASIFOCIChain(parentCount: 2), createOverlay: createOverlay)
+        }
+        try f.install(as: .nativeASIFOCIChain(parentCount: 2), allowLegacyASIFChain: true, createOverlay: createOverlay)
         let active = f.destination.appendingPathComponent("active.asif")
         try Data("guest-write".utf8).write(to: active)
         try FileManager.default.removeItem(at: f.source)
-        try f.install(createOverlay: createOverlay)
+        try f.install(as: .nativeASIFOCIChain(parentCount: 2), allowLegacyASIFChain: true, createOverlay: createOverlay)
         #expect(creations == 1)
         #expect(try Data(contentsOf: active) == Data("guest-write".utf8))
         try FileManager.default.removeItem(at: f.destination.appendingPathComponent(names[0]))
         #expect(throws: (any Error).self) { try f.install(createOverlay: createOverlay) }
+    }
+
+    @Test
+    func ociChainImportPreservesArchivedWritableOverlay() throws {
+        let f = try Fixture(format: .nativeASIFOCIChain(parentCount: 2))
+        defer { f.remove() }
+        try f.install()
+        let active = f.destination.appendingPathComponent("active.asif")
+        #expect(try Data(contentsOf: active) == Data("active.asif".utf8))
+        try Data("guest-write".utf8).write(to: active)
+        try FileManager.default.removeItem(at: f.source)
+        try f.install()
+        #expect(try Data(contentsOf: active) == Data("guest-write".utf8))
     }
 
     @Test(arguments: ["format", "checksum", "writable-base", "partial", "manifest"])
@@ -210,6 +226,9 @@ struct MacOSLocalDiskBundleTests {
             case .nativeASIFChain(let count):
                 names = MacOSLocalDiskBundle.parentNames(count: count) + Array(MacOSLocalDiskBundle.fileNames.dropFirst())
                 version = 4
+            case .nativeASIFOCIChain(let count):
+                names = MacOSLocalDiskBundle.parentNames(count: count) + ["active.asif"] + Array(MacOSLocalDiskBundle.fileNames.dropFirst())
+                version = 5
             }
             let files = names.map { name -> [String: Any] in
                 var entry: [String: Any] = ["name": name, "size": name.utf8.count]
@@ -230,10 +249,13 @@ struct MacOSLocalDiskBundleTests {
             try data.write(to: source.appendingPathComponent("disk-bundle.json"))
             for name in names { try Data(name.utf8).write(to: source.appendingPathComponent(name)) }
         }
-        func install(digest: String? = nil, generation: UInt64 = 2, createOverlay: ((URL, [URL], URL) throws -> Void)? = nil) throws {
+        func install(
+            digest: String? = nil, generation: UInt64 = 2, as requested: MacOSLocalDiskBundle.Format? = nil,
+            allowLegacyASIFChain: Bool = false, createOverlay: ((URL, [URL], URL) throws -> Void)? = nil
+        ) throws {
             try MacOSLocalDiskBundle.install(
                 storageDirectory: root.appendingPathComponent("state").path, persistenceID: "vm-test", generation: generation, digest: digest ?? self.digest,
-                destination: destination, format: format, createOverlay: createOverlay)
+                destination: destination, format: requested ?? format, allowLegacyASIFChain: allowLegacyASIFChain, createOverlay: createOverlay)
         }
         func remove() { try? FileManager.default.removeItem(at: root) }
     }

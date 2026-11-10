@@ -148,7 +148,7 @@ public enum MacOSGuestCache {
 
     // Keep lock files outside cache entries: pruning an entry must not replace the
     // inode on which another process is waiting. Closing the fd releases the lock.
-    static func lockRebuildEntry(_ entry: URL, nonBlocking: Bool = false) throws -> Int32? {
+    package static func lockRebuildEntry(_ entry: URL, nonBlocking: Bool = false) throws -> Int32? {
         let parent = entry.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         let path = parent.appendingPathComponent(".\(entry.lastPathComponent).rebuild.lock")

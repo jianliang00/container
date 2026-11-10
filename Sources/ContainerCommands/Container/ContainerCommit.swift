@@ -48,7 +48,7 @@ extension Application {
             }
             progress.start()
 
-            try await MacOSContainerCommitter.commit(
+            let digest = try await MacOSContainerCommitter.commit(
                 containerID: containerID,
                 targetReference: targetReference,
                 leaveStopped: leaveStopped,
@@ -62,6 +62,7 @@ extension Application {
 
             progress.finish()
             print(targetReference)
+            if let digest { print(digest) }
         }
     }
 }

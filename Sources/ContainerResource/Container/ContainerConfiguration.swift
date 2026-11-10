@@ -286,6 +286,8 @@ public struct ContainerConfiguration: Sendable, Codable {
             /// Digest of a cold disk bundle under the trusted storage directory.
             /// It is independent of host-bound machine-state restoration.
             public var diskBundleDigest: String?
+            /// Whether this restore can open a legacy v4 ASIF bundle.
+            public var legacyASIFChainAllowed: Bool?
             public var sidecarLifecycleBarrier: SidecarLifecycleBarrier?
 
             public init(
@@ -300,6 +302,7 @@ public struct ContainerConfiguration: Sendable, Codable {
                 adoptionManifestDigest: String? = nil,
                 restoreRequestID: String? = nil,
                 diskBundleDigest: String? = nil,
+                legacyASIFChainAllowed: Bool? = nil,
                 sidecarLifecycleBarrier: SidecarLifecycleBarrier? = nil
             ) {
                 self.protocolVersion = protocolVersion
@@ -313,6 +316,7 @@ public struct ContainerConfiguration: Sendable, Codable {
                 self.adoptionManifestDigest = adoptionManifestDigest
                 self.restoreRequestID = restoreRequestID
                 self.diskBundleDigest = diskBundleDigest
+                self.legacyASIFChainAllowed = legacyASIFChainAllowed
                 self.sidecarLifecycleBarrier = sidecarLifecycleBarrier
             }
         }

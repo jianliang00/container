@@ -172,6 +172,9 @@ public enum MacOSImageContract {
             MacOSImageOCIMediaTypes.diskImage,
             MacOSImageOCIMediaTypes.diskLayout,
             MacOSImageOCIMediaTypes.diskChunk,
+            MacOSImageOCIMediaTypes.chainRawBase,
+            MacOSImageOCIMediaTypes.chainChunkedBase,
+            MacOSImageOCIMediaTypes.chainOverlay,
         ])
         if manifest.layers.contains(where: { sandboxLayerMediaTypes.contains($0.mediaType) }) {
             throw MacOSImageContractError.workloadImageContainsSandboxLayers

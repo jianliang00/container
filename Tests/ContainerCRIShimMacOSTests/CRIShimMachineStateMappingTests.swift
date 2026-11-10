@@ -584,7 +584,7 @@ extension CRIShimMachineStateMappingTests {
     }
 
     @Test
-    func nativeDerivedAdmissionIsIndependentAndDefaultsOff() throws {
+    func disabledChainAdmissionStillAllowsAuthenticatedColdRestore() throws {
         let roots = try MachineStateTestRoots()
         defer { roots.remove() }
         var policy = roots.config
@@ -592,21 +592,28 @@ extension CRIShimMachineStateMappingTests {
         policy.nativeASIFEnabled = true
         var annotations = [
             CRIShimMachineStateAnnotation.enabled: "true",
-            CRIShimMachineStateAnnotation.persistenceID: "native-chain",
+            CRIShimMachineStateAnnotation.persistenceID: "chain",
             CRIShimMachineStateAnnotation.storageGeneration: "2",
             CRIShimMachineStateAnnotation.storageKind: "native-asif",
-            CRIShimMachineStateAnnotation.diskBundleDigest: String(repeating: "a", count: 64),
-            CRIShimMachineStateAnnotation.nativeParentCount: "2",
         ]
-        #expect(throws: (any Error).self) {
-            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        #expect(throws: CRIShimError.self) {
+            try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, imageParentCount: 2, nativeASIFAvailable: true)
         }
         policy.nativeASIFChainEnabled = true
-        let device = try #require(makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true).blockDevices.first)
-        #expect(device.kind == .nativeASIFChain)
-        #expect(device.nativeParentPaths == ["parent-01.asif", "parent-02.asif"])
+        let fresh = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, imageParentCount: 2, nativeASIFAvailable: true)
+        #expect(fresh.blockDevices.first?.nativeParentPaths == ["parent-01.asif", "parent-02.asif"])
+        policy.nativeASIFChainEnabled = false
+        annotations[CRIShimMachineStateAnnotation.diskBundleDigest] = String(repeating: "a", count: 64)
+        annotations[CRIShimMachineStateAnnotation.nativeParentCount] = "1"
+        let restored = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, imageParentCount: 2, nativeASIFAvailable: true)
+        #expect(restored.blockDevices.first?.kind == .nativeASIFChain)
+        #expect(restored.blockDevices.first?.nativeParentPaths == ["parent-01.asif"])
+        #expect(restored.machineState?.legacyASIFChainAllowed == false)
+        policy.nativeASIFChainEnabled = true
+        let legacy = try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
+        #expect(legacy.machineState?.legacyASIFChainAllowed == true)
         annotations[CRIShimMachineStateAnnotation.nativeParentCount] = "4"
-        #expect(throws: (any Error).self) {
+        #expect(throws: CRIShimError.self) {
             try makeCRIShimMachineStateMapping(annotations: annotations, nodeConfig: policy, nativeASIFAvailable: true)
         }
     }

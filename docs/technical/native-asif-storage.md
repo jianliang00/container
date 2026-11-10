@@ -24,7 +24,7 @@ The materializer must verify the immutable base content against its archive or i
 
 Use [filesystem checkpoint prepare and finish](filesystem-checkpoint.md) to reserve the paused interval. Storage-specific sealing remains the caller's responsibility. Full synchronization on the disk attachment and a guest sync acknowledgement do not by themselves prove that copying ASIF metadata while paused produces a valid cold snapshot. That boundary requires isolated VM validation before this attachment is used in a snapshot service.
 
-For a cold restore, clone the sealed cumulative overlay into a new writable file and attach it over the exact same verified RAW base. This keeps the running stack at two layers. Preserve the VM identity and auxiliary storage alongside the overlay when restoring the same VM.
+For a version 3 cold restore, clone the sealed cumulative overlay into a new writable file and attach it over the exact same verified RAW base. This keeps the running stack at two layers. Preserve the VM identity and auxiliary storage alongside the overlay when restoring the same VM.
 
 ## Build and validation
 
@@ -35,12 +35,19 @@ Tests cover legacy configuration decoding, explicit storage kinds, managed paths
 ## Derived cold restore
 
 The optional `machineState.nativeASIFChainEnabled` CRI setting defaults to false.
-It also requires the existing native ASIF policy. A trusted storage controller
-supplies `native-parent-count` only for an authenticated version 4 cold bundle.
-The bundle pins the RAW base and contains ordered, digest-bound `parent-NN.asif`
-members plus VM identity. The runtime creates a fresh writable `active.asif`
-and attaches the immutable parents oldest first. A running chain is limited to
-five total layers. The version 1 RAW and version 3 native imports remain valid.
+With the native ASIF policy enabled, it permits new OCI-derived chains and
+version 4 cold restores. A trusted storage controller supplies
+`native-parent-count` for a version 4 or 5 cold bundle. Both bundle versions pin
+the RAW base and contain ordered, digest-bound `parent-NN.asif` members and VM
+identity. Version 4 creates a fresh writable `active.asif`; version 5 restores
+the archived `active.asif` and remains available when new-chain admission is
+closed. A running chain is limited to five total layers.
+
+`container create --os darwin --macos-asif` and `container run` with the same
+flags enable native ASIF for CLI-managed instances. `container commit` seals a
+writable layer into a derived OCI image. At four disk layers, the runtime queues
+compaction and publishes an equivalent cached parent for future instances
+using the same image digest. Existing instances retain their disk chains.
 
 `container-runtime-macos compact-asif` processes detached clones in a private
 job. It uses the observed ASIF v1 index to select ranges and macOS native disk

@@ -605,6 +605,7 @@ actor MacOSSidecarService {
     private var nbdObservers: [MacOSNBDConnectionObserver] = []
     private var currentCompatibility: MacOSMachineStateCompatibilityDescription?
     private var lifecycle = MacOSVMLifecycleCoordinator()
+    private var nativeDiskLease: FileHandle?
 
     private var state: MacOSVMRuntimeState { lifecycle.state }
 
@@ -642,6 +643,9 @@ actor MacOSSidecarService {
         do {
             guard config.macosGuest?.machineState?.restoreStateID == nil else {
                 throw SidecarRPCError(code: "machineStateRestoreRequired", message: "configured machine state must be restored, not cold started")
+            }
+            if config.macosGuest?.blockDevices.first?.kind.isNativeASIF == true {
+                nativeDiskLease = try MacOSNativeDisk.acquireLifecycleLease(in: rootURL)
             }
             let vmConfiguration = try await ensurePreparedConfiguration(containerConfig: config)
             log.info("bootstrapStart: creating VZVirtualMachine")
@@ -861,6 +865,23 @@ actor MacOSSidecarService {
         }
         try lifecycle.completeFilesystemCheckpointFinish(request)
         return .init(checkpointID: request.checkpointID, lifecycleState: state)
+    }
+
+    func finishFailedNativeSeal(checkpointID: String) async throws {
+        let action: MacOSFilesystemCheckpointFinishRequest.Action = state == .stopped ? .stop : .resume
+        _ = try await finishFilesystemCheckpoint(.init(checkpointID: checkpointID, action: action))
+    }
+
+    func sealNativeDisk(checkpointID: UUID) throws {
+        let config = try loadContainerConfiguration()
+        guard state == .paused, nativeDiskLease != nil,
+            config.macosGuest?.machineState == nil,
+            let device = config.macosGuest?.blockDevices.first, device.kind.isNativeASIF
+        else { throw SidecarRPCError(code: "invalidLifecycleState", message: "ASIF commit requires a paused CLI native disk") }
+        let paths = try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: rootURL, device: device)
+        try MacOSNativeDisk.seal(
+            in: rootURL, auxiliary: MacOSSandboxLayout(root: rootURL).auxiliaryStorageURL,
+            parents: paths.parents.map(\.lastPathComponent), id: checkpointID)
     }
 
     func ensureFilesystemCheckpointAllowsNewSession() throws {
@@ -1114,8 +1135,17 @@ actor MacOSSidecarService {
         return try machineStateStore().receipt(stateID: stateID)
     }
 
-    func storageAttachments() -> [MacOSStorageAttachmentStatus] {
-        nbdObservers.map { $0.status() }
+    func storageAttachments() throws -> [MacOSStorageAttachmentStatus] {
+        let config = try loadContainerConfiguration()
+        if let device = config.macosGuest?.blockDevices.first, device.kind.isNativeASIF {
+            let paths = try MacOSBlockDeviceBuilder.nativeASIFPaths(rootURL: rootURL, device: device)
+            return [
+                .init(
+                    identifier: device.identifier, readOnly: false, synchronizationMode: "full",
+                    connectionCount: vm == nil ? 0 : 1, nativeParentCount: paths.parents.count)
+            ]
+        }
+        return nbdObservers.map { $0.status() }
     }
 
     func compatibilityDescription(stateID: String? = nil) async throws -> MacOSMachineStateCompatibilityResult {
@@ -1289,6 +1319,7 @@ actor MacOSSidecarService {
         currentCompatibility = nil
         nbdObservers = []
         discardPreparedNetworkResources()
+        nativeDiskLease = nil
     }
 
     func showGUIWindow() async throws {
@@ -5098,7 +5129,9 @@ final class SidecarControlServer: @unchecked Sendable {
 
     /// Establish the lifecycle reservation under the session admission lock, then
     /// release that lock before guest I/O so competing requests fail promptly.
-    private func prepareFilesystemCheckpoint(_ payload: MacOSFilesystemCheckpointRequest) throws -> MacOSFilesystemCheckpointResult {
+    private func prepareFilesystemCheckpoint(
+        _ payload: MacOSFilesystemCheckpointRequest, finishOnFailure: Bool = false
+    ) throws -> MacOSFilesystemCheckpointResult {
         let shouldPrepare: Bool = try {
             checkpointAdmissionLock.lock()
             defer { checkpointAdmissionLock.unlock() }
@@ -5122,7 +5155,20 @@ final class SidecarControlServer: @unchecked Sendable {
         guard shouldPrepare else {
             return .init(checkpointID: payload.checkpointID, lifecycleState: .paused)
         }
-        return try syncValue { try await self.service.prepareReservedFilesystemCheckpoint(payload) }
+        return try syncValue {
+            do {
+                return try await self.service.prepareReservedFilesystemCheckpoint(payload)
+            } catch {
+                if finishOnFailure {
+                    do {
+                        try await self.service.finishFailedNativeSeal(checkpointID: payload.checkpointID)
+                    } catch {
+                        throw SidecarRPCError(code: "checkpointUncertain", message: "native disk seal could not finish its filesystem checkpoint: \(error)")
+                    }
+                }
+                throw error
+            }
+        }
     }
 
     private func prepareCheckpoint(
@@ -5596,6 +5642,22 @@ final class SidecarControlServer: @unchecked Sendable {
             } catch {
                 return failureResponse(requestID: requestID, error: error)
             }
+        case .vmSealNativeDisk:
+            guard let id = UUID(uuidString: requestID), id.uuidString == requestID else {
+                return .failure(requestID: requestID, code: "invalidArgument", message: "native disk seal requires a UUID")
+            }
+            _ = try prepareFilesystemCheckpoint(.init(checkpointID: requestID), finishOnFailure: true)
+            return try sync(requestID: requestID) {
+                let finish = MacOSFilesystemCheckpointFinishRequest(checkpointID: requestID, action: .resume)
+                do {
+                    try await self.service.sealNativeDisk(checkpointID: id)
+                } catch {
+                    _ = try await self.service.finishFilesystemCheckpoint(finish)
+                    throw error
+                }
+                _ = try await self.service.finishFilesystemCheckpoint(finish)
+                return .success(requestID: requestID, protocolVersion: MacOSSidecarProtocolVersion.current)
+            }
         case .vmFinishFilesystemCheckpoint:
             guard let data = request.data else {
                 return .failure(requestID: requestID, code: "invalidArgument", message: "missing filesystem checkpoint finish payload")
@@ -5705,7 +5767,7 @@ final class SidecarControlServer: @unchecked Sendable {
             }
         case .vmStorageAttachments:
             return try sync(requestID: requestID) {
-                let attachments = await service.storageAttachments()
+                let attachments = try await service.storageAttachments()
                 return .success(
                     requestID: requestID,
                     data: try JSONEncoder().encode(attachments),
@@ -5847,7 +5909,8 @@ final class SidecarControlServer: @unchecked Sendable {
                     ]
                 )
             }
-        case .vmPrepareCheckpoint, .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .vmPrepareFilesystemCheckpoint, .vmFinishFilesystemCheckpoint:
+        case .vmPrepareCheckpoint, .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .vmPrepareFilesystemCheckpoint, .vmFinishFilesystemCheckpoint,
+            .vmSealNativeDisk:
             guard request.protocolVersion == MacOSSidecarProtocolVersion.durableCheckpointAdoption else {
                 return SidecarRPCError(
                     code: "protocolVersionMismatch",
@@ -5934,6 +5997,7 @@ extension MacOSSidecarMethod {
             true
         case .eventsSubscribe, .eventsAcknowledge, .vmConnectVsock, .processInspect, .processDelete, .vmCapabilities, .vmPause, .vmResume, .vmSaveMachineState,
             .vmRestoreMachineState, .vmDeleteMachineState, .vmCompatibilityDescription, .vmPrepareCheckpoint, .vmPrepareFilesystemCheckpoint, .vmFinishFilesystemCheckpoint,
+            .vmSealNativeDisk,
             .vmMachineStateReceipt, .vmAbortCheckpoint, .vmStorageAttachments, .fsSync, .vmStop, .sidecarQuit, .unknown:
             false
         }

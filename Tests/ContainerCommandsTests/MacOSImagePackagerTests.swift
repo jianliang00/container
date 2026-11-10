@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import Containerization
 import ContainerizationOCI
 import Foundation
 import Testing
@@ -179,6 +180,83 @@ struct MacOSImagePackagerTests {
         let manifest = try JSONDecoder().decode(Manifest.self, from: manifestData)
         #expect(manifest.annotations?[MacOSImageContract.roleAnnotation] == MacOSImageRole.sandbox.rawValue)
         #expect(manifest.annotations?[MacOSImageContract.workloadFormatAnnotation] == nil)
+    }
+
+    @Test
+    func derivedArchiveReusesParentBlobsAndRetainsThemAfterParentRemoval() async throws {
+        let root = try makeTemporaryDirectory()
+        let fm = FileManager.default
+        defer { try? fm.removeItem(at: root) }
+
+        let input = root.appendingPathComponent("source")
+        try fm.createDirectory(at: input, withIntermediateDirectories: false)
+        try createSparseDisk(at: input.appendingPathComponent("Disk.img"), logicalSize: 4096, writes: [(0, Data("seed".utf8))])
+        try Data("hardware".utf8).write(to: input.appendingPathComponent("HardwareModel.bin"))
+        try Data("auxiliary".utf8).write(to: input.appendingPathComponent("AuxiliaryStorage"))
+        let baseArchive = root.appendingPathComponent("base.tar")
+        let baseRef = "local/test-base:latest"
+        try MacOSImagePackager.package(imageDirectory: input, outputTar: baseArchive, reference: baseRef)
+
+        let store = try LocalContentStore(path: root.appendingPathComponent("content"))
+        let images = try ImageStore(path: root.appendingPathComponent("images"), contentStore: store)
+        let sourceLayout = root.appendingPathComponent("source-layout")
+        try extractTar(baseArchive, to: sourceLayout)
+        let baseImages = try await images.load(from: sourceLayout)
+        let baseImage = try #require(baseImages.first)
+        let baseIndex = try await baseImage.index()
+        let baseDescriptor = try #require(baseIndex.manifests.first)
+        let baseManifest: Manifest = try #require(try await store.get(digest: baseDescriptor.digest))
+        let source = try MacOSImageLayers(manifest: baseManifest)
+
+        let sealed = root.appendingPathComponent("sealed")
+        try fm.createDirectory(at: sealed, withIntermediateDirectories: false)
+        try Data("sealed auxiliary".utf8).write(to: sealed.appendingPathComponent("AuxiliaryStorage"))
+        try Data("overlay bytes".utf8).write(to: sealed.appendingPathComponent("active.asif"))
+        let archive = root.appendingPathComponent("derived.tar")
+        let imageConfig = ContainerizationOCI.Image(architecture: "arm64", os: "darwin", rootfs: .init(type: "layers", diffIDs: []))
+        try MacOSImagePackager.packageDerived(
+            source: source, logicalSize: 4096, sealed: sealed, parentNames: [],
+            imageConfig: imageConfig, reference: "local/test-derived:latest", outputTar: archive, progress: nil)
+
+        let derivedLayout = root.appendingPathComponent("derived-unpacked")
+        try extractTar(archive, to: derivedLayout)
+        let children = try await images.load(from: derivedLayout)
+        let child = try #require(children.first)
+        let childIndex = try await child.index()
+        let descriptor = try #require(childIndex.manifests.first)
+        let manifest: Manifest = try #require(try await store.get(digest: descriptor.digest))
+        let layers = try MacOSImageLayers(manifest: manifest)
+        guard case .derived(_, _, let chain) = layers,
+            case .v1(_, _, let rawLayout, let chunks) = source
+        else {
+            Issue.record("derived OCI archive lost its RAW ancestry")
+            return
+        }
+        #expect(chain.base.digest == rawLayout.digest)
+        #expect(chain.chunks == chunks)
+        #expect(chain.overlays.count == 1)
+        #expect(!fm.fileExists(atPath: derivedLayout.appendingPathComponent("blobs/sha256/\(rawLayout.digest.dropFirst(7))").path))
+        #expect(baseImage.digest != child.digest)
+        let nextSealed = root.appendingPathComponent("next-sealed")
+        try fm.createDirectory(at: nextSealed, withIntermediateDirectories: false)
+        try fm.copyItem(at: sealed.appendingPathComponent("AuxiliaryStorage"), to: nextSealed.appendingPathComponent("AuxiliaryStorage"))
+        try fm.copyItem(at: sealed.appendingPathComponent("active.asif"), to: nextSealed.appendingPathComponent("parent-01.asif"))
+        try Data("second overlay".utf8).write(to: nextSealed.appendingPathComponent("active.asif"))
+        let nextArchive = root.appendingPathComponent("next.tar")
+        try MacOSImagePackager.packageDerived(
+            source: layers, logicalSize: 4096, sealed: nextSealed, parentNames: ["parent-01.asif"],
+            imageConfig: imageConfig, reference: "local/test-descendant:latest", outputTar: nextArchive, progress: nil)
+        let nextLayout = root.appendingPathComponent("next-unpacked")
+        try extractTar(nextArchive, to: nextLayout)
+        let parentDigest = try #require(chain.overlays.first?.digest)
+        #expect(!fm.fileExists(atPath: nextLayout.appendingPathComponent("blobs/sha256/\(parentDigest.dropFirst(7))").path))
+        _ = try await images.load(from: nextLayout)
+        try await images.delete(reference: "local/test-derived:latest", performCleanup: true)
+
+        try await images.delete(reference: baseRef, performCleanup: true)
+        for member in [chain.base] + chain.chunks + chain.overlays {
+            _ = try await MacOSDiskChain.verifiedContent(member, in: store)
+        }
     }
 }
 

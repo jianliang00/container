@@ -17,6 +17,7 @@
 import ContainerResource
 import Darwin
 import Foundation
+import RuntimeMacOSSidecarShared
 @preconcurrency import Virtualization
 
 #if canImport(DiskImageKit)
@@ -36,11 +37,15 @@ extension MacOSBlockDeviceBuilder {
             throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF requires a base, writable overlay and full synchronization")
         }
         let parentPaths = device.nativeParentPaths ?? []
-        guard device.kind == .nativeASIFChain ? (1...3).contains(parentPaths.count) : device.nativeParentPaths == nil
+        guard
+            device.kind == .nativeASIFChain
+                ? (!parentPaths.isEmpty && parentPaths == MacOSNativeDisk.parentNames(count: parentPaths.count))
+                : device.nativeParentPaths == nil
         else {
             throw SidecarRPCError(code: "invalidStorageConfiguration", message: "native ASIF chain must have one to three immutable parent overlays")
         }
-        let urls = try ([basePath] + parentPaths + [device.path]).map { try managedDiskURL(rootURL: rootURL, relativePath: $0) }
+        let parents = try MacOSNativeDisk.effectiveParentNames(in: rootURL, configured: parentPaths)
+        let urls = try ([basePath] + parents + [device.path]).map { try managedDiskURL(rootURL: rootURL, relativePath: $0) }
         struct DiskIdentity: Hashable {
             let device: dev_t
             let inode: ino_t

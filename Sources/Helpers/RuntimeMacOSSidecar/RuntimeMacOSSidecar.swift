@@ -675,7 +675,11 @@ actor MacOSSidecarService {
                     case .socketDeviceAvailable:
                         try await validateSocketDeviceAvailable(on: vm)
                     case .guestAgentReady:
-                        try await waitForGuestAgentDuringBootstrap(port: agentPort)
+                        try await initializeGuest(
+                            port: agentPort,
+                            namingSandboxID: guiEnabled ? config.id : nil,
+                            restorePreparedNetwork: config.macosGuest?.networkBackend != .vmnetShared
+                        )
                     case .networksActivated:
                         try await activatePreparedNetworks()
                     case .guestClockSynchronized:
@@ -1351,7 +1355,18 @@ actor MacOSSidecarService {
         }
     }
 
-    private func waitForGuestAgentDuringBootstrap(port: UInt32) async throws {
+    private func initializeGuest(port: UInt32, namingSandboxID: String?, restorePreparedNetwork: Bool) async throws {
+        let fd = try await connectToReadyGuestAgentDuringBootstrap(port: port)
+        defer {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+        if let namingSandboxID {
+            try setGuestLocalHostName(sandboxID: namingSandboxID, restorePreparedNetwork: restorePreparedNetwork, fd: fd)
+        }
+    }
+
+    private func connectToReadyGuestAgentDuringBootstrap(port: UInt32) async throws -> Int32 {
         try await GuestAgentBootstrapRetrier.run(
             maxAttempts: Self.bootstrapGuestAgentMaxAttempts,
             retryDelayNanoseconds: Self.bootstrapGuestAgentRetryDelayNanoseconds
@@ -1368,11 +1383,6 @@ actor MacOSSidecarService {
             }
 
             let fd = try await connectVsock(port: port)
-            defer {
-                _ = Darwin.shutdown(fd, SHUT_RDWR)
-                Darwin.close(fd)
-            }
-
             do {
                 try await self.waitForGuestAgentReadyWithTimeout(
                     fd: fd,
@@ -1388,7 +1398,10 @@ actor MacOSSidecarService {
                         ]
                     )
                 }
+                return fd
             } catch {
+                _ = Darwin.shutdown(fd, SHUT_RDWR)
+                Darwin.close(fd)
                 if shouldLogBootstrapGuestAgentAttempt(attempt, maxAttempts: maxAttempts) {
                     log.warning(
                         "bootstrap guest-agent probe failed",
@@ -1401,6 +1414,61 @@ actor MacOSSidecarService {
                     )
                 }
                 throw error
+            }
+        }
+    }
+
+    private func setGuestLocalHostName(sandboxID: String, restorePreparedNetwork: Bool, fd: Int32) throws {
+        let digest = SHA256.hash(data: Data(sandboxID.utf8))
+        let name = "mac-" + digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+
+        // Managed guests enable their network services when applying the network lease below.
+        let script = """
+            set -eu
+            /usr/sbin/scutil --set LocalHostName "$1"
+            marker=/var/db/container-macos-deferred-network-service
+            if [ "$2" = restore ] && [ -f "$marker" ]; then
+                service=$(/bin/cat "$marker")
+                /usr/sbin/networksetup -setnetworkserviceenabled "$service" on
+                /usr/sbin/networksetup -listallnetworkservices | /usr/bin/grep -Fx -- "$service" >/dev/null
+                /bin/rm "$marker"
+            fi
+            """
+
+        try MacOSSidecarSocketIO.writeJSONFrame(
+            SidecarGuestAgentFrame.exec(
+                id: UUID().uuidString,
+                executable: "/bin/sh",
+                arguments: ["-c", script, "guest-local-hostname", name, restorePreparedNetwork ? "restore" : "managed"],
+                environment: nil,
+                rootDirectory: nil,
+                workingDirectory: "/",
+                terminal: false,
+                user: nil,
+                uid: nil,
+                gid: nil,
+                supplementalGroups: nil
+            ),
+            fd: fd
+        )
+
+        let deadline = sidecarReadDeadline(timeoutSeconds: 20)
+        while true {
+            let frame = try MacOSSidecarSocketIO.readJSONFrame(
+                SidecarGuestAgentFrame.self,
+                fd: fd,
+                timeoutMilliseconds: try sidecarRemainingReadMilliseconds(until: deadline)
+            )
+            switch frame.type {
+            case .exit where frame.exitCode == 0:
+                log.info("guest local hostname configured", metadata: ["local_hostname": "\(name)"])
+                return
+            case .exit:
+                throw ContainerizationError(.internalError, message: "setting guest local hostname exited with code \(frame.exitCode ?? 1)")
+            case .error:
+                throw ContainerizationError(.internalError, message: "setting guest local hostname failed: \(frame.message ?? "unknown error")")
+            default:
+                continue
             }
         }
     }
@@ -5941,18 +6009,17 @@ extension MacOSSidecarMethod {
 }
 
 package enum GuestAgentBootstrapRetrier {
-    package static func run(
+    package static func run<T: Sendable>(
         maxAttempts: Int,
         retryDelayNanoseconds: UInt64,
-        operation: @escaping @Sendable (_ attempt: Int, _ maxAttempts: Int) async throws -> Void
-    ) async throws {
+        operation: @escaping @Sendable (_ attempt: Int, _ maxAttempts: Int) async throws -> T
+    ) async throws -> T {
         let attempts = max(1, maxAttempts)
         var lastError: Error?
 
         for attempt in 1...attempts {
             do {
-                try await operation(attempt, attempts)
-                return
+                return try await operation(attempt, attempts)
             } catch {
                 lastError = error
                 if attempt < attempts, retryDelayNanoseconds > 0 {

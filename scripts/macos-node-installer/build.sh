@@ -305,6 +305,7 @@ stage_file "${ROOT_DIR}/Sources/Plugins/MachineAPIServer/Resources/create-user.s
 stage_file "${BUILD_BIN_DIR}/container-macos-guest-agent" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/bin/container-macos-guest-agent" 0755
 stage_file "${ROOT_DIR}/scripts/macos-guest-agent/install.sh" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share/install.sh" 0755
 stage_file "${ROOT_DIR}/scripts/macos-guest-agent/install-in-guest-from-seed.sh" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share/install-in-guest-from-seed.sh" 0755
+stage_file "${ROOT_DIR}/scripts/macos-guest-agent/prepare-image-network.sh" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share/prepare-image-network.sh" 0755
 stage_file "${ROOT_DIR}/scripts/macos-guest-agent/container-macos-guest-agent.plist" "${PKGROOT}/usr/local/libexec/container/macos-guest-agent/share/container-macos-guest-agent.plist" 0644
 stage_file "${BUILD_BIN_DIR}/container-macos-image-prepare" "${PKGROOT}/usr/local/libexec/container/macos-image-prepare/bin/container-macos-image-prepare" 0755
 stage_file "${BUILD_BIN_DIR}/container-macos-vm-manager" "${PKGROOT}/usr/local/libexec/container/macos-vm-manager/bin/container-macos-vm-manager" 0755

@@ -360,6 +360,9 @@ public struct Flags {
         @Flag(name: .long, help: "Show the guest VM in a local GUI window (macOS guest runtime only)")
         public var gui = false
 
+        @Flag(name: .customLong("macos-asif"), help: "Enable native ASIF storage for this macOS guest (requires macOS 27 and a capable runtime)")
+        public var macOSASIF = false
+
         public func validate() throws {
             if dnsDisabled {
                 let hasDNSConfig =

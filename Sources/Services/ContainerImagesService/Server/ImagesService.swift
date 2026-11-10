@@ -540,10 +540,14 @@ extension ImagesService {
                     continue
                 }
 
-                guard descriptor.platform?.os == "darwin" else {
+                guard let platform = descriptor.platform, platform.os == "darwin" else {
                     continue
                 }
                 digests.insert(descriptor.digest)
+                guard let manifest: Manifest = try await self.contentStore.get(digest: descriptor.digest) else { continue }
+                if case .derived(_, _, let chain) = try? MacOSImageLayers(manifest: manifest) {
+                    digests.insert(chain.base.digest)
+                }
             }
         }
 

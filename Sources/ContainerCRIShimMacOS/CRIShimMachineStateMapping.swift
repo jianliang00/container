@@ -129,12 +129,14 @@ private struct CRIShimAnyCodingKey: CodingKey {
 func makeCRIShimMachineStateMapping(
     annotations: [String: String],
     nodeConfig: MachineStateConfig?,
+    imageParentCount: Int? = nil,
     nativeASIFAvailable: Bool = CRIShimNativeASIFCapabilities.hostSupported
 ) throws -> CRIShimMachineStateMapping {
     let enabledValue = annotations[CRIShimMachineStateAnnotation.enabled]
     let presentCompanionKeys = CRIShimMachineStateAnnotation.companionKeys.filter { annotations[$0] != nil }
 
     guard let enabledValue else {
+        guard imageParentCount == nil else { throw CRIShimError.unsupported("derived macOS images require managed native ASIF storage") }
         guard presentCompanionKeys.isEmpty else {
             throw CRIShimError.invalidArgument(
                 "\(presentCompanionKeys[0]) requires \(CRIShimMachineStateAnnotation.enabled)=true"
@@ -156,6 +158,7 @@ func makeCRIShimMachineStateMapping(
     }
 
     guard enabled else {
+        guard imageParentCount == nil else { throw CRIShimError.unsupported("derived macOS images require managed native ASIF storage") }
         guard presentCompanionKeys.isEmpty else {
             throw CRIShimError.invalidArgument(
                 "\(presentCompanionKeys[0]) is not allowed when machine state is disabled"
@@ -171,12 +174,25 @@ func makeCRIShimMachineStateMapping(
     let storageKind = annotations[CRIShimMachineStateAnnotation.storageKind]
     let diskBundleDigest = annotations[CRIShimMachineStateAnnotation.diskBundleDigest]
     let native = storageKind == "native-asif"
-    let parentCount = annotations[CRIShimMachineStateAnnotation.nativeParentCount]
-    let derived = parentCount != nil
-    guard native || !derived else {
-        throw CRIShimError.invalidArgument("native-parent-count requires native-asif storage")
+    let restoreParentCount = annotations[CRIShimMachineStateAnnotation.nativeParentCount]
+    guard native || (imageParentCount == nil && restoreParentCount == nil) else {
+        throw CRIShimError.unsupported("ASIF chain requires native ASIF storage")
     }
-    var parents: [String]?
+    let parentCount: Int?
+    if let restoreParentCount {
+        guard diskBundleDigest != nil, let count = Int(restoreParentCount), String(count) == restoreParentCount,
+            !MacOSNativeDisk.parentNames(count: count).isEmpty
+        else { throw CRIShimError.invalidArgument("invalid native disk bundle parent count") }
+        parentCount = count
+    } else {
+        guard diskBundleDigest == nil || imageParentCount == nil else {
+            throw CRIShimError.invalidArgument("derived native disk restore requires the archived parent count")
+        }
+        parentCount = imageParentCount
+        if parentCount != nil, !nodeConfig.nativeASIFChainEnabled {
+            throw CRIShimError.unsupported("native ASIF chain creation is disabled on this node")
+        }
+    }
     if storageKind == "local-disk" || native {
         guard nodeConfig.localDiskEnabled,
             annotations[CRIShimMachineStateAnnotation.blockDevices] == nil,
@@ -186,17 +202,6 @@ func makeCRIShimMachineStateMapping(
             guard nodeConfig.nativeASIFEnabled, nativeASIFAvailable else {
                 throw CRIShimError.unsupported("native ASIF requires explicit node admission, macOS 27 and an SDK 27 runtime")
             }
-        }
-        if derived {
-            guard nodeConfig.nativeASIFChainEnabled else {
-                throw CRIShimError.unsupported("native ASIF chain admission is disabled on this node")
-            }
-            guard diskBundleDigest != nil, let parentCount, let count = Int(parentCount), String(count) == parentCount,
-                (1...3).contains(count)
-            else {
-                throw CRIShimError.invalidArgument("native ASIF chain requires a disk bundle and one to three ordered parents")
-            }
-            parents = MacOSLocalDiskBundle.parentNames(count: count)
         }
         if let diskBundleDigest {
             _ = try requireCanonicalSHA256(diskBundleDigest, annotation: CRIShimMachineStateAnnotation.diskBundleDigest)
@@ -208,8 +213,8 @@ func makeCRIShimMachineStateMapping(
         native
         ? [
             .init(
-                identifier: "root", kind: derived ? .nativeASIFChain : .nativeASIFOverlay, path: "active.asif",
-                nativeBasePath: "base.img", nativeParentPaths: parents)
+                identifier: "root", kind: parentCount == nil ? .nativeASIFOverlay : .nativeASIFChain, path: "active.asif",
+                nativeBasePath: "base.img", nativeParentPaths: parentCount.map { MacOSNativeDisk.parentNames(count: $0) })
         ]
         : try decodeBlockDevices(
             annotations[CRIShimMachineStateAnnotation.blockDevices],
@@ -259,7 +264,8 @@ func makeCRIShimMachineStateMapping(
             pairID: values.restorePairID,
             adoptionManifestDigest: values.restoreManifestDigest,
             restoreRequestID: values.restoreRequestID,
-            diskBundleDigest: diskBundleDigest
+            diskBundleDigest: diskBundleDigest,
+            legacyASIFChainAllowed: restoreParentCount.map { _ in nodeConfig.nativeASIFChainEnabled }
         ),
         blockDevices: blockDevices
     )

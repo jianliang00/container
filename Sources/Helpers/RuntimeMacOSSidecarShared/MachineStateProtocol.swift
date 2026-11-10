@@ -263,19 +263,22 @@ public struct MacOSStorageAttachmentStatus: Codable, Sendable, Equatable {
     public let synchronizationMode: String?
     public let connectionCount: Int
     public let terminalError: String?
+    public let nativeParentCount: Int?
 
     public init(
         identifier: String,
         readOnly: Bool,
         synchronizationMode: String? = nil,
         connectionCount: Int,
-        terminalError: String? = nil
+        terminalError: String? = nil,
+        nativeParentCount: Int? = nil
     ) {
         self.identifier = identifier
         self.readOnly = readOnly
         self.synchronizationMode = synchronizationMode
         self.connectionCount = connectionCount
         self.terminalError = terminalError
+        self.nativeParentCount = nativeParentCount
     }
 }
 

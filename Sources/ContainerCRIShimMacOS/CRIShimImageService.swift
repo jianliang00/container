@@ -28,6 +28,7 @@ public struct CRIShimImageRecord: Equatable, Sendable {
     public var size: UInt64
     public var annotations: [String: String]
     public var pinned: Bool
+    var nativeASIFParentCount: Int?
 
     public init(
         reference: String,
@@ -188,9 +189,14 @@ extension CRIShimImageRecord {
     static func resolve(image: ContainerAPIClient.ClientImage) async throws -> CRIShimImageRecord {
         var record = CRIShimImageRecord(image: image)
         record.size = UInt64(max(0, try await ClientImage.getFullImageSize(image: image)))
-        record.annotations = try await image.resolvedAnnotations(
-            for: Platform(arch: "arm64", os: "darwin")
-        )
+        let platform = Platform(arch: "arm64", os: "darwin")
+        record.annotations = try await image.resolvedAnnotations(for: platform)
+        if let manifest = try? await image.manifest(for: platform),
+            manifest.annotations?[MacOSDiskChain.versionAnnotation] != nil,
+            case .derived(_, _, let chain) = try MacOSImageLayers(manifest: manifest)
+        {
+            record.nativeASIFParentCount = chain.overlays.count
+        }
         return record
     }
 

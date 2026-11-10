@@ -26,6 +26,10 @@ public enum MacOSImageOCIMediaTypes {
     public static let diskLayout = "application/vnd.apple.container.macos.disk-layout.v1+json"
     public static let diskChunk = "application/vnd.apple.container.macos.disk-chunk.v1.tar+zstd"
 
+    public static let chainRawBase = "application/vnd.apple.container.macos.disk-chain.v1.raw"
+    public static let chainChunkedBase = "application/vnd.apple.container.macos.disk-chain.v1.layout+json"
+    public static let chainOverlay = "application/vnd.apple.container.macos.disk-chain.v1.asif"
+
     public static let required = [
         hardwareModel,
         auxiliaryStorage,
@@ -36,6 +40,7 @@ public enum MacOSImageOCIMediaTypes {
 public enum MacOSImageFormatError: Error, Equatable {
     case missingLayer(mediaType: String)
     case duplicateLayer(mediaType: String)
+    case invalidDiskChain(String)
 }
 
 /// Parsed macOS image layers, supporting both v0 (single disk image) and v1 (chunked disk) formats.
@@ -45,17 +50,19 @@ public enum MacOSImageLayers: Sendable {
     /// v1: disk layout JSON + N disk chunk blobs.
     case v1(hardwareModel: Descriptor, auxiliaryStorage: Descriptor, diskLayout: Descriptor, diskChunks: [Descriptor])
 
+    case derived(hardwareModel: Descriptor, auxiliaryStorage: Descriptor, chain: MacOSDiskChain)
+
     public var hardwareModel: Descriptor {
         switch self {
         case .v0(let hw, _, _): return hw
-        case .v1(let hw, _, _, _): return hw
+        case .v1(let hw, _, _, _), .derived(let hw, _, _): return hw
         }
     }
 
     public var auxiliaryStorage: Descriptor {
         switch self {
         case .v0(_, let aux, _): return aux
-        case .v1(_, let aux, _, _): return aux
+        case .v1(_, let aux, _, _), .derived(_, let aux, _): return aux
         }
     }
 
@@ -65,6 +72,8 @@ public enum MacOSImageLayers: Sendable {
         var diskImage: Descriptor?
         var diskLayout: Descriptor?
         var diskChunks: [Descriptor] = []
+        var chainBase: Descriptor?
+        var overlays: [Descriptor] = []
 
         for layer in manifest.layers {
             switch layer.mediaType {
@@ -88,6 +97,13 @@ public enum MacOSImageLayers: Sendable {
                     throw MacOSImageFormatError.duplicateLayer(mediaType: layer.mediaType)
                 }
                 diskLayout = layer
+            case MacOSImageOCIMediaTypes.chainRawBase, MacOSImageOCIMediaTypes.chainChunkedBase:
+                guard chainBase == nil, overlays.isEmpty else {
+                    throw MacOSImageFormatError.invalidDiskChain("base must precede all overlays")
+                }
+                chainBase = layer
+            case MacOSImageOCIMediaTypes.chainOverlay:
+                overlays.append(layer)
             case MacOSImageOCIMediaTypes.diskChunk:
                 diskChunks.append(layer)
             default:
@@ -100,6 +116,17 @@ public enum MacOSImageLayers: Sendable {
         }
         guard let auxiliaryStorage else {
             throw MacOSImageFormatError.missingLayer(mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage)
+        }
+
+        if chainBase != nil || !overlays.isEmpty || manifest.annotations?[MacOSDiskChain.versionAnnotation] != nil {
+            guard let chainBase, diskImage == nil, diskLayout == nil,
+                manifest.annotations?[MacOSDiskChain.versionAnnotation] == "1"
+            else {
+                throw MacOSImageFormatError.invalidDiskChain("unsupported version or ambiguous base")
+            }
+            let chain = try MacOSDiskChain(base: chainBase, chunks: diskChunks, overlays: overlays)
+            self = .derived(hardwareModel: hardwareModel, auxiliaryStorage: auxiliaryStorage, chain: chain)
+            return
         }
 
         // v1 format: diskLayout present

@@ -56,3 +56,15 @@ struct CRIShimNativeASIFCapabilities: Encodable {
         enabled = hostSupported && policy?.enabled == true && policy?.localDiskEnabled == true && policy?.nativeASIFEnabled == true
     }
 }
+
+struct CRIShimNativeASIFChainCapabilities: Encodable {
+    static let infoKey = "container.macos.native-asif-oci-chain.v1"
+
+    let enabled: Bool
+    let admissionEnabled: Bool
+
+    init(policy: MachineStateConfig?) {
+        enabled = CRIShimNativeASIFCapabilities(policy: policy).enabled
+        admissionEnabled = enabled && policy?.nativeASIFChainEnabled == true
+    }
+}

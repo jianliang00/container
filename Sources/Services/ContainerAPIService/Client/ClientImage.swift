@@ -97,13 +97,6 @@ public struct ClientImage: Sendable {
         let fm = FileManager.default
         let destination = outputDirectory.standardizedFileURL
 
-        if fm.fileExists(atPath: destination.path) {
-            guard overwriteExisting else {
-                throw ContainerizationError(.exists, message: "output directory already exists: \(destination.path)")
-            }
-            try fm.removeItem(at: destination)
-        }
-
         let manifestDescriptor = try await manifestDescriptor(for: platform)
         guard let manifestContent: Content = try await contentStore.get(digest: manifestDescriptor.digest) else {
             throw ContainerizationError(.notFound, message: "content with digest \(manifestDescriptor.digest)")
@@ -114,6 +107,17 @@ public struct ClientImage: Sendable {
             manifest: manifest
         )
         let imageLayers = try MacOSImageLayers(manifest: manifest)
+
+        if case .derived = imageLayers {
+            throw ContainerizationError(.unsupported, message: "ASIF derived images require the native macOS runtime")
+        }
+
+        if fm.fileExists(atPath: destination.path) {
+            guard overwriteExisting else {
+                throw ContainerizationError(.exists, message: "output directory already exists: \(destination.path)")
+            }
+            try fm.removeItem(at: destination)
+        }
 
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
         var completed = false
@@ -154,6 +158,8 @@ public struct ClientImage: Sendable {
                 )
             }
             diskImageSource = resolvedDiskImagePath
+        case .derived:
+            throw ContainerizationError(.unsupported, message: "ASIF derived images require the native macOS runtime")
         }
 
         try FilesystemClone.cloneOrCopyItem(
@@ -670,7 +676,12 @@ extension ClientImage {
                     .setSubDescription("for platform \(platform.description) (rebuilding macOS disk cache)")
                 ])
             }
-            _ = try await self.macOSChunkedDiskSource(for: platform, progressUpdate: progressUpdate)
+            let manifest = try await self.manifest(for: platform)
+            if case .derived(_, _, let chain) = try MacOSImageLayers(manifest: manifest) {
+                _ = try await chain.resolve(in: contentStore)
+            } else {
+                _ = try await self.macOSChunkedDiskSource(for: platform, progressUpdate: progressUpdate)
+            }
         }
     }
 

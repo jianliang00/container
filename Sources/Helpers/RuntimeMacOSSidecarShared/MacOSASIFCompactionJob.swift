@@ -166,7 +166,7 @@ public enum MacOSASIFCompactionJob {
         try MacOSLocalDiskBundle.synchronize(destination.deletingLastPathComponent(), directory: true)
     }
 
-    private static func withDevice<T>(base: URL, layers: [URL], size: UInt64, readOnly: Bool, _ body: (Int32) throws -> T) throws -> T {
+    package static func withDevice<T>(base: URL, layers: [URL], size: UInt64, readOnly: Bool, _ body: (Int32) throws -> T) throws -> T {
         var arguments = ["image", "attach", "--noMount", "--plist"]
         if readOnly { arguments.append("--readOnly") }
         arguments.append(base.path)
@@ -189,9 +189,10 @@ public enum MacOSASIFCompactionJob {
         }
     }
 
-    private static func recover(base: URL, size: UInt64) throws {
+    package static func recover(base: URL, size: UInt64) throws {
         if let disk = try attachedDisk(base: base, size: size) {
             _ = try command("/usr/sbin/diskutil", ["eject", disk])
+            guard try attachedDisk(base: base, size: size) == nil else { throw POSIXError(.EBUSY) }
         }
     }
 

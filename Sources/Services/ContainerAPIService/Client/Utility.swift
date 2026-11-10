@@ -36,6 +36,13 @@ public struct Utility {
     static let defaultMacOSGuestAgentPort: UInt32 = 27000
     static let defaultContainerOS = "linux"
 
+    private static var macOSASIFSupported: Bool {
+        #if canImport(DiskImageKit) && arch(arm64)
+        if #available(macOS 27, *) { return true }
+        #endif
+        return false
+    }
+
     public struct MacOSGuestNetworkingOverride: Sendable {
         public let networks: [AttachmentConfiguration]
         public let dns: ContainerConfiguration.DNSConfiguration?
@@ -140,6 +147,9 @@ public struct Utility {
             guard requestedPlatform.os == "darwin", requestedPlatform.architecture == "arm64" else {
                 throw ContainerizationError(.invalidArgument, message: "macOS guest images must target darwin/arm64, got \(requestedPlatform)")
             }
+            if management.macOSASIF, !Self.macOSASIFSupported {
+                throw ContainerizationError(.unsupported, message: "--macos-asif requires macOS 27 and an SDK 27 build")
+            }
             if management.kernel != nil {
                 throw ContainerizationError(.unsupported, message: "--kernel is not supported for --os darwin")
             }
@@ -154,6 +164,8 @@ public struct Utility {
             }
         } else if management.gui {
             throw ContainerizationError(.unsupported, message: "--gui requires --os darwin")
+        } else if management.macOSASIF {
+            throw ContainerizationError(.unsupported, message: "--macos-asif requires --os darwin")
         }
         let scheme = try RequestScheme(registry.scheme)
 
@@ -384,11 +396,30 @@ public struct Utility {
         config.stopSignal = imageConfig?.stopSignal
 
         if isMacOSRuntime {
+            let manifest = try await img.manifest(for: requestedPlatform)
+            let layers = try MacOSImageLayers(manifest: manifest)
+            let parentCount: Int
+            if case .derived(_, _, let chain) = layers { parentCount = chain.overlays.count } else { parentCount = 0 }
+            if parentCount > 0 && !management.macOSASIF {
+                throw ContainerizationError(.unsupported, message: "ASIF derived images require --macos-asif")
+            }
+            let devices: [ContainerConfiguration.MacOSGuestOptions.BlockDevice]
+            if management.macOSASIF {
+                devices = [
+                    .init(
+                        identifier: "root", kind: parentCount == 0 ? .nativeASIFOverlay : .nativeASIFChain,
+                        path: "active.asif", nativeBasePath: "base.img",
+                        nativeParentPaths: parentCount == 0 ? nil : (1...parentCount).map { String(format: "parent-%02d.asif", $0) })
+                ]
+            } else {
+                devices = []
+            }
             config.macosGuest = .init(
                 snapshotEnabled: false,
                 guiEnabled: management.gui,
                 agentPort: defaultMacOSGuestAgentPort,
-                networkBackend: resolvedMacOSGuestNetworking == nil ? .virtualizationNAT : .vmnetShared
+                networkBackend: resolvedMacOSGuestNetworking == nil ? .virtualizationNAT : .vmnetShared,
+                blockDevices: devices
             )
         }
 

@@ -20,6 +20,7 @@ import ContainerResource
 import ContainerizationError
 import ContainerizationOCI
 import Foundation
+import RuntimeMacOSSidecarShared
 
 enum MacOSContainerCommitter {
     typealias ProgressHandler = @Sendable (String) -> Void
@@ -51,7 +52,7 @@ enum MacOSContainerCommitter {
         leaveStopped: Bool,
         progress: ProgressHandler? = nil,
         detail: ProgressHandler? = nil
-    ) async throws {
+    ) async throws -> String? {
         let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
         let normalizedTargetReference = try normalizeTargetReference(
             targetReference,
@@ -66,12 +67,7 @@ enum MacOSContainerCommitter {
         let flow = try sourceFlow(for: container.status)
         let restartAction = restartAction(for: flow, leaveStopped: leaveStopped)
         let bundleRoot = try await resolveBundleRoot(for: container.id)
-        let bundleImageDirectory = try validateImageDirectory(at: bundleRoot)
-
-        let sourceImage = try await resolveSourceImage(
-            reference: container.configuration.image.reference,
-            containerSystemConfig: containerSystemConfig
-        )
+        let sourceImage = ClientImage(description: container.configuration.image)
         let baseImageConfig = try await resolveSourceImageConfig(
             image: sourceImage,
             reference: container.configuration.image.reference
@@ -86,6 +82,38 @@ enum MacOSContainerCommitter {
             try? FileManager.default.removeItem(at: temporaryPaths.root)
         }
 
+        if let device = container.configuration.macosGuest?.blockDevices.first, device.kind.isNativeASIF {
+            guard container.configuration.macosGuest?.machineState == nil else {
+                throw ContainerizationError(.unsupported, message: "commit requires a CLI-managed ASIF guest")
+            }
+            let source = try MacOSImageLayers(manifest: await sourceImage.manifest(for: buildPlatform))
+            let id = UUID()
+            let sealed = MacOSNativeDisk.sealedDirectory(in: bundleRoot, id: id)
+            defer { try? FileManager.default.removeItem(at: sealed) }
+            let parents = try MacOSNativeDisk.effectiveParentNames(in: bundleRoot, configured: device.nativeParentPaths ?? [])
+            guard parents.count + 3 <= MacOSDiskChain.maximumDepth else {
+                throw ContainerizationError(.unsupported, message: "start a new instance from the compacted image before committing another ASIF layer")
+            }
+            progress?("Sealing native disk")
+            switch flow {
+            case .running:
+                try sealRunningDisk(containerID: container.id, id: id)
+                if leaveStopped { try await stopContainer(container.id, client: client) }
+            case .stopped:
+                let lease = try MacOSNativeDisk.acquireLifecycleLease(in: bundleRoot)
+                defer { try? lease.close() }
+                try MacOSNativeDisk.seal(in: bundleRoot, auxiliary: MacOSSandboxLayout(root: bundleRoot).auxiliaryStorageURL, parents: parents, id: id)
+            }
+            let size = try bundleRoot.appendingPathComponent("base.img").resourceValues(forKeys: [.fileSizeKey]).fileSize
+            guard let size else { throw CocoaError(.fileReadCorruptFile) }
+            progress?("Packaging derived macOS OCI image")
+            try MacOSImagePackager.packageDerived(
+                source: source, logicalSize: Int64(size), sealed: sealed, parentNames: parents,
+                imageConfig: imageConfig, reference: normalizedTargetReference, outputTar: temporaryPaths.outputTar, progress: detail)
+            return try await loadCommittedImage(temporaryPaths.outputTar, containerID: container.id, target: normalizedTargetReference, progress: progress)
+        }
+
+        let bundleImageDirectory = try validateImageDirectory(at: bundleRoot)
         let packageImageDirectory: URL
         switch flow {
         case .stopped:
@@ -139,14 +167,19 @@ enum MacOSContainerCommitter {
             )
         }
 
+        _ = try await loadCommittedImage(temporaryPaths.outputTar, containerID: container.id, target: normalizedTargetReference, progress: progress)
+        return nil
+    }
+
+    private static func loadCommittedImage(_ archive: URL, containerID: String, target: String, progress: ProgressHandler?) async throws -> String {
         progress?("Loading image into local store")
         let loadResult: ImageLoadResult
         do {
-            loadResult = try await ClientImage.load(from: temporaryPaths.outputTar.path, force: false)
+            loadResult = try await ClientImage.load(from: archive.path, force: false)
         } catch {
             throw ContainerizationError(
                 .internalError,
-                message: "failed to load committed image archive for container \(container.id)",
+                message: "failed to load committed image archive for container \(containerID)",
                 cause: error
             )
         }
@@ -158,24 +191,38 @@ enum MacOSContainerCommitter {
             )
         }
 
-        guard !loadResult.images.isEmpty else {
+        guard let loaded = loadResult.images.first else {
             throw ContainerizationError(
                 .internalError,
-                message: "image load did not return any images for committed container \(container.id)"
+                message: "image load did not return any images for committed container \(containerID)"
             )
         }
 
         progress?("Tagging committed image")
         for image in loadResult.images {
             do {
-                _ = try await image.tag(new: normalizedTargetReference)
+                _ = try await image.tag(new: target)
             } catch {
                 throw ContainerizationError(
                     .internalError,
-                    message: "failed to tag committed image as \(normalizedTargetReference)",
+                    message: "failed to tag committed image as \(target)",
                     cause: error
                 )
             }
+        }
+        return loaded.digest
+    }
+
+    private static func sealRunningDisk(containerID: String, id: UUID) throws {
+        let fd = try MacOSSidecarSocketIO.connectUnixSocket(path: "/tmp/ctrm-sidecar-\(containerID).sock")
+        defer { close(fd) }
+        let request = MacOSSidecarRequest(
+            requestID: id.uuidString, method: .vmSealNativeDisk,
+            protocolVersion: MacOSSidecarProtocolVersion.durableCheckpointAdoption)
+        try MacOSSidecarSocketIO.writeJSONFrame(MacOSSidecarEnvelope.request(request), fd: fd, timeoutMilliseconds: 5000)
+        let envelope = try MacOSSidecarSocketIO.readJSONFrame(MacOSSidecarEnvelope.self, fd: fd, timeoutMilliseconds: 90000)
+        guard envelope.kind == .response, let response = envelope.response, response.requestID == request.requestID, response.ok else {
+            throw ContainerizationError(.internalError, message: envelope.response?.error?.message ?? "invalid native disk seal response")
         }
     }
 
@@ -304,24 +351,6 @@ enum MacOSContainerCommitter {
             throw ContainerizationError(
                 .invalidState,
                 message: "container bundle \(root.path) is missing required macOS image artifacts",
-                cause: error
-            )
-        }
-    }
-
-    private static func resolveSourceImage(
-        reference: String,
-        containerSystemConfig: ContainerSystemConfig
-    ) async throws -> ClientImage {
-        do {
-            return try await ClientImage.get(
-                reference: reference,
-                containerSystemConfig: containerSystemConfig
-            )
-        } catch {
-            throw ContainerizationError(
-                .internalError,
-                message: "failed to resolve source image \(reference)",
                 cause: error
             )
         }

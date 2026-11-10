@@ -79,6 +79,85 @@ enum MacOSImagePackager {
         )
     }
 
+    /// Build an OCI import archive with the sealed VM artifacts. The unchanged
+    /// disk blobs are resolved from the source image in the local store.
+    static func packageDerived(
+        source: MacOSImageLayers, logicalSize: Int64, sealed: URL, parentNames: [String],
+        imageConfig: ContainerizationOCI.Image, reference: String, outputTar: URL, progress: ProgressHandler?
+    ) throws {
+        let layout = outputTar.deletingLastPathComponent().appendingPathComponent("derived-layout")
+        let blobs = layout.appendingPathComponent("blobs/sha256")
+        let fm = FileManager.default
+        try fm.createDirectory(at: blobs, withIntermediateDirectories: true)
+        let sizeAnnotation = [MacOSDiskChain.sizeAnnotation: String(logicalSize)]
+        let base: Descriptor
+        let chunks: [Descriptor]
+        var reusableParents: [Descriptor] = []
+        switch source {
+        case .v0(_, _, let disk):
+            base = .init(mediaType: MacOSImageOCIMediaTypes.chainRawBase, digest: disk.digest, size: disk.size, annotations: sizeAnnotation)
+            chunks = []
+        case .v1(_, _, let recipe, let descriptors):
+            base = .init(mediaType: MacOSImageOCIMediaTypes.chainChunkedBase, digest: recipe.digest, size: recipe.size, annotations: sizeAnnotation)
+            chunks = descriptors
+        case .derived(_, _, let chain):
+            guard logicalSize == chain.logicalSize else {
+                throw MacOSImageFormatError.invalidDiskChain("sealed disk size differs from its OCI base")
+            }
+            base = chain.base
+            chunks = chain.chunks
+            if parentNames.count == chain.overlays.count {
+                reusableParents = chain.overlays
+            }
+        }
+        var overlays: [Descriptor] = []
+        var parent = base.digest
+        for (index, name) in (parentNames + ["active.asif"]).enumerated() {
+            let file = sealed.appendingPathComponent(name)
+            if index < reusableParents.count {
+                let descriptor = reusableParents[index]
+                let (digest, size) = try sha256AndSize(of: file)
+                guard descriptor.digest == "sha256:" + digest, descriptor.size == size else {
+                    throw MacOSImageFormatError.invalidDiskChain("sealed parent differs from its OCI descriptor")
+                }
+                overlays.append(descriptor)
+                parent = descriptor.digest
+                continue
+            }
+            let member = try addFileBlob(source: file, blobsDir: blobs, mediaType: MacOSImageOCIMediaTypes.chainOverlay)
+            overlays.append(
+                .init(
+                    mediaType: member.mediaType, digest: member.digest, size: member.size,
+                    annotations: sizeAnnotation.merging([MacOSDiskChain.parentAnnotation: parent]) { _, value in value }))
+            parent = member.digest
+        }
+        _ = try MacOSDiskChain(base: base, chunks: chunks, overlays: overlays)
+        let auxiliary = try addFileBlob(
+            source: sealed.appendingPathComponent(auxiliaryStorageFilename),
+            blobsDir: blobs, mediaType: MacOSImageOCIMediaTypes.auxiliaryStorage)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let config = try writeJSONBlob(encoder.encode(imageConfig), blobsDir: blobs, mediaType: MediaTypes.imageConfig)
+        let layers = [source.hardwareModel, .init(mediaType: auxiliary.mediaType, digest: auxiliary.digest, size: auxiliary.size), base] + chunks + overlays
+        var annotations = MacOSImageContract.annotations(for: .sandbox)
+        annotations[MacOSDiskChain.versionAnnotation] = "1"
+        let manifest = Manifest(
+            config: .init(mediaType: config.mediaType, digest: config.digest, size: config.size),
+            layers: layers, annotations: annotations)
+        let descriptor = try writeJSONBlob(encoder.encode(manifest), blobsDir: blobs, mediaType: MediaTypes.imageManifest)
+        annotations["org.opencontainers.image.ref.name"] = reference
+        let index = OCIIndex(
+            schemaVersion: 2, mediaType: MediaTypes.index,
+            manifests: [
+                .init(
+                    mediaType: descriptor.mediaType, digest: descriptor.digest, size: descriptor.size,
+                    platform: .init(architecture: "arm64", os: "darwin"), annotations: annotations)
+            ])
+        try Data("{\"imageLayoutVersion\":\"1.0.0\"}\n".utf8).write(to: layout.appendingPathComponent("oci-layout"))
+        try encoder.encode(index).write(to: layout.appendingPathComponent("index.json"))
+        try createTar(fromLayout: layout, outputTar: outputTar, progress: progress)
+    }
+
     private static func createLayoutDirectory(
         from image: ImagePaths,
         reference: String?,

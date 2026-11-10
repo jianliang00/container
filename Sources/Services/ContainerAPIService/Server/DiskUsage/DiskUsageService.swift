@@ -136,10 +136,14 @@ extension DiskUsageService {
                     continue
                 }
 
-                guard descriptor.platform?.os == "darwin" else {
+                guard let platform = descriptor.platform, platform.os == "darwin" else {
                     continue
                 }
                 digests.insert(descriptor.digest)
+                let manifest = try await image.manifest(for: platform)
+                if case .derived(_, _, let chain) = try? MacOSImageLayers(manifest: manifest) {
+                    digests.insert(chain.base.digest)
+                }
             }
         }
 

@@ -42,6 +42,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
     case vmPause
     case vmPrepareFilesystemCheckpoint
     case vmFinishFilesystemCheckpoint
+    case vmSealNativeDisk
     case vmResume
     case vmPrepareCheckpoint
     case vmSaveMachineState
@@ -81,6 +82,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         case .vmPause: "vm.pause"
         case .vmPrepareFilesystemCheckpoint: "vm.prepareFilesystemCheckpoint"
         case .vmFinishFilesystemCheckpoint: "vm.finishFilesystemCheckpoint"
+        case .vmSealNativeDisk: "vm.sealNativeDisk"
         case .vmResume: "vm.resume"
         case .vmPrepareCheckpoint: "vm.prepareCheckpoint"
         case .vmSaveMachineState: "vm.saveMachineState"
@@ -136,6 +138,7 @@ public enum MacOSSidecarMethod: Codable, Sendable, Hashable, RawRepresentable {
         Self.vmPause.rawValue: .vmPause,
         Self.vmPrepareFilesystemCheckpoint.rawValue: .vmPrepareFilesystemCheckpoint,
         Self.vmFinishFilesystemCheckpoint.rawValue: .vmFinishFilesystemCheckpoint,
+        Self.vmSealNativeDisk.rawValue: .vmSealNativeDisk,
         Self.vmResume.rawValue: .vmResume,
         Self.vmPrepareCheckpoint.rawValue: .vmPrepareCheckpoint,
         Self.vmSaveMachineState.rawValue: .vmSaveMachineState,

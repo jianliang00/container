@@ -166,6 +166,7 @@ $(STAGING_DIR):
 	@install "$(BUILD_BIN_DIR)/container-macos-guest-agent" "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/bin/container-macos-guest-agent)"
 	@install -m 0755 scripts/macos-guest-agent/install.sh "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share/install.sh)"
 	@install -m 0755 scripts/macos-guest-agent/install-in-guest-from-seed.sh "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share/install-in-guest-from-seed.sh)"
+	@install -m 0755 scripts/macos-guest-agent/prepare-image-network.sh "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share/prepare-image-network.sh)"
 	@install -m 0644 scripts/macos-guest-agent/container-macos-guest-agent.plist "$(join $(STAGING_DIR), libexec/container/macos-guest-agent/share/container-macos-guest-agent.plist)"
 	@install "$(BUILD_BIN_DIR)/container-macos-image-prepare" "$(join $(STAGING_DIR), libexec/container/macos-image-prepare/bin/container-macos-image-prepare)"
 	@install "$(BUILD_BIN_DIR)/container-macos-vm-manager" "$(join $(STAGING_DIR), libexec/container/macos-vm-manager/bin/container-macos-vm-manager)"

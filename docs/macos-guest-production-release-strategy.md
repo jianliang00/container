@@ -353,6 +353,28 @@ sandbox image as one unit. Keep both artifacts available until the replacement
 has passed node reboot, Pod recreation, exec, PortForward, dual-stack Service,
 and cleanup gates.
 
+### Prepare a GUI image for first boot
+
+Run the preparation script in the image builder VM immediately before capturing
+a GUI image. The builder must have a guest agent reachable over vsock. Use the
+name of the image's Ethernet service in place of `Ethernet` if it differs.
+
+```sh
+builder=office-image-builder
+image=localhost/macos-office:prepared
+script=/usr/local/libexec/container/macos-guest-agent/share/prepare-image-network.sh
+container exec --user 0:0 "$builder" /bin/bash -c "$(cat "$script")" prepare-image-network Ethernet
+container stop "$builder"
+container commit "$builder" "$image"
+```
+
+Use the updated macOS runtime for instances of the captured image. On first
+boot, the runtime assigns a Bonjour local hostname from the sandbox ID before
+bringing up the guest network service. This keeps instances of the same image
+from advertising the same local hostname.
+
+### Publish the macOS node package
+
 Production macOS node packages are published by GitHub Actions, not by a local
 developer machine. The release workflow is `.github/workflows/macos-node-release.yml`.
 It runs on a macOS runner, downloads the kubelet tarball from the Kubernetes

@@ -13,12 +13,12 @@ on:
       kubelet_artifact_url:
         description: "URL of the kubelet-darwin-arm64 tar.gz artifact"
         required: true
-        default: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-7/kubelet-darwin-arm64-k8s-v1.27.2-7.tar.gz"
+        default: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-11/kubelet-darwin-arm64-k8s-v1.27.2-11.tar.gz"
         type: string
       kubelet_artifact_sha256:
         description: "Expected SHA-256 digest of the kubelet artifact"
         required: true
-        default: "44eaf2f738e06a5c0312794f05dc4adad9a33dec133345274dacd323de59016e"
+        default: "270ddcb87aa503673fcd5d8a7788b19073b505b502b165559da78fcd0e55bc3b"
         type: string
       node_name:
         description: "Default node name recorded in the release manifest"
@@ -67,8 +67,8 @@ jobs:
       packages: read
     env:
       KUBERNETES_BASELINE: v1.27.2
-      DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-7/kubelet-darwin-arm64-k8s-v1.27.2-7.tar.gz"
-      DEFAULT_KUBELET_ARTIFACT_SHA256: "44eaf2f738e06a5c0312794f05dc4adad9a33dec133345274dacd323de59016e"
+      DEFAULT_KUBELET_ARTIFACT_URL: "https://github.com/jianliang00/kubernetes/releases/download/kubelet-darwin-arm64-k8s-v1.27.2-11/kubelet-darwin-arm64-k8s-v1.27.2-11.tar.gz"
+      DEFAULT_KUBELET_ARTIFACT_SHA256: "270ddcb87aa503673fcd5d8a7788b19073b505b502b165559da78fcd0e55bc3b"
       DEFAULT_NODE_NAME: macos-node-1
       RELEASE_POLICY_PATH: packaging/macos-node/release-policy.json
     steps:
